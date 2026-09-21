@@ -1,0 +1,52 @@
+# Illustrative route profile. Production values and provider choices
+# remain deployment configuration.
+route:
+  id: phala-cloud-ethereum-pha-usd
+  version: 1
+  enabled: false
+
+source:
+  chain:
+    family: evm
+    name: ethereum-mainnet
+    chain_id: 1
+    finality: finalized
+  asset:
+    kind: erc20
+    symbol: PHA
+    contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
+    decimals: 18
+
+custody:
+  adapter: mpc
+  address_mode: per_account
+  treasury_ref: phala-pha-treasury
+  gas_station_ref: ethereum-gas-station
+
+risk:
+  adapter: configured-provider
+  policy_ref: phala-cloud-pha-v1
+  retry_inconclusive: true
+
+pricing:
+  base: PHA
+  quote: USD
+  primary_source: configured-primary
+  secondary_source: configured-secondary
+  valuation_event: first_finalized_observation
+  rounding:
+    mode: down
+    decimals: 2
+
+settlement:
+  adapter: phala-cloud
+  unit: USD
+  idempotency_key: deposit_id
+
+sweep:
+  enabled: true
+  policy_ref: ethereum-erc20-economic-sweep-v1
+
+reconciliation:
+  continuous: true
+  scheduled: true
