@@ -25,6 +25,12 @@ const SIGNATURE_COMPONENTS: [&str; 4] = [
     "idempotency-key",
 ];
 
+#[derive(Clone, Copy)]
+struct SigningOptions {
+    created: i64,
+    cover_idempotency_key: bool,
+}
+
 /// A settlement payload and its deterministic product idempotency key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettlementRequest {
@@ -136,6 +142,7 @@ pub struct SettlementClient {
     endpoint: Url,
     client: reqwest::Client,
     signer: SignerHandle,
+    keyid: String,
 }
 
 impl SettlementClient {
@@ -145,7 +152,39 @@ impl SettlementClient {
         signer: SignerHandle,
         request_timeout: Duration,
     ) -> Result<Self, SettlementClientError> {
+        Self::build(
+            endpoint,
+            signer,
+            request_timeout,
+            SETTLEMENT_KEY_DOMAIN.to_owned(),
+        )
+    }
+
+    /// Creates a client with an explicitly pinned settlement key identifier.
+    ///
+    /// Only the conformance suite needs a non-default `keyid`, to prove that products reject
+    /// a valid signature under the wrong key identifier.
+    #[cfg(any(test, feature = "conformance"))]
+    #[doc(hidden)]
+    pub fn new_with_keyid(
+        endpoint: &str,
+        signer: SignerHandle,
+        request_timeout: Duration,
+        keyid: String,
+    ) -> Result<Self, SettlementClientError> {
+        Self::build(endpoint, signer, request_timeout, keyid)
+    }
+
+    fn build(
+        endpoint: &str,
+        signer: SignerHandle,
+        request_timeout: Duration,
+        keyid: String,
+    ) -> Result<Self, SettlementClientError> {
         if request_timeout.is_zero() {
+            return Err(SettlementClientError::InvalidEndpoint);
+        }
+        if keyid.is_empty() || keyid.contains(['"', '\\', '\n', '\r']) {
             return Err(SettlementClientError::InvalidEndpoint);
         }
         let endpoint = Url::parse(endpoint).map_err(|_| SettlementClientError::InvalidEndpoint)?;
@@ -164,6 +203,7 @@ impl SettlementClient {
             endpoint,
             client,
             signer,
+            keyid,
         })
     }
 
@@ -174,17 +214,20 @@ impl SettlementClient {
         key: &str,
         body: Vec<u8>,
         include_content_type: bool,
+        options: SigningOptions,
     ) -> Result<Request, SettlementClientError> {
-        let created = unix_timestamp()?;
         let idempotency_key = structured_field_string(key)?;
         let content_digest = content_digest(&body);
-        let signature_parameters = signature_parameters(created);
-        let components = [
+        let signature_parameters =
+            signature_parameters(options.created, &self.keyid, options.cover_idempotency_key);
+        let mut components = vec![
             ("@method", method.as_str()),
             ("@target-uri", url.as_str()),
             ("content-digest", content_digest.as_str()),
-            ("idempotency-key", idempotency_key.as_str()),
         ];
+        if options.cover_idempotency_key {
+            components.push(("idempotency-key", idempotency_key.as_str()));
+        }
         let signature_base = signature_base(&components, &signature_parameters);
         let signature = self
             .signer
@@ -215,6 +258,44 @@ impl SettlementClient {
         &self,
         request: &SettlementRequest,
     ) -> Result<Request, SettlementClientError> {
+        self.signed_post(
+            request,
+            SigningOptions {
+                created: unix_timestamp()?,
+                cover_idempotency_key: true,
+            },
+        )
+        .await
+    }
+
+    /// Builds a signed POST at a caller-supplied time and coverage profile.
+    ///
+    /// Normal callers should use [`Self::signed_post_request`]. This entry point exists so the
+    /// conformance suite can produce expired signatures and signatures which deliberately omit
+    /// `idempotency-key` without maintaining a second signing implementation.
+    #[cfg(any(test, feature = "conformance"))]
+    #[doc(hidden)]
+    pub async fn signed_post_request_at(
+        &self,
+        request: &SettlementRequest,
+        created: i64,
+        cover_idempotency_key: bool,
+    ) -> Result<Request, SettlementClientError> {
+        self.signed_post(
+            request,
+            SigningOptions {
+                created,
+                cover_idempotency_key,
+            },
+        )
+        .await
+    }
+
+    async fn signed_post(
+        &self,
+        request: &SettlementRequest,
+        options: SigningOptions,
+    ) -> Result<Request, SettlementClientError> {
         let body =
             serde_json::to_vec(&request.payload).map_err(|_| SettlementClientError::Encode)?;
         self.signed_request(
@@ -223,6 +304,28 @@ impl SettlementClient {
             &request.idempotency_key,
             body,
             true,
+            options,
+        )
+        .await
+    }
+
+    /// Builds the signed `GET {endpoint}/{key}` lookup without sending it.
+    pub async fn signed_get_request(&self, key: &str) -> Result<Request, SettlementClientError> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|()| SettlementClientError::InvalidEndpoint)?
+            .pop_if_empty()
+            .push(key);
+        self.signed_request(
+            Method::GET,
+            url,
+            key,
+            Vec::new(),
+            false,
+            SigningOptions {
+                created: unix_timestamp()?,
+                cover_idempotency_key: true,
+            },
         )
         .await
     }
@@ -247,14 +350,7 @@ impl SettlementApi for SettlementClient {
         &self,
         key: &str,
     ) -> Result<Option<SettlementAnswer>, SettlementClientError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut()
-            .map_err(|()| SettlementClientError::InvalidEndpoint)?
-            .pop_if_empty()
-            .push(key);
-        let signed = self
-            .signed_request(Method::GET, url, key, Vec::new(), false)
-            .await?;
+        let signed = self.signed_get_request(key).await?;
         let response = self
             .client
             .execute(signed)
@@ -388,13 +484,20 @@ fn structured_field_string(value: &str) -> Result<String, SettlementClientError>
     Ok(encoded)
 }
 
-fn signature_parameters(created: i64) -> String {
+fn signature_parameters(created: i64, keyid: &str, cover_idempotency_key: bool) -> String {
+    let component_count = if cover_idempotency_key {
+        SIGNATURE_COMPONENTS.len()
+    } else {
+        SIGNATURE_COMPONENTS.len().saturating_sub(1)
+    };
     let components = SIGNATURE_COMPONENTS
+        .get(..component_count)
+        .unwrap_or_default()
         .iter()
         .map(|component| format!("\"{component}\""))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("({components});created={created};keyid=\"{SETTLEMENT_KEY_DOMAIN}\"")
+    format!("({components});created={created};keyid=\"{keyid}\"")
 }
 
 fn signature_base(components: &[(&str, &str)], parameters: &str) -> String {
@@ -415,7 +518,7 @@ mod tests {
 
     #[test]
     fn settlement_profile_signature_base_has_exact_components() {
-        let parameters = signature_parameters(1_618_884_473);
+        let parameters = signature_parameters(1_618_884_473, SETTLEMENT_KEY_DOMAIN, true);
         let components = [
             ("@method", "POST"),
             ("@target-uri", "https://product.example/settlements"),
