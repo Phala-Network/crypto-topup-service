@@ -16,6 +16,7 @@ use topup::db::{
     self, AddressKind, ApplyTransitionResult, FlushedEvent, NewAccount, NewAddress, NewDeposit,
     NewFlush, NewProduct, OutboxEvent, SettlementIntent, TransitionUpdate,
 };
+use topup::{heartbeat, restore};
 use topup_core::deposit::{DepositState, StepOutcome, WaitReason, next};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -164,6 +165,26 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let heartbeat = heartbeat::record(&context.app_pool).await?;
+            ensure!(heartbeat.rpo_seconds == 60);
+
+            let report = restore::check(&context.owner_pool)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            ensure!(report.latest_migration == restore::LATEST_MIGRATION_VERSION);
+            ensure!(report.heartbeat_age_seconds <= i64::from(report.rpo_seconds));
+            ensure!(report.row_counts.get("heartbeat") == Some(&1));
+            ensure!(report.post_restore_reconciliation.status == "hook_pending_c6_c8");
             Ok(())
         })
     })

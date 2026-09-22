@@ -18,19 +18,37 @@ fn help_and_version_succeed() {
 }
 
 #[test]
-fn placeholder_commands_fail_with_a_clear_message() {
-    let commands: &[&[&str]] = &[&["restore-check"]];
+fn restore_check_requires_a_database_url() {
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .arg("restore-check")
+        .env_remove("RESTORE_DATABASE_URL")
+        .env_remove("MIGRATE_DATABASE_URL")
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+    assert!(!output.status.success());
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("required for restore-check"));
+}
 
-    for args in commands {
-        let output = topup(args);
-        assert!(!output.status.success(), "{args:?} should fail");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stdout.contains("not implemented") || stderr.contains("not implemented"),
-            "{args:?} should report that it is not implemented"
-        );
-    }
+#[test]
+fn heartbeat_requires_a_database_url() {
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .arg("heartbeat")
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+    assert!(!output.status.success());
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("required for heartbeat"));
 }
 
 #[test]
@@ -99,6 +117,26 @@ fn dev_attestation_prints_the_required_json_shape() {
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
+}
+
+#[cfg(feature = "dev-signer")]
+#[test]
+fn development_backup_key_is_written_without_printing_it() {
+    let directory = std::env::temp_dir().join(format!("topup-cli-backup-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).expect("temporary directory should be created");
+    let path = directory.join("backup.key");
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["backup-key", "--dev", "--output"])
+        .arg(&path)
+        .output()
+        .expect("topup process should start");
+
+    assert!(output.status.success());
+    let key = std::fs::read_to_string(&path).expect("backup key should be written");
+    assert_eq!(key.len(), 64);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&key));
+    std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
 }
 
 #[test]

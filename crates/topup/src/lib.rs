@@ -13,8 +13,11 @@
 )]
 
 pub mod api;
+pub mod backup;
 pub mod db;
+pub mod heartbeat;
 pub mod outbox;
 pub mod pump;
+pub mod restore;
 pub mod scanner;
 pub mod steps;
