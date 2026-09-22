@@ -93,7 +93,8 @@ impl MinorAmount {
 }
 
 /// A price stored as an integer with a fixed decimal scale.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "ScaledPriceRepr", into = "ScaledPriceRepr")]
 pub struct ScaledPrice {
     value: u64,
     scale: u8,
@@ -101,12 +102,12 @@ pub struct ScaledPrice {
 
 impl ScaledPrice {
     /// Creates a non-zero price at the required eight-decimal scale.
-    pub fn new(value: u64, scale: u8) -> Result<Self, MoneyTypeError> {
+    pub fn new(value: u64, scale: u8) -> Result<Self, MoneyError> {
         if value == 0 {
-            return Err(MoneyTypeError::ZeroPrice);
+            return Err(MoneyError::ZeroPrice);
         }
         if scale != PRICE_SCALE {
-            return Err(MoneyTypeError::InvalidPriceScale { scale });
+            return Err(MoneyError::InvalidPriceScale { scale });
         }
         Ok(Self { value, scale })
     }
@@ -124,16 +125,39 @@ impl ScaledPrice {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct ScaledPriceRepr {
+    value: u64,
+    scale: u8,
+}
+
+impl TryFrom<ScaledPriceRepr> for ScaledPrice {
+    type Error = MoneyError;
+
+    fn try_from(value: ScaledPriceRepr) -> Result<Self, Self::Error> {
+        Self::new(value.value, value.scale)
+    }
+}
+
+impl From<ScaledPrice> for ScaledPriceRepr {
+    fn from(value: ScaledPrice) -> Self {
+        Self {
+            value: value.value,
+            scale: value.scale,
+        }
+    }
+}
+
 /// Basis points, constrained to the inclusive range 0 through 10,000.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "u16", into = "u16")]
 pub struct Bps(u16);
 
 impl Bps {
     /// Creates a validated basis-point value.
-    pub fn new(value: u16) -> Result<Self, MoneyTypeError> {
+    pub fn new(value: u16) -> Result<Self, MoneyError> {
         if value > 10_000 {
-            return Err(MoneyTypeError::InvalidBps { value });
+            return Err(MoneyError::InvalidBps { value });
         }
         Ok(Self(value))
     }
@@ -145,9 +169,23 @@ impl Bps {
     }
 }
 
+impl TryFrom<u16> for Bps {
+    type Error = MoneyError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Bps> for u16 {
+    fn from(value: Bps) -> Self {
+        value.0
+    }
+}
+
 /// Errors constructing constrained money types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MoneyTypeError {
+pub enum MoneyError {
     /// A price of zero cannot be used for inverse quote calculations.
     ZeroPrice,
     /// A price scale other than eight was supplied.
@@ -160,9 +198,13 @@ pub enum MoneyTypeError {
         /// The rejected value.
         value: u16,
     },
+    /// A positive price rounded to zero at the configured scale.
+    PriceNotRepresentable,
+    /// An intermediate value exceeded the arithmetic representation.
+    ArithmeticOutOfRange,
 }
 
-impl fmt::Display for MoneyTypeError {
+impl fmt::Display for MoneyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroPrice => formatter.write_str("price must be greater than zero"),
@@ -172,17 +214,23 @@ impl fmt::Display for MoneyTypeError {
             Self::InvalidBps { value } => {
                 write!(formatter, "basis points must be at most 10000, got {value}")
             }
+            Self::PriceNotRepresentable => formatter.write_str(
+                "price_not_representable: locked price rounds to zero at the configured scale",
+            ),
+            Self::ArithmeticOutOfRange => formatter.write_str("money arithmetic is out of range"),
         }
     }
 }
 
-impl Error for MoneyTypeError {}
+impl Error for MoneyError {}
 
 /// Errors computing destination credit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CreditError {
     /// A decimal exponent could not be represented in the 512-bit intermediate.
     ScaleOutOfRange,
+    /// A quote attempted division by zero.
+    DivisionByZero,
     /// The floored result does not fit into a `u64` minor amount.
     OutOfRange,
 }
@@ -190,8 +238,13 @@ pub enum CreditError {
 impl fmt::Display for CreditError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ScaleOutOfRange => formatter.write_str("decimal scale is out of range"),
-            Self::OutOfRange => formatter.write_str("credit is out of range for a minor amount"),
+            Self::ScaleOutOfRange => {
+                formatter.write_str("scale_out_of_range: decimal scale is out of range")
+            }
+            Self::DivisionByZero => formatter.write_str("division_by_zero: price must be non-zero"),
+            Self::OutOfRange => {
+                formatter.write_str("out_of_range: money amount cannot be represented")
+            }
         }
     }
 }
@@ -217,7 +270,7 @@ pub fn credit(
         let divisor = power_of_ten(exponent.unsigned_abs())?;
         product
             .checked_div(divisor)
-            .ok_or(CreditError::ScaleOutOfRange)?
+            .ok_or(CreditError::DivisionByZero)?
     } else {
         product
             .checked_mul(power_of_ten(exponent.unsigned_abs())?)
@@ -230,71 +283,95 @@ pub fn credit(
 
 /// Applies a spread to a spot price and rounds the quotient to nearest, ties to even.
 ///
-/// The returned price is never greater than `spot`; a positive spread lowers the price.
-#[must_use]
-pub fn lock_price(spot: ScaledPrice, spread: Bps) -> ScaledPrice {
-    let numerator = U256::from(spot.value)
-        .checked_mul(U256::from(10_000_u16))
-        .unwrap_or(U256::MAX);
-    let denominator = U256::from(10_000_u16)
-        .checked_add(U256::from(spread.0))
-        .unwrap_or(U256::MAX);
-    let quotient = numerator.checked_div(denominator).unwrap_or_default();
-    let remainder = numerator.checked_rem(denominator).unwrap_or_default();
-    let twice_remainder = remainder.checked_mul(U256::from(2_u8)).unwrap_or(U256::MAX);
+/// The returned price is never greater than `spot`; a positive spread cannot increase the price.
+pub fn lock_price(spot: ScaledPrice, spread: Bps) -> Result<ScaledPrice, MoneyError> {
+    let basis = 10_000_u128;
+    let numerator = u128::from(spot.value)
+        .checked_mul(basis)
+        .ok_or(MoneyError::ArithmeticOutOfRange)?;
+    let denominator = basis
+        .checked_add(u128::from(spread.0))
+        .ok_or(MoneyError::ArithmeticOutOfRange)?;
+    let quotient = numerator
+        .checked_div(denominator)
+        .ok_or(MoneyError::ArithmeticOutOfRange)?;
+    let remainder = numerator
+        .checked_rem(denominator)
+        .ok_or(MoneyError::ArithmeticOutOfRange)?;
+    let twice_remainder = remainder
+        .checked_mul(2)
+        .ok_or(MoneyError::ArithmeticOutOfRange)?;
+    let quotient_is_odd = quotient
+        .checked_rem(2)
+        .ok_or(MoneyError::ArithmeticOutOfRange)?
+        == 1;
     let round_up =
-        twice_remainder > denominator || (twice_remainder == denominator && quotient.bit(0));
+        twice_remainder > denominator || (twice_remainder == denominator && quotient_is_odd);
     let rounded = if round_up {
-        quotient.checked_add(U256::from(1_u8)).unwrap_or(quotient)
+        quotient
+            .checked_add(1)
+            .ok_or(MoneyError::ArithmeticOutOfRange)?
     } else {
         quotient
     };
-    let value = u64::try_from(rounded).unwrap_or(spot.value);
-    ScaledPrice {
-        value,
-        scale: spot.scale,
+    let value = u64::try_from(rounded).map_err(|_| MoneyError::ArithmeticOutOfRange)?;
+    match ScaledPrice::new(value, spot.scale) {
+        Err(MoneyError::ZeroPrice) => Err(MoneyError::PriceNotRepresentable),
+        result => result,
     }
 }
 
 /// Returns the smallest atomic amount whose floored credit reaches `target`.
 ///
-/// This is the inverse of [`credit`] over validated route decimal counts (at most 36). Division
-/// rounds up. If inputs outside that configured domain exceed `U256`, the result saturates at the
-/// largest atomic amount because the requested token amount is not representable.
-#[must_use]
+/// This is the inverse of [`credit`]. Division rounds up, and scale, division, conversion, or final
+/// credit representation failures are returned explicitly.
 pub fn tokens_for_credit(
     target: MinorAmount,
     price: ScaledPrice,
     asset_decimals: u8,
     unit_decimals: u8,
-) -> AtomicAmount {
+) -> Result<AtomicAmount, CreditError> {
     let exponent = decimal_exponent(asset_decimals, price.scale, unit_decimals);
-    let target = U512::from(target.0);
-    let price = U512::from(price.value);
+    let target_value = U512::from(target.0);
+    let price_value = U512::from(price.value);
     let (numerator, denominator) = if exponent >= 0 {
         (
-            target
-                .checked_mul(power_of_ten_saturating(exponent.unsigned_abs()))
-                .unwrap_or(U512::MAX),
-            price,
+            target_value
+                .checked_mul(power_of_ten(exponent.unsigned_abs())?)
+                .ok_or(CreditError::ScaleOutOfRange)?,
+            price_value,
         )
     } else {
         (
-            target,
-            price
-                .checked_mul(power_of_ten_saturating(exponent.unsigned_abs()))
-                .unwrap_or(U512::MAX),
+            target_value,
+            price_value
+                .checked_mul(power_of_ten(exponent.unsigned_abs())?)
+                .ok_or(CreditError::ScaleOutOfRange)?,
         )
     };
-    let quotient = numerator.checked_div(denominator).unwrap_or(U512::MAX);
-    let remainder = numerator.checked_rem(denominator).unwrap_or_default();
+    let quotient = numerator
+        .checked_div(denominator)
+        .ok_or(CreditError::DivisionByZero)?;
+    let remainder = numerator
+        .checked_rem(denominator)
+        .ok_or(CreditError::DivisionByZero)?;
     let rounded = if remainder.is_zero() {
         quotient
     } else {
-        quotient.checked_add(U512::from(1_u8)).unwrap_or(U512::MAX)
+        quotient
+            .checked_add(U512::from(1_u8))
+            .ok_or(CreditError::OutOfRange)?
     };
     let (value, overflow) = U256::overflowing_from_limbs_slice(rounded.as_limbs());
-    AtomicAmount(if overflow { U256::MAX } else { value })
+    if overflow {
+        return Err(CreditError::OutOfRange);
+    }
+    let amount = AtomicAmount(value);
+    let achieved = credit(amount, price, asset_decimals, unit_decimals)?;
+    if achieved < target {
+        return Err(CreditError::OutOfRange);
+    }
+    Ok(amount)
 }
 
 fn decimal_exponent(asset_decimals: u8, price_scale: u8, unit_decimals: u8) -> i16 {
@@ -310,10 +387,6 @@ fn power_of_ten(exponent: u16) -> Result<U512, CreditError> {
         .ok_or(CreditError::ScaleOutOfRange)
 }
 
-fn power_of_ten_saturating(exponent: u16) -> U512 {
-    U512::from(10_u8).saturating_pow(U512::from(exponent))
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -324,26 +397,30 @@ mod tests {
         ScaledPrice::new(value, PRICE_SCALE).expect("test prices are valid")
     }
 
+    fn bps(value: u16) -> Bps {
+        Bps::new(value).expect("test basis points are valid")
+    }
+
     proptest! {
         #[test]
-        fn credit_is_monotone_in_amount(first in any::<u128>(), extra in any::<u64>(), price_value in 1_u64..=u64::MAX) {
+        fn credit_is_monotone_in_amount(first in 0_u64..1_000_000_000_000, extra in 0_u64..1_000_000_000_000, price_value in 1_u64..1_000_000_000) {
             let first = U256::from(first);
             let second = first + U256::from(extra);
-            let first_credit = credit(AtomicAmount::new(first), price(price_value), 18, 2);
-            let second_credit = credit(AtomicAmount::new(second), price(price_value), 18, 2);
-            if let (Ok(first_credit), Ok(second_credit)) = (first_credit, second_credit) {
-                prop_assert!(first_credit <= second_credit);
-            }
+            let first_credit = credit(AtomicAmount::new(first), price(price_value), 6, 2)
+                .expect("generated credit is representable");
+            let second_credit = credit(AtomicAmount::new(second), price(price_value), 6, 2)
+                .expect("generated credit is representable");
+            prop_assert!(first_credit <= second_credit);
         }
 
         #[test]
-        fn credit_is_monotone_in_price(amount in any::<u128>(), first_price in 1_u64..=u64::MAX, extra in any::<u32>()) {
-            let second_price = first_price.saturating_add(u64::from(extra));
-            let first_credit = credit(AtomicAmount::new(U256::from(amount)), price(first_price), 18, 2);
-            let second_credit = credit(AtomicAmount::new(U256::from(amount)), price(second_price), 18, 2);
-            if let (Ok(first_credit), Ok(second_credit)) = (first_credit, second_credit) {
-                prop_assert!(first_credit <= second_credit);
-            }
+        fn credit_is_monotone_in_price(amount in 0_u64..1_000_000_000_000, first_price in 1_u64..1_000_000_000, extra in 0_u64..1_000_000_000) {
+            let second_price = first_price + extra;
+            let first_credit = credit(AtomicAmount::new(U256::from(amount)), price(first_price), 6, 2)
+                .expect("generated credit is representable");
+            let second_credit = credit(AtomicAmount::new(U256::from(amount)), price(second_price), 6, 2)
+                .expect("generated credit is representable");
+            prop_assert!(first_credit <= second_credit);
         }
 
         #[test]
@@ -362,18 +439,26 @@ mod tests {
         }
 
         #[test]
-        fn tokens_round_up_to_requested_credit(target in any::<u32>(), price_value in 1_u64..=u64::MAX) {
-            let target = MinorAmount::new(u64::from(target));
+        fn tokens_round_up_to_the_minimal_amount(target in 1_u64..1_000_000_000, price_value in 1_u64..1_000_000_000) {
+            let target = MinorAmount::new(target);
             let locked_price = price(price_value);
-            let tokens = tokens_for_credit(target, locked_price, 18, 2);
-            let actual = credit(tokens, locked_price, 18, 2).expect("inverse result fits");
+            let tokens = tokens_for_credit(target, locked_price, 6, 2)
+                .expect("generated inverse quote is representable");
+            let actual = credit(tokens, locked_price, 6, 2).expect("inverse result fits");
+            let previous = tokens
+                .checked_sub(AtomicAmount::new(U256::from(1_u8)))
+                .expect("positive target needs at least one atomic unit");
+            let previous_credit = credit(previous, locked_price, 6, 2)
+                .expect("previous credit remains representable");
             prop_assert!(actual >= target);
+            prop_assert!(previous_credit < target);
         }
 
         #[test]
-        fn positive_spread_never_increases_price(value in 1_u64..=u64::MAX, spread in 1_u16..=10_000_u16) {
+        fn positive_spread_never_increases_price(value in 2_u64..=u64::MAX, spread in 1_u16..=10_000_u16) {
             let spot = price(value);
-            let locked = lock_price(spot, Bps::new(spread).expect("spread is bounded"));
+            let locked = lock_price(spot, bps(spread))
+                .expect("generated lock price is representable");
             prop_assert!(locked <= spot);
         }
     }
@@ -395,14 +480,107 @@ mod tests {
     }
 
     #[test]
+    fn credit_uses_a_u512_intermediate_before_scaling_down() {
+        let amount = AtomicAmount::new(U256::MAX);
+        let scaled_price = price(u64::MAX);
+        let product = U512::from(U256::MAX) * U512::from(u64::MAX);
+        assert!(product > U512::from(U256::MAX));
+
+        let expected = product / U512::from(10_u8).pow(U512::from(85_u8));
+        assert_eq!(
+            credit(amount, scaled_price, 77, 0),
+            Ok(MinorAmount::new(
+                u64::try_from(expected).expect("scaled result fits")
+            ))
+        );
+    }
+
+    #[test]
+    fn reverse_quote_is_minimal_by_one_atomic_unit() {
+        let target = MinorAmount::new(1_234);
+        let scaled_price = price(25_000_000);
+        let tokens = tokens_for_credit(target, scaled_price, 6, 2).expect("quote fits");
+        let previous = tokens
+            .checked_sub(AtomicAmount::new(U256::from(1_u8)))
+            .expect("quote is positive");
+
+        assert!(credit(tokens, scaled_price, 6, 2).unwrap() >= target);
+        assert!(credit(previous, scaled_price, 6, 2).unwrap() < target);
+    }
+
+    #[test]
+    fn reverse_quote_handles_a_negative_exponent() {
+        let target = MinorAmount::new(601);
+        let scaled_price = price(2);
+        let tokens = tokens_for_credit(target, scaled_price, 2, 12).expect("quote fits");
+
+        assert_eq!(tokens, AtomicAmount::new(U256::from(4_u8)));
+        assert_eq!(
+            credit(tokens, scaled_price, 2, 12),
+            Ok(MinorAmount::new(800))
+        );
+        assert_eq!(
+            credit(AtomicAmount::new(U256::from(3_u8)), scaled_price, 2, 12),
+            Ok(MinorAmount::new(600))
+        );
+    }
+
+    #[test]
+    fn reverse_quote_rejects_unrepresentable_result_credit() {
+        assert_eq!(
+            tokens_for_credit(MinorAmount::new(u64::MAX), price(1_u64 << 63), 0, 8,),
+            Err(CreditError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn reverse_quote_rejects_unrepresentable_scale() {
+        assert_eq!(
+            tokens_for_credit(MinorAmount::new(1), price(1), u8::MAX, 0),
+            Err(CreditError::ScaleOutOfRange)
+        );
+    }
+
+    #[test]
+    fn lock_price_rejects_a_zero_scaled_result() {
+        assert_eq!(
+            lock_price(price(1), bps(10_000)),
+            Err(MoneyError::PriceNotRepresentable)
+        );
+    }
+
+    #[test]
     fn lock_price_uses_half_even_rounding() {
         assert_eq!(
-            lock_price(price(20_001), Bps::new(10_000).unwrap()).value(),
+            lock_price(price(20_001), bps(10_000)).unwrap().value(),
             10_000
         );
         assert_eq!(
-            lock_price(price(20_003), Bps::new(10_000).unwrap()).value(),
+            lock_price(price(20_003), bps(10_000)).unwrap().value(),
             10_002
         );
+    }
+
+    #[test]
+    fn bps_deserialization_enforces_bounds_and_round_trips() {
+        let zero: Bps = serde_json::from_str("0").expect("zero bps is valid");
+        let maximum: Bps = serde_json::from_str("10000").expect("maximum bps is valid");
+        assert_eq!(zero, bps(0));
+        assert_eq!(maximum, bps(10_000));
+        assert_eq!(serde_json::to_string(&zero).unwrap(), "0");
+        assert_eq!(serde_json::to_string(&maximum).unwrap(), "10000");
+        assert!(serde_json::from_str::<Bps>("10001").is_err());
+    }
+
+    #[test]
+    fn scaled_price_deserialization_enforces_invariants_and_round_trips() {
+        let scaled_price = price(u64::MAX);
+        let json = serde_json::to_string(&scaled_price).expect("price serializes");
+        assert_eq!(
+            serde_json::from_str::<ScaledPrice>(&json).unwrap(),
+            scaled_price
+        );
+        assert!(serde_json::from_str::<ScaledPrice>(r#"{"value":0,"scale":8}"#).is_err());
+        assert!(serde_json::from_str::<ScaledPrice>(r#"{"value":1,"scale":7}"#).is_err());
     }
 }
