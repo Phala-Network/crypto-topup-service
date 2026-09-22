@@ -219,6 +219,9 @@ impl SettleStep {
                         json!({
                             "product_id": product_id,
                             "deposit_id": deposit.id,
+                            "chain_id": deposit.chain_id,
+                            "state": "credited",
+                            "route": deposit.route.as_deref(),
                             "destination_tx_id": receipt["destination_tx_id"],
                             "amount_minor": payload.amount_minor,
                             "unit": payload.unit,
@@ -279,6 +282,9 @@ impl SettleStep {
                         json!({
                             "product_id": product_id,
                             "deposit_id": deposit.id,
+                            "chain_id": deposit.chain_id,
+                            "state": "rejected",
+                            "route": deposit.route.as_deref(),
                             "reason": RejectReason::ProductRefused.code(),
                             "product_reason": receipt["reason"],
                         }),
@@ -319,7 +325,14 @@ impl Step for SettleStep {
         let result = match self.run_inner(deposit).await {
             Ok(result) => result,
             Err(error) => {
-                tracing::error!(deposit_id = %deposit.id, %error, "settlement step failed");
+                tracing::error!(
+                    deposit_id = %deposit.id,
+                    chain_id = deposit.chain_id,
+                    state = ?deposit.state,
+                    route = deposit.route.as_deref().unwrap_or_default(),
+                    %error,
+                    "settlement step failed"
+                );
                 StepResult::new(
                     StepOutcome::Retry {
                         error: error.retry_error(),

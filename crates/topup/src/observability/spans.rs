@@ -75,7 +75,7 @@ pub fn flush_action_span(chain: u64, route: &str, state: &str, attempt: u32) -> 
 mod tests {
     use tracing_test::traced_test;
 
-    use super::deposit_step_span;
+    use super::{deposit_step_span, outbox_delivery_span};
     use crate::db::Deposit;
     use alloy_primitives::{Address, B256};
     use chrono::Utc;
@@ -126,6 +126,27 @@ mod tests {
         assert!(logs_contain("chain_id=1"));
         assert!(logs_contain("state=Confirmed"));
         assert!(logs_contain("attempt=3"));
+        assert!(logs_contain("route=\"route-a\""));
+    }
+
+    #[traced_test]
+    #[test]
+    fn outbox_step_event_populates_state_and_route_span_fields() {
+        let span = outbox_delivery_span(
+            Uuid::nil(),
+            &serde_json::json!({
+                "deposit_id": "018f47f0-a9b2-7c31-8fa5-776a08f65201",
+                "chain_id": 1,
+                "state": "credited",
+                "route": "route-a",
+            }),
+            2,
+        );
+        let _guard = span.enter();
+        tracing::info!("outbox step event test");
+
+        assert!(logs_contain("chain_id=Some(1)"));
+        assert!(logs_contain("state=\"credited\""));
         assert!(logs_contain("route=\"route-a\""));
     }
 }

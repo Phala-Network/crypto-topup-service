@@ -6,6 +6,7 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::sync::Mutex;
 
+use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, RootProvider};
@@ -14,7 +15,6 @@ use alloy::sol;
 use alloy::sol_types::SolEvent;
 use chrono::{DateTime, Utc};
 use topup_core::money::AtomicAmount;
-use url::Url;
 
 /// Maximum inclusive block count in one `eth_getLogs` request.
 pub const MAX_BLOCKS_PER_REQUEST: u64 = 2_000;
@@ -52,9 +52,11 @@ pub struct TransferLog {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainError {
     /// The configured provider URL is invalid.
-    InvalidUrl(String),
+    InvalidUrl,
     /// The provider returned an RPC failure during the named operation.
     Rpc(&'static str),
+    /// The provider transport failed without exposing its configured URL.
+    Transport(RedactedTransportError),
     /// A required finalized block or log field was absent.
     MissingField(&'static str),
     /// A block timestamp did not fit the supported UTC representation.
@@ -84,10 +86,11 @@ pub enum ChainError {
 impl Display for ChainError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidUrl(error) => write!(formatter, "invalid RPC URL: {error}"),
+            Self::InvalidUrl => formatter.write_str("invalid RPC URL"),
             Self::Rpc(operation) => {
                 write!(formatter, "EVM RPC request failed during {operation}")
             }
+            Self::Transport(error) => Display::fmt(error, formatter),
             Self::MissingField(field) => write!(formatter, "EVM response omitted `{field}`"),
             Self::InvalidTimestamp(timestamp) => {
                 write!(
@@ -163,18 +166,28 @@ impl ProviderHealth {
 }
 
 /// Alloy HTTP client for finalized EVM reads.
-#[derive(Debug)]
 pub struct EvmChain {
     provider: RootProvider,
+    endpoint: Redacted,
     health: Mutex<ProviderHealth>,
+}
+
+impl fmt::Debug for EvmChain {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvmChain")
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EvmChain {
     /// Creates a client for one RPC provider.
     pub fn new(rpc_url: &str) -> Result<Self, ChainError> {
-        let url = Url::parse(rpc_url).map_err(|error| ChainError::InvalidUrl(error.to_string()))?;
+        let endpoint = Redacted::parse(rpc_url).map_err(|_| ChainError::InvalidUrl)?;
         Ok(Self {
-            provider: RootProvider::new_http(url),
+            provider: RootProvider::new_http(endpoint.expose().clone()),
+            endpoint,
             health: Mutex::new(ProviderHealth::default()),
         })
     }
@@ -184,7 +197,9 @@ impl EvmChain {
             .provider
             .get_block_by_number(BlockNumberOrTag::Number(block_number))
             .await
-            .map_err(|_| ChainError::Rpc("block timestamp fetch"))?
+            .map_err(|_| {
+                ChainError::Transport(self.endpoint.transport_error("block timestamp fetch"))
+            })?
             .ok_or(ChainError::MissingField("block"))?;
         let timestamp = block.header.inner.timestamp;
         let timestamp = i64::try_from(timestamp)
@@ -210,11 +225,9 @@ impl EvmChain {
             .to_block(to_block)
             .event_signature(Transfer::SIGNATURE_HASH)
             .topic2(recipients);
-        let logs = self
-            .provider
-            .get_logs(&filter)
-            .await
-            .map_err(|_| ChainError::Rpc("transfer log fetch"))?;
+        let logs = self.provider.get_logs(&filter).await.map_err(|_| {
+            ChainError::Transport(self.endpoint.transport_error("transfer log fetch"))
+        })?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
             let block_number = log
@@ -300,7 +313,9 @@ impl ChainReader for EvmChain {
             .provider
             .get_block_by_number(BlockNumberOrTag::Finalized)
             .await
-            .map_err(|_| ChainError::Rpc("finalized head fetch"))?
+            .map_err(|_| {
+                ChainError::Transport(self.endpoint.transport_error("finalized head fetch"))
+            })?
             .ok_or(ChainError::MissingField("finalized block"))?;
         let current = block.header.inner.number;
         self.health
@@ -348,7 +363,9 @@ impl ChainReader for EvmChain {
             .provider
             .get_transaction_receipt(tx_hash)
             .await
-            .map_err(|_| ChainError::Rpc("transaction receipt fetch"))?
+            .map_err(|_| {
+                ChainError::Transport(self.endpoint.transport_error("transaction receipt fetch"))
+            })?
         else {
             return Ok(None);
         };

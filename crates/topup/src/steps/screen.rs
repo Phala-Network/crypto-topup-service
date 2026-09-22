@@ -89,7 +89,7 @@ impl ScreenRoute {
         if let StepOutcome::Reject(reason) = outcome {
             result
                 .events
-                .push(rejected_event(deposit.id, product_id, reason));
+                .push(rejected_event(deposit, product_id, reason));
         }
         result
     }
@@ -367,13 +367,16 @@ fn screening_evidence(
     })
 }
 
-fn rejected_event(deposit_id: Uuid, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
     OutboxEvent {
         id: Uuid::new_v4(),
         event_type: "deposit.rejected".to_owned(),
         payload: json!({
             "product_id": product_id,
-            "deposit_id": deposit_id,
+            "deposit_id": deposit.id,
+            "chain_id": deposit.chain_id,
+            "state": "rejected",
+            "route": deposit.route.as_deref(),
             "reason": reason.code(),
         }),
         next_attempt_at: Utc::now(),
@@ -555,6 +558,8 @@ mod tests {
                     product_id.to_string()
                 );
                 assert_eq!(result.events[0].payload["reason"], "sanctioned");
+                assert_eq!(result.events[0].payload["state"], "rejected");
+                assert_eq!(result.events[0].payload["route"], "route");
             } else {
                 assert!(result.events.is_empty());
             }

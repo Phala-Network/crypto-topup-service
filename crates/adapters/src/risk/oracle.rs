@@ -13,7 +13,8 @@ use alloy::sol_types::SolCall;
 use async_trait::async_trait;
 use tokio::time::timeout;
 use topup_core::screening::{SanctionsAnswer, SanctionsResult};
-use url::Url;
+
+use crate::redaction::Redacted;
 
 /// Default upper bound for one provider's sanctions RPC request.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -53,12 +54,25 @@ impl Display for SanctionsOracleConfigError {
 impl Error for SanctionsOracleConfigError {}
 
 /// Alloy HTTP client that checks the same oracle call through two providers.
-#[derive(Debug)]
 pub struct SanctionsOracle {
     provider_a: RootProvider,
+    provider_a_endpoint: Redacted,
     provider_b: RootProvider,
+    provider_b_endpoint: Redacted,
     oracle: Address,
     request_timeout: Duration,
+}
+
+impl fmt::Debug for SanctionsOracle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SanctionsOracle")
+            .field("provider_a_endpoint", &self.provider_a_endpoint)
+            .field("provider_b_endpoint", &self.provider_b_endpoint)
+            .field("oracle", &self.oracle)
+            .field("request_timeout", &self.request_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SanctionsOracle {
@@ -72,19 +86,21 @@ impl SanctionsOracle {
         if request_timeout.is_zero() {
             return Err(SanctionsOracleConfigError::ZeroTimeout);
         }
-        let provider_a_url = Url::parse(provider_a_url)
+        let provider_a_url = Redacted::parse(provider_a_url)
             .map_err(|_| SanctionsOracleConfigError::InvalidProviderAUrl)?;
-        if !matches!(provider_a_url.scheme(), "http" | "https") {
+        if !matches!(provider_a_url.expose().scheme(), "http" | "https") {
             return Err(SanctionsOracleConfigError::InvalidProviderAUrl);
         }
-        let provider_b_url = Url::parse(provider_b_url)
+        let provider_b_url = Redacted::parse(provider_b_url)
             .map_err(|_| SanctionsOracleConfigError::InvalidProviderBUrl)?;
-        if !matches!(provider_b_url.scheme(), "http" | "https") {
+        if !matches!(provider_b_url.expose().scheme(), "http" | "https") {
             return Err(SanctionsOracleConfigError::InvalidProviderBUrl);
         }
         Ok(Self {
-            provider_a: RootProvider::new_http(provider_a_url),
-            provider_b: RootProvider::new_http(provider_b_url),
+            provider_a: RootProvider::new_http(provider_a_url.expose().clone()),
+            provider_a_endpoint: provider_a_url,
+            provider_b: RootProvider::new_http(provider_b_url.expose().clone()),
+            provider_b_endpoint: provider_b_url,
             oracle,
             request_timeout,
         })
@@ -93,6 +109,7 @@ impl SanctionsOracle {
     async fn answer(
         &self,
         provider: &RootProvider,
+        endpoint: &Redacted,
         address: Address,
         block_number: u64,
     ) -> SanctionsAnswer {
@@ -105,8 +122,18 @@ impl SanctionsOracle {
             provider.call(request).block(BlockId::number(block_number)),
         )
         .await;
-        let Ok(Ok(output)) = response else {
-            return SanctionsAnswer::Unavailable;
+        let output = match response {
+            Ok(Ok(output)) => output,
+            Ok(Err(_)) => {
+                let error = endpoint.transport_error("sanctions oracle call");
+                tracing::warn!(%error, "sanctions provider request failed");
+                return SanctionsAnswer::Unavailable;
+            }
+            Err(_) => {
+                let error = endpoint.timeout_error("sanctions oracle call");
+                tracing::warn!(%error, "sanctions provider request failed");
+                return SanctionsAnswer::Unavailable;
+            }
         };
         match isSanctionedCall::abi_decode_returns_validate(&output) {
             Ok(true) => SanctionsAnswer::Sanctioned,
@@ -120,8 +147,18 @@ impl SanctionsOracle {
 impl SanctionsSource for SanctionsOracle {
     async fn sanctions(&self, address: Address, block_number: u64) -> SanctionsResult {
         let (provider_a, provider_b) = tokio::join!(
-            self.answer(&self.provider_a, address, block_number),
-            self.answer(&self.provider_b, address, block_number)
+            self.answer(
+                &self.provider_a,
+                &self.provider_a_endpoint,
+                address,
+                block_number
+            ),
+            self.answer(
+                &self.provider_b,
+                &self.provider_b_endpoint,
+                address,
+                block_number
+            )
         );
         SanctionsResult {
             provider_a,

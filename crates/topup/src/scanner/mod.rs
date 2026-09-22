@@ -112,6 +112,7 @@ impl ScannerError {
             Self::Database(_)
                 | Self::Chain(
                     ChainError::Rpc(_)
+                        | ChainError::Transport(_)
                         | ChainError::MissingField(_)
                         | ChainError::InvalidTimestamp(_)
                         | ChainError::InvalidTransfer(_)
