@@ -229,6 +229,7 @@ enum Decision {
 enum Resolution {
     Record(Record),
     Mismatch,
+    Retry,
 }
 
 #[derive(Default)]
@@ -316,14 +317,15 @@ enum Storage {
 
 impl Storage {
     /// Atomically finds or creates the record for `key`, applying the credit and the
-    /// per-period cap in the same critical section.
+    /// per-period cap in the same critical section. `None` is a transient chain-read failure:
+    /// an existing record is still answered, but nothing new is stored.
     async fn settle(
         &self,
         config: &ReferenceConfig,
         key: &str,
         raw_payload: Box<RawValue>,
         payload: Value,
-        decision: Decision,
+        decision: Option<Decision>,
     ) -> Result<Resolution> {
         let broken = config.broken;
         let period_cap =
@@ -331,6 +333,12 @@ impl Storage {
         match self {
             Self::Memory(store) => {
                 let compare = broken != BrokenVariant::Idempotency;
+                let Some(decision) = decision else {
+                    let store = store.lock().await;
+                    return Ok(store
+                        .existing(key, &payload, compare)
+                        .unwrap_or(Resolution::Retry));
+                };
                 match broken {
                     BrokenVariant::Concurrency => {
                         if let Some(existing) = store.lock().await.existing(key, &payload, compare)
@@ -468,6 +476,7 @@ async fn post_settlement(State(state): State<ReferenceState>, request: Request) 
     {
         Ok(Resolution::Record(record)) => record_response(&record),
         Ok(Resolution::Mismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Ok(Resolution::Retry) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(error) => {
             tracing::error!(%error, "reference settlement storage failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -475,17 +484,18 @@ async fn post_settlement(State(state): State<ReferenceState>, request: Request) 
     }
 }
 
-async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> Decision {
+/// Stateless checks; `None` means the evidence cannot be verified yet.
+async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> Option<Decision> {
     let config = &state.config;
     let account_id = payload
         .get("account_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if account_id == config.refused_account_id {
-        return Decision::Rejected("business_refusal");
+        return Some(Decision::Rejected("business_refusal"));
     }
     if account_id == config.processing_account_id {
-        return Decision::Processing;
+        return Some(Decision::Processing);
     }
     let Some(amount) = payload
         .get("amount_minor")
@@ -493,10 +503,10 @@ async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> Decision 
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|amount| *amount > 0)
     else {
-        return Decision::Rejected("invalid_amount");
+        return Some(Decision::Rejected("invalid_amount"));
     };
     if config.broken != BrokenVariant::Caps && amount > config.per_deposit_cap {
-        return Decision::Rejected("per_deposit_cap");
+        return Some(Decision::Rejected("per_deposit_cap"));
     }
     let Ok(evidence) = payload
         .get("evidence")
@@ -504,21 +514,28 @@ async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> Decision 
         .context("missing evidence")
         .and_then(|evidence| serde_json::from_value::<Evidence>(evidence).map_err(Into::into))
     else {
-        return Decision::Rejected("invalid_chain_evidence");
+        return Some(Decision::Rejected("invalid_chain_evidence"));
     };
-    if let Err(error) = validate_evidence(state, account_id, &evidence).await {
-        tracing::info!(%error, "reference rejected chain evidence");
-        return Decision::Rejected("invalid_chain_evidence");
-    }
     if config.broken != BrokenVariant::DepositIdentity
         && key_from_evidence(&evidence).ok().as_deref() != Some(key)
     {
-        return Decision::Rejected("deposit_identity_mismatch");
+        return Some(Decision::Rejected("deposit_identity_mismatch"));
     }
-    Decision::Credit {
+    match validate_evidence(state, account_id, &evidence).await {
+        Ok(()) => {}
+        Err(EvidenceError::Transient(error)) => {
+            tracing::info!(%error, "chain evidence is not verifiable yet; nothing stored");
+            return None;
+        }
+        Err(EvidenceError::Mismatch(error)) => {
+            tracing::info!(%error, "reference rejected chain evidence");
+            return Some(Decision::Rejected("invalid_chain_evidence"));
+        }
+    }
+    Some(Decision::Credit {
         account_id: account_id.to_owned(),
         amount,
-    }
+    })
 }
 
 async fn get_settlement(
@@ -597,13 +614,17 @@ async fn settle_postgres(
     key: &str,
     raw_payload: Box<RawValue>,
     payload: Value,
-    decision: Decision,
+    decision: Option<Decision>,
 ) -> Result<Resolution> {
     let mut transaction = pool.begin().await?;
     if let Some(record) = select_record(&mut transaction, key).await? {
         transaction.commit().await?;
         return Ok(resolution(record, &payload));
     }
+    let Some(decision) = decision else {
+        transaction.rollback().await?;
+        return Ok(Resolution::Retry);
+    };
     let (status, destination_tx_id, reason, credit) = match decision {
         Decision::Credit { account_id, amount } => {
             let amount_i64 = i64::try_from(amount)?;
@@ -748,12 +769,36 @@ fn record_from_row(row: &sqlx::postgres::PgRow) -> Result<Record> {
     })
 }
 
+/// Why cited evidence was not credited.
+enum EvidenceError {
+    /// The chain could not answer yet (RPC failure, no receipt, not finalized); retryable.
+    Transient(anyhow::Error),
+    /// The finalized chain contradicts the evidence; a permanent rejection.
+    Mismatch(anyhow::Error),
+}
+
 async fn validate_evidence(
     state: &ReferenceState,
     account_id: &str,
     evidence: &Evidence,
-) -> Result<()> {
+) -> Result<(), EvidenceError> {
     let manifest = &state.config.manifest;
+    let expected_to = manifest.forwarder(account_id);
+    validate_evidence_fields(manifest, expected_to, evidence).map_err(EvidenceError::Mismatch)?;
+    if state.config.broken == BrokenVariant::Evidence {
+        return Ok(());
+    }
+    let receipt = finalized_receipt(&state.rpc, &evidence.tx_hash)
+        .await
+        .map_err(EvidenceError::Transient)?;
+    validate_log(manifest, expected_to, evidence, &receipt).map_err(EvidenceError::Mismatch)
+}
+
+fn validate_evidence_fields(
+    manifest: &Manifest,
+    expected_to: Address,
+    evidence: &Evidence,
+) -> Result<()> {
     ensure!(
         evidence.route == manifest.route && evidence.route_version == manifest.route_version,
         "wrong route"
@@ -763,20 +808,37 @@ async fn validate_evidence(
         Address::from_str(&evidence.asset_contract)? == manifest.asset_contract,
         "asset is not approved for the route"
     );
-    let expected_to = manifest.forwarder(account_id);
     ensure!(
         Address::from_str(&evidence.to)? == expected_to,
         "to is not the account's forwarder"
     );
-    if state.config.broken == BrokenVariant::Evidence {
-        return Ok(());
-    }
+    B256::from_str(&evidence.tx_hash)?;
+    U256::from_str(&evidence.amount_atomic)?;
+    Ok(())
+}
 
-    let rpc = &state.rpc;
+/// Returns the receipt only once its block is finalized; every failure here is transient.
+async fn finalized_receipt(rpc: &Rpc, tx_hash: &str) -> Result<Value> {
     let receipt = rpc
-        .receipt(B256::from_str(&evidence.tx_hash)?)
+        .receipt(B256::from_str(tx_hash)?)
         .await?
-        .context("transaction receipt does not exist")?;
+        .context("transaction receipt is not available yet")?;
+    let receipt_block =
+        parse_quantity(receipt.get("blockNumber").context("receipt is not mined")?)?;
+    ensure!(
+        receipt_block <= rpc.finalized_block().await?,
+        "block is not finalized yet"
+    );
+    Ok(receipt)
+}
+
+/// Checks the cited log in a finalized receipt; every failure here is permanent.
+fn validate_log(
+    manifest: &Manifest,
+    expected_to: Address,
+    evidence: &Evidence,
+    receipt: &Value,
+) -> Result<()> {
     let log = receipt
         .get("logs")
         .and_then(Value::as_array)
@@ -817,12 +879,6 @@ async fn validate_evidence(
     ensure!(
         U256::from_str(amount)? == U256::from_str(&evidence.amount_atomic)?,
         "Transfer amount differs from amount_atomic"
-    );
-    let receipt_block =
-        parse_quantity(receipt.get("blockNumber").context("receipt is not mined")?)?;
-    ensure!(
-        receipt_block <= rpc.finalized_block().await?,
-        "block is not finalized"
     );
     Ok(())
 }

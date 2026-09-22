@@ -78,6 +78,8 @@ struct RunArgs {
     processing_account_id: String,
     #[arg(long, default_value = "conformance-period")]
     period_account_id: String,
+    #[arg(long, default_value = "conformance-cap")]
+    cap_account_id: String,
     #[arg(long, default_value = "conformance-report.json")]
     report: PathBuf,
 }
@@ -135,6 +137,7 @@ async fn run(args: RunArgs) -> Result<()> {
             refused: args.refused_account_id,
             processing: args.processing_account_id,
             period: args.period_account_id,
+            cap: args.cap_account_id,
         },
         chain,
         restart,

@@ -62,6 +62,10 @@ impl Caps {
             "--per-period-cap must be at least {MIN_PER_PERIOD_CAP}"
         );
         ensure!(
+            self.per_period >= self.per_deposit,
+            "--per-period-cap must be at least --per-deposit-cap"
+        );
+        ensure!(
             self.per_period.div_ceil(self.per_deposit) <= MAX_PERIOD_FILL_REQUESTS,
             "--per-period-cap may be at most {MAX_PERIOD_FILL_REQUESTS} per-deposit caps"
         );
@@ -85,6 +89,8 @@ pub struct Accounts {
     pub processing: String,
     /// Creditable account used only to fill the per-period cap; must start empty.
     pub period: String,
+    /// Creditable account used only for the per-deposit cap case; must start empty.
+    pub cap: String,
 }
 
 impl Default for Accounts {
@@ -94,6 +100,7 @@ impl Default for Accounts {
             refused: "conformance-refused".to_owned(),
             processing: "conformance-processing".to_owned(),
             period: "conformance-period".to_owned(),
+            cap: "conformance-cap".to_owned(),
         }
     }
 }
@@ -611,14 +618,22 @@ impl Runner {
         Ok(json!({"http_status": status}))
     }
 
+    /// Uses a fresh account so neither the period cap nor earlier credits can mask the result.
     async fn over_deposit_cap(&self) -> Result<Value> {
-        let amount = self.config.caps.per_deposit.saturating_add(1);
-        let request = self.request(&self.config.accounts.accepted, amount).await?;
-        let answer = self.client.post(&request).await?;
+        let cap = self.config.caps.per_deposit;
+        let account = &self.config.accounts.cap;
+        let over = self.request(account, cap.saturating_add(1)).await?;
+        let answer = self.client.post(&over).await?;
         let SettlementAnswer::Rejected { reason, .. } = answer else {
-            bail!("over-cap request was not rejected: {answer:?}");
+            bail!("cap + 1 was not refused: {answer:?}");
         };
-        Ok(json!({"cap": self.config.caps.per_deposit, "amount_minor": amount, "reason": reason}))
+        let exact = self.request(account, cap).await?;
+        let answer = self.client.post(&exact).await?;
+        ensure!(
+            matches!(answer, SettlementAnswer::Accepted { .. }),
+            "exactly the cap must be accepted (caps are inclusive): {answer:?}"
+        );
+        Ok(json!({"cap": cap, "cap_plus_one_reason": reason, "exact_cap_accepted": true}))
     }
 
     async fn per_period_cap(&mut self) -> Result<Value> {
@@ -647,7 +662,7 @@ impl Runner {
     }
 
     async fn fill_period(&mut self, account: &str, caps: Caps) -> Result<Value> {
-        let reserve = caps.per_deposit.min(caps.per_period);
+        let reserve = caps.per_deposit;
         let fill_target = caps.per_period.saturating_sub(reserve);
         let mut credited = 0_u64;
         let mut fills = 0_u64;
@@ -673,7 +688,7 @@ impl Runner {
         let mut tasks = JoinSet::new();
         for request in racing {
             let client = self.client.clone();
-            tasks.spawn(async move { post_until_terminal(&client, &request).await });
+            tasks.spawn(async move { post_until_settled(&client, &request).await });
         }
         let mut accepted = 0_u64;
         let mut refused = 0_u64;
@@ -722,6 +737,7 @@ impl Runner {
         let account = &self.config.accounts.accepted;
         let valid = self.valid_emission(account);
         let manifest = self.config.chain.manifest();
+        let before = self.ledger(account).await;
         let mut cases = Vec::new();
         for (name, emission) in [
             (
@@ -752,30 +768,67 @@ impl Runner {
                     ..valid
                 },
             ),
-            (
-                "not_finalized",
-                Emission {
-                    finalize: false,
-                    ..valid
-                },
-            ),
         ] {
             let request = self.emit_request(account, 150, emission).await?;
             let answer = self.client.post(&request).await?;
             ensure!(
                 matches!(answer, SettlementAnswer::Rejected { .. }),
                 "{name}: request fields claim the approved token and the account forwarder, \
-                 but the on-chain log does not match; expected rejected, received {answer:?}"
+                 but the finalized log does not match; expected rejected, received {answer:?}"
             );
             cases.push(json!({"case": name, "tx_hash": request.payload["evidence"]["tx_hash"]}));
         }
+
+        // A log that is not finalized yet is a transient condition: it must not be credited,
+        // and it must not block the deposit once the block finalizes.
+        let pending = self
+            .emit_request(
+                account,
+                150,
+                Emission {
+                    finalize: false,
+                    ..valid
+                },
+            )
+            .await?;
+        let first = self.client.post(&pending).await?;
+        ensure!(
+            !matches!(first, SettlementAnswer::Accepted { .. }),
+            "not_finalized: a log in a non-finalized block was accepted"
+        );
+        let after_pending = self.ledger(account).await;
+        let resent = if matches!(first, SettlementAnswer::Rejected { .. }) {
+            None
+        } else {
+            self.config.chain.finalize().await?;
+            let answer = post_until_settled(&self.client, &pending).await?;
+            ensure!(
+                matches!(answer, SettlementAnswer::Accepted { .. }),
+                "not_finalized: the identical request resent after finality was not accepted: \
+                 {answer:?}"
+            );
+            Some(answer_label(&answer))
+        };
+
         let request = self.request(account, 150).await?;
         let answer = self.client.post(&request).await?;
         ensure!(
             matches!(answer, SettlementAnswer::Accepted { .. }),
             "valid finalized evidence was not accepted: {answer:?}"
         );
-        Ok(json!({"rejected_counter_examples": cases, "valid_accepted": true}))
+        let before = before?;
+        before.ensure_delta(after_pending?, 0, 0)?;
+        let credits = if resent.is_some() { 2 } else { 1 };
+        before.ensure_delta(self.ledger(account).await?, 150 * credits, credits)?;
+        Ok(json!({
+            "rejected_counter_examples": cases,
+            "not_finalized": {
+                "tx_hash": pending.payload["evidence"]["tx_hash"],
+                "first_answer": answer_label(&first),
+                "resent_after_finality": resent,
+            },
+            "valid_accepted": true,
+        }))
     }
 
     async fn wrong_deposit_id(&self) -> Result<Value> {
@@ -926,6 +979,7 @@ impl Runner {
             accounts.refused.clone(),
             accounts.processing.clone(),
             accounts.period.clone(),
+            accounts.cap.clone(),
         ]
     }
 
@@ -1052,22 +1106,38 @@ struct RawAnswer<'a> {
     payload: &'a RawValue,
 }
 
-async fn post_until_terminal(
+/// Resends one unchanged request until it is accepted or rejected, as the service does for
+/// `409`, `processing`, and any answer outside the contract.
+async fn post_until_settled(
     client: &SettlementClient,
     request: &SettlementRequest,
 ) -> Result<SettlementAnswer> {
     for _ in 0..50 {
-        match client.post(request).await? {
-            SettlementAnswer::Conflict409 | SettlementAnswer::Processing { .. } => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            answer => return Ok(answer),
+        let answer = client.post(request).await?;
+        if matches!(
+            answer,
+            SettlementAnswer::Accepted { .. } | SettlementAnswer::Rejected { .. }
+        ) {
+            return Ok(answer);
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     bail!(
         "{} never reached a terminal answer",
         request.idempotency_key
     )
+}
+
+/// A short, payload-free description of an answer for report evidence.
+fn answer_label(answer: &SettlementAnswer) -> String {
+    match answer {
+        SettlementAnswer::Accepted { .. } => "accepted".to_owned(),
+        SettlementAnswer::Processing { .. } => "processing".to_owned(),
+        SettlementAnswer::Rejected { reason, .. } => format!("rejected: {reason}"),
+        SettlementAnswer::Conflict409 => "http 409".to_owned(),
+        SettlementAnswer::PayloadMismatch422 => "http 422".to_owned(),
+        SettlementAnswer::Unknown { status, .. } => format!("http {status}"),
+    }
 }
 
 fn clients(config: &SuiteConfig) -> Result<(SettlementClient, reqwest::Client)> {

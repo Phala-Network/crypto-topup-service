@@ -409,11 +409,17 @@ impl ChainFixture {
             .context("fixture transfer emitted no Transfer log")?;
         let log_index = parse_quantity(log_index)?;
         if finalize {
-            self.rpc
-                .call("anvil_mine", json!([format!("{FINALITY_BLOCKS:#x}")]))
-                .await
-                .context("mine finality blocks; the chain must support anvil_mine")?;
+            self.finalize().await?;
         }
         Ok(MintedLog { tx_hash, log_index })
+    }
+
+    /// Mines enough blocks for every earlier block to be finalized.
+    pub async fn finalize(&self) -> Result<()> {
+        self.rpc
+            .call("anvil_mine", json!([format!("{FINALITY_BLOCKS:#x}")]))
+            .await
+            .context("mine finality blocks; the chain must support anvil_mine")?;
+        Ok(())
     }
 }

@@ -1,6 +1,7 @@
 //! Proof that the suite passes the conforming reference and that every deliberately broken
 //! variant fails exactly the cases of its obligation. Requires Foundry's `anvil` and `forge` on
-//! `PATH`; the anvil-backed tests are skipped with a message otherwise.
+//! `PATH`; the anvil-backed tests are skipped with a message otherwise, unless
+//! `CONFORMANCE_REQUIRE_TOOLS=1`, which turns every skip into a failure.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -24,12 +25,15 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
+use topup_adapters::settlement::http::{
+    SettlementAnswer, SettlementApi as _, SettlementClient, SettlementRequest,
+};
 use topup_conformance::DEV_SETTLEMENT_SEED;
 use topup_conformance::chain::{ChainFixture, Manifest, PrepareOptions};
 use topup_conformance::reference::{BrokenVariant, ReferenceConfig, ReferenceState, router};
 use topup_conformance::report::{Report, TestStatus};
 use topup_conformance::signer_handle;
-use topup_conformance::suite::{Accounts, Caps, Restart, SuiteConfig};
+use topup_conformance::suite::{Accounts, Caps, Evidence, Restart, SuiteConfig, key_from_evidence};
 
 const CAPS: Caps = Caps {
     per_deposit: 1_000,
@@ -48,7 +52,7 @@ struct Anvil {
 impl Anvil {
     fn start() -> Result<Option<Self>> {
         if !command_available("anvil") || !command_available("forge") {
-            eprintln!("skipping anvil-backed conformance test: anvil or forge is not on PATH");
+            skip("anvil or forge is not on PATH")?;
             return Ok(None);
         }
         let port = free_port()?;
@@ -96,6 +100,15 @@ impl Drop for Anvil {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Skips with a message, or fails when `CONFORMANCE_REQUIRE_TOOLS=1`.
+fn skip(reason: &str) -> Result<()> {
+    if std::env::var("CONFORMANCE_REQUIRE_TOOLS").is_ok_and(|value| value == "1") {
+        bail!("CONFORMANCE_REQUIRE_TOOLS=1 but {reason}");
+    }
+    eprintln!("skipping conformance test: {reason}");
+    Ok(())
 }
 
 fn command_available(command: &str) -> bool {
@@ -268,6 +281,20 @@ async fn conforming_reference_passes_every_case() -> Result<()> {
         get_original.evidence["payload_semantically_equal"],
         json!(true)
     );
+    let chain_evidence = report
+        .tests
+        .iter()
+        .find(|test| test.id == "chain_evidence")
+        .context("chain_evidence case")?;
+    assert_eq!(
+        chain_evidence.evidence["not_finalized"]["first_answer"],
+        json!("http 503"),
+        "an unfinalized log is transient: no stored rejection"
+    );
+    assert_eq!(
+        chain_evidence.evidence["not_finalized"]["resent_after_finality"],
+        json!("accepted")
+    );
     Ok(())
 }
 
@@ -335,6 +362,7 @@ async fn missing_ledger_hook_and_restart_are_incomplete_never_pass() -> Result<(
         [
             "accepted",
             "business_refusal",
+            "chain_evidence",
             "concurrency",
             "per_period_cap",
             "processing",
@@ -357,8 +385,7 @@ async fn missing_ledger_hook_and_restart_are_incomplete_never_pass() -> Result<(
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_reference_passes_across_a_real_reconnect() -> Result<()> {
     let Ok(admin_url) = std::env::var("MIGRATE_DATABASE_URL") else {
-        eprintln!("skipping postgres conformance test: MIGRATE_DATABASE_URL is not set");
-        return Ok(());
+        return skip("MIGRATE_DATABASE_URL is not set");
     };
     let Some(anvil) = Anvil::start()? else {
         return Ok(());
@@ -404,11 +431,9 @@ async fn postgres_reference_passes_across_a_real_reconnect() -> Result<()> {
     Ok(())
 }
 
-/// The reference authenticates with the service's shared verifier, so any label, parameter
-/// order, and the optional `alg` parameter are accepted.
-#[tokio::test]
-async fn reference_accepts_structured_field_signature_variants() -> Result<()> {
-    let manifest = Manifest {
+/// A manifest whose RPC URL refuses connections.
+fn unreachable_chain_manifest() -> Manifest {
+    Manifest {
         version: 1,
         chain_id: 31_337,
         rpc_url: "http://127.0.0.1:9".to_owned(),
@@ -421,7 +446,65 @@ async fn reference_accepts_structured_field_signature_variants() -> Result<()> {
         asset_contract: alloy_primitives::Address::repeat_byte(3),
         unapproved_asset_contract: alloy_primitives::Address::repeat_byte(4),
         funder: alloy_primitives::Address::repeat_byte(5),
+    }
+}
+
+/// A chain read that fails transiently must answer `503` and store nothing, so the service's
+/// unchanged resend can still be credited once the product's RPC recovers.
+#[tokio::test]
+async fn transient_chain_read_failure_answers_503_without_a_record() -> Result<()> {
+    let manifest = unreachable_chain_manifest();
+    let account = "conformance-accepted";
+    let evidence = Evidence {
+        chain_id: manifest.chain_id,
+        asset_contract: format!("{:#x}", manifest.asset_contract),
+        route: manifest.route.clone(),
+        route_version: manifest.route_version,
+        tx_hash: format!("{:#x}", alloy_primitives::B256::repeat_byte(9)),
+        log_index: 0,
+        to: format!("{:#x}", manifest.forwarder(account)),
+        amount_atomic: "1000000".to_owned(),
+        price_scaled: "100000000".to_owned(),
+        price_scale: 8,
+        valuation_at: chrono::Utc::now().to_rfc3339(),
+        lock_ref: None,
     };
+    let key = key_from_evidence(&evidence)?;
+    let request = SettlementRequest {
+        idempotency_key: key.clone(),
+        payload: json!({
+            "version": 1,
+            "idempotency_key": key,
+            "account_id": account,
+            "unit": "USD",
+            "amount_minor": "100",
+            "source": "crypto_deposit",
+            "evidence": evidence,
+        }),
+    };
+    let state = ReferenceState::new(config(manifest, BrokenVariant::None))?;
+    let server = Server::start(state, router, memory_restart()).await?;
+    let client = SettlementClient::new(
+        &server.url(),
+        signer_handle(DEV_SETTLEMENT_SEED)?,
+        Duration::from_secs(10),
+    )?;
+    let answer = client.post(&request).await;
+    let stored = client.get_by_key(&request.idempotency_key).await;
+    server.stop().await;
+    assert!(
+        matches!(answer?, SettlementAnswer::Unknown { status: 503, .. }),
+        "a transient chain-read failure must answer 503"
+    );
+    assert_eq!(stored?, None, "a transient failure must not store a record");
+    Ok(())
+}
+
+/// The reference authenticates with the service's shared verifier, so any label, parameter
+/// order, and the optional `alg` parameter are accepted.
+#[tokio::test]
+async fn reference_accepts_structured_field_signature_variants() -> Result<()> {
+    let manifest = unreachable_chain_manifest();
     let state = ReferenceState::new(config(manifest, BrokenVariant::None))?;
     let server = Server::start(state, router, memory_restart()).await?;
     let client = reqwest::Client::new();
