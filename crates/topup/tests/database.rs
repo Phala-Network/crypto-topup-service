@@ -380,6 +380,58 @@ async fn restore_check_reconciles_every_settlement_and_adopts_product_pricing() 
 }
 
 #[tokio::test]
+async fn rate_lock_credit_migration_upgrades_preexisting_rows() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            sqlx::query("ALTER TABLE rate_locks DROP COLUMN credit_minor")
+                .execute(&context.owner_pool)
+                .await?;
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20260922000008")
+                .execute(&context.owner_pool)
+                .await?;
+
+            let seed = seed_account(&context.app_pool, 61).await?;
+            let deposit_id = insert_numbered_deposit(&context.app_pool, &seed, 61).await?;
+            let lock_address = insert_lock_address(&context.app_pool, seed.account_id, 61).await?;
+            sqlx::query(
+                "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes', $2)",
+            )
+            .bind(lock_address)
+            .bind(deposit_id)
+            .execute(&context.app_pool)
+            .await?;
+
+            db::migrate(&context.owner_pool).await?;
+            db::migrate(&context.owner_pool).await?;
+            let (data_type, precision, nullable): (String, Option<i32>, String) =
+                sqlx::query_as(
+                    r#"
+                    SELECT data_type, numeric_precision, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rate_locks'
+                      AND column_name = 'credit_minor'
+                    "#,
+                )
+                .fetch_one(&context.owner_pool)
+                .await?;
+            ensure!(data_type == "numeric");
+            ensure!(precision == Some(78));
+            ensure!(nullable == "NO");
+            let credit_minor: String = sqlx::query_scalar(
+                "SELECT credit_minor::text FROM rate_locks WHERE address_id = $1",
+            )
+            .bind(lock_address)
+            .fetch_one(&context.owner_pool)
+            .await?;
+            ensure!(credit_minor == "0");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn restore_check_fails_on_product_protocol_and_transport_errors() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
@@ -424,6 +476,41 @@ async fn restore_check_fails_on_product_protocol_and_transport_errors() -> Resul
                     .failures
                     .iter()
                     .any(|failure| failure.contains("product lookup failed"))
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn rate_lock_credit_migration_rejects_preexisting_open_locks() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            sqlx::query("ALTER TABLE rate_locks DROP COLUMN credit_minor")
+                .execute(&context.owner_pool)
+                .await?;
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20260922000008")
+                .execute(&context.owner_pool)
+                .await?;
+
+            let seed = seed_account(&context.app_pool, 62).await?;
+            let lock_address = insert_lock_address(&context.app_pool, seed.account_id, 62).await?;
+            sqlx::query(
+                "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes')",
+            )
+            .bind(lock_address)
+            .execute(&context.app_pool)
+            .await?;
+
+            let error = db::migrate(&context.owner_pool)
+                .await
+                .expect_err("open pre-upgrade lock must block migration");
+            ensure!(
+                error.to_string().contains(
+                    "migration 20260922000008 requires every pre-existing rate lock to be consumed or removed"
+                ),
+                "unexpected migration error: {error}"
             );
             Ok(())
         })
@@ -747,8 +834,11 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
                     attempt: 3,
                     next_attempt_at: Utc::now() - Duration::seconds(1),
                 },
-                &json!({"wait": "paused"}),
-                &[],
+                db::TransitionWrites {
+                    evidence: &json!({"wait": "paused"}),
+                    effects: &db::TransitionEffects::default(),
+                    outbox_events: &[],
+                },
             )
             .await?;
             ensure!(result == ApplyTransitionResult::Applied);
@@ -777,8 +867,11 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
                     attempt: 0,
                     next_attempt_at: Utc::now(),
                 },
-                &json!({"advance": true}),
-                &[],
+                db::TransitionWrites {
+                    evidence: &json!({"advance": true}),
+                    effects: &db::TransitionEffects::default(),
+                    outbox_events: &[],
+                },
             )
             .await?;
             transaction.commit().await?;
@@ -819,8 +912,11 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     DepositState::Detected,
                     Uuid::new_v4(),
                     update,
-                    &json!({}),
-                    &[],
+                    db::TransitionWrites {
+                        evidence: &json!({}),
+                        effects: &db::TransitionEffects::default(),
+                        outbox_events: &[],
+                    },
                 )
                 .await?
                     == ApplyTransitionResult::Stale
@@ -850,8 +946,11 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     DepositState::Detected,
                     claimed.lease_token.context("claim must have a token")?,
                     update,
-                    &json!({"atomic": true}),
-                    &events,
+                    db::TransitionWrites {
+                        evidence: &json!({"atomic": true}),
+                        effects: &db::TransitionEffects::default(),
+                        outbox_events: &events,
+                    },
                 )
                 .await
                 .is_err()
@@ -1205,7 +1304,7 @@ async fn insert_rate_lock(
     consumed_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes', $2)",
+        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, 250, now() + interval '15 minutes', $2)",
     )
     .bind(address_id)
     .bind(consumed_by)

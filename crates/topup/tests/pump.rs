@@ -1,5 +1,6 @@
 //! PostgreSQL integration tests for concurrent deposit pumps.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::future::Future;
 use std::pin::Pin;
@@ -13,20 +14,24 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
-use tokio::sync::Semaphore;
+use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
 use topup::db::{
     self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
-    SettlementIntent,
+    SettlementIntent, StoredValuation, TransitionEffects,
 };
 use topup::pump::{
-    AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, PumpMetrics, RunOnceResult, Step,
-    StepResult, StepSet,
+    AgeAlertConfig, AgeAlerter, JitterSource, NoopStepSet, Pump, PumpConfig, PumpMetrics,
+    RunOnceResult, Step, StepResult, StepSet,
 };
+use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
+use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
+use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
-use topup_core::money::AtomicAmount;
+use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
+use topup_core::valuation::{SourceId, UnixSeconds};
 use url::Url;
 use uuid::Uuid;
 
@@ -361,6 +366,18 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     payload: json!({"deposit_id": id}),
                     next_attempt_at: Utc::now(),
                 }],
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 12_345_678,
+                        price_source: "spot".to_owned(),
+                        credit_minor: MinorAmount::new(1_234),
+                        quote: json!({"primary": {"source": "test"}}),
+                    }),
+                    settlement_adoption: None,
+                    lock_consumption: None,
+                },
             };
             let pump = test_pump(
                 &context.app_pool,
@@ -383,6 +400,204 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 .await?
                 .try_get(0)?;
             ensure!(event_count == 1);
+            let stored = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("deposit")?;
+            ensure!(stored.state == DepositState::Confirmed);
+            ensure!(stored.price_scaled == Some(12_345_678));
+            ensure!(stored.price_source.as_deref() == Some("spot"));
+            ensure!(stored.credit_minor == Some(MinorAmount::new(1_234)));
+            ensure!(stored.quote == Some(json!({"primary": {"source": "test"}})));
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 14).await?;
+            sqlx::query("UPDATE addresses SET kind = 'lock', lock_ref = 'race-lock' WHERE id = $1")
+                .bind(seed.address_id)
+                .execute(&context.app_pool)
+                .await?;
+            let first_id = insert_deposit(&context.app_pool, seed, 14).await?;
+            let second_id = insert_deposit(&context.app_pool, seed, 15).await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
+                        now() + interval '15 minutes')
+                "#,
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let first = db::get_deposit(&context.app_pool, first_id)
+                .await?
+                .context("first deposit")?;
+            let second = db::get_deposit(&context.app_pool, second_id)
+                .await?
+                .context("second deposit")?;
+            let logs = vec![
+                transfer_log(&first, evm_address(14)),
+                transfer_log(&second, evm_address(14)),
+            ];
+            let pump = test_pump(
+                &context.app_pool,
+                confirm_steps(
+                    &context.app_pool,
+                    logs,
+                    Arc::new(ProductAnswers::default()),
+                    Some(Arc::new(Barrier::new(4))),
+                ),
+                PumpConfig::default(),
+                0,
+            )?;
+            let (first, second) = tokio::join!(pump.run_once(), pump.run_once());
+            let results = [first?, second?];
+            ensure!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, RunOnceResult::Applied { .. }))
+                    .count()
+                    == 1
+            );
+            ensure!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, RunOnceResult::Contended { .. }))
+                    .count()
+                    == 1
+            );
+            let consumed_by: Uuid =
+                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(consumed_by == first_id || consumed_by == second_id);
+            let confirmed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM deposits WHERE id IN ($1, $2) AND state = 'confirmed'",
+            )
+            .bind(first_id)
+            .bind(second_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(confirmed == 1);
+            let locked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM deposits WHERE id IN ($1, $2) AND price_source = 'lock' AND credit_minor = 777",
+            )
+            .bind(first_id)
+            .bind(second_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(locked == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restored_lock_answer_consumes_lock_before_a_second_payment() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 16).await?;
+            sqlx::query(
+                "UPDATE addresses SET kind = 'lock', lock_ref = 'restore-lock' WHERE id = $1",
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let restored_id = insert_deposit(&context.app_pool, seed, 16).await?;
+            let second_id = insert_deposit(&context.app_pool, seed, 17).await?;
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
+            )
+            .bind(second_id)
+            .execute(&context.app_pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
+                        now() + interval '15 minutes')
+                "#,
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let second = db::get_deposit(&context.app_pool, second_id)
+                .await?
+                .context("second deposit")?;
+            let product_answers = ProductAnswers(BTreeMap::from([(
+                format!("deposit:{restored_id}"),
+                ProductAnswer {
+                    accepted: true,
+                    destination_tx_id: Some("credit-restored".to_owned()),
+                    payload: json!({
+                        "amount_minor": "777",
+                        "evidence": {
+                            "price_scaled": "9000000",
+                            "valuation_at": "2026-09-22T00:00:00Z",
+                            "lock_ref": "restore-lock"
+                        }
+                    }),
+                },
+            )]));
+            let restore_pump = test_pump(
+                &context.app_pool,
+                confirm_steps(
+                    &context.app_pool,
+                    vec![transfer_log(&second, evm_address(16))],
+                    Arc::new(product_answers),
+                    None,
+                ),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                restore_pump.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: restored_id
+                    }
+            );
+            let consumed_by: Uuid =
+                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(consumed_by == restored_id);
+
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
+            )
+            .bind(restored_id)
+            .execute(&context.app_pool)
+            .await?;
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(second_id)
+            .execute(&context.app_pool)
+            .await?;
+            ensure!(
+                restore_pump.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: second_id
+                    }
+            );
+            let second = db::get_deposit(&context.app_pool, second_id)
+                .await?
+                .context("confirmed second payment")?;
+            ensure!(second.price_source.as_deref() == Some("spot"));
+            ensure!(second.credit_minor == Some(MinorAmount::new(100)));
             Ok(())
         })
     })
@@ -712,6 +927,119 @@ fn test_pump(pool: &PgPool, steps: StepSet, config: PumpConfig, jitter: u64) -> 
         Arc::new(FixedJitter(jitter)),
     )
     .map_err(Into::into)
+}
+
+#[derive(Clone)]
+struct ConfirmChain {
+    logs: Arc<Vec<TransferLog>>,
+    barrier: Option<Arc<Barrier>>,
+}
+
+impl ChainReader for ConfirmChain {
+    async fn finalized_head(&self) -> Result<u64, ChainError> {
+        if let Some(barrier) = &self.barrier {
+            barrier.wait().await;
+        }
+        Ok(u64::MAX)
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        _addresses: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        panic!("confirm must locate transfers by receipt identity")
+    }
+
+    async fn transfer_log_by_identity(
+        &self,
+        tx_hash: B256,
+        log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        Ok(self
+            .logs
+            .iter()
+            .find(|log| log.tx_hash == tx_hash && log.log_index == log_index)
+            .cloned())
+    }
+}
+
+struct FixedPrice(Observation);
+
+#[async_trait]
+impl PriceSource for FixedPrice {
+    async fn observe(&self) -> Result<Observation, PriceError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Default)]
+struct ProductAnswers(BTreeMap<String, ProductAnswer>);
+
+#[async_trait]
+impl ProductLookup for ProductAnswers {
+    async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
+        Ok(self.0.get(key).cloned())
+    }
+}
+
+fn confirm_steps(
+    pool: &PgPool,
+    logs: Vec<TransferLog>,
+    product_lookup: Arc<dyn ProductLookup>,
+    barrier: Option<Arc<Barrier>>,
+) -> StepSet {
+    let chain = ConfirmChain {
+        logs: Arc::new(logs),
+        barrier,
+    };
+    let observed_at = UnixSeconds::new(
+        u64::try_from(Utc::now().timestamp()).expect("current timestamp must be non-negative"),
+    );
+    let price = |source: &str, value| {
+        Arc::new(FixedPrice(Observation {
+            source: SourceId::new(source),
+            price: ScaledPrice::new(value, PRICE_SCALE).expect("test price"),
+            observed_at,
+        })) as Arc<dyn PriceSource>
+    };
+    let confirm = ConfirmStep::single(
+        pool.clone(),
+        confirmation_route(),
+        chain.clone(),
+        chain,
+        price("primary", 10_000_000),
+        Some(price("check", 10_000_000)),
+        Some(price("fx", 100_000_000)),
+        product_lookup,
+    );
+    NoopStepSet::build().with_detected(Box::new(confirm))
+}
+
+fn confirmation_route() -> RouteFile {
+    let mut route: RouteFile =
+        serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
+            .expect("route fixture");
+    route.asset.contract = evm_address(200);
+    route.asset.decimals = 0;
+    route.destination.unit_decimals = 0;
+    route.screening.min_credit_minor = 1;
+    route
+}
+
+fn transfer_log(deposit: &db::Deposit, recipient: Address) -> TransferLog {
+    TransferLog {
+        tx_hash: deposit.tx_hash,
+        log_index: deposit.log_index,
+        block_number: deposit.block_number,
+        block_hash: deposit.block_hash,
+        block_time: deposit.block_time,
+        token: deposit.asset_contract,
+        from: deposit.from_address,
+        to: recipient,
+        amount: deposit.amount_atomic,
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -564,8 +564,11 @@ async fn apply_restore_transition(
             attempt: 0,
             next_attempt_at: Utc::now(),
         },
-        &result.evidence,
-        &result.events,
+        db::TransitionWrites {
+            evidence: &result.evidence,
+            effects: &result.effects,
+            outbox_events: &result.events,
+        },
     )
     .await
     .map_err(|_| "failed to persist restored deposit transition".to_owned())?;

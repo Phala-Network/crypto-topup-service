@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
 use crate::pump::{Step, StepResult};
+use crate::rpc_provider::configured_provider_url;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RouteKey {
@@ -315,31 +316,6 @@ fn parse_pause_scope_sources(
     })
 }
 
-fn configured_provider_url(provider: &str) -> Result<String, String> {
-    if provider.contains("://") {
-        return Ok(provider.to_owned());
-    }
-    let environment = provider_environment_name(provider);
-    std::env::var(&environment)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or(environment)
-}
-
-fn provider_environment_name(provider_id: &str) -> String {
-    let normalized = provider_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("TOPUP_RPC_{normalized}_URL")
-}
-
 #[async_trait]
 impl Step for ScreenStep {
     async fn run(&self, deposit: &Deposit) -> StepResult {
@@ -449,18 +425,6 @@ mod tests {
 
     fn amount(value: u64) -> AtomicAmount {
         AtomicAmount::new(U256::from(value))
-    }
-
-    #[test]
-    fn provider_ids_use_the_scanner_environment_convention() {
-        assert_eq!(
-            provider_environment_name("quick-node.eu"),
-            "TOPUP_RPC_QUICK_NODE_EU_URL"
-        );
-        assert_eq!(
-            configured_provider_url("http://127.0.0.1:8545"),
-            Ok("http://127.0.0.1:8545".to_owned())
-        );
     }
 
     fn deposit(amount_atomic: AtomicAmount) -> Deposit {

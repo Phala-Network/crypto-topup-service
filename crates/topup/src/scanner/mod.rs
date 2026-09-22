@@ -22,6 +22,7 @@ use topup_core::route::{ChainConfig, RouteFile};
 use uuid::Uuid;
 
 use crate::db::{self, NewDeposit, ScanAddress};
+use crate::rpc_provider::configured_provider_url;
 
 /// Maximum inclusive block count scanned in one window.
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
@@ -353,8 +354,7 @@ pub async fn run(
             .rpc_providers
             .first()
             .ok_or_else(|| ScannerError::Configuration("chain has no provider A".to_owned()))?;
-        let environment = provider_environment_name(provider_id);
-        let rpc_url = std::env::var(&environment).map_err(|_| {
+        let rpc_url = configured_provider_url(provider_id).map_err(|environment| {
             ScannerError::Configuration(format!("{environment} is required for provider A"))
         })?;
         let reader = EvmChain::new(&rpc_url)?;
@@ -521,20 +521,6 @@ fn poll_interval_from_env() -> Result<Duration, ScannerError> {
         ));
     }
     Ok(Duration::from_secs(seconds))
-}
-
-fn provider_environment_name(provider_id: &str) -> String {
-    let normalized = provider_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 fn address_index(addresses: &[ScanAddress]) -> BTreeMap<Address, ScanAddress> {

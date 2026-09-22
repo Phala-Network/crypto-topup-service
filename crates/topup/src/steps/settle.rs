@@ -77,11 +77,12 @@ impl SettleStep {
                     .map_err(SettleStepError::Client)?,
                 ),
             };
+        let lock_ref = settlement_lock_ref(deposit, address.lock_ref.as_deref());
         let payload = SettlementPayload::from_deposit(
             deposit,
             &account.external_id,
             address.address,
-            address.lock_ref.clone(),
+            lock_ref.clone(),
         )?;
         let payload = serde_json::to_value(payload).map_err(|_| SettleStepError::Encode)?;
         let key = format!("deposit:{}", deposit.id);
@@ -105,7 +106,7 @@ impl SettleStep {
             deposit,
             &account.external_id,
             address.address,
-            address.lock_ref,
+            lock_ref,
         )?)
         .map_err(|_| SettleStepError::Encode)?;
         if settlement.status == SettlementStatus::Intent && settlement.payload != expected_payload {
@@ -249,6 +250,7 @@ impl SettleStep {
                             "valuation_at": payload.evidence.valuation_at,
                         }),
                     )],
+                    effects: db::TransitionEffects::default(),
                 })
             }
             SettlementAnswer::Processing { payload } => {
@@ -304,6 +306,7 @@ impl SettleStep {
                             "product_reason": receipt["reason"],
                         }),
                     )],
+                    effects: db::TransitionEffects::default(),
                 })
             }
             SettlementAnswer::PayloadMismatch422 => {
@@ -566,6 +569,12 @@ fn event(event_type: &str, payload: Value) -> OutboxEvent {
         payload,
         next_attempt_at: Utc::now(),
     }
+}
+
+fn settlement_lock_ref(deposit: &db::Deposit, lock_ref: Option<&str>) -> Option<String> {
+    (deposit.price_source.as_deref() == Some("lock"))
+        .then(|| lock_ref.map(str::to_owned))
+        .flatten()
 }
 
 fn invariant_result(error: &str) -> StepResult {

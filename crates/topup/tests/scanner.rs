@@ -5,25 +5,42 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use chrono::DateTime;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
+use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
 use topup::scanner::{load_route_files, scan_once};
+use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
-use topup_core::money::AtomicAmount;
+use topup_adapters::pricing::{Observation, PriceError, PriceSource};
+use topup_core::deposit::{StepOutcome, WaitReason};
+use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
+use topup_core::route::RouteFile;
+use topup_core::valuation::{SourceId, UnixSeconds};
 use url::Url;
 use uuid::Uuid;
 
 const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const CHAIN_ID: u64 = 31_337;
+
+struct MissingProductAnswer;
+
+#[async_trait]
+impl ProductLookup for MissingProductAnswer {
+    async fn get_by_key(&self, _key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
+        Ok(None)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordedRequest {
@@ -70,6 +87,14 @@ impl ChainReader for RecordingReader {
                 to_block,
             });
         Ok(Vec::new())
+    }
+
+    async fn transfer_log_by_identity(
+        &self,
+        _tx_hash: B256,
+        _log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        Ok(None)
     }
 }
 
@@ -145,6 +170,14 @@ impl ChainReader for BackfillReader {
             logs.push(mock_transfer_log(self.token, self.recipient, 3_000, 2));
         }
         Ok(logs)
+    }
+
+    async fn transfer_log_by_identity(
+        &self,
+        _tx_hash: B256,
+        _log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        Ok(None)
     }
 }
 
@@ -379,6 +412,29 @@ async fn scanner_shards_actual_requests_and_includes_lock_addresses() -> Result<
     result.and(cleanup)
 }
 
+#[tokio::test]
+async fn scanned_transfer_confirms_with_two_providers_and_waits_for_a_lagging_provider()
+-> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let Some(primary_anvil) = Anvil::start()? else {
+        database.cleanup().await?;
+        return Ok(());
+    };
+    let Some(lagging_anvil) = Anvil::start()? else {
+        drop(primary_anvil);
+        database.cleanup().await?;
+        return Ok(());
+    };
+
+    let result = run_confirm_scenario(&database, &primary_anvil, &lagging_anvil).await;
+    drop(lagging_anvil);
+    drop(primary_anvil);
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
     run_checked("forge", &["build"], Some(&contracts))?;
@@ -607,6 +663,142 @@ async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
         "unexpected request sharding: {shapes:?}"
     );
     Ok(())
+}
+
+async fn run_confirm_scenario(
+    database: &TestDatabase,
+    primary_anvil: &Anvil,
+    lagging_anvil: &Anvil,
+) -> Result<()> {
+    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+    run_checked("forge", &["build"], Some(&contracts))?;
+    let token = deploy_token(&contracts, &primary_anvil.rpc_url)?;
+    let tracked = Address::from([0x91_u8; 20]);
+    let account_id = seed_account(&database.app_pool).await?;
+    insert_address(&database.app_pool, account_id, tracked, 1).await?;
+    transfer(&primary_anvil.rpc_url, token, tracked, 1_000)?;
+    primary_anvil.mine(2)?;
+
+    let fixture = RouteFixture::create(token)?;
+    let scanner_routes = load_route_files(std::slice::from_ref(&fixture.path))?
+        .into_iter()
+        .next()
+        .context("one scanner route")?;
+    let scanner_reader = EvmChain::new(&primary_anvil.rpc_url)?;
+    ensure!(
+        scan_once(&database.app_pool, &scanner_reader, &scanner_routes)
+            .await?
+            .inserted
+            == 1
+    );
+
+    let mut route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(&fixture.path)?)?;
+    route.asset.decimals = 0;
+    route.destination.unit_decimals = 0;
+    route.screening.min_credit_minor = 1;
+    let now = u64::try_from(chrono::Utc::now().timestamp())?;
+    let primary_price: Arc<dyn PriceSource> =
+        Arc::new(FixedPrice(observation("coinmetrics", 10_000_000, now)));
+    let check_price: Arc<dyn PriceSource> =
+        Arc::new(FixedPrice(observation("binance", 10_000_000, now)));
+    let fx_price: Arc<dyn PriceSource> =
+        Arc::new(FixedPrice(observation("kraken", 100_000_000, now)));
+    let confirm = ConfirmStep::single(
+        database.app_pool.clone(),
+        route.clone(),
+        EvmChain::new(&primary_anvil.rpc_url)?,
+        EvmChain::new(&primary_anvil.rpc_url)?,
+        Arc::clone(&primary_price),
+        Some(Arc::clone(&check_price)),
+        Some(Arc::clone(&fx_price)),
+        Arc::new(MissingProductAnswer),
+    );
+    let pump = Pump::new(
+        database.app_pool.clone(),
+        Arc::new(NoopStepSet::build().with_detected(Box::new(confirm))),
+        PumpConfig::default(),
+    )?;
+    let confirmed_id: Uuid = sqlx::query_scalar("SELECT id FROM deposits LIMIT 1")
+        .fetch_one(&database.app_pool)
+        .await?;
+    ensure!(
+        pump.run_once().await?
+            == RunOnceResult::Applied {
+                deposit_id: confirmed_id
+            }
+    );
+    let confirmed = db::get_deposit(&database.app_pool, confirmed_id)
+        .await?
+        .context("confirmed deposit")?;
+    ensure!(confirmed.state == topup_core::deposit::DepositState::Confirmed);
+    ensure!(confirmed.price_scaled == Some(10_000_000));
+    ensure!(confirmed.credit_minor == Some(topup_core::money::MinorAmount::new(100)));
+    ensure!(confirmed.quote.is_some());
+    let evidence: Value =
+        sqlx::query_scalar("SELECT evidence FROM transitions WHERE deposit_id = $1")
+            .bind(confirmed_id)
+            .fetch_one(&database.app_pool)
+            .await?;
+    ensure!(evidence["stage"] == "confirmed");
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE event_type = 'deposit.confirmed' AND payload->>'deposit_id' = $1",
+    )
+    .bind(confirmed_id.to_string())
+    .fetch_one(&database.app_pool)
+    .await?;
+    ensure!(outbox_count == 1);
+
+    transfer(&primary_anvil.rpc_url, token, tracked, 2_000)?;
+    primary_anvil.mine(2)?;
+    ensure!(
+        scan_once(&database.app_pool, &scanner_reader, &scanner_routes)
+            .await?
+            .inserted
+            == 1
+    );
+    let lagging_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM deposits WHERE state = 'detected' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&database.app_pool)
+    .await?;
+    let lagging_deposit = db::get_deposit(&database.app_pool, lagging_id)
+        .await?
+        .context("lagging deposit")?;
+    let lagging_confirm = ConfirmStep::single(
+        database.app_pool.clone(),
+        route,
+        EvmChain::new(&primary_anvil.rpc_url)?,
+        EvmChain::new(&lagging_anvil.rpc_url)?,
+        primary_price,
+        Some(check_price),
+        Some(fx_price),
+        Arc::new(MissingProductAnswer),
+    );
+    let result = lagging_confirm.run(&lagging_deposit).await;
+    ensure!(
+        result.outcome
+            == StepOutcome::Wait {
+                reason: WaitReason::Finality
+            }
+    );
+    Ok(())
+}
+
+struct FixedPrice(Observation);
+
+#[async_trait]
+impl PriceSource for FixedPrice {
+    async fn observe(&self) -> Result<Observation, PriceError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn observation(source: &str, price: u64, observed_at: u64) -> Observation {
+    Observation {
+        source: SourceId::new(source),
+        price: ScaledPrice::new(price, PRICE_SCALE).expect("integration price"),
+        observed_at: UnixSeconds::new(observed_at),
+    }
 }
 
 fn required_url(name: &str) -> Option<String> {
