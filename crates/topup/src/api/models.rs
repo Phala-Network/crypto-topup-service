@@ -1,0 +1,312 @@
+//! Typed HTTP request and response models.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
+
+/// Account registration body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct RegisterAccountRequest {
+    /// Product-owned account identifier.
+    pub external_id: String,
+}
+
+/// Product-owned account.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AccountResponse {
+    /// Service account identifier.
+    pub id: Uuid,
+    /// Product-owned account identifier.
+    pub external_id: String,
+    /// Active account-level pause scopes.
+    pub paused_scopes: Vec<String>,
+}
+
+/// Inputs needed to recompute a persistent CREATE2 address.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PersistentSaltInputs {
+    /// Stable product slug.
+    pub product_slug: String,
+    /// Product-owned account identifier.
+    pub external_id: String,
+    /// Persistent address version.
+    pub version: u64,
+}
+
+/// Persistent deposit address and deterministic derivation inputs.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositAddressResponse {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Route name governing deposits to this address.
+    pub route: String,
+    /// Canonical EVM address.
+    pub address: String,
+    /// Canonical CREATE2 salt.
+    pub salt: String,
+    /// Inputs encoded into the salt.
+    pub salt_inputs: PersistentSaltInputs,
+}
+
+/// Deposit-list filters.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+pub struct DepositListQuery {
+    /// Filter by state.
+    pub state: Option<String>,
+    /// Include deposits created at or after this time.
+    pub from: Option<DateTime<Utc>>,
+    /// Include deposits created before this time.
+    pub to: Option<DateTime<Utc>>,
+    /// Opaque cursor returned by the previous page.
+    pub cursor: Option<Uuid>,
+}
+
+/// Product-wide support lookup filters.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+pub struct DepositLookupQuery {
+    /// Canonical transaction hash.
+    pub tx_hash: Option<String>,
+    /// Canonical receiving address.
+    pub address: Option<String>,
+    /// Product lock reference.
+    pub lock_ref: Option<String>,
+}
+
+/// Product-visible deposit facts.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositResponse {
+    /// Deterministic deposit identifier.
+    pub id: Uuid,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Canonical transaction hash.
+    pub tx_hash: String,
+    /// Transfer log index.
+    pub log_index: u64,
+    /// Finalized block number.
+    pub block_number: u64,
+    /// Finalized block time.
+    pub block_time: DateTime<Utc>,
+    /// Receiving forwarder address.
+    pub address: String,
+    /// Rate-lock reference, when applicable.
+    pub lock_ref: Option<String>,
+    /// Selected route.
+    pub route: Option<String>,
+    /// Selected route version.
+    pub route_version: Option<u64>,
+    /// Canonical token contract address.
+    pub asset_contract: String,
+    /// Canonical transfer sender address.
+    pub from_address: String,
+    /// Atomic token amount encoded as a decimal string.
+    pub amount_atomic: String,
+    /// Current processing state.
+    pub state: String,
+    /// Valuation observation time.
+    pub valuation_at: Option<DateTime<Utc>>,
+    /// Eight-decimal scaled price encoded as a decimal string.
+    pub price_scaled: Option<String>,
+    /// Product credit in minor units encoded as a decimal string.
+    pub credit_minor: Option<String>,
+    /// Row creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last processing update time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A page of deposits.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositsResponse {
+    /// Deposits in descending creation order.
+    pub deposits: Vec<DepositResponse>,
+    /// Cursor for the next page, or `null` when exhausted.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// Configured route limits and currently available exposure.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct LimitsResponse {
+    /// Route name.
+    pub route: String,
+    /// Minimum atomic deposit amount.
+    pub min_deposit_atomic: String,
+    /// Maximum atomic deposit amount.
+    pub max_deposit_atomic: String,
+    /// Minimum destination credit in minor units.
+    pub min_credit_minor: u64,
+    /// Per-account open rate-lock cap in minor units.
+    pub account_open_minor: u64,
+    /// Per-product open rate-lock cap in minor units.
+    pub product_open_minor: u64,
+    /// Global open rate-lock cap in minor units.
+    pub global_open_minor: u64,
+    /// Remaining account exposure; `null` until C10 owns reservations.
+    pub remaining_account_minor: Option<u64>,
+    /// Exposure reset time; `null` until C10 defines reservation windows.
+    pub reset_at: Option<DateTime<Utc>>,
+}
+
+/// Pause or resume request.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct PauseRequest {
+    /// Pause scopes to add or remove.
+    pub scopes: Vec<String>,
+}
+
+/// Current scopes after a pause mutation.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PauseResponse {
+    /// Current pause scopes.
+    pub paused_scopes: Vec<String>,
+}
+
+/// Rate-lock creation body owned by C10.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct CreateRateLockRequest {
+    /// Desired destination amount in minor units.
+    pub amount_minor: Option<String>,
+    /// Desired token amount in atomic units.
+    pub amount_atomic: Option<String>,
+    /// Product checkout reference.
+    pub product_lock_ref: String,
+}
+
+/// Rate-lock response shape owned by C10.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RateLockResponse {
+    /// Single-use forwarder address.
+    pub address: String,
+    /// Exact token amount in atomic units.
+    pub amount_atomic: String,
+    /// Locked eight-decimal scaled price.
+    pub price_scaled: String,
+    /// Destination credit in minor units.
+    pub credit_minor: String,
+    /// Lock expiry time.
+    pub expires_at: DateTime<Utc>,
+    /// EIP-681 payment URI.
+    pub eip681_uri: String,
+    /// Inputs encoded into the rate-lock salt.
+    pub salt_inputs: RateLockSaltInputs,
+}
+
+/// Inputs needed to recompute a rate-lock CREATE2 address.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RateLockSaltInputs {
+    /// Stable product slug.
+    pub product_slug: String,
+    /// Product-owned account identifier.
+    pub external_id: String,
+    /// Product checkout reference.
+    pub lock_ref: String,
+}
+
+/// Cancellation result for an unpaid rate lock.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct CancelRateLockResponse {
+    /// Product checkout reference.
+    pub product_lock_ref: String,
+    /// Stable cancellation status.
+    pub status: String,
+}
+
+/// Refund request body owned by C12.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct RefundRequest {
+    /// Customer-controlled destination address.
+    pub to_address: String,
+    /// Atomic refund amount.
+    pub amount: String,
+}
+
+/// Administrative refund record body owned by C12.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct RecordRefundRequest {
+    /// Confirmed treasury transaction hash.
+    pub tx_hash: String,
+}
+
+/// Customer refund request accepted for finance review.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RefundResponse {
+    /// Refund request identifier.
+    pub id: Uuid,
+    /// Related deposit identifier.
+    pub deposit_id: Uuid,
+    /// Atomic token amount.
+    pub amount_atomic: String,
+    /// Customer-controlled destination address.
+    pub to_address: String,
+    /// Stable workflow status.
+    pub status: String,
+}
+
+/// Administrative deposit nudge result.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct NudgeResponse {
+    /// Nudged deposit identifier.
+    pub deposit_id: Uuid,
+    /// Newly due processing time.
+    pub next_attempt_at: DateTime<Utc>,
+}
+
+/// Administrative refund workflow result.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AdminRefundResponse {
+    /// Refund request identifier.
+    pub id: Uuid,
+    /// Stable workflow status.
+    pub status: String,
+    /// Recorded treasury transaction hash, when present.
+    pub tx_hash: Option<String>,
+}
+
+/// Daily finance report produced by C12.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DailyReportResponse {
+    /// Report snapshot time.
+    pub generated_at: DateTime<Utc>,
+    /// Treasury balances keyed by asset, encoded as decimal strings.
+    pub treasury: std::collections::BTreeMap<String, String>,
+    /// Unflushed balances keyed by asset, encoded as decimal strings.
+    pub unflushed: std::collections::BTreeMap<String, String>,
+    /// Count of open rate locks.
+    pub open_locks: u64,
+    /// Count of rejected deposits still held.
+    pub rejected_holds: u64,
+    /// Open exposure in destination minor units.
+    pub exposure_minor: String,
+    /// PnL versus recorded valuation in destination minor units.
+    pub pnl_minor: String,
+}
+
+/// Administrative route pause response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RoutePauseResponse {
+    /// Route name.
+    pub route: String,
+    /// Current route-level pause scopes.
+    pub paused_scopes: Vec<String>,
+}
+
+/// Attestation query parameters.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+pub struct AttestationQuery {
+    /// Non-empty hexadecimal nonce of at most 32 bytes.
+    pub nonce: String,
+}
+
+/// TDX evidence binding a nonce to the settlement public key.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AttestationResponse {
+    /// Settlement key identifier.
+    pub keyid: String,
+    /// Raw ed25519 settlement public key as lowercase hexadecimal.
+    pub settlement_pubkey: String,
+    /// SHA-256 report data as lowercase hexadecimal.
+    pub report_data: String,
+    /// Versioned dstack attestation bytes as lowercase hexadecimal.
+    pub quote: String,
+}

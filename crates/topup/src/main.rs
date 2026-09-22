@@ -5,8 +5,9 @@ mod route;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
 #[derive(Parser)]
@@ -18,7 +19,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum TopupCommand {
-    Run,
+    Run(RunArgs),
     Migrate,
     Route {
         #[command(subcommand)]
@@ -26,6 +27,16 @@ enum TopupCommand {
     },
     Attest,
     RestoreCheck,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Socket address on which the API listens.
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    bind: std::net::SocketAddr,
+    /// Attested route file. Repeat for each enabled route.
+    #[arg(long = "route", required = true)]
+    routes: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -52,7 +63,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        TopupCommand::Run => not_implemented("run"),
+        TopupCommand::Run(args) => return run(&args).await,
         TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
@@ -62,6 +73,101 @@ async fn main() -> ExitCode {
     }
 
     ExitCode::FAILURE
+}
+
+async fn run(args: &RunArgs) -> ExitCode {
+    let database_url = match required_env("DATABASE_URL") {
+        Ok(value) => value,
+        Err(message) => {
+            tracing::error!(%message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let admin_kid = match required_env("TOPUP_ADMIN_KID") {
+        Ok(value) => value,
+        Err(message) => {
+            tracing::error!(%message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let admin_public_key = match required_env("TOPUP_ADMIN_PUBLIC_KEY") {
+        Ok(value) => value,
+        Err(message) => {
+            tracing::error!(%message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let admin_key = match topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key) {
+        Ok(key) => key,
+        Err(message) => {
+            tracing::error!(%message, "invalid administrative verification key");
+            return ExitCode::FAILURE;
+        }
+    };
+    let routes = match load_routes(&args.routes) {
+        Ok(routes) => routes,
+        Err(message) => {
+            tracing::error!(%message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    let state = topup::api::AppState {
+        pool,
+        routes: Arc::new(routes),
+        admin_key,
+        // C11 will replace this placeholder with the dstack attestation adapter.
+        attestor: Arc::new(topup::api::UnavailableAttestor),
+    };
+    let (application, _) = topup::api::router(state);
+    let listener = match tokio::net::TcpListener::bind(args.bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(%error, bind = %args.bind, "failed to bind API listener");
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!(bind = %args.bind, "API listening");
+    if let Err(error) = axum::serve(listener, application).await {
+        tracing::error!(%error, "API server failed");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn load_routes(files: &[PathBuf]) -> Result<Vec<topup_core::route::RouteFile>, String> {
+    let mut routes = Vec::with_capacity(files.len());
+    for file in files {
+        let yaml = std::fs::read_to_string(file)
+            .map_err(|error| format!("failed to read route file `{}`: {error}", file.display()))?;
+        let parsed = route::parse_and_validate(&yaml, false)
+            .map_err(|error| format!("route file `{}` is invalid: {error}", file.display()))?;
+        if routes
+            .iter()
+            .any(|existing: &topup_core::route::RouteFile| existing.route == parsed.route)
+        {
+            return Err(format!("duplicate route `{}`", parsed.route));
+        }
+        routes.push(parsed);
+    }
+    Ok(routes)
+}
+
+fn required_env(name: &'static str) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{name} is required"))
 }
 
 async fn migrate() -> ExitCode {

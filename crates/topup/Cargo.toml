@@ -12,19 +12,28 @@ path = "src/main.rs"
 
 [dependencies]
 alloy-primitives.workspace = true
+axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 serde-saphyr.workspace = true
 topup-core = { path = "../core" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
+tower.workspace = true
 url = "=2.5.7"
 
 [lints.rust]
