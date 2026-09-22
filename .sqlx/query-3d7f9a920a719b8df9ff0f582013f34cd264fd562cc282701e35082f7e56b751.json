@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transitions SET evidence = '{}'::jsonb WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3d7f9a920a719b8df9ff0f582013f34cd264fd562cc282701e35082f7e56b751"
+}

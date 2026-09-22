@@ -1,0 +1,184 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH candidate AS (\n            SELECT id\n            FROM deposits\n            WHERE state NOT IN ('swept', 'rejected')\n              AND next_attempt_at <= now()\n              AND (lease_until IS NULL OR lease_until <= now())\n            ORDER BY next_attempt_at, created_at, id\n            FOR UPDATE SKIP LOCKED\n            LIMIT 1\n        )\n        UPDATE deposits AS deposit\n        SET lease_token = $1,\n            lease_until = now() + interval '5 minutes',\n            updated_at = now()\n        FROM candidate\n        WHERE deposit.id = candidate.id\n        RETURNING\n            deposit.id, deposit.chain_id, deposit.tx_hash, deposit.log_index,\n            deposit.block_number, deposit.block_hash, deposit.block_time, deposit.address_id,\n            deposit.account_id, deposit.route, deposit.route_version, deposit.asset_contract,\n            deposit.from_address, deposit.amount_atomic::text AS \"amount_atomic!\",\n            deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,\n            deposit.lease_token, deposit.lease_until, deposit.valuation_at,\n            deposit.price_scaled::text AS price_scaled, deposit.price_source,\n            deposit.credit_minor::text AS credit_minor, deposit.quote, deposit.flush_id,\n            deposit.created_at, deposit.updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "chain_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "tx_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "log_index",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "block_number",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "block_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "block_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "address_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "route",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "route_version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "asset_contract",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "from_address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "amount_atomic!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 17,
+        "name": "next_attempt_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "lease_token",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 19,
+        "name": "lease_until",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 20,
+        "name": "valuation_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 21,
+        "name": "price_scaled",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "price_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 23,
+        "name": "credit_minor",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 24,
+        "name": "quote",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 25,
+        "name": "flush_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 26,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 27,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      null,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      null,
+      true,
+      null,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "5f3c70beca3dcdd636dbdedf722c0a6639380f0a431a3305f771d8c2e4ddfe29"
+}

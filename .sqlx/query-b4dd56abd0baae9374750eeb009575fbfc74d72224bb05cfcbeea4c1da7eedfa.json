@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO settlements (deposit_id, product_id, key, payload, status)\n        VALUES ($1, $2, $3, $4, 'intent')\n        ON CONFLICT (deposit_id) DO UPDATE SET deposit_id = EXCLUDED.deposit_id\n        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt, sent_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "deposit_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "product_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "destination_tx_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "receipt",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "sent_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "b4dd56abd0baae9374750eeb009575fbfc74d72224bb05cfcbeea4c1da7eedfa"
+}

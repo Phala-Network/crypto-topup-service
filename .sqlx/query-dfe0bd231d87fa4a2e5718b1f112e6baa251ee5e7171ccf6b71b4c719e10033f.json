@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE accounts\n        SET product_id = $2, external_id = $3, paused_scopes = $4\n        WHERE id = $1\n        RETURNING id, product_id, external_id, paused_scopes\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "product_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "external_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "paused_scopes",
+        "type_info": "TextArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dfe0bd231d87fa4a2e5718b1f112e6baa251ee5e7171ccf6b71b4c719e10033f"
+}

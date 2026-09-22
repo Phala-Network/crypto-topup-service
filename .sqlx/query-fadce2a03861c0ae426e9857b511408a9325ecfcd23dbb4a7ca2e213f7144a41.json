@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE audit SET reason = 'changed' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fadce2a03861c0ae426e9857b511408a9325ecfcd23dbb4a7ca2e213f7144a41"
+}

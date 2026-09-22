@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO deposits (\n            id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,\n            address_id, account_id, route, route_version, asset_contract, from_address,\n            amount_atomic, state, reason, attempt, next_attempt_at, created_at, updated_at\n        )\n        SELECT $1, chain_id, tx_hash, log_index, block_number, block_hash, block_time,\n               address_id, account_id, route, route_version, asset_contract, from_address,\n               amount_atomic, state, reason, attempt, next_attempt_at, created_at, updated_at\n        FROM deposits WHERE id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e5e9165492386b7bc52b189e006fb9489c6fd53239a36b4fa197e5808b56a832"
+}
