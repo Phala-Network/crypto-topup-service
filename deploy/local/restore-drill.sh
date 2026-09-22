@@ -15,7 +15,12 @@ case "$mode" in
     *) echo "usage: $0 [controlled|crash|all]" >&2; exit 64 ;;
 esac
 
-project="topup-restore-drill-$mode-$$"
+# TOPUP_RESTORE_DRILL_ID lets a caller (the weekly workflow) find and clean up its own projects.
+drill_id=${TOPUP_RESTORE_DRILL_ID:-$$}
+case "$drill_id" in
+    ''|*[!a-z0-9]*) echo "TOPUP_RESTORE_DRILL_ID must be lowercase alphanumeric" >&2; exit 64 ;;
+esac
+project="topup-restore-drill-$mode-$drill_id"
 # Per-run image tags keep concurrent checkouts from replacing this drill's images mid-run.
 export TOPUP_LOCAL_IMAGE="crypto-topup-service:$project"
 export TOPUP_LOCAL_POSTGRES_IMAGE="crypto-topup-postgres-walg:$project"

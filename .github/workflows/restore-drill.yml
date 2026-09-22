@@ -17,7 +17,23 @@ jobs:
   drill:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
+    env:
+      TOPUP_RESTORE_DRILL_ID: gh${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run the controlled and crash restore drills
         run: make restore-drill
+      # A cancelled or timed-out job skips the drill's own trap; remove only this run's projects.
+      - name: Remove this run's drill projects, volumes, and image tags
+        if: always()
+        run: |
+          suffix="-$TOPUP_RESTORE_DRILL_ID"
+          for project in "topup-restore-drill-controlled$suffix" "topup-restore-drill-crash$suffix"; do
+            docker ps -aq --filter "label=com.docker.compose.project=$project" | xargs -r docker rm -f
+            docker volume ls -q --filter "label=com.docker.compose.project=$project" |
+              xargs -r docker volume rm
+            docker network ls -q --filter "label=com.docker.compose.project=$project" |
+              xargs -r docker network rm
+            docker images --format '{{.Repository}}:{{.Tag}}' | grep -F ":$project" |
+              xargs -r docker image rm || true
+          done
