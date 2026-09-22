@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Foundry
+/contracts/cache/
+/contracts/out/
+/contracts/broadcast/
+
+# Local environment
+.env
+.env.*
+!.env.example
