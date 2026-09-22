@@ -318,9 +318,14 @@ Product obligations, checked by the conformance suite:
 5. Verify the cited log against its own RPC: it exists at `tx_hash`/`log_index` in a
    finalized block, was emitted by the approved `asset_contract` for that route, `to` equals
    the forwarder address the product computed for that account, and `amount_atomic` matches.
+   Transient chain-read failures must not produce a stored rejection.
 6. Recompute `deposit_id = uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` from the
    evidence and require `idempotency_key == "deposit:" + deposit_id`, so one chain event can
    never be credited under a second key.
+
+The suite (`docs/conformance.md`) also requires, in the product's test environment only, a
+ledger observation hook (`GET {settlement_url}/_conformance/ledger/{account_id}`) and a restart
+during the run, so single mutation and durability are observed rather than inferred.
 
 Phala Cloud: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code =
 'crypto-top-up'`, `provider_order_id = key`, partial unique index on `(team_id,

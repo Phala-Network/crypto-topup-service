@@ -70,10 +70,14 @@ commit timestamp when producing an image:
 
 ```sh
 export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-cargo build --release --locked
+cargo build --release --locked -p topup
 docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t crypto-topup-service:dev .
 docker run --rm crypto-topup-service:dev --help
 ```
+
+Release artifacts build only the `topup` package. Building the whole workspace would unify the
+`topup-adapters/conformance` feature, which exists only for the conformance suite, into the
+runtime binary; CI fails if that feature ever reaches `topup`.
 
 The Debian 12 builder and distroless runtime images are pinned by digest and share the same libc
 baseline. Full verification that two builds produce identical image digests is owned by work

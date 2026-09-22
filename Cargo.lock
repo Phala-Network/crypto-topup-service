@@ -5323,6 +5323,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sfv",
  "sha2",
  "tokio",
  "topup-core",
@@ -5330,6 +5331,33 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "topup-conformance"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "topup-adapters",
+ "topup-core",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
