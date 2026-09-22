@@ -195,6 +195,24 @@ jobs:
             deploy/render-app-compose.sh deploy/staging.env.example | jq -e \
               '.docker_compose_file | contains("@sha256:1111111111111111111111111111111111111111111111111111111111111111")' \
               >/dev/null
+      - name: Ensure Rust toolchain (self-hosted runners may lack rustup)
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" show active-toolchain || "$HOME/.cargo/bin/rustup" toolchain install
+      - name: Install Rust
+        run: rustup toolchain install 1.98 --profile minimal
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-runbooks-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check runbook commands against the CLI and OpenAPI
+        run: make runbook-check
       - name: Build postgres-walg image
         run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
       - name: Check WAL-G runtime
