@@ -133,6 +133,11 @@ impl SanctionsSource for SanctionsOracle {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use tokio::net::TcpListener;
+    use tokio::time::sleep;
+
     use super::*;
 
     #[test]
@@ -171,5 +176,40 @@ mod tests {
         )
         .expect_err("non-HTTP URL must fail");
         assert_eq!(error, SanctionsOracleConfigError::InvalidProviderAUrl);
+    }
+
+    #[tokio::test]
+    async fn delayed_provider_responses_become_unavailable_at_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener must bind");
+        let address = listener.local_addr().expect("test listener has an address");
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::with_capacity(2);
+            for _ in 0..2 {
+                let (connection, _) = listener.accept().await.expect("provider must connect");
+                connections.push(connection);
+            }
+            sleep(Duration::from_secs(2)).await;
+        });
+        let timeout = Duration::from_millis(100);
+        let oracle = SanctionsOracle::new(
+            &format!("http://{address}"),
+            &format!("http://{address}"),
+            Address::ZERO,
+            timeout,
+        )
+        .expect("test oracle must configure");
+
+        let started = Instant::now();
+        let result = oracle.sanctions(Address::repeat_byte(1), 1).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.provider_a, SanctionsAnswer::Unavailable);
+        assert_eq!(result.provider_b, SanctionsAnswer::Unavailable);
+        assert!(elapsed >= timeout);
+        assert!(elapsed < Duration::from_secs(1));
+        server.abort();
+        let _ = server.await;
     }
 }

@@ -1,4 +1,4 @@
-//! Anvil and PostgreSQL integration coverage for the C5 screen step.
+//! PostgreSQL and Anvil integration coverage for the C5 screen step.
 
 use std::env;
 use std::future::Future;
@@ -11,18 +11,19 @@ use std::time::Duration as StdDuration;
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
-use topup::pump::{NoopStep, Pump, PumpConfig, RunOnceResult, Step, StepSet};
+use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
-use topup_adapters::risk::oracle::SanctionsOracle;
+use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
-use topup_core::screening::Bounds;
+use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use url::Url;
 use uuid::Uuid;
 
@@ -142,19 +143,33 @@ where
     result.and(cleanup)
 }
 
-#[tokio::test]
-async fn anvil_oracle_and_postgres_pump_cover_clear_reject_and_outage() -> Result<()> {
-    let Some(rpc_url) = required_env("ANVIL_RPC_URL") else {
-        return Ok(());
-    };
-    let oracle = deploy_oracle(&rpc_url)?;
-    let sanctioned = Address::repeat_byte(0x22);
-    set_sanctioned(&rpc_url, oracle, sanctioned)?;
-    let block_number = current_block(&rpc_url)?;
+struct MockSanctionsSource {
+    sanctioned: Address,
+}
 
+#[async_trait]
+impl SanctionsSource for MockSanctionsSource {
+    async fn sanctions(&self, address: Address, block_number: u64) -> SanctionsResult {
+        let answer = if address == self.sanctioned {
+            SanctionsAnswer::Sanctioned
+        } else {
+            SanctionsAnswer::Clear
+        };
+        SanctionsResult {
+            provider_a: answer,
+            provider_b: answer,
+            block_number,
+        }
+    }
+}
+
+#[tokio::test]
+async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool).await?;
+            let block_number = 123;
+            let sanctioned = Address::repeat_byte(0x22);
             let clear_id = insert_confirmed(
                 &context.app_pool,
                 seed,
@@ -165,109 +180,53 @@ async fn anvil_oracle_and_postgres_pump_cover_clear_reject_and_outage() -> Resul
             .await?;
             let sanctioned_id =
                 insert_confirmed(&context.app_pool, seed, 2, sanctioned, block_number).await?;
-            let step = screen_step(&context.app_pool, &rpc_url, oracle)?;
-
+            let step = mock_screen_step(&context.app_pool, sanctioned)?;
             let clear = db::get_deposit(&context.app_pool, clear_id)
                 .await?
                 .context("clear deposit")?;
-            let clear_result = step.run(&clear).await;
-            ensure!(clear_result.outcome == StepOutcome::Advance);
-            ensure!(clear_result.events.is_empty());
-            ensure!(clear_result.evidence["block_number"] == block_number);
-            ensure!(clear_result.evidence["provider_a"] == "clear");
-            ensure!(clear_result.evidence["provider_b"] == "clear");
 
-            let sanctioned_deposit = db::get_deposit(&context.app_pool, sanctioned_id)
-                .await?
-                .context("sanctioned deposit")?;
-            let rejected = step.run(&sanctioned_deposit).await;
+            set_route_pauses(&context.app_pool, &["settlement"]).await?;
+            let route_wait = step.run(&clear).await;
             ensure!(
-                rejected.outcome == StepOutcome::Reject(RejectReason::Sanctioned),
-                "unexpected sanctions result: {:?}",
-                rejected.outcome
-            );
-            ensure!(rejected.events.len() == 1);
-            ensure!(rejected.events[0].event_type == "deposit.rejected");
-            ensure!(rejected.events[0].payload["reason"] == "sanctioned");
-            ensure!(rejected.evidence["provider_a"] == "sanctioned");
-            ensure!(rejected.evidence["provider_b"] == "sanctioned");
-
-            db::set_account_paused_scopes(
-                &context.app_pool,
-                seed.account_id,
-                &["settlement".to_owned()],
-            )
-            .await?
-            .context("pause account")?;
-            let account_wait = step.run(&clear).await;
-            ensure!(
-                account_wait.outcome
+                route_wait.outcome
                     == StepOutcome::Wait {
                         reason: WaitReason::Paused,
                     }
             );
-            db::set_account_paused_scopes(&context.app_pool, seed.account_id, &[])
-                .await?
-                .context("resume account")?;
-            db::set_product_paused_scopes(
-                &context.app_pool,
-                seed.product_id,
-                &["settlement".to_owned()],
-            )
-            .await?
-            .context("pause product")?;
-            let product_wait = step.run(&clear).await;
+            ensure!(route_wait.evidence["pause_scopes"]["account"] == serde_json::json!([]));
+            ensure!(route_wait.evidence["pause_scopes"]["product"] == serde_json::json!([]));
             ensure!(
-                product_wait.outcome
-                    == StepOutcome::Wait {
-                        reason: WaitReason::Paused,
-                    }
+                route_wait.evidence["pause_scopes"]["route"] == serde_json::json!(["settlement"])
             );
-            db::set_product_paused_scopes(&context.app_pool, seed.product_id, &[])
-                .await?
-                .context("resume product")?;
 
-            let down_source = Arc::new(SanctionsOracle::new(
-                &rpc_url,
-                "http://127.0.0.1:1",
-                oracle,
-                StdDuration::from_millis(200),
-            )?);
-            let down_step = ScreenStep::new(
-                context.app_pool.clone(),
-                [ScreenRoute::new("down", 1, oracle, bounds(), down_source)],
-            )?;
-            let mut down_deposit = clear.clone();
-            down_deposit.route = Some("down".to_owned());
-            let unavailable = down_step.run(&down_deposit).await;
+            set_route_pauses(&context.app_pool, &[]).await?;
+            let resumed = step.run(&clear).await;
+            ensure!(resumed.outcome == StepOutcome::Advance);
+
+            set_route_pauses(&context.app_pool, &["flush"]).await?;
+            let unrelated_pause = step.run(&clear).await;
+            ensure!(unrelated_pause.outcome == StepOutcome::Advance);
             ensure!(
-                unavailable.outcome
-                    == StepOutcome::Retry {
-                        error: RetryError::SanctionsInconclusive,
-                    }
+                unrelated_pause.evidence["pause_scopes"]["route"] == serde_json::json!(["flush"])
             );
-            ensure!(unavailable.evidence["provider_a"] == "clear");
-            ensure!(unavailable.evidence["provider_b"] == "unavailable");
+            set_route_pauses(&context.app_pool, &[]).await?;
 
-            let pump_screen = screen_step(&context.app_pool, &rpc_url, oracle)?;
             let pump = Pump::new(
                 context.app_pool.clone(),
-                Arc::new(StepSet::new(
-                    Box::new(NoopStep),
-                    Box::new(pump_screen),
-                    Box::new(NoopStep),
-                    Box::new(NoopStep),
-                )),
+                Arc::new(NoopStepSet::build().with_confirmed(Box::new(step))),
                 PumpConfig::default(),
             )?;
-            for expected_id in [clear_id, sanctioned_id] {
-                ensure!(
-                    pump.run_once().await?
-                        == RunOnceResult::Applied {
-                            deposit_id: expected_id,
-                        }
-                );
+            let mut applied = Vec::new();
+            for _ in 0..2 {
+                let RunOnceResult::Applied { deposit_id } = pump.run_once().await? else {
+                    anyhow::bail!("screen pump did not apply a due deposit");
+                };
+                applied.push(deposit_id);
             }
+            applied.sort_unstable();
+            let mut expected = vec![clear_id, sanctioned_id];
+            expected.sort_unstable();
+            ensure!(applied == expected);
 
             let clear = db::get_deposit(&context.app_pool, clear_id)
                 .await?
@@ -282,9 +241,10 @@ async fn anvil_oracle_and_postgres_pump_cover_clear_reject_and_outage() -> Resul
             let clear_evidence = transition_evidence(&context.app_pool, clear_id).await?;
             ensure!(clear_evidence["provider_a"] == "clear");
             ensure!(clear_evidence["block_number"] == block_number);
+            ensure!(clear_evidence["pause_scopes"]["route"] == serde_json::json!([]));
             let rejected_evidence = transition_evidence(&context.app_pool, sanctioned_id).await?;
             ensure!(rejected_evidence["provider_a"] == "sanctioned");
-            ensure!(rejected_evidence["oracle"] == format!("{oracle:#x}"));
+            ensure!(rejected_evidence["oracle"] == format!("{:#x}", Address::repeat_byte(9)));
 
             let outbox = sqlx::query(
                 "SELECT event_type, payload FROM outbox WHERE payload->>'deposit_id' = $1",
@@ -303,16 +263,105 @@ async fn anvil_oracle_and_postgres_pump_cover_clear_reject_and_outage() -> Resul
     .await
 }
 
-fn screen_step(pool: &PgPool, rpc_url: &str, oracle: Address) -> Result<ScreenStep> {
+#[tokio::test]
+async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()> {
+    let Some(rpc_url) = required_env("ANVIL_RPC_URL") else {
+        return Ok(());
+    };
+    let oracle = deploy_oracle(&rpc_url)?;
+    let account = Address::repeat_byte(0x22);
+    let recorded_block = current_block(&rpc_url)?;
     let source = Arc::new(SanctionsOracle::new(
-        rpc_url,
-        rpc_url,
+        &rpc_url,
+        &rpc_url,
         oracle,
         StdDuration::from_secs(2),
     )?);
+    let before = source.sanctions(account, recorded_block).await;
+    ensure!(before.provider_a == SanctionsAnswer::Clear);
+    ensure!(before.provider_b == SanctionsAnswer::Clear);
+
+    set_sanctioned(&rpc_url, oracle, account, true)?;
+    let latest_block = current_block(&rpc_url)?;
+    ensure!(latest_block > recorded_block);
+    let historical = source.sanctions(account, recorded_block).await;
+    let latest = source.sanctions(account, latest_block).await;
+    ensure!(historical.provider_a == SanctionsAnswer::Clear);
+    ensure!(historical.provider_b == SanctionsAnswer::Clear);
+    ensure!(latest.provider_a == SanctionsAnswer::Sanctioned);
+    ensure!(latest.provider_b == SanctionsAnswer::Sanctioned);
+
+    with_database(|context| {
+        let rpc_url = rpc_url.clone();
+        let source = Arc::<SanctionsOracle>::clone(&source);
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool).await?;
+            let old_id =
+                insert_confirmed(&context.app_pool, seed, 3, account, recorded_block).await?;
+            let latest_id =
+                insert_confirmed(&context.app_pool, seed, 4, account, latest_block).await?;
+            let step = ScreenStep::new(
+                context.app_pool.clone(),
+                [ScreenRoute::new("screen", 1, oracle, bounds(), source)],
+            )?;
+
+            let old_deposit = db::get_deposit(&context.app_pool, old_id)
+                .await?
+                .context("historical deposit")?;
+            let old_result = step.run(&old_deposit).await;
+            ensure!(old_result.outcome == StepOutcome::Advance);
+            ensure!(old_result.evidence["block_number"] == recorded_block);
+            ensure!(old_result.evidence["provider_a"] == "clear");
+
+            let latest_deposit = db::get_deposit(&context.app_pool, latest_id)
+                .await?
+                .context("latest deposit")?;
+            let rejected = step.run(&latest_deposit).await;
+            ensure!(rejected.outcome == StepOutcome::Reject(RejectReason::Sanctioned));
+            ensure!(rejected.events.len() == 1);
+            ensure!(rejected.events[0].event_type == "deposit.rejected");
+            ensure!(rejected.events[0].payload["reason"] == "sanctioned");
+            ensure!(rejected.evidence["provider_a"] == "sanctioned");
+            ensure!(rejected.evidence["provider_b"] == "sanctioned");
+
+            let down_source = Arc::new(SanctionsOracle::new(
+                &rpc_url,
+                "http://127.0.0.1:1",
+                oracle,
+                StdDuration::from_millis(200),
+            )?);
+            let down_step = ScreenStep::new(
+                context.app_pool.clone(),
+                [ScreenRoute::new("down", 1, oracle, bounds(), down_source)],
+            )?;
+            let mut down_deposit = latest_deposit;
+            down_deposit.route = Some("down".to_owned());
+            down_deposit.from_address = Address::repeat_byte(0x11);
+            let unavailable = down_step.run(&down_deposit).await;
+            ensure!(
+                unavailable.outcome
+                    == StepOutcome::Retry {
+                        error: RetryError::SanctionsInconclusive,
+                    }
+            );
+            ensure!(unavailable.evidence["provider_a"] == "clear");
+            ensure!(unavailable.evidence["provider_b"] == "unavailable");
+            Ok(())
+        })
+    })
+    .await
+}
+
+fn mock_screen_step(pool: &PgPool, sanctioned: Address) -> Result<ScreenStep> {
     Ok(ScreenStep::new(
         pool.clone(),
-        [ScreenRoute::new("screen", 1, oracle, bounds(), source)],
+        [ScreenRoute::new(
+            "screen",
+            1,
+            Address::repeat_byte(9),
+            bounds(),
+            Arc::new(MockSanctionsSource { sanctioned }),
+        )],
     )?)
 }
 
@@ -397,6 +446,21 @@ async fn insert_confirmed(
     Ok(id)
 }
 
+async fn set_route_pauses(pool: &PgPool, scopes: &[&str]) -> Result<()> {
+    let scopes = scopes.iter().map(ToString::to_string).collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO route_pauses (route, paused_scopes)
+        VALUES ('screen', $1)
+        ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes
+        "#,
+    )
+    .bind(scopes)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn transition_evidence(pool: &PgPool, deposit_id: Uuid) -> Result<Value> {
     Ok(
         sqlx::query("SELECT evidence FROM transitions WHERE deposit_id = $1")
@@ -439,7 +503,12 @@ fn deploy_oracle(rpc_url: &str) -> Result<Address> {
     Address::from_str(deployed).context("forge returned an invalid deployment address")
 }
 
-fn set_sanctioned(rpc_url: &str, oracle: Address, account: Address) -> Result<()> {
+fn set_sanctioned(
+    rpc_url: &str,
+    oracle: Address,
+    account: Address,
+    sanctioned: bool,
+) -> Result<()> {
     let output = Command::new("cast")
         .args([
             "send",
@@ -450,7 +519,7 @@ fn set_sanctioned(rpc_url: &str, oracle: Address, account: Address) -> Result<()
             &format!("{oracle:#x}"),
             "setSanctioned(address,bool)",
             &format!("{account:#x}"),
-            "true",
+            if sanctioned { "true" } else { "false" },
         ])
         .output()?;
     ensure!(
