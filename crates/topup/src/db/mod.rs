@@ -18,14 +18,19 @@ pub use accounts::{
 };
 pub use addresses::{
     Address, AddressKind, NewAddress, find_active_persistent, find_address_by_chain, get_address,
-    insert_address,
+    insert_address, list_chain_addresses,
 };
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
     TransitionUpdate, apply_transition, claim_deposit, get_deposit, insert_deposit,
 };
-pub use flushes::{FlushedEvent, NewFlush, insert_flush, insert_flushed};
+pub use flushes::{
+    Flush, FlushStatus, FlushedEvent, NewFlush, confirm_flush, get_flush, has_open_flush,
+    has_open_flush_locked, has_sent_flush, insert_flush, insert_flushed, insert_planned_flush,
+    list_flushes, lock_flush_plan, lock_operator, mark_flush_reverted, mark_flush_reverted_locked,
+    mark_flush_sent, next_flush_nonce, next_planned_flush, store_flush_replacement,
+};
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
 pub use products::{
     NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,
