@@ -1,0 +1,2050 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "utoipa-axum",
+    "description": "Utoipa's axum bindings for seamless integration for the two",
+    "contact": {
+      "name": "Juha Kukkonen",
+      "email": "juha7kukkonen@gmail.com"
+    },
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.2.0"
+  },
+  "paths": {
+    "/v1/admin/deposits/{id}/nudge": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "nudge_deposit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NudgeResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/refunds/{id}/approve": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "approve_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminRefundResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/refunds/{id}/record": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "record_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordRefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminRefundResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/report/daily": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "daily_report",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyReportResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/routes/{r}/pause": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "pause_route",
+        "parameters": [
+          {
+            "name": "r",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutePauseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/routes/{r}/resume": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "resume_route",
+        "parameters": [
+          {
+            "name": "r",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutePauseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/attestation": {
+      "get": {
+        "tags": [
+          "attestation"
+        ],
+        "operationId": "get_attestation",
+        "parameters": [
+          {
+            "name": "nonce",
+            "in": "path",
+            "description": "Non-empty hexadecimal nonce of at most 32 bytes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/products/{p}/accounts": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "operationId": "register_account",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/deposit-address": {
+      "get": {
+        "tags": [
+          "addresses"
+        ],
+        "operationId": "get_deposit_address",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "description": "Product-owned account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddressResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "addresses"
+        ],
+        "operationId": "create_deposit_address",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "description": "Product-owned account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddressResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/deposit-address/rotate": {
+      "post": {
+        "tags": [
+          "addresses"
+        ],
+        "operationId": "rotate_deposit_address",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "description": "Product-owned account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddressResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/deposits": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "operationId": "list_deposits",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "path",
+            "description": "Filter by state.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Include deposits created at or after this time.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "Include deposits created before this time.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "path",
+            "description": "Opaque cursor returned by the previous page.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/limits": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "operationId": "get_limits",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/pause": {
+      "post": {
+        "tags": [
+          "pauses"
+        ],
+        "operationId": "pause_account",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/rate-locks": {
+      "post": {
+        "tags": [
+          "rate-locks"
+        ],
+        "operationId": "create_rate_lock",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRateLockRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLockResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}": {
+      "get": {
+        "tags": [
+          "rate-locks"
+        ],
+        "operationId": "get_rate_lock",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLockResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "rate-locks"
+        ],
+        "operationId": "cancel_rate_lock",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelRateLockResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/accounts/{ext}/resume": {
+      "post": {
+        "tags": [
+          "pauses"
+        ],
+        "operationId": "resume_account",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/deposits": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "operationId": "lookup_deposits",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tx_hash",
+            "in": "path",
+            "description": "Canonical transaction hash.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "address",
+            "in": "path",
+            "description": "Canonical receiving address.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "lock_ref",
+            "in": "path",
+            "description": "Product lock reference.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/deposits/{id}": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "operationId": "get_deposit",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/products/{p}/deposits/{id}/refund-requests": {
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "operationId": "request_refund",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountResponse": {
+        "type": "object",
+        "description": "Product-owned account.",
+        "required": [
+          "id",
+          "external_id",
+          "paused_scopes"
+        ],
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "description": "Product-owned account identifier."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Service account identifier."
+          },
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Active account-level pause scopes."
+          }
+        }
+      },
+      "AdminRefundResponse": {
+        "type": "object",
+        "description": "Administrative refund workflow result.",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refund request identifier."
+          },
+          "status": {
+            "type": "string",
+            "description": "Stable workflow status."
+          },
+          "tx_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recorded treasury transaction hash, when present."
+          }
+        }
+      },
+      "AttestationResponse": {
+        "type": "object",
+        "description": "TDX evidence binding a nonce to the settlement public key.",
+        "required": [
+          "keyid",
+          "settlement_pubkey",
+          "report_data",
+          "quote"
+        ],
+        "properties": {
+          "keyid": {
+            "type": "string",
+            "description": "Settlement key identifier."
+          },
+          "quote": {
+            "type": "string",
+            "description": "Versioned dstack attestation bytes as lowercase hexadecimal."
+          },
+          "report_data": {
+            "type": "string",
+            "description": "SHA-256 report data as lowercase hexadecimal."
+          },
+          "settlement_pubkey": {
+            "type": "string",
+            "description": "Raw ed25519 settlement public key as lowercase hexadecimal."
+          }
+        }
+      },
+      "CancelRateLockResponse": {
+        "type": "object",
+        "description": "Cancellation result for an unpaid rate lock.",
+        "required": [
+          "product_lock_ref",
+          "status"
+        ],
+        "properties": {
+          "product_lock_ref": {
+            "type": "string",
+            "description": "Product checkout reference."
+          },
+          "status": {
+            "type": "string",
+            "description": "Stable cancellation status."
+          }
+        }
+      },
+      "CreateRateLockRequest": {
+        "type": "object",
+        "description": "Rate-lock creation body owned by C10.",
+        "required": [
+          "product_lock_ref"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Desired token amount in atomic units."
+          },
+          "amount_minor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Desired destination amount in minor units."
+          },
+          "product_lock_ref": {
+            "type": "string",
+            "description": "Product checkout reference."
+          }
+        }
+      },
+      "DailyReportResponse": {
+        "type": "object",
+        "description": "Daily finance report produced by C12.",
+        "required": [
+          "generated_at",
+          "treasury",
+          "unflushed",
+          "open_locks",
+          "rejected_holds",
+          "exposure_minor",
+          "pnl_minor"
+        ],
+        "properties": {
+          "exposure_minor": {
+            "type": "string",
+            "description": "Open exposure in destination minor units."
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Report snapshot time."
+          },
+          "open_locks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Count of open rate locks.",
+            "minimum": 0
+          },
+          "pnl_minor": {
+            "type": "string",
+            "description": "PnL versus recorded valuation in destination minor units."
+          },
+          "rejected_holds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Count of rejected deposits still held.",
+            "minimum": 0
+          },
+          "treasury": {
+            "type": "object",
+            "description": "Treasury balances keyed by asset, encoded as decimal strings.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "unflushed": {
+            "type": "object",
+            "description": "Unflushed balances keyed by asset, encoded as decimal strings.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DepositAddressResponse": {
+        "type": "object",
+        "description": "Persistent deposit address and deterministic derivation inputs.",
+        "required": [
+          "chain_id",
+          "route",
+          "address",
+          "salt",
+          "salt_inputs"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Canonical EVM address."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "route": {
+            "type": "string",
+            "description": "Route name governing deposits to this address."
+          },
+          "salt": {
+            "type": "string",
+            "description": "Canonical CREATE2 salt."
+          },
+          "salt_inputs": {
+            "$ref": "#/components/schemas/PersistentSaltInputs",
+            "description": "Inputs encoded into the salt."
+          }
+        }
+      },
+      "DepositResponse": {
+        "type": "object",
+        "description": "Product-visible deposit facts.",
+        "required": [
+          "id",
+          "chain_id",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "block_time",
+          "address",
+          "asset_contract",
+          "from_address",
+          "amount_atomic",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Receiving forwarder address."
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "Atomic token amount encoded as a decimal string."
+          },
+          "asset_contract": {
+            "type": "string",
+            "description": "Canonical token contract address."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Finalized block number.",
+            "minimum": 0
+          },
+          "block_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Finalized block time."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Row creation time."
+          },
+          "credit_minor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Product credit in minor units encoded as a decimal string."
+          },
+          "from_address": {
+            "type": "string",
+            "description": "Canonical transfer sender address."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Deterministic deposit identifier."
+          },
+          "lock_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Rate-lock reference, when applicable."
+          },
+          "log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfer log index.",
+            "minimum": 0
+          },
+          "price_scaled": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Eight-decimal scaled price encoded as a decimal string."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Selected route."
+          },
+          "route_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Selected route version.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "Current processing state."
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Canonical transaction hash."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last processing update time."
+          },
+          "valuation_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Valuation observation time."
+          }
+        }
+      },
+      "DepositsResponse": {
+        "type": "object",
+        "description": "A page of deposits.",
+        "required": [
+          "deposits"
+        ],
+        "properties": {
+          "deposits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositResponse"
+            },
+            "description": "Deposits in descending creation order."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Cursor for the next page, or `null` when exhausted."
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "description": "Stable error fields safe to expose to callers.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable code."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable summary without internal details."
+          },
+          "work_package": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Work package that owns a deliberately deferred handler."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Machine-readable error envelope returned by every API failure.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail",
+            "description": "Error details."
+          }
+        }
+      },
+      "LimitsResponse": {
+        "type": "object",
+        "description": "Configured route limits and currently available exposure.",
+        "required": [
+          "route",
+          "min_deposit_atomic",
+          "max_deposit_atomic",
+          "min_credit_minor",
+          "account_open_minor",
+          "product_open_minor",
+          "global_open_minor"
+        ],
+        "properties": {
+          "account_open_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-account open rate-lock cap in minor units.",
+            "minimum": 0
+          },
+          "global_open_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Global open rate-lock cap in minor units.",
+            "minimum": 0
+          },
+          "max_deposit_atomic": {
+            "type": "string",
+            "description": "Maximum atomic deposit amount."
+          },
+          "min_credit_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum destination credit in minor units.",
+            "minimum": 0
+          },
+          "min_deposit_atomic": {
+            "type": "string",
+            "description": "Minimum atomic deposit amount."
+          },
+          "product_open_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-product open rate-lock cap in minor units.",
+            "minimum": 0
+          },
+          "remaining_account_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Remaining account exposure; `null` until C10 owns reservations.",
+            "minimum": 0
+          },
+          "reset_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Exposure reset time; `null` until C10 defines reservation windows."
+          },
+          "route": {
+            "type": "string",
+            "description": "Route name."
+          }
+        }
+      },
+      "NudgeResponse": {
+        "type": "object",
+        "description": "Administrative deposit nudge result.",
+        "required": [
+          "deposit_id",
+          "next_attempt_at"
+        ],
+        "properties": {
+          "deposit_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Nudged deposit identifier."
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Newly due processing time."
+          }
+        }
+      },
+      "PauseRequest": {
+        "type": "object",
+        "description": "Pause or resume request.",
+        "required": [
+          "scopes"
+        ],
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pause scopes to add or remove."
+          }
+        }
+      },
+      "PauseResponse": {
+        "type": "object",
+        "description": "Current scopes after a pause mutation.",
+        "required": [
+          "paused_scopes"
+        ],
+        "properties": {
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Current pause scopes."
+          }
+        }
+      },
+      "PersistentSaltInputs": {
+        "type": "object",
+        "description": "Inputs needed to recompute a persistent CREATE2 address.",
+        "required": [
+          "product_slug",
+          "external_id",
+          "version"
+        ],
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "description": "Product-owned account identifier."
+          },
+          "product_slug": {
+            "type": "string",
+            "description": "Stable product slug."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Persistent address version.",
+            "minimum": 0
+          }
+        }
+      },
+      "RateLockResponse": {
+        "type": "object",
+        "description": "Rate-lock response shape owned by C10.",
+        "required": [
+          "address",
+          "amount_atomic",
+          "price_scaled",
+          "credit_minor",
+          "expires_at",
+          "eip681_uri",
+          "salt_inputs"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Single-use forwarder address."
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "Exact token amount in atomic units."
+          },
+          "credit_minor": {
+            "type": "string",
+            "description": "Destination credit in minor units."
+          },
+          "eip681_uri": {
+            "type": "string",
+            "description": "EIP-681 payment URI."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Lock expiry time."
+          },
+          "price_scaled": {
+            "type": "string",
+            "description": "Locked eight-decimal scaled price."
+          },
+          "salt_inputs": {
+            "$ref": "#/components/schemas/RateLockSaltInputs",
+            "description": "Inputs encoded into the rate-lock salt."
+          }
+        }
+      },
+      "RateLockSaltInputs": {
+        "type": "object",
+        "description": "Inputs needed to recompute a rate-lock CREATE2 address.",
+        "required": [
+          "product_slug",
+          "external_id",
+          "lock_ref"
+        ],
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "description": "Product-owned account identifier."
+          },
+          "lock_ref": {
+            "type": "string",
+            "description": "Product checkout reference."
+          },
+          "product_slug": {
+            "type": "string",
+            "description": "Stable product slug."
+          }
+        }
+      },
+      "RecordRefundRequest": {
+        "type": "object",
+        "description": "Administrative refund record body owned by C12.",
+        "required": [
+          "tx_hash"
+        ],
+        "properties": {
+          "tx_hash": {
+            "type": "string",
+            "description": "Confirmed treasury transaction hash."
+          }
+        }
+      },
+      "RefundRequest": {
+        "type": "object",
+        "description": "Refund request body owned by C12.",
+        "required": [
+          "to_address",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Atomic refund amount."
+          },
+          "to_address": {
+            "type": "string",
+            "description": "Customer-controlled destination address."
+          }
+        }
+      },
+      "RefundResponse": {
+        "type": "object",
+        "description": "Customer refund request accepted for finance review.",
+        "required": [
+          "id",
+          "deposit_id",
+          "amount_atomic",
+          "to_address",
+          "status"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": "string",
+            "description": "Atomic token amount."
+          },
+          "deposit_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Related deposit identifier."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refund request identifier."
+          },
+          "status": {
+            "type": "string",
+            "description": "Stable workflow status."
+          },
+          "to_address": {
+            "type": "string",
+            "description": "Customer-controlled destination address."
+          }
+        }
+      },
+      "RegisterAccountRequest": {
+        "type": "object",
+        "description": "Account registration body.",
+        "required": [
+          "external_id"
+        ],
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "description": "Product-owned account identifier."
+          }
+        }
+      },
+      "RoutePauseResponse": {
+        "type": "object",
+        "description": "Administrative route pause response.",
+        "required": [
+          "route",
+          "paused_scopes"
+        ],
+        "properties": {
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Current route-level pause scopes."
+          },
+          "route": {
+            "type": "string",
+            "description": "Route name."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "http_message_signature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Signature"
+      }
+    }
+  }
+}
