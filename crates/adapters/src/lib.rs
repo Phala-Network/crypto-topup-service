@@ -16,5 +16,6 @@
 mod dev_feature_guard;
 
 pub mod attestation;
+pub mod chain;
 pub mod risk;
 pub mod signer;

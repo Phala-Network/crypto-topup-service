@@ -48,6 +48,15 @@ and append-only `transitions` and `audit` permit only `SELECT` and `INSERT`.
 `topup migrate` uses only `MIGRATE_DATABASE_URL`. It must identify the trusted database owner with
 permission to create roles and schema objects; the command never falls back to the application URL.
 
+## Scanner configuration
+
+`topup run` reads `DATABASE_URL` and accepts each enabled route version through a repeated
+`--route FILE` option. Provider ids in each route file resolve to `TOPUP_RPC_<ID>_URL` after
+uppercasing and replacing non-alphanumeric characters with underscores; the first provider is
+provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
+route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to
+15 seconds.
+
 ## Status
 
 Design v5 is under review. Implementation has not started. Production policy values are set by
