@@ -69,7 +69,6 @@ fn core_runtime_dependencies_are_pure_and_reviewed() -> Result<(), Box<dyn Error
     let allowed_runtime_dependencies = [
         "alloy-primitives", // Pure fixed-width Ethereum values and keccak256.
         "alloy-sol-types",  // Pure Solidity ABI encoding for deterministic salts.
-        "noyalib",          // Pure-Rust, unsafe-free YAML parser; no file access is used in core.
         "serde",            // Pure schema serialization and deserialization.
         "uuid",             // Pure UUIDv5 derivation.
     ];

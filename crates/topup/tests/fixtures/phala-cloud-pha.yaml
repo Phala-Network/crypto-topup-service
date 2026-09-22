@@ -1,0 +1,52 @@
+# Fully valid schema fixture. Addresses are from the A1 deterministic test-vector deployment.
+chain:
+  chain_id: 1
+  name: ethereum-mainnet
+  finality: finalized
+  rpc_providers: [alchemy, quicknode]
+  contracts:
+    forwarder_factory: "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d"
+    treasury:          "0x0000000000000000000000000000000000007EA5"
+  flush:
+    schedule: "0 */6 * * *"
+    max_gas_ratio_bps: 200
+
+route: phala-cloud-ethereum-pha-usd
+version: 1
+
+asset:
+  symbol: PHA
+  contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
+  decimals: 18
+  min_flush_atomic: "20000000000000000000000"
+
+destination:
+  product: phala-cloud
+  unit: USD
+  unit_decimals: 2
+  settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
+  product_kid: phala-cloud/v1
+
+pricing:
+  primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
+  check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
+  price_scale: 8
+  max_age_s: 120
+  max_deviation_bps: 100
+  max_fx_deviation_bps: 50
+
+screening:
+  sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
+  min_deposit_atomic: "20000000000000000000"
+  max_deposit_atomic: "200000000000000000000000"
+  min_credit_minor: 100
+
+rate_lock:
+  enabled: true
+  window_s: 900
+  spread_bps: 50
+  lock_tolerance_bps: 100
+  max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
+
+alerts:
+  stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }

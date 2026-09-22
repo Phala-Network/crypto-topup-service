@@ -34,15 +34,32 @@ fn placeholder_commands_fail_with_a_clear_message() {
 }
 
 #[test]
-fn route_validate_accepts_the_committed_example() {
+fn route_validate_accepts_the_valid_fixture() {
     let route = format!(
-        "{}/../../examples/phala-cloud-pha.yaml",
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
         env!("CARGO_MANIFEST_DIR")
     );
     let output = topup(&["route", "validate", &route]);
 
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("is valid"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("valid at schema level"));
+    assert!(stdout.contains("on-chain deployment and Safe control were not checked"));
+}
+
+#[test]
+fn route_validate_requires_template_mode_for_placeholders() {
+    let template = format!(
+        "{}/../../examples/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let normal_output = topup(&["route", "validate", &template]);
+    assert!(!normal_output.status.success());
+    assert!(String::from_utf8_lossy(&normal_output.stderr).contains("forwarder_factory"));
+
+    let template_output = topup(&["route", "validate", "--template", &template]);
+    assert!(template_output.status.success());
+    assert!(String::from_utf8_lossy(&template_output.stdout).contains("route template"));
 }
 
 #[test]

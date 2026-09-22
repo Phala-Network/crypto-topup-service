@@ -1,10 +1,12 @@
 //! Command-line entry point for the crypto top-up service.
 
+mod route;
+
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use topup_core::route::RouteFile;
 
 #[derive(Parser)]
 #[command(name = "topup", version, about = "Crypto top-up service")]
@@ -27,7 +29,12 @@ enum TopupCommand {
 
 #[derive(Subcommand)]
 enum RouteCommand {
-    Validate { file: PathBuf },
+    Validate {
+        /// Permit zero factory and treasury placeholders in deployment templates.
+        #[arg(long)]
+        template: bool,
+        file: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -46,8 +53,8 @@ fn main() -> ExitCode {
         TopupCommand::Run => not_implemented("run"),
         TopupCommand::Migrate => not_implemented("migrate"),
         TopupCommand::Route {
-            command: RouteCommand::Validate { file },
-        } => return validate_route(&file),
+            command: RouteCommand::Validate { template, file },
+        } => return validate_route(&file, template),
         TopupCommand::Attest => not_implemented("attest"),
         TopupCommand::RestoreCheck => not_implemented("restore-check"),
     }
@@ -55,7 +62,7 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn validate_route(file: &PathBuf) -> ExitCode {
+fn validate_route(file: &Path, template: bool) -> ExitCode {
     let yaml = match std::fs::read_to_string(file) {
         Ok(yaml) => yaml,
         Err(error) => {
@@ -63,9 +70,17 @@ fn validate_route(file: &PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match RouteFile::from_yaml(&yaml) {
+    match route::parse_and_validate(&yaml, template) {
         Ok(_) => {
-            println!("route file `{}` is valid", file.display());
+            let kind = if template {
+                "route template"
+            } else {
+                "route file"
+            };
+            println!(
+                "{kind} `{}` is valid at schema level; on-chain deployment and Safe control were not checked",
+                file.display()
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {

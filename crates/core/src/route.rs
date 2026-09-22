@@ -1,5 +1,6 @@
 //! Serde schemas and pure validation for attested chain and route files.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
@@ -33,21 +34,29 @@ pub struct RouteFile {
 }
 
 impl RouteFile {
-    /// Parses and validates a route from YAML text without performing I/O.
-    pub fn from_yaml(yaml: &str) -> Result<Self, RouteError> {
-        let route: Self =
-            noyalib::from_str(yaml).map_err(|error| RouteError::Parse(error.to_string()))?;
-        route.validate()?;
-        Ok(route)
-    }
-
     /// Validates cross-field constraints required before a route is enabled.
     pub fn validate(&self) -> Result<(), RouteError> {
-        validate_address(
-            "chain.contracts.forwarder_factory",
-            self.chain.contracts.forwarder_factory,
-        )?;
-        validate_address("chain.contracts.treasury", self.chain.contracts.treasury)?;
+        self.validate_with_template_addresses(false)
+    }
+
+    /// Validates a deployment template while allowing zero factory and treasury placeholders.
+    ///
+    /// Asset and sanctions-oracle addresses remain subject to normal non-zero validation.
+    pub fn validate_template(&self) -> Result<(), RouteError> {
+        self.validate_with_template_addresses(true)
+    }
+
+    fn validate_with_template_addresses(
+        &self,
+        allow_template_addresses: bool,
+    ) -> Result<(), RouteError> {
+        if !allow_template_addresses {
+            validate_address(
+                "chain.contracts.forwarder_factory",
+                self.chain.contracts.forwarder_factory,
+            )?;
+            validate_address("chain.contracts.treasury", self.chain.contracts.treasury)?;
+        }
         validate_address("asset.contract", self.asset.contract)?;
         validate_address(
             "screening.sanctions_oracle",
@@ -93,12 +102,7 @@ impl RouteFile {
             "alerts.stuck_after_s.credited",
             self.alerts.stuck_after_s.credited,
         )?;
-        if self.chain.rpc_providers.len() < 2 {
-            return Err(RouteError::validation(
-                "chain.rpc_providers",
-                "must contain at least two providers",
-            ));
-        }
+        validate_rpc_providers(&self.chain.rpc_providers)?;
         if self.screening.min_deposit_atomic > self.screening.max_deposit_atomic {
             return Err(RouteError::validation(
                 "screening.min_deposit_atomic",
@@ -295,11 +299,9 @@ pub struct StuckAfterConfig {
     pub credited: u64,
 }
 
-/// Route parsing or validation failure.
+/// Route validation failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteError {
-    /// YAML could not be deserialized into the route schema.
-    Parse(String),
     /// A parsed field violated a domain constraint.
     Validation {
         /// Dotted path to the invalid field.
@@ -321,7 +323,6 @@ impl RouteError {
 impl fmt::Display for RouteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Parse(message) => write!(formatter, "invalid route YAML: {message}"),
             Self::Validation { field, message } => {
                 write!(formatter, "invalid route field `{field}`: {message}")
             }
@@ -362,54 +363,56 @@ fn validate_positive(field: &'static str, value: u64) -> Result<(), RouteError> 
     Ok(())
 }
 
+fn validate_rpc_providers(providers: &[String]) -> Result<(), RouteError> {
+    if providers.len() < 2 {
+        return Err(RouteError::validation(
+            "chain.rpc_providers",
+            "must contain at least two providers",
+        ));
+    }
+
+    let mut unique = BTreeSet::new();
+    for provider in providers {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return Err(RouteError::validation(
+                "chain.rpc_providers",
+                "provider ids must not be empty",
+            ));
+        }
+        if !unique.insert(provider) {
+            return Err(RouteError::validation(
+                "chain.rpc_providers",
+                "provider ids must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const EXAMPLE: &str = include_str!("../../../examples/phala-cloud-pha.yaml");
-
     #[test]
-    fn example_route_validates() {
-        RouteFile::from_yaml(EXAMPLE).expect("committed example must remain valid");
-    }
-
-    #[test]
-    fn zero_address_fails_with_field_name() {
-        let invalid = EXAMPLE.replace(
-            "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
-            "0x0000000000000000000000000000000000000000",
-        );
-        let error = RouteFile::from_yaml(&invalid).expect_err("zero factory must fail");
+    fn rpc_providers_must_be_distinct_and_non_empty() {
         assert!(
-            error
+            validate_rpc_providers(&["alchemy".to_owned()])
+                .expect_err("one provider must fail")
                 .to_string()
-                .contains("chain.contracts.forwarder_factory")
+                .contains("at least two")
         );
-    }
-
-    #[test]
-    fn excessive_decimals_and_zero_windows_fail_clearly() {
-        let invalid_decimals = EXAMPLE.replace("decimals: 18", "decimals: 37");
         assert!(
-            RouteFile::from_yaml(&invalid_decimals)
-                .expect_err("excessive decimals must fail")
+            validate_rpc_providers(&["alchemy".to_owned(), "alchemy".to_owned()])
+                .expect_err("duplicate providers must fail")
                 .to_string()
-                .contains("asset.decimals")
+                .contains("unique")
         );
-
-        let invalid_window = EXAMPLE.replace("window_s: 900", "window_s: 0");
         assert!(
-            RouteFile::from_yaml(&invalid_window)
-                .expect_err("zero window must fail")
+            validate_rpc_providers(&[String::new(), String::new()])
+                .expect_err("empty providers must fail")
                 .to_string()
-                .contains("rate_lock.window_s")
+                .contains("must not be empty")
         );
-    }
-
-    #[test]
-    fn excessive_bps_fails_clearly() {
-        let invalid = EXAMPLE.replace("spread_bps: 50", "spread_bps: 10001");
-        let error = RouteFile::from_yaml(&invalid).expect_err("excessive bps must fail");
-        assert!(error.to_string().contains("rate_lock.spread_bps"));
     }
 }

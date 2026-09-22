@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
-noyalib.workspace = true
 serde.workspace = true
 uuid.workspace = true
 
