@@ -1291,6 +1291,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
         )
         .expect("admin key is valid"),
         attestor: Arc::new(UnavailableAttestor),
+        rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
     };
     topup::api::router(state).0
 }

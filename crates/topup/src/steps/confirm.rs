@@ -13,18 +13,14 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
-use topup_adapters::pricing::binance::Binance;
-use topup_adapters::pricing::coinmetrics::CoinMetrics;
-use topup_adapters::pricing::kraken::Kraken;
-use topup_adapters::pricing::{Observation, PriceSource};
+use topup_adapters::pricing::PriceSource;
 use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, SettlementClient};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::{PricingMode, RouteFile};
+use topup_core::route::RouteFile;
 use topup_core::valuation::{
-    FxObservation, LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationPolicy,
-    ValuationSource, stablecoin_price, validate_spot, value_deposit,
+    LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
 };
 use uuid::Uuid;
 
@@ -32,6 +28,7 @@ use crate::db::{
     CanonicalEvidence, Deposit, LockConsumption, OutboxEvent, SettlementAdoption, StoredValuation,
     TransitionEffects,
 };
+use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
 use crate::rpc_provider::configured_provider_url;
 
@@ -173,9 +170,7 @@ struct ChainPair {
 
 struct RouteRuntime {
     route: RouteFile,
-    primary: Arc<dyn PriceSource>,
-    check: Option<Arc<dyn PriceSource>>,
-    fx: Option<Arc<dyn PriceSource>>,
+    pricing: PricingRuntime,
 }
 
 /// Invalid detected-step runtime configuration.
@@ -220,26 +215,12 @@ impl ConfirmStep {
                     route.route, route.version
                 )));
             }
-            let primary = price_source(&route.pricing.primary.source, route)?;
-            let (check, fx) = match route.pricing.mode {
-                PricingMode::Spot => {
-                    let check_config = route.pricing.check.as_ref().ok_or_else(|| {
-                        ConfirmConfigError("spot route is missing pricing.check".to_owned())
-                    })?;
-                    (
-                        Some(price_source(&check_config.source, route)?),
-                        Some(price_source(&check_config.fx.source, route)?),
-                    )
-                }
-                PricingMode::Stablecoin => (None, None),
-            };
+            let pricing = PricingRuntime::configured(route).map_err(ConfirmConfigError)?;
             runtimes.insert(
                 key.clone(),
                 RouteRuntime {
                     route: route.clone(),
-                    primary,
-                    check,
-                    fx,
+                    pricing,
                 },
             );
             let asset_key = (route.chain.chain_id, route.asset.contract);
@@ -318,9 +299,7 @@ impl ConfirmStep {
                 key.clone(),
                 RouteRuntime {
                     route,
-                    primary: primary_price,
-                    check: check_price,
-                    fx: fx_price,
+                    pricing: PricingRuntime::injected(primary_price, check_price, fx_price),
                 },
             )]),
             asset_routes: BTreeMap::from([((chain_id, asset_contract), key)]),
@@ -422,7 +401,7 @@ impl ConfirmStep {
         };
 
         let valuation_at = Utc::now();
-        let quote = match fetch_quote(runtime).await {
+        let quote = match runtime.pricing.fetch(&runtime.route).await {
             Ok(quote) => quote,
             Err(evidence) => {
                 return retry(RetryError::PriceUnavailable, evidence, effects);
@@ -555,40 +534,6 @@ impl Step for ConfirmStep {
     }
 }
 
-fn price_source(
-    source: &str,
-    route: &RouteFile,
-) -> Result<Arc<dyn PriceSource>, ConfirmConfigError> {
-    match source {
-        "coinmetrics" => CoinMetrics::new(
-            route.pricing.primary.asset.clone(),
-            route.pricing.primary.metric.clone(),
-            route.pricing.primary.frequency.clone(),
-        )
-        .map(|source| Arc::new(source) as Arc<dyn PriceSource>)
-        .map_err(|error| ConfirmConfigError(error.to_string())),
-        "binance" => {
-            let check = route.pricing.check.as_ref().ok_or_else(|| {
-                ConfirmConfigError("binance source requires pricing.check".to_owned())
-            })?;
-            Binance::new(check.symbol.clone())
-                .map(|source| Arc::new(source) as Arc<dyn PriceSource>)
-                .map_err(|error| ConfirmConfigError(error.to_string()))
-        }
-        "kraken" => {
-            let check = route.pricing.check.as_ref().ok_or_else(|| {
-                ConfirmConfigError("kraken source requires pricing.check".to_owned())
-            })?;
-            Kraken::new(check.fx.pair.replace('/', ""))
-                .map(|source| Arc::new(source) as Arc<dyn PriceSource>)
-                .map_err(|error| ConfirmConfigError(error.to_string()))
-        }
-        other => Err(ConfirmConfigError(format!(
-            "unsupported price source `{other}`"
-        ))),
-    }
-}
-
 #[derive(Clone)]
 struct ConfirmationContext {
     address: Address,
@@ -627,7 +572,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
                rate_lock.route, rate_lock.amount_atomic::text AS amount_atomic,
                rate_lock.price_scaled::text AS price_scaled,
                rate_lock.credit_minor::text AS credit_minor,
-               rate_lock.expires_at, rate_lock.consumed_by
+               rate_lock.expires_at, rate_lock.consumed_by, rate_lock.status AS lock_status
         FROM addresses AS address
         JOIN accounts AS account ON account.id = address.account_id
         LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
@@ -642,7 +587,11 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
         .map_err(|error| sqlx::Error::Decode(format!("invalid address: {error}").into()))?;
     let kind: String = row.try_get("kind")?;
     let consumed_by: Option<Uuid> = row.try_get("consumed_by")?;
-    let lock = if kind == "lock" && consumed_by.is_none() {
+    let lock_status: Option<String> = row.try_get("lock_status")?;
+    let lock = if kind == "lock"
+        && consumed_by.is_none()
+        && matches!(lock_status.as_deref(), Some("open" | "expired"))
+    {
         let route: Option<String> = row.try_get("route")?;
         let amount: Option<String> = row.try_get("amount_atomic")?;
         let price: Option<String> = row.try_get("price_scaled")?;
@@ -802,114 +751,6 @@ fn canonical_effect(
     })
 }
 
-struct Quote {
-    price: ScaledPrice,
-    evidence: Value,
-}
-
-async fn fetch_quote(runtime: &RouteRuntime) -> Result<Quote, Value> {
-    match runtime.route.pricing.mode {
-        PricingMode::Spot => {
-            let Some(check_source) = runtime.check.as_ref() else {
-                return Err(json!({"stage": "pricing", "error": "missing_check_source"}));
-            };
-            let Some(fx_source) = runtime.fx.as_ref() else {
-                return Err(json!({"stage": "pricing", "error": "missing_fx_source"}));
-            };
-            let (primary, check, fx) = tokio::join!(
-                runtime.primary.observe(),
-                check_source.observe(),
-                fx_source.observe()
-            );
-            let evidence = json!({
-                "mode": "spot",
-                "primary": observation_result(&primary),
-                "check": observation_result(&check),
-                "fx": observation_result(&fx),
-            });
-            let (primary, check, fx) = match (primary, check, fx) {
-                (Ok(primary), Ok(check), Ok(fx)) => (primary, check, fx),
-                _ => {
-                    return Err(
-                        json!({"stage": "pricing", "error": "source_failure", "quote": evidence}),
-                    );
-                }
-            };
-            let fx = FxObservation {
-                source: fx.source.clone(),
-                rate: fx.price,
-                observed_at: fx.observed_at,
-            };
-            let now = pricing_validation_time()?;
-            match validate_spot(
-                &primary,
-                &check,
-                Some(&fx),
-                now,
-                ValuationPolicy::from(&runtime.route.pricing),
-            ) {
-                Ok(price) => Ok(Quote { price, evidence }),
-                Err(error) => Err(json!({
-                    "stage": "pricing",
-                    "error": valuation_error_code(&error),
-                    "quote": evidence,
-                })),
-            }
-        }
-        PricingMode::Stablecoin => {
-            let primary = runtime.primary.observe().await;
-            let evidence = json!({
-                "mode": "stablecoin",
-                "primary": observation_result(&primary),
-            });
-            let primary = match primary {
-                Ok(primary) => primary,
-                Err(_) => {
-                    return Err(
-                        json!({"stage": "pricing", "error": "source_failure", "quote": evidence}),
-                    );
-                }
-            };
-            let now = pricing_validation_time()?;
-            match stablecoin_price(&primary, now, ValuationPolicy::from(&runtime.route.pricing)) {
-                Ok(price) => Ok(Quote { price, evidence }),
-                Err(error) => Err(json!({
-                    "stage": "pricing",
-                    "error": valuation_error_code(&error),
-                    "quote": evidence,
-                })),
-            }
-        }
-    }
-}
-
-fn pricing_validation_time() -> Result<UnixSeconds, Value> {
-    unix_seconds(Utc::now()).ok_or_else(|| json!({"stage": "pricing", "error": "invalid_clock"}))
-}
-
-fn observation_result(result: &Result<Observation, topup_adapters::pricing::PriceError>) -> Value {
-    match result {
-        Ok(observation) => json!({
-            "source": observation.source.as_str(),
-            "price_scaled": observation.price.value().to_string(),
-            "observed_at": observation.observed_at.value(),
-        }),
-        Err(_) => json!({"error": "unavailable"}),
-    }
-}
-
-fn valuation_error_code(error: &ValuationError) -> &'static str {
-    match error {
-        ValuationError::Stale { .. } => "stale",
-        ValuationError::Divergent { .. } => "divergent",
-        ValuationError::FxDepeg => "fx_depeg",
-        ValuationError::FxMissing => "fx_missing",
-        ValuationError::Depeg => "depeg",
-        ValuationError::BelowMinimum => "below_minimum",
-        ValuationError::ArithmeticOutOfRange | ValuationError::Credit(_) => "out_of_range",
-    }
-}
-
 fn stored_valuation(
     valuation_at: DateTime<Utc>,
     price: ScaledPrice,
@@ -937,7 +778,7 @@ fn reject_out_of_range(
     deposit: &Deposit,
     product_id: Uuid,
     effects: TransitionEffects,
-    quote: &Quote,
+    quote: &ValidatedQuote,
 ) -> StepResult {
     rejected_result(
         deposit,
@@ -1128,7 +969,8 @@ mod tests {
     use std::future::ready;
     use std::time::Duration;
 
-    use topup_adapters::pricing::PriceError;
+    use topup_adapters::pricing::{Observation, PriceError};
+    use topup_core::route::PricingMode;
     use topup_core::valuation::SourceId;
 
     use super::*;
@@ -1425,11 +1267,13 @@ mod tests {
         let now = now_seconds();
         let runtime = |route: RouteFile| RouteRuntime {
             route,
-            primary: Arc::new(MockPrice(Ok(observation("primary", 10_000_000, now)))),
-            check: Some(Arc::new(MockPrice(Ok(observation(
-                "check", 10_000_000, now,
-            ))))),
-            fx: Some(Arc::new(MockPrice(Ok(observation("fx", 100_000_000, now))))),
+            pricing: PricingRuntime::injected(
+                Arc::new(MockPrice(Ok(observation("primary", 10_000_000, now)))),
+                Some(Arc::new(MockPrice(Ok(observation(
+                    "check", 10_000_000, now,
+                ))))),
+                Some(Arc::new(MockPrice(Ok(observation("fx", 100_000_000, now))))),
+            ),
         };
         let context = context(None);
         let product_id = context.product_id;
@@ -1503,23 +1347,27 @@ mod tests {
         route.pricing.max_age_s = 1;
         let runtime = RouteRuntime {
             route,
-            primary: Arc::new(DelayedPrice {
-                source: "primary",
-                value: 10_000_000,
-                delay: Duration::from_secs(2),
-            }),
-            check: Some(Arc::new(DelayedPrice {
-                source: "check",
-                value: 10_000_000,
-                delay: Duration::from_secs(2),
-            })),
-            fx: Some(Arc::new(DelayedPrice {
-                source: "fx",
-                value: 100_000_000,
-                delay: Duration::from_secs(2),
-            })),
+            pricing: PricingRuntime::injected(
+                Arc::new(DelayedPrice {
+                    source: "primary",
+                    value: 10_000_000,
+                    delay: Duration::from_secs(2),
+                }),
+                Some(Arc::new(DelayedPrice {
+                    source: "check",
+                    value: 10_000_000,
+                    delay: Duration::from_secs(2),
+                })),
+                Some(Arc::new(DelayedPrice {
+                    source: "fx",
+                    value: 100_000_000,
+                    delay: Duration::from_secs(2),
+                })),
+            ),
         };
-        let quote = fetch_quote(&runtime)
+        let quote = runtime
+            .pricing
+            .fetch(&runtime.route)
             .await
             .expect("slow quote remains fresh");
         assert_eq!(quote.price.value(), 10_000_000);
@@ -1730,13 +1578,15 @@ mod tests {
                 key.clone(),
                 RouteRuntime {
                     route,
-                    primary: Arc::new(MockPrice(Ok(prices.primary))),
-                    check: prices.check.map(|observation| {
-                        Arc::new(MockPrice(Ok(observation))) as Arc<dyn PriceSource>
-                    }),
-                    fx: prices.fx.map(|observation| {
-                        Arc::new(MockPrice(Ok(observation))) as Arc<dyn PriceSource>
-                    }),
+                    pricing: PricingRuntime::injected(
+                        Arc::new(MockPrice(Ok(prices.primary))),
+                        prices.check.map(|observation| {
+                            Arc::new(MockPrice(Ok(observation))) as Arc<dyn PriceSource>
+                        }),
+                        prices.fx.map(|observation| {
+                            Arc::new(MockPrice(Ok(observation))) as Arc<dyn PriceSource>
+                        }),
+                    ),
                 },
             )]),
             asset_routes: BTreeMap::from([((chain_id, asset_contract), key)]),

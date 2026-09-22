@@ -148,6 +148,10 @@ impl RouteFile {
         validate_positive("pricing.max_age_s", self.pricing.max_age_s)?;
         validate_positive("rate_lock.window_s", self.rate_lock.window_s)?;
         validate_positive(
+            "rate_lock.max_creations_per_minute",
+            self.rate_lock.max_creations_per_minute,
+        )?;
+        validate_positive(
             "alerts.stuck_after_s.detected",
             self.alerts.stuck_after_s.detected,
         )?;
@@ -358,6 +362,8 @@ pub struct RateLockConfig {
     pub spread_bps: Bps,
     /// Accepted transfer amount tolerance in basis points.
     pub lock_tolerance_bps: Bps,
+    /// Maximum successful lock creations per account in one rolling minute.
+    pub max_creations_per_minute: u64,
     /// Open exposure caps.
     pub max_open_minor: ExposureCaps,
 }

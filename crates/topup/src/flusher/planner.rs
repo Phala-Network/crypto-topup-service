@@ -48,6 +48,14 @@ impl Planner {
 
     /// Evaluates a route and persists one or more independently estimable batches.
     pub async fn plan(&self, route: &RouteFile) -> Result<Option<Uuid>, FlusherError> {
+        if crate::reconciler::chain_is_blocked(&self.pool, route.chain.chain_id).await? {
+            tracing::warn!(
+                chain_id = route.chain.chain_id,
+                route = %route.route,
+                "flush planning skipped because reconciliation froze the chain"
+            );
+            return Ok(None);
+        }
         let operator = self.signer.operator_address().await.map_err(map_signer)?;
         let pending = self
             .chain
@@ -59,7 +67,7 @@ impl Planner {
             ExistingPlan::Planned(id) => return Ok(Some(id)),
             ExistingPlan::Sent => return Ok(None),
         }
-        let excluded = db::list_active_flush_exclusions(
+        let mut excluded = db::list_active_flush_exclusions(
             &self.pool,
             route.chain.chain_id,
             route.asset.contract,
@@ -68,6 +76,8 @@ impl Planner {
         .await?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
+        excluded
+            .extend(crate::reconciler::blocked_addresses(&self.pool, route.chain.chain_id).await?);
         let addresses = db::list_chain_addresses(&self.pool, route.chain.chain_id)
             .await?
             .into_iter()

@@ -1,4 +1,4 @@
-.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image runbook-check
+.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image deploy-check runbook-check
 
 build:
 	cargo build --workspace --locked
@@ -32,6 +32,13 @@ service-smoke:
 
 verify-image:
 	deploy/verify-image.sh
+
+deploy-check:
+	cd contracts && forge fmt --check
+	cd contracts && forge build
+	cd contracts && forge test
+	deploy/contracts/check-build.sh --check
+	deploy/contracts/test-determinism.sh
 
 runbook-check:
 	deploy/runbooks/check.sh

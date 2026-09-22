@@ -29,3 +29,20 @@ Migration `20260922000014_refund_settlement_exclusion` persists the effective ro
 so later approval checks the same route pause selected at request time. Before upgrading an
 environment with pre-existing refunds whose deposits have no route, reconcile and populate an
 effective fallback route; the migration refuses to invent one.
+
+Migration `20260922000017_reconciliation` adds the append-only `reconciliation_findings` table,
+the `reconciliation_blocks` freeze table, and the reconciler's incremental scan cursors.
+`topup_app` can read and insert findings but cannot update, delete, or truncate them. It can insert
+and update blocks and cursors but cannot delete them, so only the database owner can lift a block.
+
+A `chain` block written by the address-derivation check freezes that chain at runtime: pumps leave
+its deposits waiting, its scanner pauses, the flusher plans nothing, and address issuance and
+rate-lock creation answer `423 chain_frozen`. The service still starts and keeps serving other
+chains. An `address` block excludes one address from flush planning after a credit recomputation
+mismatch. To lift a block after the cause has been investigated and signed off, the owner deletes
+the row; the components resume on their next iteration without a restart:
+
+```sql
+DELETE FROM reconciliation_blocks WHERE block_key = 'chain:<chain_id>';
+DELETE FROM reconciliation_blocks WHERE block_key = 'address:<address_id>';
+```

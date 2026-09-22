@@ -61,6 +61,46 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
+    /// Returns a typed open-exposure cap conflict.
+    #[must_use]
+    pub fn exposure_cap(scope: &'static str) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "exposure_cap_exceeded",
+            format!("{scope} open rate-lock exposure cap would be exceeded"),
+        )
+    }
+
+    /// Returns a conflict for a rate lock whose address already received funds.
+    #[must_use]
+    pub fn pending_payment() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "pending_payment",
+            "rate lock address already received a payment",
+        )
+    }
+
+    /// Returns a conflict for an idempotent replay whose body differs from the original.
+    #[must_use]
+    pub fn idempotency_mismatch() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "idempotency_mismatch",
+            "request does not match the original request for this reference",
+        )
+    }
+
+    /// Returns a typed per-account rate-limit response.
+    #[must_use]
+    pub fn rate_limited() -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate-lock creation limit exceeded",
+        )
+    }
+
     /// Returns a conflict for an already consumed request signature.
     #[must_use]
     pub fn signature_replayed() -> Self {
@@ -75,6 +115,16 @@ impl ApiError {
     #[must_use]
     pub fn paused(message: impl Into<String>) -> Self {
         Self::new(StatusCode::LOCKED, "paused", message)
+    }
+
+    /// Returns a locked response for a chain frozen by reconciliation.
+    #[must_use]
+    pub fn chain_frozen() -> Self {
+        Self::new(
+            StatusCode::LOCKED,
+            "chain_frozen",
+            "the route chain is frozen pending reconciliation review",
+        )
     }
 
     /// Returns a temporary dependency or pause failure.
