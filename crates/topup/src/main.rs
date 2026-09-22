@@ -330,7 +330,11 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(&routes) {
+    let refund_config = topup::refunds::RefundConfirmationConfig::default();
+    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(
+        &routes,
+        refund_config.request_timeout,
+    ) {
         Ok(reader) => reader,
         Err(error) => {
             tracing::error!(%error, "failed to configure refund confirmation chain reader");
@@ -341,7 +345,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         pool.clone(),
         refund_reader,
         &routes,
-        topup::refunds::RefundConfirmationConfig::default(),
+        refund_config,
     ) {
         Ok(worker) => worker,
         Err(error) => {

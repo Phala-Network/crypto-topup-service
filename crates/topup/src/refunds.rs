@@ -6,7 +6,7 @@ use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
 use alloy::eips::BlockNumberOrTag;
-use alloy::providers::{Provider, RootProvider};
+use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::sol;
 use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
@@ -42,6 +42,17 @@ pub struct RefundCheck {
     pub amount_atomic: U256,
     /// Recorded treasury transaction hash.
     pub tx_hash: B256,
+    /// Version of the recorded hash used to reject stale observations.
+    pub tx_version: i64,
+}
+
+/// One matching ERC-20 transfer log in a finalized refund transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefundTransfer {
+    /// Global log index in the containing block.
+    pub log_index: u64,
+    /// Atomic amount transferred by this log.
+    pub transferred_atomic: U256,
 }
 
 /// Finality-aware observation of a recorded refund transaction.
@@ -49,14 +60,14 @@ pub struct RefundCheck {
 pub enum RefundObservation {
     /// The transaction is absent or not yet finalized.
     Pending,
-    /// The transaction is finalized with the matching transfer total shown.
+    /// The transaction is finalized with its matching transfer logs shown.
     Finalized {
         /// Finalized block containing the receipt.
         block_number: u64,
         /// Whether EVM execution succeeded.
         succeeded: bool,
-        /// Sum of matching ERC-20 transfers in the transaction.
-        transferred_atomic: U256,
+        /// Matching ERC-20 transfer logs in receipt order.
+        transfers: Vec<RefundTransfer>,
     },
 }
 
@@ -102,10 +113,13 @@ pub struct EvmRefundChainReader {
 
 impl EvmRefundChainReader {
     /// Creates one provider per configured chain using provider A.
-    pub fn from_routes(routes: &[RouteFile]) -> Result<Self, RefundReadError> {
-        let mut providers = BTreeMap::new();
+    pub fn from_routes(
+        routes: &[RouteFile],
+        request_timeout: Duration,
+    ) -> Result<Self, RefundReadError> {
+        let mut urls = BTreeMap::new();
         for route in routes {
-            if providers.contains_key(&route.chain.chain_id) {
+            if urls.contains_key(&route.chain.chain_id) {
                 continue;
             }
             let provider_id = route
@@ -118,8 +132,31 @@ impl EvmRefundChainReader {
                 .map_err(|_| RefundReadError::MissingField("refund RPC environment"))?;
             let url = Url::parse(&rpc_url)
                 .map_err(|error| RefundReadError::InvalidUrl(error.to_string()))?;
-            providers.insert(route.chain.chain_id, RootProvider::new_http(url));
+            urls.insert(route.chain.chain_id, url);
         }
+        Self::from_chain_urls(urls, request_timeout)
+    }
+
+    /// Creates providers from explicit per-chain URLs, primarily for controlled deployments/tests.
+    pub fn from_chain_urls(
+        urls: BTreeMap<u64, Url>,
+        request_timeout: Duration,
+    ) -> Result<Self, RefundReadError> {
+        let client = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .map_err(|_| RefundReadError::Rpc("HTTP client configuration"))?;
+        let providers = urls
+            .into_iter()
+            .map(|(chain_id, url)| {
+                (
+                    chain_id,
+                    ProviderBuilder::new()
+                        .disable_recommended_fillers()
+                        .connect_reqwest(client.clone(), url),
+                )
+            })
+            .collect();
         Ok(Self { providers })
     }
 }
@@ -153,7 +190,7 @@ impl RefundChainReader for EvmRefundChainReader {
             return Ok(RefundObservation::Pending);
         }
 
-        let mut transferred_atomic = U256::ZERO;
+        let mut transfers = Vec::new();
         for log in receipt.logs() {
             if log.address() != check.asset_contract {
                 continue;
@@ -164,15 +201,18 @@ impl RefundChainReader for EvmRefundChainReader {
             if transfer.inner.data.from == check.treasury
                 && transfer.inner.data.to == check.to_address
             {
-                transferred_atomic = transferred_atomic
-                    .checked_add(transfer.inner.data.amount)
-                    .ok_or(RefundReadError::Rpc("matching transfer sum overflow"))?;
+                transfers.push(RefundTransfer {
+                    log_index: log
+                        .log_index
+                        .ok_or(RefundReadError::MissingField("receipt.log.log_index"))?,
+                    transferred_atomic: transfer.inner.data.amount,
+                });
             }
         }
         Ok(RefundObservation::Finalized {
             block_number,
             succeeded: receipt.status(),
-            transferred_atomic,
+            transfers,
         })
     }
 }
@@ -184,6 +224,10 @@ pub struct RefundConfirmationConfig {
     pub poll_interval: Duration,
     /// Delay before a sent refund is eligible for another check.
     pub retry_interval: Duration,
+    /// Maximum duration of one HTTP JSON-RPC request.
+    pub request_timeout: Duration,
+    /// Maximum duration of the complete receipt and finality observation.
+    pub observe_timeout: Duration,
 }
 
 impl Default for RefundConfirmationConfig {
@@ -191,6 +235,8 @@ impl Default for RefundConfirmationConfig {
         Self {
             poll_interval: Duration::from_secs(5),
             retry_interval: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(10),
+            observe_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -242,21 +288,35 @@ where
         let chain_id = u64::try_from(row.chain_id).map_err(decode_error)?;
         let Some(treasury) = self.treasuries.get(&chain_id).copied() else {
             let evidence = json!({"result": "configuration_mismatch", "chain_id": chain_id});
-            persist_evidence(&self.pool, row.refund_id, &evidence).await?;
+            persist_evidence(
+                &self.pool,
+                row.refund_id,
+                &row.tx_hash,
+                row.tx_version,
+                &evidence,
+            )
+            .await?;
             tracing::error!(refund_id = %row.refund_id, chain_id, "refund confirmation has no treasury configuration");
             return Ok(true);
         };
         let check = row.into_check(treasury)?;
-        match self.reader.observe(&check).await {
-            Ok(RefundObservation::Pending) => {
-                persist_evidence(&self.pool, check.refund_id, &json!({"result": "pending"}))
-                    .await?;
+        match tokio::time::timeout(self.config.observe_timeout, self.reader.observe(&check)).await {
+            Ok(Ok(RefundObservation::Pending)) => {
+                persist_evidence(
+                    &self.pool,
+                    check.refund_id,
+                    &format!("{:#x}", check.tx_hash),
+                    check.tx_version,
+                    &json!({"result": "pending"}),
+                )
+                .await?;
             }
-            Ok(RefundObservation::Finalized {
+            Ok(Ok(RefundObservation::Finalized {
                 block_number,
                 succeeded,
-                transferred_atomic,
-            }) => {
+                transfers,
+            })) => {
+                let transferred_atomic = transfer_total(&transfers)?;
                 let matched = succeeded && transferred_atomic >= check.amount_atomic;
                 let evidence = json!({
                     "result": if matched { "matched" } else { "mismatch" },
@@ -268,16 +328,55 @@ where
                     "treasury": format!("{:#x}", check.treasury),
                     "to_address": format!("{:#x}", check.to_address),
                     "tx_hash": format!("{:#x}", check.tx_hash),
+                    "tx_version": check.tx_version,
+                    "transfer_logs": transfers.iter().map(|transfer| json!({
+                        "log_index": transfer.log_index,
+                        "amount_atomic": transfer.transferred_atomic.to_string(),
+                    })).collect::<Vec<_>>(),
                 });
                 if matched {
-                    confirm_refund(&self.pool, &check, &evidence).await?;
+                    if !confirm_refund(&self.pool, &check, &transfers, &evidence).await? {
+                        let unavailable = json!({
+                            "result": "payment_claim_unavailable",
+                            "tx_hash": format!("{:#x}", check.tx_hash),
+                            "tx_version": check.tx_version,
+                            "expected_amount_atomic": check.amount_atomic.to_string(),
+                        });
+                        persist_evidence(
+                            &self.pool,
+                            check.refund_id,
+                            &format!("{:#x}", check.tx_hash),
+                            check.tx_version,
+                            &unavailable,
+                        )
+                        .await?;
+                        tracing::error!(refund_id = %check.refund_id, tx_hash = %check.tx_hash, "finalized refund transfer was already claimed");
+                    }
                 } else {
-                    persist_evidence(&self.pool, check.refund_id, &evidence).await?;
+                    persist_evidence(
+                        &self.pool,
+                        check.refund_id,
+                        &format!("{:#x}", check.tx_hash),
+                        check.tx_version,
+                        &evidence,
+                    )
+                    .await?;
                     tracing::error!(refund_id = %check.refund_id, tx_hash = %check.tx_hash, "finalized refund transaction does not match the approved transfer");
                 }
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::warn!(refund_id = %check.refund_id, %error, "refund confirmation chain read failed");
+            }
+            Err(_) => {
+                persist_evidence(
+                    &self.pool,
+                    check.refund_id,
+                    &format!("{:#x}", check.tx_hash),
+                    check.tx_version,
+                    &json!({"result": "observe_timeout"}),
+                )
+                .await?;
+                tracing::warn!(refund_id = %check.refund_id, "refund confirmation observation timed out");
             }
         }
         Ok(true)
@@ -289,11 +388,15 @@ where
             if cancellation.is_cancelled() {
                 return;
             }
-            let pause = match self.check_once().await {
-                Ok(found) => !found,
-                Err(error) => {
-                    tracing::error!(%error, "refund confirmation database poll failed");
-                    true
+            let pause = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                result = self.check_once() => match result {
+                    Ok(found) => !found,
+                    Err(error) => {
+                        tracing::error!(%error, "refund confirmation database poll failed");
+                        true
+                    }
                 }
             };
             if pause {
@@ -316,6 +419,7 @@ struct RefundCheckRow {
     to_address: String,
     amount_atomic: String,
     tx_hash: String,
+    tx_version: i64,
 }
 
 impl RefundCheckRow {
@@ -330,6 +434,7 @@ impl RefundCheckRow {
             to_address: self.to_address.parse().map_err(decode_error)?,
             amount_atomic: self.amount_atomic.parse().map_err(decode_error)?,
             tx_hash: self.tx_hash.parse().map_err(decode_error)?,
+            tx_version: self.tx_version,
         })
     }
 }
@@ -356,7 +461,8 @@ async fn claim_due_refund(
           AND account.id = deposit.account_id
         RETURNING refund.id AS refund_id, account.product_id, deposit.id AS deposit_id,
                   deposit.chain_id, deposit.asset_contract, refund.to_address,
-                  refund.amount_atomic::text AS amount_atomic, refund.tx_hash
+                  refund.amount_atomic::text AS amount_atomic, refund.tx_hash,
+                  refund.tx_version
         "#,
     )
     .bind(retry_seconds)
@@ -367,12 +473,20 @@ async fn claim_due_refund(
 async fn persist_evidence(
     pool: &PgPool,
     refund_id: Uuid,
+    tx_hash: &str,
+    tx_version: i64,
     evidence: &Value,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE refunds SET confirmation_evidence = $2, updated_at = now() WHERE id = $1 AND status = 'sent'",
+        r#"
+        UPDATE refunds
+        SET confirmation_evidence = $4, updated_at = now()
+        WHERE id = $1 AND status = 'sent' AND tx_hash = $2 AND tx_version = $3
+        "#,
     )
     .bind(refund_id)
+    .bind(tx_hash)
+    .bind(tx_version)
     .bind(evidence)
     .execute(pool)
     .await?;
@@ -382,44 +496,113 @@ async fn persist_evidence(
 async fn confirm_refund(
     pool: &PgPool,
     check: &RefundCheck,
+    transfers: &[RefundTransfer],
     evidence: &Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    let tx_hash = format!("{:#x}", check.tx_hash);
+    let locked = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT true
+        FROM refunds
+        WHERE id = $1 AND status = 'sent' AND tx_hash = $2 AND tx_version = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(check.refund_id)
+    .bind(&tx_hash)
+    .bind(check.tx_version)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if locked.is_none() {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+
+    let mut remaining = check.amount_atomic;
+    for transfer in transfers {
+        if remaining.is_zero() {
+            break;
+        }
+        let claimed = remaining.min(transfer.transferred_atomic);
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO refund_payment_claims (
+                refund_id, chain_id, tx_hash, log_index,
+                claimed_amount_atomic, transferred_amount_atomic
+            )
+            VALUES ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(check.refund_id)
+        .bind(i64::try_from(check.chain_id).map_err(decode_error)?)
+        .bind(&tx_hash)
+        .bind(i64::try_from(transfer.log_index).map_err(decode_error)?)
+        .bind(claimed.to_string())
+        .bind(transfer.transferred_atomic.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        remaining = remaining
+            .checked_sub(claimed)
+            .ok_or_else(|| decode_error("refund claim subtraction underflow"))?;
+    }
+    if !remaining.is_zero() {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+
     let updated = sqlx::query(
         r#"
         UPDATE refunds
         SET status = 'confirmed', confirmation_evidence = $2,
             confirmed_at = now(), updated_at = now()
-        WHERE id = $1 AND status = 'sent'
+        WHERE id = $1 AND status = 'sent' AND tx_hash = $3 AND tx_version = $4
         "#,
     )
     .bind(check.refund_id)
     .bind(evidence)
+    .bind(&tx_hash)
+    .bind(check.tx_version)
     .execute(&mut *transaction)
     .await?;
-    if updated.rows_affected() == 1 {
-        sqlx::query(
-            r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-            VALUES ($1, 'deposit.refunded', $2, now())
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(json!({
-            "product_id": check.product_id,
-            "deposit_id": check.deposit_id,
-            "refund_id": check.refund_id,
-            "chain_id": check.chain_id,
-            "asset_contract": format!("{:#x}", check.asset_contract),
-            "amount_atomic": check.amount_atomic.to_string(),
-            "to_address": format!("{:#x}", check.to_address),
-            "tx_hash": format!("{:#x}", check.tx_hash),
-        }))
-        .execute(&mut *transaction)
-        .await?;
+    if updated.rows_affected() != 1 {
+        transaction.rollback().await?;
+        return Ok(false);
     }
+    sqlx::query(
+        r#"
+        INSERT INTO outbox (id, event_type, payload, next_attempt_at)
+        VALUES ($1, 'deposit.refunded', $2, now())
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(json!({
+        "product_id": check.product_id,
+        "deposit_id": check.deposit_id,
+        "refund_id": check.refund_id,
+        "chain_id": check.chain_id,
+        "asset_contract": format!("{:#x}", check.asset_contract),
+        "amount_atomic": check.amount_atomic.to_string(),
+        "to_address": format!("{:#x}", check.to_address),
+        "tx_hash": tx_hash,
+    }))
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
-    Ok(())
+    Ok(true)
+}
+
+fn transfer_total(transfers: &[RefundTransfer]) -> Result<U256, sqlx::Error> {
+    transfers.iter().try_fold(U256::ZERO, |total, transfer| {
+        total
+            .checked_add(transfer.transferred_atomic)
+            .ok_or_else(|| decode_error("matching transfer sum overflow"))
+    })
 }
 
 fn provider_environment_name(provider_id: &str) -> String {
