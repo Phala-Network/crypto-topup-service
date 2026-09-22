@@ -51,6 +51,7 @@ wait_for_rpc "${rpcs[1]}"
 
 factory="$(predicted_factory "$admin" "$treasury")"
 implementation="$(predicted_implementation "$factory")"
+safe_expectations="$tmp_dir/safe-expectations.json"
 
 reports='[]'
 for index in 0 1; do
@@ -67,15 +68,36 @@ for index in 0 1; do
     ) >/dev/null
     [[ "$(cast code "$treasury" --rpc-url "$rpc_url")" != "0x" ]] || die "mock Safe was not deployed"
 
-    (
-        cd "$CONTRACTS_DIR"
-        ADMIN="$admin" TREASURY="$treasury" forge script \
-            script/DeployFactory.s.sol:DeployFactory \
+    if ((index == 0)); then
+        jq -n \
+            --arg treasury "$treasury" \
+            --arg owner "$owner" \
+            --arg code_hash "$(code_hash "$rpc_url" "$treasury")" \
+            '{configured: true, treasury: $treasury, owners: [$owner], threshold: 1,
+              proxy_code_hashes: [$code_hash]}' >"$safe_expectations"
+        ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
+            "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
+            --rpc-url "$rpc_url" \
+            --dry-run \
+            --safe-expectations "$safe_expectations" >/dev/null 2>&1
+        [[ "$(cast code "$factory" --rpc-url "$rpc_url")" == "0x" ]] || \
+            die "dry-run wrote factory code to the target chain"
+        ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
+            "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
             --rpc-url "$rpc_url" \
             --broadcast \
-            --private-key "$ANVIL_PRIVATE_KEY" \
-            -q
-    ) >/dev/null
+            --safe-expectations "$safe_expectations" >/dev/null 2>&1
+    else
+        (
+            cd "$CONTRACTS_DIR"
+            ADMIN="$admin" TREASURY="$treasury" forge script \
+                script/DeployFactory.s.sol:DeployFactory \
+                --rpc-url "$rpc_url" \
+                --broadcast \
+                --private-key "$ANVIL_PRIVATE_KEY" \
+                -q
+        ) >/dev/null
+    fi
 
     grant_calldata="$(cast calldata 'grantRole(bytes32,address)' "$operator_role" "$owner")"
     cast send "$treasury" 'exec(address,bytes)' "$factory" "$grant_calldata" \
@@ -106,14 +128,6 @@ done
 actual="$(jq -c '.[0] | del(.chain_id)' <<<"$reports")"
 committed="$(jq -c '{factory, implementation, forwarder, factory_code_hash, implementation_code_hash}' "$expected")"
 [[ "$actual" == "$committed" ]] || die "local deterministic vectors drifted; inspect compiler or constructor input changes"
-
-safe_expectations="$tmp_dir/safe-expectations.json"
-jq -n \
-    --arg treasury "$treasury" \
-    --arg owner "$owner" \
-    --arg code_hash "$(code_hash "${rpcs[0]}" "$treasury")" \
-    '{configured: true, treasury: $treasury, owners: [$owner], threshold: 1,
-      proxy_code_hashes: [$code_hash]}' >"$safe_expectations"
 
 verification="$tmp_dir/verification.json"
 ADMIN="$admin" TREASURY="$treasury" "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
