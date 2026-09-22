@@ -26,7 +26,7 @@ groups:
         annotations:
           summary: Successful backup marker is older than two minutes
       - alert: TopupLoopStopped
-        expr: (topup_loop_expected{producer_enabled="true"} unless on (loop, instance) topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"}) or ((time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"} > 120) and on (loop, instance) (topup_loop_wait_until_unixtime_seconds{producer_enabled="true"} <= time()))
+        expr: (topup_loop_expected{producer_enabled="true"} unless on (loop, loop_instance) topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"}) or ((time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"} > 120) and on (loop, loop_instance) (topup_loop_wait_until_unixtime_seconds{producer_enabled="true"} <= time()) and on (loop, loop_instance) (topup_loop_deadline_unixtime_seconds{producer_enabled="true"} <= time()))
         for: 1m
         labels: { severity: page }
         annotations:

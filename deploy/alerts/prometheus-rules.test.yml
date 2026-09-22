@@ -36,20 +36,31 @@ tests:
             exp_annotations:
               summary: Reconciliation found a new mismatch
 
-  - name: expected loop without a first heartbeat alerts
+  - name: one missing worker alerts without losing scrape target identity
     interval: 1m
     input_series:
-      - series: 'topup_loop_expected{loop="scanner",instance="1",producer_enabled="true"}'
+      - series: 'topup_loop_expected{loop="scanner",loop_instance="0",instance="topup:9464",producer_enabled="true"}'
         values: '1x5'
-      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+      - series: 'topup_loop_heartbeat_unixtime_seconds{loop="scanner",loop_instance="0",instance="topup:9464",producer_enabled="true"}'
+        values: '0+60x5'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",loop_instance="0",instance="topup:9464",producer_enabled="true"}'
+        values: '0x5'
+      - series: 'topup_loop_deadline_unixtime_seconds{loop="scanner",loop_instance="0",instance="topup:9464",producer_enabled="true"}'
+        values: '0x5'
+      - series: 'topup_loop_expected{loop="scanner",loop_instance="1",instance="topup:9464",producer_enabled="true"}'
+        values: '1x5'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",loop_instance="1",instance="topup:9464",producer_enabled="true"}'
+        values: '0x5'
+      - series: 'topup_loop_deadline_unixtime_seconds{loop="scanner",loop_instance="1",instance="topup:9464",producer_enabled="true"}'
         values: '0x5'
     alert_rule_test:
       - eval_time: 2m
         alertname: TopupLoopStopped
         exp_alerts:
           - exp_labels:
-              instance: "1"
+              instance: "topup:9464"
               loop: scanner
+              loop_instance: "1"
               producer_enabled: "true"
               severity: page
             exp_annotations:
@@ -58,13 +69,41 @@ tests:
   - name: intentional long wait suppresses a stale heartbeat alert
     interval: 1m
     input_series:
-      - series: 'topup_loop_expected{loop="scanner",instance="1",producer_enabled="true"}'
+      - series: 'topup_loop_expected{loop="scanner",loop_instance="1",producer_enabled="true"}'
         values: '1x10'
-      - series: 'topup_loop_heartbeat_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+      - series: 'topup_loop_heartbeat_unixtime_seconds{loop="scanner",loop_instance="1",producer_enabled="true"}'
         values: '1x10'
-      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",loop_instance="1",producer_enabled="true"}'
         values: '3600x10'
+      - series: 'topup_loop_deadline_unixtime_seconds{loop="scanner",loop_instance="1",producer_enabled="true"}'
+        values: '0x10'
     alert_rule_test:
       - eval_time: 6m
         alertname: TopupLoopStopped
         exp_alerts: []
+
+  - name: long running pump step is healthy until its execution deadline
+    interval: 1m
+    input_series:
+      - series: 'topup_loop_expected{loop="pump",loop_instance="0",producer_enabled="true"}'
+        values: '1x10'
+      - series: 'topup_loop_heartbeat_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
+        values: '1x10'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
+        values: '0x10'
+      - series: 'topup_loop_deadline_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
+        values: '300x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TopupLoopStopped
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TopupLoopStopped
+        exp_alerts:
+          - exp_labels:
+              loop: pump
+              loop_instance: "0"
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Service loop heartbeat stopped

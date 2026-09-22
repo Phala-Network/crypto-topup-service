@@ -312,8 +312,15 @@ impl Pump {
                 return;
             }
             crate::observability::heartbeat("pump", instance.clone());
+            crate::observability::execution_deadline(
+                "pump",
+                instance.clone(),
+                self.config.step_timeout,
+            );
 
-            match self.run_once().await {
+            let result = self.run_once().await;
+            crate::observability::clear_execution_deadline("pump", instance.clone());
+            match result {
                 Ok(RunOnceResult::Idle) => {
                     crate::observability::waiting(
                         "pump",

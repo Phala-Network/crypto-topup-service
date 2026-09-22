@@ -141,6 +141,10 @@ pub fn register_metrics() {
         "Unix time until which a loop is intentionally waiting"
     );
     describe_gauge!(
+        "topup_loop_deadline_unixtime_seconds",
+        "Unix time by which the current loop iteration is expected to complete"
+    );
+    describe_gauge!(
         "topup_loop_expected",
         "Whether a loop instance is expected to emit heartbeats"
     );
@@ -177,12 +181,13 @@ pub fn register_metrics() {
     counter!("topup_reconciliation_mismatches_total", "check" => "pending", "producer_enabled" => "false").absolute(0);
     counter!("topup_unsupported_inflows_total", "chain" => "pending", "producer_enabled" => "false").absolute(0);
     for loop_name in ["pump", "scanner", "outbox", "flusher", "reconciler"] {
-        gauge!("topup_loop_expected", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
-        gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
-        gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
-        gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_expected", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_deadline_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
     }
-    gauge!("topup_loop_expected", "loop" => "metrics", "instance" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_loop_expected", "loop" => "metrics", "loop_instance" => "pending", "producer_enabled" => "false").set(0);
 }
 
 /// Renders the process metrics in Prometheus text exposition format.
@@ -204,30 +209,48 @@ pub fn metrics_router() -> Router {
 }
 
 /// Registers one expected loop instance before its task starts.
-pub fn register_loop(loop_name: &'static str, instance: impl Into<String>) {
-    let instance = instance.into();
-    gauge!("topup_loop_expected", "loop" => loop_name, "instance" => instance.clone(), "producer_enabled" => "true").set(1);
-    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance, "producer_enabled" => "true").set(0);
+pub fn register_loop(loop_name: &'static str, loop_instance: impl Into<String>) {
+    let loop_instance = loop_instance.into();
+    gauge!("topup_loop_expected", "loop" => loop_name, "loop_instance" => loop_instance.clone(), "producer_enabled" => "true").set(1);
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.clone(), "producer_enabled" => "true").set(0);
+    gauge!("topup_loop_deadline_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance, "producer_enabled" => "true").set(0);
 }
 
 /// Records that a named service loop began one iteration.
-pub fn heartbeat(loop_name: &'static str, instance: impl Into<String>) {
-    let instance = instance.into();
-    gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "instance" => instance.clone(), "producer_enabled" => "true")
+pub fn heartbeat(loop_name: &'static str, loop_instance: impl Into<String>) {
+    let loop_instance = loop_instance.into();
+    gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.clone(), "producer_enabled" => "true")
         .set(metric_value(unix_now()));
-    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance, "producer_enabled" => "true").set(0);
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance, "producer_enabled" => "true").set(0);
 }
 
 /// Records that a loop instance completed useful work.
-pub fn progress(loop_name: &'static str, instance: impl Into<String>) {
-    gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "instance" => instance.into(), "producer_enabled" => "true")
+pub fn progress(loop_name: &'static str, loop_instance: impl Into<String>) {
+    gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.into(), "producer_enabled" => "true")
         .set(metric_value(unix_now()));
 }
 
 /// Records an intentional wait so stopped-loop alerts allow the full delay.
-pub fn waiting(loop_name: &'static str, instance: impl Into<String>, delay: Duration) {
-    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance.into(), "producer_enabled" => "true")
+pub fn waiting(loop_name: &'static str, loop_instance: impl Into<String>, delay: Duration) {
+    let loop_instance = loop_instance.into();
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.clone(), "producer_enabled" => "true")
         .set(metric_value(unix_now().saturating_add(delay.as_secs())));
+    clear_execution_deadline(loop_name, loop_instance);
+}
+
+/// Records the expected completion time of an in-flight loop iteration.
+pub fn execution_deadline(
+    loop_name: &'static str,
+    loop_instance: impl Into<String>,
+    duration: Duration,
+) {
+    gauge!("topup_loop_deadline_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.into(), "producer_enabled" => "true")
+        .set(metric_value(unix_now().saturating_add(duration.as_secs())));
+}
+
+/// Clears the execution deadline after an iteration completes.
+pub fn clear_execution_deadline(loop_name: &'static str, loop_instance: impl Into<String>) {
+    gauge!("topup_loop_deadline_unixtime_seconds", "loop" => loop_name, "loop_instance" => loop_instance.into(), "producer_enabled" => "true").set(0);
 }
 
 /// Updates scanner lag after one pass.
@@ -404,6 +427,7 @@ mod tests {
             "topup_loop_heartbeat_unixtime_seconds",
             "topup_loop_progress_unixtime_seconds",
             "topup_loop_wait_until_unixtime_seconds",
+            "topup_loop_deadline_unixtime_seconds",
             "topup_loop_expected",
         ] {
             assert!(rendered.contains(name), "missing {name}\n{rendered}");
