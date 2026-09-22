@@ -325,6 +325,34 @@ async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> 
 }
 
 #[tokio::test]
+async fn application_role_can_read_but_cannot_mutate_migration_history() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let versions: Vec<i64> =
+                sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                    .fetch_all(&context.app_pool)
+                    .await?;
+            ensure!(versions.contains(&20_260_922_000_015));
+
+            for statement in [
+                "UPDATE _sqlx_migrations SET version = version",
+                "DELETE FROM _sqlx_migrations",
+            ] {
+                assert_sqlstate(
+                    sqlx::query(statement)
+                        .execute(&context.app_pool)
+                        .await
+                        .err(),
+                    "42501",
+                )?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
