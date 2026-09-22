@@ -33,7 +33,11 @@ After a successful `wal-g wal-push` or `wal-g backup-push`, `walg-cron` atomical
 current Unix timestamp as decimal ASCII plus a newline to `TOPUP_BACKUP_TIMESTAMP_FILE` with mode
 `0644`; the marker is operational metadata and contains no secret. PostgreSQL
 uses `walg-cron wal-push %p` as its archive command, so the 60-second `archive_timeout` drives the
-two-minute alert. The measured compose shares
+two-minute alert. `archive_timeout` only switches a segment that contains new WAL, so the `backup`
+service also commits one `txid_current()` transaction every 30 seconds, and requests one
+`CHECKPOINT` per postmaster start because PostgreSQL 15+ otherwise ignores `archive_timeout` until
+the checkpointer first wakes, up to `checkpoint_timeout` after startup. An idle database therefore
+still archives a segment and refreshes the marker every minute. The measured compose shares
 `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and `backup`, and
 read-only with `topup`. The service exports the marker value as
 `topup_backup_last_success_unixtime_seconds`; a missing or malformed marker exports zero so the

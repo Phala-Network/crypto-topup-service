@@ -112,3 +112,22 @@ tests:
               severity: page
             exp_annotations:
               summary: Service loop heartbeat stopped
+
+  - name: an idle database refreshed by the WAL keepalive does not page until archiving stops
+    interval: 1m
+    input_series:
+      # The marker trails evaluation time by 90s while segments archive every minute, then stops at 5m.
+      - series: 'topup_backup_last_success_unixtime_seconds{producer_enabled="true"}'
+        values: '-90+60x5 210x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TopupBackupTooOld
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: TopupBackupTooOld
+        exp_alerts:
+          - exp_labels:
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Successful backup marker is older than two minutes

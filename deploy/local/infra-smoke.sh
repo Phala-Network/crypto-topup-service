@@ -68,10 +68,24 @@ printf '%s\n' "$settings" | grep -Fx 'archive_mode=on' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_timeout=60' >/dev/null
 echo "postgres archive settings passed"
 
-docker compose -p "$project" -f "$compose" exec -T postgres \
-    psql -U postgres -d topup -At -c 'select pg_switch_wal()' >/dev/null
+# No manual WAL switch: the backup keepalive must refresh the marker on an idle database.
 wait_for backup-marker docker compose -p "$project" -f "$compose" \
     exec -T postgres test -s /run/topup-observability/last-backup-unix-seconds
+marker_age() {
+    docker compose -p "$project" -f "$compose" exec -T postgres sh -c \
+        'echo $(( $(date -u +%s) - $(cat /run/topup-observability/last-backup-unix-seconds) ))'
+}
+idle_checks=16
+while [ "$idle_checks" -gt 0 ]; do
+    age=$(marker_age)
+    if [ "$age" -gt 120 ]; then
+        echo "idle backup marker is ${age}s old; TopupBackupTooOld would fire" >&2
+        exit 1
+    fi
+    idle_checks=$((idle_checks - 1))
+    sleep 10
+done
+echo "idle database kept the backup marker fresh for 160s"
 marker_mode=$(docker compose -p "$project" -f "$compose" exec -T postgres \
     stat -c %a /run/topup-observability/last-backup-unix-seconds)
 [ "$marker_mode" = 644 ]

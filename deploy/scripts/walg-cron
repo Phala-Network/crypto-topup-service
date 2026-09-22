@@ -67,6 +67,26 @@ if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi
 
+# archive_timeout only switches a segment that contains new WAL, and an idle database writes none:
+# one transaction id every 30 s keeps a segment switch, wal-push, and marker refresh every minute.
+# PostgreSQL 15+ also ignores archive_timeout after startup until the checkpointer first wakes (up
+# to checkpoint_timeout later), so a CHECKPOINT is requested once per postmaster start.
+wal_keepalive() {
+    woken_postmaster=
+    while :; do
+        postmaster=$(psql -XAtq -c 'SELECT pg_catalog.pg_postmaster_start_time()') ||
+            postmaster=
+        if [ -n "$postmaster" ] && [ "$postmaster" != "$woken_postmaster" ] &&
+            psql -XAtq -c 'CHECKPOINT'; then
+            woken_postmaster=$postmaster
+        fi
+        psql -XAtq -c 'SELECT pg_catalog.txid_current()' >/dev/null ||
+            echo "WAL keepalive transaction failed" >&2
+        sleep 30
+    done
+}
+wal_keepalive &
+
 while :; do
     now=$(date -u +%s)
     run_at=$(date -u -d "$(date -u +%F) $hour:$minute:00" +%s)
