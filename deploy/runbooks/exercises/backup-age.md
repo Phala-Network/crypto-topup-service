@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: blocked on D3 backup/restore automation in #58.
+
+G2 exercised once: [ ]
+
 ```sh
 docker compose -p wp-d5-exercise -f deploy/local/docker-compose.yml exec -T backup wal-g backup-list
 docker compose -p wp-d5-exercise -f deploy/local/docker-compose.yml exec -T postgres \
@@ -16,3 +20,4 @@ No backups found
 ```
 
 WAL archiving worked locally, but D3 encrypted base backup, age marker, and restore drill are absent.
+This exercise remains partial and does not satisfy G2.

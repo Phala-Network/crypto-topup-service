@@ -2,14 +2,14 @@
 
 ## Trigger
 
-Trigger when the two configured providers return different finalized block hashes, log evidence,
-or sanctions results. The current symptom is deposits remaining `detected` with disagreement
-evidence; PR #56 alert names are not on `main`.
+Trigger when the two configured providers return different finalized block hashes or log evidence,
+or when sanctions screening is unavailable or reports a hit. PR #56 alert names are not on `main`.
 
 ## Impact and blast radius
 
-Affected deposits cannot safely confirm. No credit should occur, but customer deposits on the
-route wait for agreement. Other chains and routes are unaffected.
+Chain-evidence disagreement keeps affected deposits retrying in `detected`. Sanctions screening
+has different precedence: any provider returning `Sanctioned` rejects the deposit immediately;
+`Unavailable` retries only when neither provider reports `Sanctioned`.
 
 ## First 5 minutes
 
@@ -34,9 +34,15 @@ SQL
 
 ## Decision tree
 
-- Same finalized height, different hash: treat as critical; keep settlement paused.
-- One provider behind but internally consistent: wait within provider SLA, then escalate/replace.
-- Same chain evidence but sanctions answers differ: keep the deposit waiting and page Compliance.
+- Same finalized height, different hash or log: retry with an alert; keep settlement paused.
+- One chain provider behind but internally consistent: retry within provider SLA, then
+  escalate/replace.
+- Any sanctions provider returns `Sanctioned`: the deposit is `rejected(sanctioned)` immediately,
+  even when a settlement pause exists; do not leave it waiting.
+- At least one sanctions provider returns `Unavailable` and neither reports `Sanctioned`: retry the
+  screen step and alert after the route's age threshold.
+- Both sanctions providers return `Clear`: continue normal screening and apply pause state only
+  afterward.
 
 ## Remediation
 
@@ -45,11 +51,18 @@ attested configuration, not runtime state. Replacing a provider requires a new r
 `topup route validate`, immutable image digests, a new compose hash, Safe allow-list approval, and
 the D2 upgrade flow.
 
+For a sanctions rejection, page Compliance and follow
+[Rejected funds at treasury](rejected-funds-at-treasury.md). The rejected funds still flush to the
+treasury, but Finance must not initiate an automatic refund or other transfer until Compliance has
+recorded the disposition.
+
 ## Verification
 
-Both `cast block finalized` calls must agree, affected logs must match, and deposit attempts must
-advance without manual database writes. Resume settlement with the same signed curl pattern against
-`/v1/admin/routes/$ROUTE/resume`.
+For chain disagreement, both `cast block finalized` calls must agree, affected logs must match, and
+deposit attempts must advance without manual database writes. For sanctions, verify the recorded
+provider answers and either `rejected(sanctioned)` or a retry transition exactly matches the truth
+table above. Resume settlement with the same signed curl pattern against
+`/v1/admin/routes/$ROUTE/resume` only after chain evidence is healthy.
 
 ## Rollback
 

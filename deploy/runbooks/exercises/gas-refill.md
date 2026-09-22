@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: partial; blocked on a local EVM/Safe transfer fixture and human Finance approval.
+
+G2 exercised once: [ ]
+
 The authenticated all-scope pause included `flush` and returned HTTP 200. The app-role snapshot
 returned `flushes=0`.
 

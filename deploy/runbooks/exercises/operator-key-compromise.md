@@ -2,6 +2,10 @@
 
 Date: 2026-09-22. Environment: local `deploy/local` stack, project `wp-d5-exercise`.
 
+Status: blocked on operator/v2 support in #60 and human Finance Safe execution.
+
+G2 exercised once: [ ]
+
 ```sh
 # Signed POST /v1/admin/routes/phala-cloud-sepolia-pha-usd/pause
 # body: {"scopes":["settlement","flush"]}

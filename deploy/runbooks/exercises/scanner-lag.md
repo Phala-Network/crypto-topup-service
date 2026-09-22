@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: partial; blocked on a controllable finalized-chain fixture and PR #56 alert rules.
+
+G2 exercised once: [ ]
+
 ```sh
 docker compose -p wp-d5-exercise -f deploy/local/docker-compose.yml logs --no-color topup
 ```

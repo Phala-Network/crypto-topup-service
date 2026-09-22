@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: partial; blocked on human Safe approval and deterministic factory deployment tooling.
+
+G2 exercised once: [ ]
+
 ```sh
 docker compose -p wp-d5-exercise -f deploy/local/docker-compose.yml exec -T topup \
   topup route validate /etc/topup/routes/phala-cloud-sepolia-pha.yaml

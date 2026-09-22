@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: partial; blocked on human status-page publication and incident-role assignment.
+
+G2 exercised once: [ ]
+
 ```sh
 curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18085/healthz
 docker compose -p wp-d5-exercise -f deploy/local/docker-compose.yml exec -T topup \

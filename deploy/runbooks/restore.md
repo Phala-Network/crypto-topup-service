@@ -15,13 +15,17 @@ database are affected. Deposit addresses remain derivable, but every settlement 
 
 ```sh
 curl --fail-with-body -sS "$BASE_URL/healthz"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT max(version) AS latest_migration FROM _sqlx_migrations WHERE success; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
 docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=200 postgres backup topup
 docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-list
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 ```
 
-The last command currently exits `restore-check is not implemented`; D3 is a blocking command gap.
+The application role cannot read `_sqlx_migrations`; that grant is tracked in
+[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61). Never place owner or
+migration credentials in the app container to bypass this boundary. The supported check will be
+`topup restore-check`, but current `main` exits `restore-check is not implemented`; D3 is pending in
+#58.
 
 ## Decision tree
 
@@ -31,9 +35,10 @@ The last command currently exits `restore-check is not implemented`; D3 is a blo
 
 ## Remediation
 
-**HUMAN-ONLY:** execute the reviewed D3 restore procedure once merged. `main` does not contain the
-encrypted key fallback, WAL fetch, throwaway-CVM drill, or implemented restore check, so this
-runbook intentionally stops rather than inventing commands.
+**HUMAN-ONLY:** execute D3's reviewed `deploy/RESTORE.md` once #58 merges. This runbook delegates
+restore execution to that procedure. Current `main` does not contain the encrypted key fallback,
+WAL fetch, throwaway-CVM drill, or implemented restore check, so it intentionally stops rather than
+inventing commands or using database-owner credentials in the app container.
 
 After restore, run read-only reconciliation:
 

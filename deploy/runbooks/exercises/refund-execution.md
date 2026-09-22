@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: blocked on C12 admin operations in #57 and human Finance Safe execution.
+
+G2 exercised once: [ ]
+
 Authenticated local probes produced:
 
 ```text

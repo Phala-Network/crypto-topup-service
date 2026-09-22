@@ -1,8 +1,8 @@
 # Operations runbooks
 
-These runbooks implement architecture sections 14-16 and plan work package D5. They are written
-against commit `6b868ea` on `main`. PRs #56 (alerts), #57 (C12 admin operations), and #58 (D3
-restore) were not on `main` when these commands were exercised on 2026-09-22.
+These runbooks implement architecture sections 14-16 and plan work package D5. PRs #56 (alerts),
+#57 (C12 admin operations), and #58 (D3 restore) were not on `main` when these commands were
+re-exercised on 2026-09-22.
 
 ## Required environment
 
@@ -70,12 +70,41 @@ Until it merges, route the metric or symptom below to the named runbook.
   implemented`.
 - Admin nudge, refund approve/record, and daily report are documented in OpenAPI but return HTTP
   `501` owned by C12.
-- There is no CLI command to derive or select `operator/v2`; Safe role rotation cannot be completed
-  until the service can start with the new operator derivation.
+- [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60): there is no CLI/config
+  path to derive or select `operator/v2`; Safe role rotation cannot be completed until the service
+  can start with the new operator derivation.
+- [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61): the flusher does not honor
+  the `flush` pause scope, and `topup_app` cannot read `_sqlx_migrations`. Runbooks use Safe role
+  revocation and/or service stop for flush control, and `topup restore-check` as the future
+  supported migration/restore entry point.
 - There is no deterministic factory deployment command on `main`; treasury migration stops before
   deployment rather than substituting an ad hoc deployment.
 - Alert rules and stable metric names are pending PR #56. D3 encrypted backup/restore automation is
   pending PR #58. C10 lock reservation operations are not on `main`.
+
+## Exercise status
+
+Only complete local scenarios carry a checked G2 box. Empty tables, HTTP 501 placeholders, and
+unreachable RPC probes are partial evidence and do not satisfy the gate.
+
+| Runbook | Local status | G2 exercised once |
+|---|---|---|
+| Operator key compromise | Blocked on #60 and Finance Safe execution | [ ] |
+| Provider disagreement | Partial; blocked on a dual-provider evidence fixture | [ ] |
+| Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
+| Stuck settlement | Blocked on #57 and a mock product scenario | [ ] |
+| 422 payload mismatch | Complete PostgreSQL/mock-product integration scenario | [x] |
+| Restore | Blocked on #58 | [ ] |
+| Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
+| Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
+| Refund execution | Blocked on #57 and Safe execution | [ ] |
+| Rejected funds at treasury | Blocked on #57 and Compliance/Safe disposition | [ ] |
+| Outbox backlog | Partial; blocked on a seeded delivered event and receiver | [ ] |
+| Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
+| Flush reverted or bisected | Complete PostgreSQL/Anvil/selective-revert scenario | [x] |
+| Lock exposure near cap | Partial non-zero aggregation; blocked on C10 enforcement | [ ] |
+| Backup age | Blocked on #58 backup/restore automation | [ ] |
+| Incident communication | Partial; publication and role actions are human-only | [ ] |
 
 Run `make runbook-check` after editing any runbook. Exercise evidence is under
 [`exercises/`](exercises/).

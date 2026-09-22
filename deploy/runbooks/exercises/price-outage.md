@@ -3,6 +3,10 @@
 Date: 2026-09-22. Authenticated route pause was exercised locally with the all-scope body, which
 includes `quotes`.
 
+Status: partial; blocked on controllable stale/unavailable/divergent price-source fixtures.
+
+G2 exercised once: [ ]
+
 ```text
 200 {"route":"phala-cloud-sepolia-pha-usd","paused_scopes":["addresses","flush","quotes","refunds","settlement"]}
 deposits rows: 0

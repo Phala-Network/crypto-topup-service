@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Status: blocked on the nudge implementation in #57 and a seeded mock-product settlement.
+
+G2 exercised once: [ ]
+
 ```sh
 # Signed POST /v1/admin/deposits/00000000-0000-0000-0000-000000000001/nudge
 ```
