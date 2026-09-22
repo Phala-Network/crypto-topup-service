@@ -1,45 +1,54 @@
-# dstack deployment
+# dstack staging deployment
 
-This directory implements work packages D1 and D2 from `docs/plan.md` and the deployment model in
-`docs/architecture.md` sections 5 and 14. It does not deploy a CVM. Every step that changes cloud,
-chain, Safe, registry, or secret state is marked **HUMAN-ONLY**.
+This directory implements work packages D1 and D2 from `docs/plan.md`. It prepares images and
+deployment artifacts; it does not deploy a CVM. D3 backup encryption, restore automation, and
+restore drills remain separate work.
 
-The commands below were checked on 2026-09-22 against dstack commit
-`721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22. The old
-`Phala-Network/phala-cloud-cli` repository is archived; the maintained CLI is in
-`Phala-Network/phala-cloud` and is published as the `phala` npm package.
+Every command that changes a registry, Phala Cloud, a CVM, a Safe, an on-chain contract, or secret
+state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against dstack commit
+`721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22.
 
-## Files
+## Deployment artifacts
 
-- `docker-compose.yml`: measured staging workload. Replace both image placeholders with registry
-  digests before computing the compose hash.
-- `app-compose.example.json`: dstack manifest policy, including the exact encrypted environment
-  variable allow-list and gateway port restriction.
-- `config/`: authoring copies of the Sepolia chain and route templates. Production compose embeds
-  these and the role initializer with `configs.content`, so their bytes are inside the measured
-  `docker_compose_file`; `validate-compose.sh` rejects drift between the copies.
-- `Dockerfile.postgres-walg`: PostgreSQL 16.15 plus WAL-G 3.0.9.
-- `local/`: local Postgres and dstack guest-agent simulator stack.
+- `docker-compose.yml` is the measured workload. Render immutable image references into a separate
+  staging file before giving it to the CLI.
+- `staging.env.example` lists every encrypted environment variable. `MIGRATE_DATABASE_URL` is sent
+  only to the one-shot `migrate` service; `topup` receives only the app-role `DATABASE_URL`.
+- `app-compose.example.json` and `render-app-compose.sh` are review previews of the fields CLI
+  1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
+- `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
+  compose and the compose hash reported for the CVM.
+- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G. Its hooks prepare D3 but do not claim
+  encrypted backups, a tested restore, or an achieved RPO/RTO.
 
-## Build and verify images
+## Build and publish images
 
-Build the service from the source commit timestamp:
+The service image must be published by the same reproducible build path that is verified locally:
 
 ```sh
 export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-  -t ghcr.io/phala-network/crypto-topup:staging .
-docker run --rm ghcr.io/phala-network/crypto-topup:staging topup --help
 deploy/verify-image.sh
 ```
 
-`verify-image.sh` performs two clean BuildKit OCI exports with provenance/SBOM disabled, rewrites
-layer timestamps to `SOURCE_DATE_EPOCH`, and compares both the OCI manifest and image config
-digests. This verifies the committed build path on the current builder and platform. It does not
-prove cross-builder or cross-architecture identity, and registry-added attestations can give the
-pushed multi-platform index a different digest.
+The script performs two clean BuildKit OCI exports for `linux/amd64`, with provenance and SBOM
+attachments disabled and `rewrite-timestamp=true`, then compares their OCI manifest and config
+digests. This proves repeatability on the current builder and platform, not cross-builder or
+cross-architecture identity.
 
-Build the database image and check WAL-G:
+**HUMAN-ONLY, registry credentials required:** set a candidate tag and let the same script build,
+push, read back, and compare the registry child manifest and config with both verified local builds:
+
+```sh
+export PUBLISH_IMAGE=ghcr.io/phala-network/crypto-topup:staging-candidate
+deploy/verify-image.sh
+docker buildx imagetools inspect "$PUBLISH_IMAGE"
+```
+
+Use the reported platform manifest digest as `TOPUP_IMAGE`; do not deploy the tag or assume a
+registry index digest equals its platform manifest digest. Registry-added indexes or attestations
+can legitimately change the outer index digest while the child manifest and config stay identical.
+
+Build and publish PostgreSQL/WAL-G separately:
 
 ```sh
 docker build -f deploy/Dockerfile.postgres-walg \
@@ -47,212 +56,238 @@ docker build -f deploy/Dockerfile.postgres-walg \
 docker run --rm ghcr.io/phala-network/postgres-walg:16-3.0.9 wal-g --version
 ```
 
-**HUMAN-ONLY, registry credentials required:** push both images, then record immutable digests:
+**HUMAN-ONLY, registry credentials required:** push that image, inspect its digest, and set
+`POSTGRES_WALG_IMAGE` to `repository@sha256:...`.
+
+Render literal, nonzero image digests into the compose. Secret values remain `${NAME:-}` references:
 
 ```sh
-docker push ghcr.io/phala-network/crypto-topup:staging
-docker push ghcr.io/phala-network/postgres-walg:16-3.0.9
-docker buildx imagetools inspect ghcr.io/phala-network/crypto-topup:staging
-docker buildx imagetools inspect ghcr.io/phala-network/postgres-walg:16-3.0.9
+export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:<64-hex-digest>
+export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:<64-hex-digest>
+deploy/render-compose.sh > deploy/docker-compose.staging.yml
+deploy/validate-compose.sh
+docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```
 
-Set `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE` to `repository@sha256:...`; never deploy tags.
+Keep `.env.staging` outside Git, based on `staging.env.example`. Both database URLs are encrypted,
+but the compose enforces their separate consumers. Validate the route with real contract addresses
+and without `--template` before deployment.
 
-## Configure staging
+## Authoritative manifest and hash
 
-1. Replace all address placeholders in `config/chains/ethereum-sepolia.yaml` and
-   `config/routes/phala-cloud-sepolia-pha.yaml`. Keep their values aligned.
-2. Validate the route template, then validate it again without template mode after real addresses
-   are present:
+CLI 1.1.22 builds app-compose internally from the exact YAML bytes, privacy/storage flags, and env
+names passed to `phala deploy`. It derives `allowed_envs` from `-e`; it does not submit this repo's
+`app-compose.example.json`, and it does not submit that old template's `port_policy`. The CLI has no
+command that prints the complete app-compose before initial provisioning.
 
-   ```sh
-   docker run --rm -v "$PWD/deploy/config:/etc/topup/config:ro" "$TOPUP_IMAGE" \
-     topup route validate --template \
-     /etc/topup/config/routes/phala-cloud-sepolia-pha.yaml
-   docker run --rm -v "$PWD/deploy/config:/etc/topup/config:ro" "$TOPUP_IMAGE" \
-     topup route validate /etc/topup/config/routes/phala-cloud-sepolia-pha.yaml
-   ```
+Therefore:
 
-3. Create a non-committed env file containing every name in `allowed_envs`. Database URLs should
-   use the owner for `MIGRATE_DATABASE_URL` and `topup_service` for `DATABASE_URL`. Object storage
-   variables are used by PostgreSQL continuous archiving and the backup service.
-4. **HUMAN-ONLY, provider/object-storage/product credentials required:** confirm the credentials
-   are staging-scoped, have minimum permissions, and are not present in the compose or shell
-   history.
+- Never authorize a hash produced from `render-app-compose.sh` before deployment. It is only useful
+  for review and tests.
+- For an existing on-chain-KMS CVM, `phala deploy --prepare-only --json` returns the authoritative
+  `compose_hash` and a commit token bound to that prepared update. Approve that hash, then commit the
+  same token against the same `--cvm-id`.
+- For first-time provisioning, CLI 1.1.22 does not stop at `--prepare-only`. It provisions the CVM,
+  deploys its app authorization contract, registers the initial hash, and commits the CVM. Treat the
+  first CVM as staging, read back its attested `compose_file`, and verify it before enabling a route.
 
-WAL-G hooks are present, but D3 is not complete: the operator must not claim encrypted backups or
-an RPO/RTO until `backup/v1` key wrapping, restore-check, and the weekly restore drill are
-implemented and exercised.
+`compose-hash.sh APP_COMPOSE_JSON` canonicalizes a read-back manifest for independent comparison; it
+must not be used to guess the CLI's pre-deployment manifest.
 
-## Egress and ingress
+## A. First-time provisioning
 
-`app-compose.example.json` enables the dstack gateway and restricts gateway ingress to CVM port
-8080. The expected TLS endpoint is the Phala/dstack gateway URL for port 8080; PostgreSQL has no
-published port.
-
-The dstack app-compose schema does not provide a hostname egress allow-list. **HUMAN-ONLY, cloud
-network authority required:** before enabling a route, enforce outbound access at the CVM/network
-layer to only:
-
-- the two hosts extracted from `RPC_PROVIDER_A_URL` and `RPC_PROVIDER_B_URL`;
-- Coin Metrics, Binance, and Kraken hosts selected by the adapters;
-- the object-storage endpoint in `AWS_ENDPOINT`/`WALG_S3_PREFIX`;
-- the product host from the attested route `destination.settlement_url`;
-- DNS and platform endpoints required by the selected Phala Cloud/dstack environment.
-
-Record the resolved hostnames, ports, and the enforcement mechanism in the deployment ticket.
-Do not put a firewall security gate in `pre_launch_script`: dstack documents that it runs after
-Docker and cannot reliably constrain restored containers before they start.
-
-## Compose hash and allow-list
-
-Render the example app-compose with the exact compose text and compute dstack's deterministic
-SHA-256 (recursive key sorting, compact JSON):
+This staging workload uses on-chain KMS on Base mainnet, chain ID 8453. The Sepolia chain in the
+route is the asset chain and is independent of the KMS control plane. On 2026-09-22, CLI 1.1.22
+reported the Base KMS contract as `0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C`; re-query it and
+confirm the selected contract has allowed devices and an allowed production OS image:
 
 ```sh
-deploy/render-app-compose.sh > deploy/app-compose.staging.json
-COMPOSE_HASH="0x$(deploy/compose-hash.sh)"
-printf '%s\n' "$COMPOSE_HASH"
+npx --yes phala@1.1.22 kms base --json > base-kms.json
+jq '{chain_id, contracts: [.contracts[] | {contract_address, devices, os_images}]}' base-kms.json
+export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 ```
 
-The rendered file is public attestation input and contains no secrets. Run
-`deploy/validate-compose.sh` before rendering, and recompute after any image, route, chain, policy,
-port, or compose change.
-
-**HUMAN-ONLY, finance Safe/on-chain credentials required:** submit the following calldata to the
-app's dstack `DstackApp` contract and wait for finality:
+**HUMAN-ONLY, Phala Cloud, Base RPC, registry, and provisioner-key credentials required:** authenticate
+and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager. Do not add
+`--prepare-only`; it does not halt the create path in this CLI version.
 
 ```sh
-export APP_AUTH_CONTRACT=0x...
-cast calldata 'addComposeHash(bytes32)' "$COMPOSE_HASH"
-cast call "$APP_AUTH_CONTRACT" 'allowedComposeHashes(bytes32)(bool)' "$COMPOSE_HASH" \
-  --rpc-url "$SEPOLIA_RPC_URL"
-```
-
-The calldata must be executed by the contract owner, normally through the Safe. The final `cast
-call` must return `true` before deployment.
-
-## Deploy with Phala Cloud
-
-Use the pinned CLI without installing it globally:
-
-```sh
-npx phala@1.1.22 --version
-```
-
-**HUMAN-ONLY, Phala Cloud credentials required:** authenticate and prepare the deployment. The
-prepare step is the authoritative cloud-side check of the compose and registered hash:
-
-```sh
-npx phala@1.1.22 login --no-open
-npx phala@1.1.22 deploy \
+npx --yes phala@1.1.22 login --no-open
+npx --yes phala@1.1.22 deploy --json \
   --name crypto-topup-staging \
-  --compose deploy/docker-compose.yml \
-  --env .env.staging \
+  --compose deploy/docker-compose.staging.yml \
+  -e .env.staging \
   --instance-type tdx.medium \
   --fs ext4 \
+  --kms base \
+  --kms-contract "$KMS_CONTRACT" \
+  --no-dev-os \
   --no-public-logs \
   --no-public-sysinfo \
   --public-tcbinfo \
   --secure-time \
-  --prepare-only
+  --wait > provision.json
+export CVM_ID="$(jq -er '.vm_uuid' provision.json)"
+export APP_ID="$(jq -er '.app_id' provision.json)"
+case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
 ```
 
-Compare the prepared compose hash with `$COMPOSE_HASH`. After the Safe transaction is final,
-commit using the token and transaction hash printed by the prepare command:
+The CLI deploys a new `DstackApp` authorization contract and returns its address as `app_id`. Its
+initializer registers the initial compose hash and device, and the provisioner EOA initially owns
+the contract.
+
+**HUMAN-ONLY, provisioner key and Finance Safe required:** transfer ownership using the
+`Ownable2Step` flow, then have the Finance Safe execute `acceptOwnership()` on Base:
 
 ```sh
-npx phala@1.1.22 deploy \
+cast send "$APP_AUTH_CONTRACT" 'transferOwnership(address)' "$FINANCE_SAFE" \
+  --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY"
+cast calldata 'acceptOwnership()'
+cast call "$APP_AUTH_CONTRACT" 'owner()(address)' --rpc-url "$ETH_RPC_URL"
+```
+
+The final owner must equal `$FINANCE_SAFE`. The calldata printed above is the Safe transaction data;
+do not remove the provisioner's access until the Safe acceptance is final.
+
+Read back and verify the artifact that was actually deployed:
+
+```sh
+npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
+npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
+deploy/verify-attested-compose.sh \
+  attestation.json cvm.json deploy/docker-compose.staging.yml
+```
+
+If the attestation is unavailable or its `compose_file` cannot be read back, stop. Do not enable the
+route or represent the locally previewed manifest as the deployed artifact.
+
+## B. Upgrade an existing CVM
+
+Use the same literal compose and env file for prepare and commit. The commit token binds the update,
+so any compose/env change requires a new prepare.
+
+**HUMAN-ONLY, Phala Cloud and encrypted-env credentials required:** prepare against the existing CVM:
+
+```sh
+export CVM_ID=<existing-cvm-id>
+npx --yes phala@1.1.22 deploy --json \
+  --cvm-id "$CVM_ID" \
+  --compose deploy/docker-compose.staging.yml \
+  -e .env.staging \
+  --prepare-only > prepare.json
+export COMPOSE_HASH="$(jq -er '.compose_hash' prepare.json)"
+export COMMIT_TOKEN="$(jq -er '.commit_token' prepare.json)"
+export APP_ID="$(jq -er '.app_id' prepare.json)"
+case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
+```
+
+Confirm `prepare_only` is true and review `onchain_status`. **HUMAN-ONLY, Finance Safe required:**
+approve the exact returned hash on the Base `DstackApp`, wait for finality, and record the Safe
+transaction hash:
+
+```sh
+jq '{prepare_only, compose_hash, app_id, device_id, chain_id, onchain_status}' prepare.json
+cast calldata 'addComposeHash(bytes32)' "$COMPOSE_HASH"
+cast call "$APP_AUTH_CONTRACT" 'allowedComposeHashes(bytes32)(bool)' "$COMPOSE_HASH" \
+  --rpc-url "$ETH_RPC_URL"
+export ALLOWLIST_TRANSACTION_HASH=<final-safe-transaction-hash>
+```
+
+The call must return `true`. If `onchain_status.device_id_allowed` is false, the Safe must also
+execute `addDevice(bytes32)` for the returned `device_id` before commit.
+
+**HUMAN-ONLY, Phala Cloud credentials required:** commit the same prepared update to the same target:
+
+```sh
+npx --yes phala@1.1.22 deploy --json \
+  --cvm-id "$CVM_ID" \
   --commit \
-  --token "$PHALA_COMMIT_TOKEN" \
+  --token "$COMMIT_TOKEN" \
   --compose-hash "$COMPOSE_HASH" \
   --transaction-hash "$ALLOWLIST_TRANSACTION_HASH" \
-  --wait
-npx phala@1.1.22 link crypto-topup-staging
-npx phala@1.1.22 ps
-npx phala@1.1.22 logs topup --tail 100
+  --wait > commit.json
+npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
+npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
+deploy/verify-attested-compose.sh \
+  attestation.json cvm.json deploy/docker-compose.staging.yml
 ```
 
-Passing `--env` encrypts the allowed variables client-side before upload. For later secret-only
-rotation, use:
+After the observation window, **HUMAN-ONLY, Finance Safe required:** remove the old hash with
+`removeComposeHash(bytes32)`. Rollback is another upgrade: prepare the retained old compose, approve
+its returned hash if necessary, commit its token, and repeat attestation checks. Never roll a schema
+back destructively; use a forward repair migration.
+
+## Attestation, ingress, and egress
+
+Request an application-bound quote with a fresh nonce:
 
 ```sh
-npx phala@1.1.22 envs update crypto-topup-staging --env .env.staging
-```
-
-## Verify attestation
-
-Generate an application-bound quote through the mounted dstack v1 socket:
-
-```sh
-NONCE="$(openssl rand -hex 32)"
-npx phala@1.1.22 ssh crypto-topup-staging -- \
+export NONCE="$(openssl rand -hex 32)"
+npx --yes phala@1.1.22 ssh "$CVM_ID" -- \
   sh -lc "docker exec \"\$(docker ps -q --filter label=com.docker.compose.service=topup)\" \
   topup attest --nonce '$NONCE'"
 ```
 
-Also retrieve the platform evidence and measured runtime configuration:
+**HUMAN-ONLY, verifier approval required:** verify the platform certificate/quote and TCB in the
+Phala Trust Center or official dstack verification flow, replay the RTMR event log, confirm the
+attested compose hash, and bind the fresh nonce to the returned `settlement/v1` public key.
+
+CLI 1.1.22 does not submit `port_policy`. Ingress is therefore verified after deployment from the
+attested compose and the live gateway:
 
 ```sh
-npx phala@1.1.22 cvms attestation crypto-topup-staging --json > attestation.json
-npx phala@1.1.22 runtime-config crypto-topup-staging --json > runtime-config.json
+npx --yes phala@1.1.22 runtime-config "$CVM_ID" --json > runtime-config.json
+jq '{hostname, default_gateway_domain}' runtime-config.json
+jq -r '.compose_file' attestation.json | jq -r '.docker_compose_file' \
+  | docker compose -f - config --format json \
+  | jq '.services | with_entries(.value = (.value.ports // []))'
 ```
 
-**HUMAN-ONLY, verifier approval required:** use the Phala Trust Center or the official
-`dstack-verifier`/DCAP verification flow to verify platform signatures and TCB, replay the runtime
-event log, and confirm its compose hash equals `$COMPOSE_HASH`. Confirm the `topup attest` report
-data binds the fresh nonce and returned `settlement/v1` public key, then pin `(keyid, public key)`
-in the product verifier.
+The result must expose only `topup` TCP port 8080; `postgres`, `migrate`, and `backup` must expose no
+ports. **HUMAN-ONLY, external network access required:** derive the port-8080 TLS hostname from the
+returned gateway domain, request `/openapi.json`, validate its certificate, and confirm connection
+attempts to PostgreSQL are rejected. Record the exact URL and results in the deployment ticket.
 
-Before enabling the Sepolia route, also check: both RPC providers agree at `finalized`; factory,
-implementation, treasury Safe, and sample CREATE2 address checks pass; the product accepts the
-pinned settlement key; WAL archiving is current; egress enforcement is active; policy numbers and
-pilot caps have human sign-off.
+dstack app-compose has no hostname egress allow-list. **HUMAN-ONLY, cloud network authority
+required:** restrict outbound access to the two RPC hosts, configured price-source hosts, object
+storage host, attested product settlement host, DNS, and required Phala/dstack platform endpoints.
+Record resolved hostnames, ports, and enforcement rules. Do not treat `pre_launch_script` as the
+firewall boundary because it runs after Docker startup.
 
-## Upgrade and rollback
+Before enabling a route, also confirm real route addresses validate without template mode, both RPC
+providers agree at `finalized`, Safe/factory/implementation/CREATE2 checks pass, migrations completed,
+WAL archiving is current, the product pins the attested settlement key, pilot limits are approved,
+and D3 limitations are accepted explicitly.
 
-Upgrade order:
+## Local verification
 
-1. Build and verify the new image, then pin its registry digest.
-2. Update compose/config, render app-compose, and compute the new hash.
-3. **HUMAN-ONLY:** add the new hash through the Safe and wait for finality.
-4. **HUMAN-ONLY:** run `phala deploy --prepare-only`, verify the hash, then `--commit --wait`.
-5. Verify migrations, health, route validation, attestation, reconciliation, and backup age.
-6. **HUMAN-ONLY:** remove the old hash only after the observation window:
-
-   ```sh
-   cast calldata 'removeComposeHash(bytes32)' "$OLD_COMPOSE_HASH"
-   ```
-
-Rollback uses the same process: keep the previous digest and compose artifact, re-add its hash if
-necessary, prepare/commit that compose, verify attestation, and only then remove the failed hash.
-Never roll database schema backward destructively; use a forward repair migration.
-
-## Local development
-
-The local simulator image is built from the pinned dstack commit because that commit publishes no
-simulator container image. It exposes the same `/var/run/dstack.sock` v1 surface through a shared
-volume.
+The local stack builds dstack's simulator from the pinned source revision and shares its
+`/var/run/dstack.sock` with `topup`.
 
 ```sh
 make up
 make down
-make smoke
+make infra-smoke
+SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 ```
 
-`make smoke` builds the local images, starts Postgres and the simulator, applies migrations,
-validates the route template, requests `topup attest --nonce deadbeef`, conditionally checks
-`/healthz` when C9 is present, and always removes its containers and volumes.
+`infra-smoke.sh` tests migrations, route-template validation, simulator attestation, the running
+backup service, WAL-G dry-run commands, and PostgreSQL archive settings, then removes its containers
+and volumes. `service-smoke.sh` is opt-in and fails unless `topup run --help` exposes the unified
+`--bind` and `--route` options; when available it checks the TCP listener and `GET /openapi.json`.
+A skipped service smoke is not a successful service check.
 
-## Verified upstream facts
+## Pinned upstream references
 
-- dstack app-compose fields, `allowed_envs`, encrypted env handling, and compose measurement:
+- dstack boundaries and encrypted env:
   <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/security/cvm-boundaries.md>
-- dstack socket mount, gateway URL convention, and encrypted env usage:
+- dstack socket, gateway, and simulator usage:
   <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/usage.md>
-- official simulator source and fixtures:
-  <https://github.com/Dstack-TEE/dstack/tree/721df1b93fd93884224f2261c37dd86ca250432f/sdk/simulator>
-- dstack verification flow:
+- dstack verification:
   <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/verification.md>
-- current Phala Cloud CLI deployment commands:
-  <https://github.com/Phala-Network/phala-cloud/blob/main/cli/docs/deploy.md>
+- Phala CLI 1.1.22 deploy implementation:
+  <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts>
+- Phala CLI 1.1.22 flags:
+  <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts>
+- dstack `DstackApp` authorization contract:
+  <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/dstack/kms/auth-eth/contracts/DstackApp.sol>

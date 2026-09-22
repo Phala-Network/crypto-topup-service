@@ -15,29 +15,16 @@
     "RPC_PROVIDER_A_URL",
     "RPC_PROVIDER_B_API_KEY",
     "RPC_PROVIDER_B_URL",
+    "TOPUP_ADMIN_KID",
+    "TOPUP_ADMIN_PUBLIC_KEY",
     "TOPUP_APP_PASSWORD",
     "WALG_S3_PREFIX"
   ],
   "docker_compose_file": "",
-  "gateway_enabled": true,
-  "key_provider": "kms",
-  "key_provider_id": "",
-  "kms_enabled": true,
-  "manifest_version": 2,
-  "name": "crypto-topup-staging",
-  "no_instance_id": false,
-  "port_policy": {
-    "ports": [
-      {
-        "port": 8080
-      }
-    ],
-    "restrict_mode": true
-  },
+  "name": "",
   "public_logs": false,
   "public_sysinfo": false,
   "public_tcbinfo": true,
-  "runner": "docker-compose",
   "secure_time": true,
   "storage_fs": "ext4"
 }

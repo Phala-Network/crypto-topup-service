@@ -7,13 +7,20 @@ rendered=$(mktemp)
 compose_envs=$(mktemp)
 allowed_envs=$(mktemp)
 escaped_config=$(mktemp)
+staging_envs=$(mktemp)
 
 cleanup() {
-    rm -f "$rendered" "$compose_envs" "$allowed_envs" "$escaped_config"
+    rm -f "$rendered" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs"
 }
 trap cleanup EXIT INT TERM
 
 docker compose -f "$compose" config --format json >"$rendered"
+
+if jq -e '.services.topup.environment | has("MIGRATE_DATABASE_URL")' "$rendered" \
+    >/dev/null; then
+    echo "topup must not receive MIGRATE_DATABASE_URL" >&2
+    exit 1
+fi
 
 compare_config() {
     name=$1
@@ -43,6 +50,22 @@ jq -r '.allowed_envs[]' "$root/deploy/app-compose.example.json" | sort >"$allowe
 cmp -s "$compose_envs" "$allowed_envs" || {
     echo "app-compose allowed_envs differs from compose secret variables" >&2
     diff -u "$compose_envs" "$allowed_envs" >&2 || true
+    exit 1
+}
+
+awk '
+/^[[:space:]]*($|#)/ { next }
+{
+    line = $0
+    sub(/^[[:space:]]*export[[:space:]]+/, "", line)
+    if (line !~ /^[A-Za-z_][A-Za-z0-9_]*=/) exit 64
+    sub(/=.*/, "", line)
+    print line
+}
+' "$root/deploy/staging.env.example" | sort -u >"$staging_envs"
+cmp -s "$staging_envs" "$allowed_envs" || {
+    echo "staging.env.example names differ from app-compose allowed_envs" >&2
+    diff -u "$staging_envs" "$allowed_envs" >&2 || true
     exit 1
 }
 

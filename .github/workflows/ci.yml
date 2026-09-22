@@ -138,11 +138,20 @@ jobs:
           docker compose -f deploy/local/docker-compose.yml config >/dev/null
       - name: Validate deployment scripts and app compose
         run: |
-          for file in deploy/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/*; do
-            sh -n "$file"
+          for file in deploy/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
+            case "$(head -n 1 "$file")" in
+              *bash) bash -n "$file" ;;
+              *) sh -n "$file" ;;
+            esac
           done
           jq empty deploy/app-compose.example.json
-          deploy/compose-hash.sh
+          deploy/tests/walg-cron.sh
+          deploy/tests/render-compose.sh
+          TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+          POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+            deploy/render-app-compose.sh deploy/staging.env.example | jq -e \
+              '.docker_compose_file | contains("@sha256:1111111111111111111111111111111111111111111111111111111111111111")' \
+              >/dev/null
       - name: Build postgres-walg image
         run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
       - name: Check WAL-G runtime
