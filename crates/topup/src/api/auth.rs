@@ -430,9 +430,11 @@ mod tests {
         let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
         assert_eq!(vectors.len(), 5);
         assert!(
-            vectors.iter().any(|vector| vector["headers"]["signature-input"]
-                .as_str()
-                .is_some_and(|input| input.contains(";nonce=\""))),
+            vectors
+                .iter()
+                .any(|vector| vector["headers"]["signature-input"]
+                    .as_str()
+                    .is_some_and(|input| input.contains(";nonce=\""))),
             "the fixture must cover the nonce parameter"
         );
 
