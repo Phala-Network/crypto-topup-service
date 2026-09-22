@@ -16,10 +16,15 @@ pub(crate) fn parse_and_validate(yaml: &str, template: bool) -> Result<RouteFile
 
 #[cfg(test)]
 mod tests {
+    use topup_core::route::ChainConfig;
+
     use super::*;
 
     const VALID: &str = include_str!("../tests/fixtures/phala-cloud-pha.yaml");
     const TEMPLATE: &str = include_str!("../../../examples/phala-cloud-pha.yaml");
+    const DEPLOY_ROUTE: &str =
+        include_str!("../../../deploy/config/routes/phala-cloud-sepolia-pha.yaml");
+    const DEPLOY_CHAIN: &str = include_str!("../../../deploy/config/chains/ethereum-sepolia.yaml");
 
     #[test]
     fn valid_fixture_parses_and_validates() {
@@ -34,6 +39,41 @@ mod tests {
                 .contains("forwarder_factory")
         );
         parse_and_validate(TEMPLATE, true).expect("template placeholders must be allowed");
+    }
+
+    #[test]
+    fn attested_deployment_configs_match_the_schema() {
+        parse_and_validate(DEPLOY_ROUTE, true).expect("attested route template must parse");
+        let chain: ChainConfig =
+            serde_saphyr::from_str(DEPLOY_CHAIN).expect("attested chain file must parse");
+        chain
+            .operator_key_version()
+            .expect("attested chain file must set a valid operator key version");
+    }
+
+    #[test]
+    fn operator_key_version_is_required_and_positive() {
+        assert!(
+            parse_and_validate(&VALID.replace("  operator_key_version: 1\n", ""), false)
+                .expect_err("missing operator key version must fail")
+                .contains("operator_key_version")
+        );
+        for template in [false, true] {
+            assert!(
+                parse_and_validate(
+                    &VALID.replace("operator_key_version: 1", "operator_key_version: 0"),
+                    template
+                )
+                .expect_err("operator key version zero must fail")
+                .contains("chain.operator_key_version")
+            );
+        }
+        let rotated = parse_and_validate(
+            &VALID.replace("operator_key_version: 1", "operator_key_version: 2"),
+            false,
+        )
+        .expect("a later operator key version is valid");
+        assert_eq!(rotated.chain.operator_key_version().map(u32::from), Ok(2));
     }
 
     #[test]

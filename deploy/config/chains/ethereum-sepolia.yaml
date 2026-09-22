@@ -2,6 +2,7 @@ chain_id: 11155111
 name: ethereum-sepolia
 finality: finalized
 rpc_providers: [provider-a, provider-b]
+operator_key_version: 1
 contracts:
   forwarder_factory: "0x0000000000000000000000000000000000000000"
   implementation: "0x0000000000000000000000000000000000000000"

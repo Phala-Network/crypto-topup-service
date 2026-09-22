@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::time::timeout;
 use topup_adapters::chain::flush::{
-    decode_address_of, decode_balance_of, encode_address_of, encode_balance_of, encode_flush,
+    decode_address_of, decode_balance_of, decode_has_role, encode_address_of, encode_balance_of,
+    encode_flush, encode_has_role, operator_role,
 };
 
 use super::{ChainClient, ChainError, ChainLog, ChainReceipt, FeeQuote, NonceReceiptSearch};
@@ -255,6 +256,25 @@ impl ChainClient for AlloyChainClient {
                 }
             }
         }
+    }
+
+    async fn has_operator_role(
+        &self,
+        factory: Address,
+        operator: Address,
+    ) -> Result<bool, ChainError> {
+        let tx = TransactionRequest::default()
+            .to(factory)
+            .input(TransactionInput::new(encode_has_role(
+                operator_role(),
+                operator,
+            )));
+        let output = timeout(self.request_timeout, self.provider.call(tx))
+            .await
+            .map_err(|_| ChainError::rpc("hasRole call timed out"))?
+            .map_err(transport_error)?;
+        decode_has_role(&output)
+            .map_err(|error| ChainError::rpc(format!("decode hasRole result: {error}")))
     }
 
     async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError> {
