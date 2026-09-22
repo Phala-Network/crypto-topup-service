@@ -294,34 +294,39 @@ pub async fn rebind_planned_flushes(
     if plans.is_empty() {
         return Ok(plans);
     }
+    let stale = plans
+        .iter()
+        .filter(|plan| plan.operator != operator)
+        .collect::<Vec<_>>();
+    if stale.is_empty() {
+        return Ok(plans);
+    }
     let mut nonce = next_flush_nonce(transaction, chain_id, operator, pending_nonce).await?;
-    for plan in &plans {
-        if plan.operator != operator || plan.nonce != nonce {
-            sqlx::query(
-                "UPDATE flushes SET operator = $2, nonce = $3::text::numeric WHERE id = $1 AND status = 'planned'",
-            )
-            .bind(plan.id)
-            .bind(address_hex(operator))
-            .bind(nonce.to_string())
-            .execute(&mut **transaction)
-            .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO audit (id, actor, action, subject, reason)
-                VALUES ($1, $2, 'flush.plan_operator_rebound', $3, $4)
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(address_hex(operator))
-            .bind(plan.id.to_string())
-            .bind(format!(
-                "rebound unsigned plan from operator {} nonce {}",
-                address_hex(plan.operator),
-                plan.nonce
-            ))
-            .execute(&mut **transaction)
-            .await?;
-        }
+    for plan in stale {
+        sqlx::query(
+            "UPDATE flushes SET operator = $2, nonce = $3::text::numeric WHERE id = $1 AND status = 'planned' AND operator <> $2",
+        )
+        .bind(plan.id)
+        .bind(address_hex(operator))
+        .bind(nonce.to_string())
+        .execute(&mut **transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit (id, actor, action, subject, reason)
+            VALUES ($1, $2, 'flush.plan_operator_rebound', $3, $4)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(address_hex(operator))
+        .bind(plan.id.to_string())
+        .bind(format!(
+            "rebound unsigned plan from operator {} nonce {}",
+            address_hex(plan.operator),
+            plan.nonce
+        ))
+        .execute(&mut **transaction)
+        .await?;
         nonce = nonce.checked_add(1).ok_or_else(|| {
             sqlx::Error::Protocol("flush nonce overflowed while rebinding plans".to_owned())
         })?;

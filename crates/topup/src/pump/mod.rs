@@ -86,6 +86,13 @@ impl StepSet {
         }
     }
 
+    /// Replaces the step registered for `detected` deposits.
+    #[must_use]
+    pub fn with_detected(mut self, detected: Box<dyn Step>) -> Self {
+        self.detected = detected;
+        self
+    }
+
     /// Replaces the step registered for `confirmed` deposits.
     #[must_use]
     pub fn with_confirmed(mut self, confirmed: Box<dyn Step>) -> Self {
@@ -97,6 +104,13 @@ impl StepSet {
     #[must_use]
     pub fn with_cleared(mut self, cleared: Box<dyn Step>) -> Self {
         self.cleared = cleared;
+        self
+    }
+
+    /// Replaces the step registered for `credited` deposits.
+    #[must_use]
+    pub fn with_credited(mut self, credited: Box<dyn Step>) -> Self {
+        self.credited = credited;
         self
     }
 
@@ -115,64 +129,15 @@ impl StepSet {
 pub struct NoopStepSet;
 
 impl NoopStepSet {
-    /// Starts a composable registry with no-op defaults for every state.
-    #[must_use]
-    pub fn builder() -> StepSetBuilder {
-        StepSetBuilder::default()
-    }
-
     /// Builds a registry whose steps leave every deposit waiting.
     #[must_use]
     pub fn build() -> StepSet {
-        Self::builder().build()
-    }
-}
-
-/// Composable state-step registry builder used by independently delivered work packages.
-pub struct StepSetBuilder {
-    detected: Box<dyn Step>,
-    confirmed: Box<dyn Step>,
-    cleared: Box<dyn Step>,
-    credited: Box<dyn Step>,
-}
-
-impl Default for StepSetBuilder {
-    fn default() -> Self {
-        Self {
-            detected: Box::new(NoopStep),
-            confirmed: Box::new(NoopStep),
-            cleared: Box::new(NoopStep),
-            credited: Box::new(NoopStep),
-        }
-    }
-}
-
-impl StepSetBuilder {
-    /// Registers the confirmed-state step.
-    #[must_use]
-    pub fn with_confirmed(mut self, step: impl Step + 'static) -> Self {
-        self.confirmed = Box::new(step);
-        self
-    }
-
-    /// Registers the cleared-state step.
-    #[must_use]
-    pub fn with_cleared(mut self, step: impl Step + 'static) -> Self {
-        self.cleared = Box::new(step);
-        self
-    }
-
-    /// Registers the credited-state step.
-    #[must_use]
-    pub fn with_credited(mut self, step: impl Step + 'static) -> Self {
-        self.credited = Box::new(step);
-        self
-    }
-
-    /// Builds the complete registry.
-    #[must_use]
-    pub fn build(self) -> StepSet {
-        StepSet::new(self.detected, self.confirmed, self.cleared, self.credited)
+        StepSet::new(
+            Box::new(NoopStep),
+            Box::new(NoopStep),
+            Box::new(NoopStep),
+            Box::new(NoopStep),
+        )
     }
 }
 

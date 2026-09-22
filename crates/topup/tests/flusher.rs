@@ -468,6 +468,29 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 .plan(&route)
                 .await?
                 .context("plan stale old-operator flush")?;
+            let stale_nonce: String =
+                sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
+                    .bind(stale_plan)
+                    .fetch_one(&database.pool)
+                    .await?;
+            let repeated_plan = planner
+                .plan(&route)
+                .await?
+                .context("repeat current-operator planning")?;
+            ensure!(repeated_plan == stale_plan);
+            let repeated_nonce: String =
+                sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
+                    .bind(repeated_plan)
+                    .fetch_one(&database.pool)
+                    .await?;
+            ensure!(repeated_nonce == stale_nonce);
+            let pre_rotation_audits: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1",
+            )
+            .bind(stale_plan.to_string())
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(pre_rotation_audits == 0);
             let rotated_signer = signer_handle(ROTATED_KEY)?;
             let rotated_planner = Planner::new(
                 database.pool.clone(),
@@ -490,13 +513,24 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let rotated_operator: String = rotated_row.try_get("operator")?;
             ensure!(rotated_nonce == "0");
             ensure!(rotated_operator == ROTATED_ADDRESS);
-            let rebound_audit: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1)",
+            let repeated_rotated = rotated_planner
+                .plan(&route)
+                .await?
+                .context("repeat rotated-operator planning")?;
+            ensure!(repeated_rotated == rotated_flush);
+            let repeated_rotated_nonce: String =
+                sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
+                    .bind(repeated_rotated)
+                    .fetch_one(&database.pool)
+                    .await?;
+            ensure!(repeated_rotated_nonce == rotated_nonce);
+            let rebound_audits: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1",
             )
             .bind(stale_plan.to_string())
             .fetch_one(&database.pool)
             .await?;
-            ensure!(rebound_audit);
+            ensure!(rebound_audits == 1);
 
             ensure!(
                 Flusher::new(

@@ -324,15 +324,14 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let steps = Arc::new(
-        NoopStepSet::builder()
-            .with_confirmed(screen_step)
-            .with_cleared(SettleStep::new(
+        NoopStepSet::build()
+            .with_confirmed(Box::new(screen_step))
+            .with_cleared(Box::new(SettleStep::new(
                 pool.clone(),
                 signer,
                 Duration::from_secs(30),
-            ))
-            .with_credited(topup::flusher::SweepStep)
-            .build(),
+            )))
+            .with_credited(Box::new(topup::flusher::SweepStep)),
     );
     tracing::warn!("placeholder step remains active in detected state");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
