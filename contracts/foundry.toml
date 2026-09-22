@@ -1,0 +1,32 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+]
+solc_version = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false
+fs_permissions = [{ access = "write", path = "./test-vectors" }]
+
+[fmt]
+ignore = ["lib/**"]
+line_length = 100
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
+quote_style = "double"
+
+[fuzz]
+runs = 256
+
+[invariant]
+runs = 128
+depth = 32
+fail_on_revert = true
