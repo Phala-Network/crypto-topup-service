@@ -3,37 +3,35 @@
 set -euo pipefail
 source "$(dirname -- "$0")/common.sh"
 
-rpc_url=""
+target=""
 mode=""
 safe_expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
 while (($#)); do
     case "$1" in
-        --rpc-url) rpc_url="${2:-}"; shift 2 ;;
+        --rpc) target="${2:-}"; shift 2 ;;
         --dry-run) mode="dry-run"; shift ;;
         --broadcast) mode="broadcast"; shift ;;
         --safe-expectations) safe_expectations="${2:-}"; shift 2 ;;
-        *) die "usage: $0 --rpc-url URL (--dry-run|--broadcast) [--safe-expectations FILE]" ;;
+        *) die "usage: $0 --rpc NETWORK[/LABEL]=URL (--dry-run|--broadcast) [--safe-expectations FILE]" ;;
     esac
 done
-[[ -n "$rpc_url" ]] || die "--rpc-url is required"
+[[ -n "$target" ]] || die "--rpc NETWORK[/LABEL]=URL is required"
 [[ -n "$mode" ]] || die "one of --dry-run or --broadcast is required"
-[[ -n "${ADMIN:-}" && -n "${TREASURY:-}" && -n "${PRIVATE_KEY:-}" ]] || \
-    die "ADMIN, TREASURY, and PRIVATE_KEY must be set in the environment"
+[[ -n "${PRIVATE_KEY:-}" ]] || die "PRIVATE_KEY must be set in the environment"
 
 "$DEPLOY_CONTRACTS_DIR/check-build.sh" --check
 
-expected_treasury="$(jq -er '.treasury' "$safe_expectations")"
-[[ "$(lower "$TREASURY")" == "$(lower "$expected_treasury")" ]] || \
-    die "TREASURY does not match the committed Safe expectation"
-"$DEPLOY_CONTRACTS_DIR/verify-safe.sh" \
-    --expectations "$safe_expectations" \
-    --rpc "target=$rpc_url" >/dev/null
-
+safe_report="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-safe-report.XXXXXX")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-reference-manifest.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$safe_report" "$tmp"' EXIT
+validate_deployment_params "$safe_expectations" "$safe_report" "$target" || \
+    die "refusing to deploy: ADMIN/TREASURY are not the verified approved Safes on $target"
+parse_target "$safe_expectations" "$target"
+rpc_url="$TARGET_RPC_URL"
+
 "$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" \
-    --admin "$ADMIN" \
-    --treasury "$TREASURY" \
+    --admin "$EXPECTED_ADMIN" \
+    --treasury "$EXPECTED_TREASURY" \
     --output "$tmp" >/dev/null
 
 export EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$tmp")"

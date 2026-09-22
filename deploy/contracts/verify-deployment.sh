@@ -9,11 +9,10 @@ while (($#)); do
     case "$1" in
         --safe-expectations) safe_expectations="${2:-}"; shift 2 ;;
         --rpc) rpcs+=("${2:-}"); shift 2 ;;
-        *) die "usage: $0 [--safe-expectations FILE] --rpc NAME=URL [--rpc NAME=URL ...]" ;;
+        *) die "usage: $0 [--safe-expectations FILE] --rpc NETWORK[/LABEL]=URL [--rpc ...]" ;;
     esac
 done
-((${#rpcs[@]} > 0)) || die "at least one --rpc NAME=URL is required"
-[[ -n "${ADMIN:-}" && -n "${TREASURY:-}" ]] || die "ADMIN and TREASURY must be set"
+((${#rpcs[@]} > 0)) || die "at least one --rpc NETWORK[/LABEL]=URL is required"
 
 require_command cast
 require_command jq
@@ -22,13 +21,7 @@ require_command jq
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-verification.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
-safe_args=(--expectations "$safe_expectations")
-for entry in "${rpcs[@]}"; do
-    safe_args+=(--rpc "$entry")
-done
-safe_status=0
-"$DEPLOY_CONTRACTS_DIR/verify-safe.sh" "${safe_args[@]}" >"$tmp_dir/safe.json" || safe_status=$?
-if ((safe_status != 0)); then
+if ! validate_deployment_params "$safe_expectations" "$tmp_dir/safe.json" "${rpcs[@]}"; then
     jq -n --slurpfile safe "$tmp_dir/safe.json" \
         '{safe: ($safe[0] // null), chains: [], passed: false}'
     exit 1
@@ -36,8 +29,8 @@ fi
 
 reference="$tmp_dir/reference.json"
 "$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" \
-    --admin "$ADMIN" \
-    --treasury "$TREASURY" \
+    --admin "$EXPECTED_ADMIN" \
+    --treasury "$EXPECTED_TREASURY" \
     --output "$reference" >/dev/null
 
 factory="$(jq -er '.factory' "$reference")"
@@ -49,9 +42,11 @@ reports="$tmp_dir/reports.jsonl"
 status=0
 
 for entry in "${rpcs[@]}"; do
-    [[ "$entry" == *=* ]] || die "RPC must be NAME=URL: $entry"
-    name="${entry%%=*}"
-    rpc_url="${entry#*=}"
+    parse_target "$safe_expectations" "$entry"
+    rpc_url="$TARGET_RPC_URL"
+    chain_id="$(rpc_chain_id "$rpc_url")"
+    chain_id_ok=false
+    [[ "$chain_id" == "$TARGET_EXPECTED_CHAIN_ID" ]] && chain_id_ok=true
 
     proxy_hash="$(lower "$(code_hash "$rpc_url" "$DETERMINISTIC_PROXY")")"
     factory_hash="$(lower "$(code_hash "$rpc_url" "$factory")")"
@@ -74,14 +69,14 @@ for entry in "${rpcs[@]}"; do
     factory_binding_actual="$(cast call "$implementation" 'factory()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
     admin_role_actual="$(cast call "$factory" 'hasRole(bytes32,address)(bool)' \
         0x0000000000000000000000000000000000000000000000000000000000000000 \
-        "$ADMIN" --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
+        "$EXPECTED_ADMIN" --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
 
     implementation_ok=false
     treasury_ok=false
     factory_binding_ok=false
     admin_role_ok=false
     [[ "$cast_call_ok" == true && "$(lower "$implementation_actual")" == "$(lower "$implementation")" ]] && implementation_ok=true
-    [[ "$cast_call_ok" == true && "$(lower "$treasury_actual")" == "$(lower "$TREASURY")" ]] && treasury_ok=true
+    [[ "$cast_call_ok" == true && "$(lower "$treasury_actual")" == "$(lower "$EXPECTED_TREASURY")" ]] && treasury_ok=true
     [[ "$cast_call_ok" == true && "$(lower "$factory_binding_actual")" == "$(lower "$factory")" ]] && factory_binding_ok=true
     [[ "$cast_call_ok" == true && "$admin_role_actual" == "true" ]] && admin_role_ok=true
 
@@ -109,7 +104,7 @@ for entry in "${rpcs[@]}"; do
     done < <(jq -r '.sample_forwarders[] | [.salt, .address] | @tsv' "$reference")
 
     passed=false
-    if [[ "$proxy_ok" == true && "$factory_hash_ok" == true && \
+    if [[ "$chain_id_ok" == true && "$proxy_ok" == true && "$factory_hash_ok" == true && \
         "$implementation_hash_ok" == true && "$implementation_ok" == true && \
         "$treasury_ok" == true && "$factory_binding_ok" == true && \
         "$admin_role_ok" == true && "$vectors_ok" == true ]]; then
@@ -119,7 +114,11 @@ for entry in "${rpcs[@]}"; do
     fi
 
     jq -n \
-        --arg chain "$name" \
+        --arg target "$TARGET_NAME" \
+        --arg network "$TARGET_NETWORK" \
+        --argjson expected_chain_id "$TARGET_EXPECTED_CHAIN_ID" \
+        --arg chain_id "$chain_id" \
+        --argjson chain_id_ok "$chain_id_ok" \
         --arg factory "$factory" \
         --arg implementation "$implementation_actual" \
         --arg treasury "$treasury_actual" \
@@ -136,10 +135,13 @@ for entry in "${rpcs[@]}"; do
         --argjson vectors_ok "$vectors_ok" \
         --argjson vectors "$vector_reports" \
         --argjson passed "$passed" \
-        '{chain: $chain, factory: $factory, implementation: $implementation, treasury: $treasury,
+        '{target: $target, network: $network, expected_chain_id: $expected_chain_id,
+          chain_id: ($chain_id | tonumber? // $chain_id),
+          factory: $factory, implementation: $implementation, treasury: $treasury,
           code_hashes: {proxy: $proxy_code_hash, factory: $factory_code_hash,
                         implementation: $implementation_code_hash},
-          checks: {proxy: $proxy_ok, factory_code_hash: $factory_hash_ok,
+          checks: {chain_id: $chain_id_ok, proxy: $proxy_ok,
+                   factory_code_hash: $factory_hash_ok,
                    implementation_code_hash: $implementation_hash_ok,
                    implementation: $implementation_ok, treasury: $treasury_ok,
                    implementation_factory: $factory_binding_ok,
