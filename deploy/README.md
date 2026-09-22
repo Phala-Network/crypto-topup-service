@@ -101,7 +101,11 @@ route is the asset chain and is independent of the KMS control plane. On 2026-09
 reported the Base KMS contract as `0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C`; re-query it and
 confirm the selected contract has allowed devices and an allowed production OS image:
 
+**HUMAN-ONLY, Phala Cloud credentials required:** authenticate before querying the operator's
+available KMS control plane:
+
 ```sh
+npx --yes phala@1.1.22 login --no-open
 npx --yes phala@1.1.22 kms base --json > base-kms.json
 jq '{chain_id, contracts: [.contracts[] | {contract_address, devices, os_images}]}' base-kms.json
 export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
@@ -112,7 +116,6 @@ and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager. Do 
 `--prepare-only`; it does not halt the create path in this CLI version.
 
 ```sh
-npx --yes phala@1.1.22 login --no-open
 npx --yes phala@1.1.22 deploy --json \
   --name crypto-topup-staging \
   --compose deploy/docker-compose.staging.yml \
@@ -121,6 +124,8 @@ npx --yes phala@1.1.22 deploy --json \
   --fs ext4 \
   --kms base \
   --kms-contract "$KMS_CONTRACT" \
+  --private-key "$PRIVATE_KEY" \
+  --rpc-url "$ETH_RPC_URL" \
   --no-dev-os \
   --no-public-logs \
   --no-public-sysinfo \
