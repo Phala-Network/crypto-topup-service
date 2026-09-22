@@ -98,7 +98,7 @@ jobs:
           SQLX_OFFLINE: false
         run: cargo sqlx prepare --workspace --check -- --all-targets
       - name: Run database integration tests
-        run: cargo test --locked -p topup --test database -- --nocapture
+        run: cargo test --locked -p topup --test database --test pump -- --nocapture
 
   deny:
     runs-on: ubuntu-latest
