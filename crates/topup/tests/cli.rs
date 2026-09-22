@@ -159,3 +159,24 @@ fn route_validate_rejects_invalid_content_and_missing_files() {
     assert!(!missing_output.status.success());
     assert!(String::from_utf8_lossy(&missing_output.stderr).contains("failed to read"));
 }
+
+#[test]
+fn outbox_replay_validates_selector_and_timestamp_before_connecting() {
+    let help = topup(&["outbox", "replay", "--help"]);
+    assert!(help.status.success());
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("--id"));
+    assert!(help_text.contains("--since"));
+    assert!(help_text.contains("--force"));
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["outbox", "replay", "--since", "not-a-timestamp"])
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("RFC 3339")
+            || String::from_utf8_lossy(&invalid.stdout).contains("RFC 3339")
+    );
+}
