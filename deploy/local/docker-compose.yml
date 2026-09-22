@@ -3,8 +3,9 @@ x-walg-environment: &walg-environment
   AWS_ENDPOINT: http://minio:9000
   AWS_REGION: us-east-1
   AWS_S3_FORCE_PATH_STYLE: "true"
-  AWS_ACCESS_KEY_ID: topup-minio
-  AWS_SECRET_ACCESS_KEY: topup-minio-secret
+  # A restore phase switches to the read-only topup-restore-read user created by minio-init.
+  AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-minio}
+  AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-minio-secret}
   WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
@@ -28,7 +29,15 @@ services:
     image: quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
     entrypoint: ["/bin/sh", "-eu", "-c"]
     command:
-      - mc alias set local http://minio:9000 topup-minio topup-minio-secret >/dev/null && mc mb --ignore-existing local/topup-backups >/dev/null
+      - |
+        mc alias set local http://minio:9000 topup-minio topup-minio-secret >/dev/null
+        mc mb --ignore-existing local/topup-backups >/dev/null
+        printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::topup-backups"]},{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::topup-backups/*"]}]}' >/tmp/restore-read.json
+        mc admin policy create local topup-restore-read /tmp/restore-read.json >/dev/null
+        mc admin user add local topup-restore-read topup-restore-read-secret >/dev/null
+        # attach fails when the policy is already attached, e.g. when minio-init runs again.
+        mc admin policy attach local topup-restore-read --user topup-restore-read >/dev/null 2>&1 ||
+          mc admin user info local topup-restore-read | grep -q 'PolicyName: *topup-restore-read'
     depends_on:
       minio:
         condition: service_healthy
@@ -135,7 +144,8 @@ services:
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
-      DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
+      # Empty (not unset) models a replacement CVM booting before restore: the service fails closed.
+      DATABASE_URL: ${TOPUP_LOCAL_DATABASE_URL-postgres://topup_service:topup@postgres:5432/topup}
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
       TOPUP_ADMIN_KID: local-admin/v1
       TOPUP_ADMIN_PUBLIC_KEY: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
@@ -165,7 +175,8 @@ services:
     image: ${TOPUP_LOCAL_IMAGE:-crypto-topup-service:local}
     command: ["topup", "heartbeat", "--interval-s", "60"]
     environment:
-      DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
+      # Empty (not unset) models a replacement CVM booting before restore: the service fails closed.
+      DATABASE_URL: ${TOPUP_LOCAL_DATABASE_URL-postgres://topup_service:topup@postgres:5432/topup}
     depends_on:
       migrate:
         condition: service_completed_successfully

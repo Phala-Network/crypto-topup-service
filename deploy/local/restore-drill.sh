@@ -268,6 +268,45 @@ storage_listing() {
     dc run --rm --no-deps restore 'wal-g st ls -r' | sort
 }
 
+remove_pgdata_volume() {
+    pg_volume=$(docker volume ls -q \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.volume=pgdata")
+    if [ -z "$pg_volume" ]; then
+        echo "could not locate drill PostgreSQL volume" >&2
+        return 1
+    fi
+    docker volume rm "$pg_volume" >/dev/null
+}
+
+# A service booted with an empty DATABASE_URL must exit at its configuration check.
+failed_closed() {
+    dc logs --no-log-prefix "$1" 2>/dev/null | grep -F "DATABASE_URL is required for $2"
+}
+
+storage_write_probe() {
+    dc run --rm --no-deps restore \
+        'printf probe >/tmp/probe && wal-g st put --no-compress --no-encrypt /tmp/probe drill-write-probe'
+}
+
+# Positive control with the source credentials, so the read-only check below cannot pass on a
+# broken probe command.
+storage_probe_writes() {
+    storage_write_probe >/dev/null 2>&1 || {
+        echo "object-storage write probe failed with read-write credentials" >&2
+        return 1
+    }
+    dc run --rm --no-deps restore 'wal-g st rm drill-write-probe' >/dev/null
+}
+
+# The replacement's storage credentials must not be able to write.
+storage_is_read_only() {
+    if storage_write_probe >/dev/null 2>&1; then
+        echo "replacement object-storage credentials can write" >&2
+        return 1
+    fi
+}
+
 test_restore_failures_are_fatal() {
     wal_name=$1
     expected_version=$2
@@ -397,7 +436,6 @@ case "$backup_name" in
     base_*) ;;
     *) echo "could not determine WAL-G base backup name" >&2; exit 1 ;;
 esac
-check_runbook_selection_commands "$backup_name"
 
 if [ "$mode" = controlled ]; then
     exercise_key_rotation
@@ -458,6 +496,8 @@ last_archived_wal=$(psql_value 'SELECT last_archived_wal FROM pg_stat_archiver')
 test -n "$last_archived_wal"
 test_restore_failures_are_fatal "$last_archived_wal" "$TOPUP_BACKUP_KEY_VERSION"
 
+storage_probe_writes
+
 rto_started=$(date +%s)
 dc stop backup >/dev/null
 if [ "$mode" = crash ]; then
@@ -466,48 +506,56 @@ else
     dc stop postgres >/dev/null
 fi
 dc rm -f backup postgres heartbeat migrate restore-check >/dev/null 2>&1 || true
-pg_volume=$(docker volume ls -q \
-    --filter "label=com.docker.compose.project=$project" \
-    --filter "label=com.docker.compose.volume=pgdata")
-if [ -z "$pg_volume" ]; then
-    echo "could not locate drill PostgreSQL volume" >&2
-    exit 1
-fi
-docker volume rm "$pg_volume" >/dev/null
+remove_pgdata_volume
 
-if [ "$mode" = controlled ]; then
-    dc run --rm --no-deps \
-        -e BACKUP_NAME="$backup_name" \
-        -e RECOVERY_TARGET_LSN="$expected_lsn" restore '
-        rm -rf "$PGDATA"/*
-        walg-backup-fetch "$PGDATA" "$BACKUP_NAME"
-        test -s "$PGDATA/PG_VERSION"
-        cat >>"$PGDATA/postgresql.auto.conf" <<EOF
-restore_command = '\''walg-restore-command %f %p'\''
-recovery_target_lsn = '\''$RECOVERY_TARGET_LSN'\''
-recovery_target_inclusive = true
-recovery_target_action = '\''promote'\''
-EOF
-        touch "$PGDATA/recovery.signal"
-        chmod 0700 "$PGDATA"
-    '
-else
-    dc run --rm --no-deps -e BACKUP_NAME="$backup_name" restore '
-        rm -rf "$PGDATA"/*
-        walg-backup-fetch "$PGDATA" "$BACKUP_NAME"
-        test -s "$PGDATA/PG_VERSION"
-        cat >>"$PGDATA/postgresql.auto.conf" <<EOF
-restore_command = '\''walg-restore-command %f %p'\''
-EOF
-        touch "$PGDATA/recovery.signal"
-        chmod 0700 "$PGDATA"
-    '
-fi
-
-# Like a staging drill, the restored instance must not archive into the source WAL prefix.
+# Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole stack comes up, with
+# the restore-time environment from deploy/RESTORE.md: WAL archiving off, read-only object-storage
+# credentials, and an empty service DATABASE_URL. Nothing may reach object storage from here on.
 storage_before=$(storage_listing)
 test -n "$storage_before"
 export TOPUP_WAL_ARCHIVE=off
+export TOPUP_LOCAL_S3_ACCESS_KEY_ID=topup-restore-read
+export TOPUP_LOCAL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
+export TOPUP_LOCAL_DATABASE_URL=
+dc up --remove-orphans -d
+wait_for "boot PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
+test "$(psql_value 'SHOW archive_mode')" = off
+wait_for "topup failing closed" failed_closed topup run
+wait_for "heartbeat failing closed" failed_closed heartbeat heartbeat
+storage_is_read_only
+
+# RESTORE.md "Restore the database" step 2: stop everything but the key service and reset pgdata.
+dc stop topup heartbeat backup migrate postgres >/dev/null
+dc rm -f topup heartbeat backup migrate postgres >/dev/null
+remove_pgdata_volume
+
+# Step 3: select and fetch into the new empty volume, with the runbook's exact commands.
+check_runbook_selection_commands "$backup_name"
+dc run --rm --no-deps -e BACKUP_NAME="$backup_name" restore '
+    test -z "$(ls -A "$PGDATA")"
+    walg-backup-fetch "$PGDATA" "$BACKUP_NAME"
+    test -s "$PGDATA/PG_VERSION"
+'
+
+# Step 4: recovery configuration; controlled mode stops at the recorded LSN.
+if [ "$mode" = controlled ]; then
+    recovery_target=$expected_lsn
+else
+    recovery_target=
+fi
+dc run --rm --no-deps -e RECOVERY_TARGET_LSN="$recovery_target" restore '
+    printf "%s\n" "restore_command = '\''walg-restore-command %f %p'\''" \
+        >>"$PGDATA/postgresql.auto.conf"
+    if [ -n "$RECOVERY_TARGET_LSN" ]; then
+        printf "%s\n" \
+            "recovery_target_lsn = '\''$RECOVERY_TARGET_LSN'\''" \
+            "recovery_target_inclusive = true" \
+            "recovery_target_action = '\''promote'\''" >>"$PGDATA/postgresql.auto.conf"
+    fi
+    touch "$PGDATA/recovery.signal"
+    chmod 0700 "$PGDATA"
+'
+
 dc up -d --no-deps postgres
 wait_for "restored PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
 test "$(psql_value 'SHOW archive_mode')" = off
