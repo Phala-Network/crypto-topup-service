@@ -37,7 +37,7 @@ struct Dependency {
 }
 
 #[test]
-fn core_has_no_runtime_dependencies() -> Result<(), Box<dyn Error>> {
+fn core_runtime_dependencies_are_pure_and_reviewed() -> Result<(), Box<dyn Error>> {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -66,11 +66,23 @@ fn core_has_no_runtime_dependencies() -> Result<(), Box<dyn Error>> {
         .find(|package| package.name == "topup-core")
         .ok_or("topup-core was not present in cargo metadata")?;
 
+    let allowed_runtime_dependencies = [
+        "alloy-primitives", // Pure fixed-width Ethereum values and keccak256.
+        "alloy-sol-types",  // Pure Solidity ABI encoding for deterministic salts.
+        "serde",            // Pure schema serialization and deserialization.
+        "uuid",             // Pure UUIDv5 derivation.
+    ];
+    let unexpected: Vec<&str> = core
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.kind.as_deref() != Some("dev"))
+        .filter(|dependency| !allowed_runtime_dependencies.contains(&dependency.name.as_str()))
+        .map(|dependency| dependency.name.as_str())
+        .collect();
+
     assert!(
-        core.dependencies.iter().all(|dependency| {
-            dependency.kind.as_deref() == Some("dev") || dependency.name == "serde"
-        }),
-        "topup-core runtime dependencies must be serde or explicitly reviewed as pure and I/O-free"
+        unexpected.is_empty(),
+        "topup-core runtime dependencies must be explicitly reviewed as pure and I/O-free: {unexpected:?}"
     );
 
     Ok(())
