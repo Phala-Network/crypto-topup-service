@@ -2,12 +2,14 @@
 
 ## Setup
 
-Install Rust 1.98 with the formatting and lint components, Foundry for contract work, and
-`cargo-deny` for dependency policy checks:
+The committed `rust-toolchain.toml` selects Rust 1.98 with the formatting and lint components.
+Install that toolchain, Foundry v1.8.3 for contract work, and cargo-deny 0.20.2 for dependency
+policy checks:
 
 ```sh
-rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
-cargo install cargo-deny --locked
+rustup toolchain install 1.98 --profile minimal --component rustfmt,clippy
+foundryup --install v1.8.3
+cargo install cargo-deny --version 0.20.2 --locked
 ```
 
 Use the package manager and committed `Cargo.lock`; do not update dependencies as a side effect
@@ -63,12 +65,13 @@ commit timestamp when producing an image:
 ```sh
 export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
 cargo build --release --locked
-docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" .
+docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t crypto-topup-service:dev .
+docker run --rm crypto-topup-service:dev --help
 ```
 
-The builder and distroless runtime images are pinned by digest. Full verification that two builds
-produce identical image digests is owned by work package D1; B1 establishes the inputs and build
-flags only.
+The Debian 12 builder and distroless runtime images are pinned by digest and share the same libc
+baseline. Full verification that two builds produce identical image digests is owned by work
+package D1; B1 establishes the inputs and build flags only.
 
 ## Review checklist
 
