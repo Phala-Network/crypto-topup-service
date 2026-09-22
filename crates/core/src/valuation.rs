@@ -429,6 +429,7 @@ fn amount_within_tolerance(actual: AtomicAmount, locked: AtomicAmount, tolerance
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, U256};
+    use proptest::prelude::*;
 
     use super::*;
     use crate::route::{
@@ -964,5 +965,76 @@ mod tests {
             ),
             Err(ValuationError::Credit(CreditError::OutOfRange))
         );
+    }
+
+    proptest! {
+        #[test]
+        fn accepted_spot_always_satisfies_ratio_bound(
+            primary_value in 1_u64..1_000_000_000_000,
+            check_value in 1_u64..1_000_000_000_000,
+            maximum in 0_u16..=10_000,
+        ) {
+            let primary = observation("primary", primary_value, 100);
+            let check = observation("check", check_value, 100);
+            let maximum_bps = bps(maximum);
+            let result = validate_spot(
+                &primary,
+                &check,
+                Some(&fx(PRICE_SCALE_FACTOR, 100)),
+                UnixSeconds::new(100),
+                ValuationPolicy {
+                    max_age_s: 0,
+                    max_deviation_bps: maximum_bps,
+                    max_fx_deviation_bps: bps(0),
+                    stablecoin_peg: None,
+                },
+            );
+            if result.is_ok() {
+                prop_assert!(within_deviation(primary_value, check_value, maximum_bps).unwrap());
+            }
+        }
+
+        #[test]
+        fn fx_normalization_is_monotone(
+            check_value in 100_000_000_u64..1_000_000_000,
+            first_fx in 1_u64..1_000_000_000,
+            extra in 0_u64..1_000_000_000,
+        ) {
+            let second_fx = first_fx + extra;
+            let first = multiply_scaled(price(check_value), price(first_fx))
+                .expect("bounded normalized price is representable");
+            let second = multiply_scaled(price(check_value), price(second_fx))
+                .expect("bounded normalized price is representable");
+            prop_assert!(first <= second);
+        }
+
+        #[test]
+        fn lock_selection_is_total_and_matches_all_three_conditions(
+            actual in 1_u64..1_000_000_000,
+            locked in 1_u64..1_000_000_000,
+            tolerance in 0_u16..=10_000,
+            has_lock in any::<bool>(),
+            on_time in any::<bool>(),
+            asset_matches in any::<bool>(),
+        ) {
+            let route_asset = Address::from([1_u8; 20]);
+            let route = TestRoute::new(route_asset, 0, tolerance);
+            let lock = LockTerms {
+                asset: if asset_matches { route_asset } else { Address::from([2_u8; 20]) },
+                amount: AtomicAmount::new(U256::from(locked)),
+                price: price(2),
+                expires_at: UnixSeconds::new(100),
+                block_time: UnixSeconds::new(if on_time { 100 } else { 101 }),
+            };
+            let amount = AtomicAmount::new(U256::from(actual));
+            let selected_lock = has_lock.then_some(&lock);
+            let result = value_deposit(amount, price(1), &route.valuation(), selected_lock);
+            let expected_lock = has_lock
+                && on_time
+                && asset_matches
+                && amount_within_tolerance(amount, lock.amount, bps(tolerance));
+            let valuation = result.expect("bounded lock selection always values the deposit");
+            prop_assert_eq!(valuation.source == ValuationSource::Lock, expected_lock);
+        }
     }
 }
