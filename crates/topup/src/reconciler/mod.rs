@@ -46,6 +46,9 @@ pub use types::{CheckName, Finding, ReconciliationMetrics, ReconciliationReport}
 const MAX_WINDOWS_PER_ROUND: usize = 64;
 
 /// Order in which a round runs its checks; derivation runs first so a freeze lands early.
+const LOOP_NAME: &str = "reconciler";
+const LOOP_INSTANCE: &str = "0";
+
 const REGULAR_CHECKS: [CheckName; 6] = [
     CheckName::AddressDerivation,
     CheckName::MissingDeposit,
@@ -382,16 +385,22 @@ impl Reconciler {
 
     /// Runs periodic reconciliation until cancellation.
     pub async fn run_loop(&self, every: Duration, cancellation: CancellationToken) {
+        crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
         let mut ticks = interval(every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticks.tick() => {
+                    crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
+                    // A round may legitimately run past the heartbeat threshold; it is overdue
+                    // only once it overruns the interval that schedules the next round.
+                    crate::observability::execution_deadline(LOOP_NAME, LOOP_INSTANCE, every);
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         _report = self.run_checks(false) => {}
                     }
+                    crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, every);
                 }
             }
         }

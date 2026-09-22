@@ -507,9 +507,14 @@ async fn run(args: &RunArgs) -> ExitCode {
     });
     let database_metrics_cancellation = cancellation.child_token();
     let metrics_pool = pool.clone();
+    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(&routes);
     let database_metrics_task = tokio::spawn(async move {
-        topup::observability::collect_database_metrics(metrics_pool, database_metrics_cancellation)
-            .await;
+        topup::observability::collect_database_metrics(
+            metrics_pool,
+            lock_exposure_caps,
+            database_metrics_cancellation,
+        )
+        .await;
     });
     let backup_metrics_cancellation = cancellation.child_token();
     let backup_metrics_task = tokio::spawn(async move {

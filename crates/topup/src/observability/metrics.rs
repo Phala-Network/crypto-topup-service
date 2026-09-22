@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,9 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sqlx::{PgPool, Row};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use topup_core::route::RouteFile;
+
+use crate::reconciler::CheckName;
 
 static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
 const DEFAULT_BACKUP_TIMESTAMP_FILE: &str = "/run/topup-observability/last-backup-unix-seconds";
@@ -153,8 +157,8 @@ pub fn register_metrics() {
         "Finalized unsupported-asset inflows observed by the scanner"
     );
 
-    // C4/C7/C8 consume these stable names when their producers merge. Their pending-labelled
-    // zero series keep dashboards and alert expressions reviewable without inventing fake data.
+    // Producers owned by later work packages consume these stable names when they merge. Their
+    // pending-labelled zero series keep dashboards and alerts reviewable without fake data.
     gauge!("topup_scanner_lag_blocks", "chain" => "pending", "producer_enabled" => "false").set(0);
     gauge!("topup_scanner_lag_seconds", "chain" => "pending", "producer_enabled" => "false").set(0);
     gauge!("topup_scanner_last_success_unixtime_seconds", "chain" => "pending", "producer_enabled" => "false").set(0);
@@ -178,9 +182,19 @@ pub fn register_metrics() {
     gauge!("topup_open_lock_exposure_cap_minor", "scope" => "pending", "id" => "pending", "producer_enabled" => "false").set(0);
     gauge!("topup_backup_age_seconds", "producer_enabled" => "false").set(0);
     gauge!("topup_backup_last_success_unixtime_seconds", "producer_enabled" => "true").set(0);
-    counter!("topup_reconciliation_mismatches_total", "check" => "pending", "producer_enabled" => "false").absolute(0);
+    // Zero-initialized so `increase()` observes the first mismatch of every check.
+    for check in CheckName::ALL {
+        counter!("topup_reconciliation_mismatches_total", "check" => check.code(), "producer_enabled" => "true").absolute(0);
+    }
     counter!("topup_unsupported_inflows_total", "chain" => "pending", "producer_enabled" => "false").absolute(0);
-    for loop_name in ["pump", "scanner", "outbox", "flusher", "reconciler"] {
+    for loop_name in [
+        "pump",
+        "scanner",
+        "outbox",
+        "flusher",
+        "reconciler",
+        "lock_expiry",
+    ] {
         gauge!("topup_loop_expected", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
         gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
         gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "loop_instance" => "pending", "producer_enabled" => "false").set(0);
@@ -280,10 +294,60 @@ pub fn record_scanner_success(chain: u64) {
         .set(metric_value(unix_now()));
 }
 
+/// Rate-lock exposure caps exported beside the observed product and global exposure.
+///
+/// Account scopes are not exported because their label cardinality grows with accounts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LockExposureCaps {
+    global: Option<u64>,
+    products: BTreeMap<String, u64>,
+}
+
+impl LockExposureCaps {
+    /// Uses the tightest cap of every lock-enabled route because routes share one counter.
+    #[must_use]
+    pub fn from_routes(routes: &[RouteFile]) -> Self {
+        let mut caps = Self::default();
+        for route in routes.iter().filter(|route| route.rate_lock.enabled) {
+            let configured = &route.rate_lock.max_open_minor;
+            caps.global = Some(
+                caps.global
+                    .map_or(configured.global, |cap| cap.min(configured.global)),
+            );
+            caps.products
+                .entry(route.destination.product.clone())
+                .and_modify(|cap| *cap = (*cap).min(configured.product))
+                .or_insert(configured.product);
+        }
+        caps
+    }
+
+    fn scopes(&self) -> impl Iterator<Item = (&'static str, &str, u64)> {
+        self.global
+            .map(|cap| ("global", "global", cap))
+            .into_iter()
+            .chain(
+                self.products
+                    .iter()
+                    .map(|(slug, cap)| ("product", slug.as_str(), *cap)),
+            )
+    }
+}
+
 /// Periodically refreshes metrics sourced from PostgreSQL.
-pub async fn collect_database_metrics(pool: PgPool, cancellation: CancellationToken) {
+pub async fn collect_database_metrics(
+    pool: PgPool,
+    lock_exposure_caps: LockExposureCaps,
+    cancellation: CancellationToken,
+) {
     let instance = "database";
     register_loop("metrics", instance);
+    for (scope, id, cap) in lock_exposure_caps.scopes() {
+        gauge!("topup_open_lock_exposure_cap_minor", "scope" => scope, "id" => id.to_owned(), "producer_enabled" => "true")
+            .set(metric_value(cap));
+        gauge!("topup_open_lock_exposure_minor", "scope" => scope, "id" => id.to_owned(), "producer_enabled" => "true")
+            .set(0);
+    }
     loop {
         heartbeat("metrics", instance);
         if let Err(error) = collect_database_once(&pool).await {
@@ -371,6 +435,27 @@ async fn collect_database_once(pool: &PgPool) -> Result<(), sqlx::Error> {
         .set(metric_value(u64::try_from(backlog).unwrap_or_default()));
     gauge!("topup_outbox_oldest_age_seconds", "producer_enabled" => "true")
         .set(oldest_age.max(0.0));
+
+    let exposure = sqlx::query(
+        r#"
+        SELECT CASE WHEN exposure.scope_key = 'global' THEN 'global' ELSE 'product' END AS scope,
+               COALESCE(product.slug, 'global') AS id,
+               exposure.open_minor::text AS open_minor
+        FROM lock_exposure AS exposure
+        LEFT JOIN products AS product ON exposure.scope_key = 'product:' || product.id::text
+        WHERE exposure.scope_key = 'global' OR product.id IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    for row in exposure {
+        let scope: String = row.try_get("scope")?;
+        let id: String = row.try_get("id")?;
+        let open: String = row.try_get("open_minor")?;
+        let open = open.parse::<f64>().unwrap_or(f64::INFINITY);
+        gauge!("topup_open_lock_exposure_minor", "scope" => scope, "id" => id, "producer_enabled" => "true")
+            .set(open);
+    }
     Ok(())
 }
 

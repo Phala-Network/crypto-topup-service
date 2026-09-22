@@ -10,9 +10,9 @@
     {"id": 6, "title": "Outbox", "type": "timeseries", "targets": [{"expr": "topup_outbox_backlog", "legendFormat": "backlog"}, {"expr": "topup_outbox_oldest_age_seconds", "legendFormat": "oldest seconds"}]},
     {"id": 7, "title": "Unflushed balance", "type": "timeseries", "targets": [{"expr": "topup_unflushed_balance_atomic", "legendFormat": "{{route}}"}]},
     {"id": 8, "title": "Operator gas", "type": "timeseries", "targets": [{"expr": "topup_operator_gas_balance_wei", "legendFormat": "{{chain}}"}]},
-    {"id": 9, "title": "Open lock exposure", "type": "timeseries", "targets": [{"expr": "topup_open_lock_exposure_minor", "legendFormat": "{{scope}} {{id}}"}, {"expr": "topup_open_lock_exposure_cap_minor", "legendFormat": "{{scope}} {{id}} cap"}]},
+    {"id": 9, "title": "Open lock exposure", "type": "timeseries", "targets": [{"expr": "topup_open_lock_exposure_minor{producer_enabled=\"true\"}", "legendFormat": "{{scope}} {{id}}"}, {"expr": "topup_open_lock_exposure_cap_minor{producer_enabled=\"true\"}", "legendFormat": "{{scope}} {{id}} cap"}]},
     {"id": 10, "title": "Backup age", "type": "timeseries", "targets": [{"expr": "time() - topup_backup_last_success_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "seconds"}]},
-    {"id": 11, "title": "Reconciliation mismatches", "type": "timeseries", "targets": [{"expr": "rate(topup_reconciliation_mismatches_total[5m])", "legendFormat": "{{check}}"}]},
+    {"id": 11, "title": "Reconciliation mismatches", "type": "timeseries", "targets": [{"expr": "increase(topup_reconciliation_mismatches_total{producer_enabled=\"true\"}[15m])", "legendFormat": "{{check}}"}]},
     {"id": 12, "title": "Loop health", "type": "timeseries", "targets": [{"expr": "time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{loop_instance}} heartbeat age"}, {"expr": "time() - topup_loop_progress_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{loop_instance}} progress age"}, {"expr": "clamp_min(topup_loop_wait_until_unixtime_seconds{producer_enabled=\"true\"} - time(), 0)", "legendFormat": "{{loop}} {{loop_instance}} planned wait"}, {"expr": "clamp_min(topup_loop_deadline_unixtime_seconds{producer_enabled=\"true\"} - time(), 0)", "legendFormat": "{{loop}} {{loop_instance}} execution budget"}]}
   ],
   "schemaVersion": 39,
