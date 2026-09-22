@@ -406,6 +406,13 @@ of §4.
 All enabled versions are loaded at startup. The highest enabled version of a route is current for
 new API operations, while older versions remain available for historical deposits.
 
+The attested chain file also owns the complete flush execution policy: the planning cron,
+`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, replacement bump and
+delay, gas-limit buffer, RPC timeout, balance batch cap, bounded recovery window, estimation
+exclusion retry delay, and maintenance interval. Gas policy compares gas-token value and token
+balance value in USD using separate reference rates. Changing any of these fields requires a new
+attested configuration version.
+
 ```yaml
 services:
   topup:    { image: ghcr.io/phala-network/crypto-topup@sha256:…, command: ["topup", "run"] }

@@ -137,7 +137,7 @@ struct FixedPrice;
 
 #[async_trait]
 impl PriceSource for FixedPrice {
-    async fn latest_primary_price(&self, _route: &str) -> Result<ScaledPrice, PriceError> {
+    async fn price_usd(&self, _asset: &str) -> Result<ScaledPrice, PriceError> {
         ScaledPrice::new(25_000_000, PRICE_SCALE).map_err(|error| PriceError(error.to_string()))
     }
 }
@@ -149,6 +149,49 @@ impl AlertSink for Alerts {
     fn emit(&self, alert: FlushAlert) {
         self.0.lock().expect("alert mutex is available").push(alert);
     }
+}
+
+#[tokio::test]
+async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let endpoint = format!("http://{}", listener.local_addr()?);
+            let stalled_server = tokio::spawn(async move {
+                if let Ok((_stream, _address)) = listener.accept().await {
+                    std::future::pending::<()>().await;
+                }
+            });
+            let route = test_route(Address::from([1; 20]), Address::from([2; 20]))?;
+            let chain = Arc::new(AlloyChainClient::connect_http_with_policy(
+                &endpoint,
+                StdDuration::from_millis(50),
+                10,
+            )?);
+            let signer = signer_handle(OPERATOR_KEY)?;
+            let flusher = Flusher::new(
+                database.pool.clone(),
+                chain,
+                signer,
+                Arc::new(Alerts::default()),
+                FlusherPolicy::default(),
+            );
+            ensure!(flusher.send_next(&route).await.is_err());
+
+            let operator = Address::from_str(OPERATOR_ADDRESS)?;
+            let mut transaction = database.pool.begin().await?;
+            tokio::time::timeout(
+                StdDuration::from_millis(200),
+                topup::db::lock_operator(&mut transaction, route.chain.chain_id, operator),
+            )
+            .await
+            .context("operator lock remained held after RPC timeout")??;
+            transaction.rollback().await?;
+            stalled_server.abort();
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[tokio::test]
@@ -229,9 +272,11 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             );
 
             let first_flush = planner.plan(&route).await?.context("plan first flush")?;
+            let mut changed_route = route.clone();
+            changed_route.chain.contracts.forwarder_factory = Address::from([0x77; 20]);
             ensure!(
                 flusher
-                    .send_next(&route)
+                    .send_next(&changed_route)
                     .await
                     .context("send first flush")?
                     == RunResult::Sent {
@@ -240,7 +285,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             );
             finalize(&anvil.rpc_url)?;
             ensure!(
-                flusher.maintain_sent(&route).await?
+                flusher.maintain_sent(&changed_route).await?
                     == Some(RunResult::Confirmed {
                         flush_id: first_flush
                     })
@@ -309,14 +354,15 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                         flush_id: replacement_flush
                     }
             );
+            let (replacement_a, replacement_b) = tokio::join!(
+                replacement_flusher.maintain_sent(&route),
+                replacement_flusher.maintain_sent(&route)
+            );
+            let replacement_a = replacement_a.context("first concurrent replacement")?;
+            let replacement_b = replacement_b.context("second concurrent replacement")?;
             ensure!(
-                replacement_flusher
-                    .maintain_sent(&route)
-                    .await
-                    .context("replace pending transaction")?
-                    == Some(RunResult::Replaced {
-                        flush_id: replacement_flush
-                    })
+                matches!(replacement_a, Some(RunResult::Replaced { flush_id }) if flush_id == replacement_flush)
+                    || matches!(replacement_b, Some(RunResult::Replaced { flush_id }) if flush_id == replacement_flush)
             );
             let signed_versions: i32 = sqlx::query(
                 "SELECT jsonb_array_length(receipt->'signed') FROM flushes WHERE id = $1",
@@ -346,6 +392,70 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                     })
             );
 
+            cast_send(
+                &anvil.rpc_url,
+                token,
+                ADMIN_KEY,
+                "mint(address,uint256)",
+                &[&format!("{:#x}", seeded[0].physical), TOKEN_AMOUNT],
+            )?;
+            let capped_flush = planner.plan(&route).await?.context("plan fee-cap flush")?;
+            cast_rpc(&anvil.rpc_url, "evm_setAutomine", &["false"])?;
+            ensure!(
+                flusher.send_next(&route).await?
+                    == RunResult::Sent {
+                        flush_id: capped_flush
+                    }
+            );
+            let initial_fee: String = sqlx::query_scalar(
+                "SELECT receipt->'signed'->0->>'max_fee_per_gas' FROM flushes WHERE id = $1",
+            )
+            .bind(capped_flush)
+            .fetch_one(&database.pool)
+            .await?;
+            let initial_fee = initial_fee.parse::<u128>()?;
+            let capped_flusher = Flusher::new(
+                database.pool.clone(),
+                chain.clone(),
+                signer.clone(),
+                alerts.clone(),
+                FlusherPolicy {
+                    replacement_after_blocks: 0,
+                    max_fee_per_gas: initial_fee,
+                    ..FlusherPolicy::default()
+                },
+            );
+            ensure!(
+                capped_flusher.maintain_sent(&route).await?
+                    == Some(RunResult::Rebroadcast {
+                        flush_id: capped_flush
+                    })
+            );
+            let capped_versions: i32 = sqlx::query_scalar(
+                "SELECT jsonb_array_length(receipt->'signed') FROM flushes WHERE id = $1",
+            )
+            .bind(capped_flush)
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(capped_versions == 1);
+            ensure!(
+                alerts
+                    .0
+                    .lock()
+                    .expect("alert mutex is available")
+                    .iter()
+                    .any(|alert| matches!(alert, FlushAlert::FeeCapReached { flush_id, .. } if *flush_id == capped_flush))
+            );
+            cast_rpc(&anvil.rpc_url, "anvil_mine", &["1"])?;
+            cast_rpc(&anvil.rpc_url, "evm_setAutomine", &["true"])?;
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher.maintain_sent(&route).await?
+                    == Some(RunResult::Confirmed {
+                        flush_id: capped_flush
+                    })
+            );
+
             grant_operator(&anvil.rpc_url, factory, ROTATED_ADDRESS, ADMIN_KEY)?;
             cast_send(
                 &anvil.rpc_url,
@@ -354,6 +464,10 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "mint(address,uint256)",
                 &[&format!("{:#x}", seeded[0].physical), TOKEN_AMOUNT],
             )?;
+            let stale_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan stale old-operator flush")?;
             let rotated_signer = signer_handle(ROTATED_KEY)?;
             let rotated_planner = Planner::new(
                 database.pool.clone(),
@@ -365,14 +479,54 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let rotated_flush = rotated_planner
                 .plan(&route)
                 .await?
-                .context("plan rotated-operator flush")?;
-            let rotated_nonce: String =
-                sqlx::query("SELECT nonce::text FROM flushes WHERE id = $1")
+                .context("rebind rotated-operator flush")?;
+            ensure!(rotated_flush == stale_plan);
+            let rotated_row =
+                sqlx::query("SELECT nonce::text, operator FROM flushes WHERE id = $1")
                     .bind(rotated_flush)
                     .fetch_one(&database.pool)
-                    .await?
-                    .try_get(0)?;
+                    .await?;
+            let rotated_nonce: String = rotated_row.try_get("nonce")?;
+            let rotated_operator: String = rotated_row.try_get("operator")?;
             ensure!(rotated_nonce == "0");
+            ensure!(rotated_operator == ROTATED_ADDRESS);
+            let rebound_audit: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1)",
+            )
+            .bind(stale_plan.to_string())
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(rebound_audit);
+
+            ensure!(
+                Flusher::new(
+                    database.pool.clone(),
+                    chain.clone(),
+                    signer_handle(ROTATED_KEY)?,
+                    alerts.clone(),
+                    FlusherPolicy::default(),
+                )
+                .send_next(&route)
+                .await?
+                    == RunResult::Sent {
+                        flush_id: rotated_flush
+                    }
+            );
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                Flusher::new(
+                    database.pool.clone(),
+                    chain.clone(),
+                    signer_handle(ROTATED_KEY)?,
+                    alerts.clone(),
+                    FlusherPolicy::default(),
+                )
+                .maintain_sent(&route)
+                .await?
+                    == Some(RunResult::Confirmed {
+                        flush_id: rotated_flush
+                    })
+            );
 
             let reverting = deploy(
                 &root,
@@ -390,10 +544,68 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                     &[&format!("{:#x}", address.physical), TOKEN_AMOUNT],
                 )?;
             }
-            let revert_flush = planner
+            cast_send(
+                &anvil.rpc_url,
+                reverting,
+                ADMIN_KEY,
+                "setBlockedForwarder(address)",
+                &[&format!("{:#x}", seeded[1].physical)],
+            )?;
+            let estimated_plan = planner
                 .plan(&route)
                 .await?
-                .context("plan reverting batch")?;
+                .context("plan around estimation revert")?;
+            let estimated_count: i32 = sqlx::query_scalar(
+                "SELECT jsonb_array_length(receipt->'plan') FROM flushes WHERE id = $1",
+            )
+            .bind(estimated_plan)
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(estimated_count == 1);
+            let exclusion_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM flush_exclusions WHERE chain_id = 31337 AND token = $1",
+            )
+            .bind(format!("{reverting:#x}"))
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(exclusion_count == 1);
+            ensure!(alerts.0.lock().expect("alert mutex is available").iter().any(
+                |alert| matches!(alert, FlushAlert::PlanningExcluded { address_id, .. } if *address_id == seeded[1].id)
+            ));
+            ensure!(
+                flusher.send_next(&route).await?
+                    == RunResult::Sent {
+                        flush_id: estimated_plan
+                    }
+            );
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher.maintain_sent(&route).await?
+                    == Some(RunResult::Confirmed {
+                        flush_id: estimated_plan
+                    })
+            );
+            cast_send(
+                &anvil.rpc_url,
+                reverting,
+                ADMIN_KEY,
+                "setBlockedForwarder(address)",
+                &["0x0000000000000000000000000000000000000000"],
+            )?;
+            for address in &seeded {
+                cast_send(
+                    &anvil.rpc_url,
+                    reverting,
+                    ADMIN_KEY,
+                    "mint(address,uint256)",
+                    &[&format!("{:#x}", address.physical), TOKEN_AMOUNT],
+                )?;
+            }
+            sqlx::query("DELETE FROM flush_exclusions WHERE chain_id = 31337 AND token = $1")
+                .bind(format!("{reverting:#x}"))
+                .execute(&database.pool)
+                .await?;
+            let revert_flush = planner.plan(&route).await?.context("plan reverting batch")?;
             cast_send(
                 &anvil.rpc_url,
                 reverting,
@@ -703,7 +915,8 @@ async fn insert_deposit(
         reason,
         next_attempt_at: Utc::now() - Duration::seconds(1),
     };
-    ensure!(topup::db::insert_deposit(pool, &deposit).await?);
+    let committed = topup::db::commit_scan(pool, 31_337, &[deposit], &[], None).await?;
+    ensure!(committed.inserted == 1);
     Ok(deposit_id(31_337, tx_hash, log_index))
 }
 
