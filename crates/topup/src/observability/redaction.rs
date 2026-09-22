@@ -50,7 +50,8 @@ mod tests {
                 .expect("route fixture parses");
         let chain_id = route.chain.chain_id;
         let chain = RpcReconciliationChain::connect(&rpc_url, Duration::from_secs(5), 10)
-            .expect("production adapter accepts URL");
+            .expect("production adapter accepts URL")
+            .with_provider("provider-a");
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
             .expect("lazy pool URL is valid");
@@ -74,7 +75,7 @@ mod tests {
                 .iter()
                 .find(|line| line.contains("missing-deposit check failed for chain"))
                 .ok_or_else(|| "missing production reconciler error log".to_owned())?;
-            if !line.contains("[REDACTED URL]") || !line.contains("finalized head fetch") {
+            if !line.contains("finalized head fetch failed for provider `provider-a` (transport)") {
                 return Err(format!("adapter error was not redacted: {line}"));
             }
             // This capture enables every level; `log_subscriber` drops alloy's DEBUG transport

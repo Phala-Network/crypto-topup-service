@@ -265,7 +265,8 @@ impl Reconciler {
                     "reconciliation balance batch size exceeds usize".to_owned(),
                 )
             })?;
-            let chain = RpcReconciliationChain::connect(&url, timeout, batch)?;
+            let chain = RpcReconciliationChain::connect(&url, timeout, batch)?
+                .with_provider(&crate::rpc_provider::provider_label(provider, 0));
             chains.insert(route.chain.chain_id, Arc::new(chain));
         }
         let settlement = Arc::new(SignedSettlementLookup {

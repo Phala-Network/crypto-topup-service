@@ -87,12 +87,14 @@ impl SanctionsOracle {
             return Err(SanctionsOracleConfigError::ZeroTimeout);
         }
         let provider_a_url = Redacted::parse(provider_a_url)
-            .map_err(|_| SanctionsOracleConfigError::InvalidProviderAUrl)?;
+            .map_err(|_| SanctionsOracleConfigError::InvalidProviderAUrl)?
+            .with_provider("provider-a");
         if !matches!(provider_a_url.expose().scheme(), "http" | "https") {
             return Err(SanctionsOracleConfigError::InvalidProviderAUrl);
         }
         let provider_b_url = Redacted::parse(provider_b_url)
-            .map_err(|_| SanctionsOracleConfigError::InvalidProviderBUrl)?;
+            .map_err(|_| SanctionsOracleConfigError::InvalidProviderBUrl)?
+            .with_provider("provider-b");
         if !matches!(provider_b_url.expose().scheme(), "http" | "https") {
             return Err(SanctionsOracleConfigError::InvalidProviderBUrl);
         }
@@ -104,6 +106,18 @@ impl SanctionsOracle {
             oracle,
             request_timeout,
         })
+    }
+
+    /// Labels provider A and B errors with their configured provider ids instead of roles.
+    #[must_use]
+    pub fn with_provider_ids(
+        mut self,
+        provider_a: impl Into<String>,
+        provider_b: impl Into<String>,
+    ) -> Self {
+        self.provider_a_endpoint = self.provider_a_endpoint.with_provider(provider_a);
+        self.provider_b_endpoint = self.provider_b_endpoint.with_provider(provider_b);
+        self
     }
 
     async fn answer(
@@ -124,8 +138,8 @@ impl SanctionsOracle {
         .await;
         let output = match response {
             Ok(Ok(output)) => output,
-            Ok(Err(_)) => {
-                let error = endpoint.transport_error("sanctions oracle call");
+            Ok(Err(error)) => {
+                let error = endpoint.rpc_error("sanctions oracle call", &error);
                 tracing::warn!(%error, "sanctions provider request failed");
                 return SanctionsAnswer::Unavailable;
             }

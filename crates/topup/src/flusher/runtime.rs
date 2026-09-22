@@ -23,7 +23,7 @@ use super::{
     AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
     PriceError, PriceSource, RunResult,
 };
-use crate::rpc_provider::configured_provider_url;
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// One configured chain/token flusher task.
 pub struct FlusherTask {
@@ -282,7 +282,8 @@ pub fn configure_tasks(
             .map_err(|_| "flush balance batch size exceeds usize".to_owned())?;
         let chain = Arc::new(
             AlloyChainClient::connect_http_with_policy(url.expose().as_str(), timeout, batch_size)
-                .map_err(|_| format!("failed to configure flusher provider {url}"))?,
+                .map_err(|_| format!("failed to configure flusher provider {url}"))?
+                .with_provider(provider_label(provider, 0)),
         );
         let prices: Arc<dyn PriceSource> =
             Arc::new(CoinMetricsPriceSource(CoinMetricsUsdClient::new(timeout)?));

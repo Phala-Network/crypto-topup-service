@@ -491,6 +491,7 @@ async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyRepo
         };
         let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
         let Ok(client) = AlloyChainClient::connect_http_with_policy(&url, timeout, batch_size)
+            .map(|client| client.with_provider(crate::rpc_provider::provider_label(provider, 0)))
         else {
             route_report.treasury_balance_note =
                 "treasury balance unavailable: RPC client configuration is invalid".to_owned();

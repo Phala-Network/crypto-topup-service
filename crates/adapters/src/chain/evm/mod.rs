@@ -192,13 +192,20 @@ impl EvmChain {
         })
     }
 
+    /// Labels provider errors with the configured provider id instead of the URL.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.endpoint = self.endpoint.with_provider(provider);
+        self
+    }
+
     async fn block_time(&self, block_number: u64) -> Result<DateTime<Utc>, ChainError> {
         let block = self
             .provider
             .get_block_by_number(BlockNumberOrTag::Number(block_number))
             .await
-            .map_err(|_| {
-                ChainError::Transport(self.endpoint.transport_error("block timestamp fetch"))
+            .map_err(|error| {
+                ChainError::Transport(self.endpoint.rpc_error("block timestamp fetch", &error))
             })?
             .ok_or(ChainError::MissingField("block"))?;
         let timestamp = block.header.inner.timestamp;
@@ -225,8 +232,8 @@ impl EvmChain {
             .to_block(to_block)
             .event_signature(Transfer::SIGNATURE_HASH)
             .topic2(recipients);
-        let logs = self.provider.get_logs(&filter).await.map_err(|_| {
-            ChainError::Transport(self.endpoint.transport_error("transfer log fetch"))
+        let logs = self.provider.get_logs(&filter).await.map_err(|error| {
+            ChainError::Transport(self.endpoint.rpc_error("transfer log fetch", &error))
         })?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
@@ -313,8 +320,8 @@ impl ChainReader for EvmChain {
             .provider
             .get_block_by_number(BlockNumberOrTag::Finalized)
             .await
-            .map_err(|_| {
-                ChainError::Transport(self.endpoint.transport_error("finalized head fetch"))
+            .map_err(|error| {
+                ChainError::Transport(self.endpoint.rpc_error("finalized head fetch", &error))
             })?
             .ok_or(ChainError::MissingField("finalized block"))?;
         let current = block.header.inner.number;
@@ -363,8 +370,8 @@ impl ChainReader for EvmChain {
             .provider
             .get_transaction_receipt(tx_hash)
             .await
-            .map_err(|_| {
-                ChainError::Transport(self.endpoint.transport_error("transaction receipt fetch"))
+            .map_err(|error| {
+                ChainError::Transport(self.endpoint.rpc_error("transaction receipt fetch", &error))
             })?
         else {
             return Ok(None);

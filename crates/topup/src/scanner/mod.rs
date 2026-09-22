@@ -23,7 +23,7 @@ use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
-use crate::rpc_provider::configured_provider_url;
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// Maximum inclusive block count scanned in one window.
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
@@ -391,7 +391,8 @@ pub async fn run(
                 "provider `{provider_id}` does not contain a valid URL"
             ))
         })?;
-        let reader = EvmChain::new(rpc_url.expose().as_str())?;
+        let reader =
+            EvmChain::new(rpc_url.expose().as_str())?.with_provider(provider_label(provider_id, 0));
         let chain_pool = pool.clone();
         let chain_cancellation = cancellation.child_token();
         tasks.spawn(async move {
@@ -535,6 +536,7 @@ where
                 tracing::warn!(
                     chain_id,
                     error_category = error.category(),
+                    %error,
                     retry_after_seconds = delay.as_secs(),
                     "finalized chain scan failed transiently"
                 );
@@ -544,6 +546,7 @@ where
                 tracing::error!(
                     chain_id,
                     error_category = error.category(),
+                    %error,
                     "finalized chain scanner stopped"
                 );
                 return Err(error);

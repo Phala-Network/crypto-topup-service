@@ -30,7 +30,7 @@ use crate::db::{
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
-use crate::rpc_provider::configured_provider_url;
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// Authoritative prior answer returned by the destination product.
 #[derive(Clone, Debug, PartialEq)]
@@ -256,11 +256,13 @@ impl ConfirmStep {
                 entry.insert(ChainPair {
                     primary: Arc::new(
                         EvmChain::new(&primary_url)
-                            .map_err(|error| ConfirmConfigError(error.to_string()))?,
+                            .map_err(|error| ConfirmConfigError(error.to_string()))?
+                            .with_provider(provider_label(first, 0)),
                     ),
                     secondary: Arc::new(
                         EvmChain::new(&secondary_url)
-                            .map_err(|error| ConfirmConfigError(error.to_string()))?,
+                            .map_err(|error| ConfirmConfigError(error.to_string()))?
+                            .with_provider(provider_label(second, 1)),
                     ),
                 });
             }

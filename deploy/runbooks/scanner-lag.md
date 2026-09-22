@@ -29,7 +29,10 @@ Pause address/quote issuance when lag is material; existing addresses remain val
 
 - Both providers healthy and cursor static: inspect/restart the service loop.
 - One provider unhealthy: follow provider disagreement/config replacement.
-- Cursor advances but lag grows: provider rate limit or scan workload is insufficient.
+- Cursor advances but lag grows: provider rate limit or scan workload is insufficient. A rate limit
+  shows as `finalized chain scan failed transiently` warnings whose `error` field reads
+  `... failed for provider `<provider id>` (HTTP 429)`; the provider id names which configured
+  provider is throttling.
 
 ## Remediation
 

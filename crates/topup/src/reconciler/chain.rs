@@ -84,6 +84,17 @@ impl RpcReconciliationChain {
             request_timeout,
         })
     }
+
+    /// Labels every provider error with the configured provider id instead of the URL.
+    #[must_use]
+    pub fn with_provider(self, provider: &str) -> Self {
+        Self {
+            scanner: self.scanner.with_provider(provider),
+            flusher: self.flusher.with_provider(provider),
+            endpoint: self.endpoint.with_provider(provider),
+            ..self
+        }
+    }
 }
 
 #[async_trait]
@@ -151,10 +162,10 @@ impl ReconciliationChain for RpcReconciliationChain {
                         self.endpoint.timeout_error("Flushed log fetch").to_string(),
                     )
                 })?
-                .map_err(|_| {
+                .map_err(|error| {
                     ReconciliationError::Chain(
                         self.endpoint
-                            .transport_error("Flushed log fetch")
+                            .rpc_error("Flushed log fetch", &error)
                             .to_string(),
                     )
                 })?;

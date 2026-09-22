@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::db::{Deposit, OutboxEvent};
 use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
-use crate::rpc_provider::configured_provider_url;
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RouteKey {
@@ -220,6 +220,7 @@ impl ScreenStep {
                     version: route.version,
                 });
             };
+            let provider_ids = (provider_label(provider_a, 0), provider_label(provider_b, 1));
             let provider_a = configured_provider_url(provider_a).map_err(|environment| {
                 ScreenStepConfigError::MissingProviderUrl {
                     route: route.route.clone(),
@@ -244,7 +245,8 @@ impl ScreenStep {
                 route: route.route.clone(),
                 version: route.version,
                 source,
-            })?;
+            })?
+            .with_provider_ids(provider_ids.0, provider_ids.1);
             screening_routes.push(ScreenRoute::new(
                 route.route.clone(),
                 route.version,
