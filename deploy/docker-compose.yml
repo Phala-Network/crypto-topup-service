@@ -1,0 +1,209 @@
+x-walg-environment: &walg-environment
+  WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+  AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+
+services:
+  postgres:
+    image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    environment:
+      <<: *walg-environment
+      POSTGRES_DB: topup
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    configs:
+      - source: postgres_init_topup_role
+        target: /docker-entrypoint-initdb.d/10-topup-role.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d topup"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["topup", "migrate"]
+    environment:
+      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  topup:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["topup", "run"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+      RPC_PROVIDER_A_URL: ${RPC_PROVIDER_A_URL:-}
+      RPC_PROVIDER_A_API_KEY: ${RPC_PROVIDER_A_API_KEY:-}
+      RPC_PROVIDER_B_URL: ${RPC_PROVIDER_B_URL:-}
+      RPC_PROVIDER_B_API_KEY: ${RPC_PROVIDER_B_API_KEY:-}
+      COINMETRICS_API_KEY: ${COINMETRICS_API_KEY:-}
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      KRAKEN_API_KEY: ${KRAKEN_API_KEY:-}
+      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      TOPUP_CHAINS_DIR: /etc/topup/chains
+      TOPUP_ROUTES_DIR: /etc/topup/routes
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    configs:
+      - source: topup_chain_ethereum_sepolia
+        target: /etc/topup/chains/ethereum-sepolia.yaml
+      - source: topup_route_phala_cloud_sepolia_pha
+        target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "topup", "attest", "--nonce", "00"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  backup:
+    image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    user: postgres
+    command: ["walg-cron", "backup-push", "0 3 * * *"]
+    environment:
+      <<: *walg-environment
+      PGDATA: /var/lib/postgresql/data
+      PGHOST: postgres
+      PGDATABASE: topup
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-}
+      WALG_RETENTION_FULL: "7"
+    volumes:
+      - pgdata:/var/lib/postgresql/data:ro
+    healthcheck:
+      test: ["CMD", "wal-g", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+configs:
+  postgres_init_topup_role:
+    content: |
+      #!/bin/sh
+      set -eu
+
+      if [ -z "$${TOPUP_APP_PASSWORD:-}" ]; then
+          echo "TOPUP_APP_PASSWORD is required to initialize the application login" >&2
+          exit 1
+      fi
+
+      psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" \
+          --set=ON_ERROR_STOP=1 --set=app_password="$$TOPUP_APP_PASSWORD" <<'SQL'
+      DO $$$$
+      BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_app') THEN
+              CREATE ROLE topup_app NOLOGIN;
+          END IF;
+      END;
+      $$$$;
+
+      SELECT format(
+          'CREATE ROLE topup_service LOGIN PASSWORD %L IN ROLE topup_app',
+          :'app_password'
+      )
+      WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_service')
+      \gexec
+
+      SELECT format('ALTER ROLE topup_service PASSWORD %L', :'app_password')
+      WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_service')
+      \gexec
+      SQL
+
+  topup_chain_ethereum_sepolia:
+    content: |
+      chain_id: 11155111
+      name: ethereum-sepolia
+      finality: finalized
+      rpc_providers: [provider-a, provider-b]
+      contracts:
+        forwarder_factory: "0x0000000000000000000000000000000000000000"
+        implementation: "0x0000000000000000000000000000000000000000"
+        treasury: "0x0000000000000000000000000000000000000000"
+      flush:
+        schedule: "0 */6 * * *"
+        max_gas_ratio_bps: 200
+
+  topup_route_phala_cloud_sepolia_pha:
+    content: |
+      # Deployment template. Replace every placeholder and validate without --template before enabling it.
+      chain:
+        chain_id: 11155111
+        name: ethereum-sepolia
+        finality: finalized
+        rpc_providers: [provider-a, provider-b]
+        contracts:
+          forwarder_factory: "0x0000000000000000000000000000000000000000"
+          treasury: "0x0000000000000000000000000000000000000000"
+        flush:
+          schedule: "0 */6 * * *"
+          max_gas_ratio_bps: 200
+
+      route: phala-cloud-sepolia-pha-usd
+      version: 1
+
+      asset:
+        symbol: PHA
+        contract: "0x1111111111111111111111111111111111111111"
+        decimals: 18
+        min_flush_atomic: "20000000000000000000000"
+
+      destination:
+        product: phala-cloud
+        unit: USD
+        unit_decimals: 2
+        settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
+        product_kid: phala-cloud/v1
+
+      pricing:
+        primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
+        check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
+        price_scale: 8
+        max_age_s: 120
+        max_deviation_bps: 100
+        max_fx_deviation_bps: 50
+
+      screening:
+        sanctions_oracle: "0x2222222222222222222222222222222222222222"
+        min_deposit_atomic: "20000000000000000000"
+        max_deposit_atomic: "200000000000000000000000"
+        min_credit_minor: 100
+
+      rate_lock:
+        enabled: true
+        window_s: 900
+        spread_bps: 50
+        lock_tolerance_bps: 100
+        max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
+
+      alerts:
+        stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }

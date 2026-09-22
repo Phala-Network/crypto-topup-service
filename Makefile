@@ -1,4 +1,4 @@
-.PHONY: build test lint image
+.PHONY: build test lint image up down smoke verify-image
 
 build:
 	cargo build --workspace --locked
@@ -13,4 +13,16 @@ lint:
 
 image:
 	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t crypto-topup-service:dev .
-	docker run --rm crypto-topup-service:dev --help
+	docker run --rm crypto-topup-service:dev topup --help
+
+up:
+	docker compose -f deploy/local/docker-compose.yml up --build -d
+
+down:
+	docker compose -f deploy/local/docker-compose.yml down --remove-orphans
+
+smoke:
+	deploy/local/smoke.sh
+
+verify-image:
+	deploy/verify-image.sh

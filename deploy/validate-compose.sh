@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+compose="$root/deploy/docker-compose.yml"
+rendered=$(mktemp)
+compose_envs=$(mktemp)
+allowed_envs=$(mktemp)
+escaped_config=$(mktemp)
+
+cleanup() {
+    rm -f "$rendered" "$compose_envs" "$allowed_envs" "$escaped_config"
+}
+trap cleanup EXIT INT TERM
+
+docker compose -f "$compose" config --format json >"$rendered"
+
+compare_config() {
+    name=$1
+    path=$2
+    if [ "${3:-}" = "escape-dollars" ]; then
+        sed 's/[$]/&&/g' "$path" >"$escaped_config"
+        path=$escaped_config
+    fi
+    jq -j --arg name "$name" '.configs[$name].content' "$rendered" | cmp -s - "$path" || {
+        echo "attested config $name differs from $path" >&2
+        return 1
+    }
+}
+
+compare_config postgres_init_topup_role "$root/deploy/postgres-init/10-topup-role.sh" \
+    escape-dollars
+compare_config topup_chain_ethereum_sepolia \
+    "$root/deploy/config/chains/ethereum-sepolia.yaml"
+compare_config topup_route_phala_cloud_sepolia_pha \
+    "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml"
+
+docker compose -f "$compose" config --variables |
+    awk 'NR > 1 && NF > 0 { print $1 }' |
+    grep -Ev '^(POSTGRES_WALG_IMAGE|TOPUP_IMAGE)$' |
+    sort >"$compose_envs"
+jq -r '.allowed_envs[]' "$root/deploy/app-compose.example.json" | sort >"$allowed_envs"
+cmp -s "$compose_envs" "$allowed_envs" || {
+    echo "app-compose allowed_envs differs from compose secret variables" >&2
+    diff -u "$compose_envs" "$allowed_envs" >&2 || true
+    exit 1
+}
+
+echo "attested compose config and allowed_envs validation passed"
