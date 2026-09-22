@@ -1,0 +1,23 @@
+name: Restore drill
+
+on:
+  schedule:
+    # Weekly, Monday 03:17 UTC: the architecture section 14 restore drill.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run the controlled and crash restore drills
+        run: make restore-drill

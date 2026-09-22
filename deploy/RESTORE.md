@@ -64,11 +64,15 @@ MinIO's `LastModified` for the uploaded WAL object. Controlled mode also builds 
 key v1 while object storage is down, archives one segment with a single v1 wrapper call and proves
 no adjacent segment was uploaded, rotates PostgreSQL to v2 while the rest are pending, lets the
 archiver finish them under v2, decrypts every rotation segment with its recorded key version (and
-proves the other version fails), and restores across the rotation boundary. Both modes pass the externally recorded source heartbeat and LSN
-to `restore-check`, assert RTO is at most 3600 seconds, exercise a signed product GET, and remove
-their uniquely named Compose projects, volumes, and per-run image tags. The full image build plus real 60-second archive
-window is intentionally a weekly job; the bounded deployment CI job runs the WAL-G wrapper tests
-instead.
+proves the other version fails), and restores across the rotation boundary. Both modes run the step
+3 selection commands verbatim, start the restored instance with `TOPUP_WAL_ARCHIVE=off` and require
+the object-storage listing to be unchanged after promotion, pass the externally recorded source
+heartbeat and LSN to `restore-check`, assert RTO is at most 3600 seconds, exercise a signed product
+GET, and remove their uniquely named Compose projects, volumes, and per-run image tags.
+
+The `Restore drill` workflow (`.github/workflows/restore-drill.yml`) runs `make restore-drill` every
+Monday at 03:17 UTC on the CI runner and can be started manually. The per-push deployment job runs
+the bounded WAL-G wrapper and archive-switch tests instead.
 
 ## Authorize the replacement CVM
 
