@@ -69,7 +69,7 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 | C8 Reconciler | Every check in §13 with the two safe repairs and post-restore mode `after: C3, C6, C7` | Each check exercised with a seeded mismatch | §13 |
 | C9 API | `axum` routes of §12 (accounts, addresses, rotate, rate locks, deposits, limits, pause scopes, refund requests, attestation, admin), product signature verification, tenant checks, `utoipa` OpenAPI `after: C1` | Route tests incl. cross-tenant denial; OpenAPI snapshot | §12 |
 | C10 Rate locks | Creation with atomic exposure reservation and rate limit, EIP-681 URI, single consumption, tolerance, expiry event, cancel, resume `after: C4, C9` | Exact, over, under, late, double payment, cancel-then-pay | §9 |
-| C11 Signer and attestation | `signer::dstack` (`operator/v1`, `settlement/v1`, `backup/v1`), zeroization, attestation endpoint with nonce, startup contract checks `after: B1` | dstack simulator tests; recorded quote verification | §10, §14 |
+| C11 Signer and attestation | `signer::dstack` (`operator/v1`, `settlement/v1`, `backup/v1`), zeroization, attestation primitive and `topup attest --nonce`; HTTP endpoint remains in C9 and startup contract checks belong to the later `run` command `after: B1` | Signing and report-data unit tests; dstack simulator integration when explicitly enabled; `topup attest --dev` | §10, §14 |
 | C12 Refunds and support | `refunds` table flow, `deposit.refunded`, support lookup filters, `nudge`, daily report `after: C9` | Refund request → approve → record → event; report snapshot | §12, §15 |
 | C13 Outbox delivery | Standard Webhooks sender, retry, delivery log, CLI replay `after: C1` | Signature verified by a reference receiver; replay by id | §12 |
 
