@@ -17,6 +17,7 @@ pub mod address;
 pub mod deposit;
 pub mod identity;
 pub mod money;
+pub mod refund;
 pub mod retry;
 pub mod route;
 pub mod screening;

@@ -24,3 +24,8 @@ route decimal configuration. Before upgrading, stop quote issuance, let open loc
 them in the product, reconcile that none received a payment, and remove those unconsumed rows. The
 migration preserves already consumed rows with a non-operative zero sentinel; every lock created by
 the upgraded service stores its exact frozen `credit_minor`.
+
+Migration `20260922000014_refund_settlement_exclusion` persists the effective route on every refund
+so later approval checks the same route pause selected at request time. Before upgrading an
+environment with pre-existing refunds whose deposits have no route, reconcile and populate an
+effective fallback route; the migration refuses to invent one.

@@ -204,6 +204,7 @@ configs:
         contract: "0x1111111111111111111111111111111111111111"
         decimals: 18
         min_flush_atomic: "20000000000000000000000"
+        min_refund_atomic: "20000000000000000000"
 
       destination:
         product: phala-cloud
