@@ -115,8 +115,12 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
 ## 5. Stack
 
 Rust stable, `#![forbid(unsafe_code)]`, release `overflow-checks = true`. `tokio`, `axum` +
-`utoipa`, `sqlx`, `alloy`, `dstack-sdk` pinned to one guest-API version, `secrecy` +
-`zeroize`. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
+`utoipa`, `sqlx`, `alloy`, `dstack-sdk` pinned to the `dstack.guest.v1` guest API,
+`secrecy` + `zeroize`. The v1 Rust SDK is not yet published on crates.io: the published
+`dstack-sdk = 0.1.3` exposes the legacy API and cannot derive an ed25519 key. Until a v1
+release is published, use the official repository with both `version = "=0.6.0"` and
+`rev = "721df1b93fd93884224f2261c37dd86ca250432f"`; changing that revision requires a spec
+change. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
 `unwrap_used`. `cargo-deny`, committed lockfile, reproducible distroless image by digest.
 Contracts: Solidity with OpenZeppelin, Foundry, one external audit.
 
@@ -193,7 +197,7 @@ once.
 | Step | Does |
 |---|---|
 | `detected → confirmed` | First, `GET` the product by the deterministic key: an existing answer restores the original payload and business state (`credited` or `rejected`) directly, before any quoting or local decision, so a deposit rebuilt after a restore can never diverge from what the product already did. Then, from both providers: `finalized ≥ block_number`, same block hash, same log. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same event identity, the row is corrected. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
-| `confirmed → cleared` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account and product not paused. |
+| `confirmed → cleared` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account and product not paused (paused → `Wait`, never a rejection). |
 | `cleared → credited` | Signed `POST` (§11). Body `rejected` → `rejected(product_refused)`. On an unknown result, `GET` before any resend. |
 | `credited → swept` | `flush_id` is set: a confirmed `flushed` row exists for the deposit's address and token at a log position `(block_number, log_index)` greater than the deposit's. Evaluated on flush confirmation and on every deposit insert, so backfilled deposits resolve too. |
 
@@ -442,8 +446,10 @@ divergent prices; sanctions hit; settlement `processing`, `409`, `422`, `rejecte
 then `GET`; lock exact, over, under, late, double payment; batch flush with replacement,
 reverted flush, and operator rotation; flush carrying pending and rejected deposits; deposit
 backfilled after its flush; deposit arriving while a flush is unconfirmed; restore from a
-pre-settlement snapshot with `GET`-first adoption. Conformance suite against Phala Cloud in CI, including obligations 4 and 5;
-`signer::dstack` against the simulator; attestation against a recorded quote.
+pre-settlement snapshot with `GET`-first adoption. Conformance suite against Phala Cloud in
+CI, including obligations 4 and 5; `signer::dstack` against the simulator when explicitly
+enabled; attestation report-data construction against a known vector and the simulator
+response when available.
 
 ## 17. Delivery
 

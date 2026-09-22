@@ -14,6 +14,8 @@
 )]
 
 pub mod address;
+pub mod deposit;
 pub mod identity;
 pub mod money;
+pub mod retry;
 pub mod route;
