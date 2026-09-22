@@ -163,6 +163,10 @@ def test_transient_chain_reads_answer_503_and_store_nothing(rpc: FakeRpc) -> Non
         (_receipt(status="0x0"), "transaction_reverted"),
         (_receipt(logs=[]), "log_not_found"),
         (_receipt(logs=[_log(address="0x" + "99" * 20)]), "log_not_emitted_by_asset"),
+        (
+            _receipt(logs=[_log(topics=[*_log()["topics"][:2], "0x" + "00" * 12 + "77" * 20])]),
+            "log_recipient_mismatch",
+        ),
         (_receipt(logs=[_log(data=hex(AMOUNT + 1))]), "log_amount_mismatch"),
     ],
 )

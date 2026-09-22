@@ -561,19 +561,18 @@ class SettlementService:
     def _team_address(self, team_id: str, to: str, evidence: dict[str, Any]) -> bool:
         """`to` must be an address this product computed itself for the account.
 
-        Payments that do not consume a lock (late, wrong amount) carry `lock_ref: null`, so the
-        product records every quote address it computes, not just persistent ones.
+        A cited `lock_ref` is recomputed directly from the salt inputs. Payments that do not
+        consume a lock (late, wrong amount) carry `lock_ref: null`, so the product also records
+        every quote address it computes, before asking the service for the quote.
         """
-        if self.ledger.address_owner(to) != team_id:
-            return False
         lock_ref = evidence.get("lock_ref")
-        if lock_ref is None:
-            return True
-        if not isinstance(lock_ref, str):
-            return False
-        salt = lock_salt(self.config.product_slug, team_id, lock_ref)
-        expected = forwarder_address(self.config.factory, self.config.implementation, salt)
-        return same_address(expected, to)
+        if lock_ref is not None:
+            if not isinstance(lock_ref, str):
+                return False
+            salt = lock_salt(self.config.product_slug, team_id, lock_ref)
+            expected = forwarder_address(self.config.factory, self.config.implementation, salt)
+            return same_address(expected, to)
+        return self.ledger.address_owner(to) == team_id
 
     def _commit(self, key: str, payload: dict[str, Any], refusal: str | None) -> Answer:
         team_id = None if refusal == "unknown_account" else str(payload["account_id"])
@@ -660,7 +659,7 @@ class SettlementService:
 
 
 def _decimal(value: object) -> int | None:
-    if not isinstance(value, str) or not value.isdigit():
+    if not isinstance(value, str) or not (value.isascii() and value.isdigit()):
         return None
     return int(value)
 
@@ -809,14 +808,17 @@ def create_quote(
     lock_ref: str,
     amount_minor: int,
 ) -> RateLockResponse:
-    """Creates a quote-first lock and records its address after recomputing it."""
-    lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
+    """Creates a quote-first lock, recording its recomputed address before the request.
+
+    Recording first means a crash between the two steps never leaves a paid quote address the
+    product does not recognise; the service's answer must then match the recorded address.
+    """
     salt = lock_salt(config.product_slug, team, lock_ref)
-    if not same_address(
-        forwarder_address(config.factory, config.implementation, salt), lock.address
-    ):
+    expected = forwarder_address(config.factory, config.implementation, salt)
+    ledger.record_address(expected, team, lock_ref=lock_ref)
+    lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
+    if not same_address(expected, lock.address):
         raise RuntimeError("rate-lock address does not match the product's computation")
-    ledger.record_address(lock.address, team, lock_ref=lock_ref)
     return lock
 
 
