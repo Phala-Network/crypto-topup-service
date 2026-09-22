@@ -6,3 +6,5 @@ contracts/out
 contracts/broadcast
 .env
 .env.*
+sdk/python/.venv
+**/__pycache__

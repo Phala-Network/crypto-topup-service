@@ -1,0 +1,77 @@
+{
+  "description": "RFC 9421 requests signed by sdk/python (topup_sdk.signing). Regenerate with `uv run python -m tests.vectors` from sdk/python.",
+  "keyid": "sdk-vector/v1",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "created": 1790000000,
+  "vectors": [
+    {
+      "name": "register_account",
+      "method": "POST",
+      "target": "/v1/products/sdk-vector/accounts",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-type": "application/json",
+        "content-digest": "sha-256=:jx8cW0Qp8yTqjdK+j6Mloexuv3e+JLtSwPTp/M9zpZY=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1790000000;keyid=\"sdk-vector/v1\";alg=\"ed25519\"",
+        "signature": "sig1=:9rnW9cwTVeC+I8HT7BRbuBAFGF6sctvXLCvQSklaI8/WfSPWNB6QyFvioPkb9c7o4FgtVeatOLBTVaVJfjYgAg==:"
+      },
+      "body": "{\"external_id\":\"workspace-42\"}"
+    },
+    {
+      "name": "list_deposits_with_query",
+      "method": "GET",
+      "target": "/v1/products/sdk-vector/accounts/%E5%AE%A2%E6%88%B7%2042/deposits?state=credited&from=2026-09-01T00%3A00%3A00%2B00%3A00",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts/%E5%AE%A2%E6%88%B7%2042/deposits?state=credited&from=2026-09-01T00%3A00%3A00%2B00%3A00",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1790000000;keyid=\"sdk-vector/v1\";alg=\"ed25519\"",
+        "signature": "sig1=:mnTK8RyiMzI2CLToLqgzWae9fWgrXSKo+M4wCNLyz0iAZ/2S97JXlHOpL4S3d4JVhs7zS+2ZnJ0pLwEZCUJyAA==:"
+      },
+      "body": ""
+    },
+    {
+      "name": "idempotency_key_covered",
+      "method": "POST",
+      "target": "/v1/products/sdk-vector/accounts/workspace-42/rate-locks",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts/workspace-42/rate-locks",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-type": "application/json",
+        "idempotency-key": "\"checkout-1\"",
+        "content-digest": "sha-256=:I1pVr5U1KlbssUG4PA27T/ElYbUtDIdjIis/Hf0ADsI=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=1790000000;keyid=\"sdk-vector/v1\";alg=\"ed25519\"",
+        "signature": "sig1=:CG5x2AdKMlE3xjd3k8ih3T3i5dERKH+Gk2xi9imT1IbIfgGvkgORXaYRi6QDjX2qxrPhJW2AhpqP7uIOq8k4CQ==:"
+      },
+      "body": "{\"amount_minor\":\"2500\",\"product_lock_ref\":\"checkout-1\"}"
+    },
+    {
+      "name": "without_alg_parameter",
+      "method": "DELETE",
+      "target": "/v1/products/sdk-vector/accounts/workspace-42/rate-locks/checkout-1",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts/workspace-42/rate-locks/checkout-1",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1790000000;keyid=\"sdk-vector/v1\"",
+        "signature": "sig1=:6y4pEL51xT29H2GEW0H1aYt13tm0ukK4Ax3e7dF0f1UNPwTuywNeJy1Ob7G6dV35AhCoUN40AF55kAivcFJTAw==:"
+      },
+      "body": ""
+    },
+    {
+      "name": "nonce_parameter",
+      "method": "POST",
+      "target": "/v1/products/sdk-vector/accounts/workspace-42/deposit-address",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts/workspace-42/deposit-address",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1790000000;keyid=\"sdk-vector/v1\";alg=\"ed25519\";nonce=\"p3Ul4Lz1G9w2QWrZ0bN8xA\"",
+        "signature": "sig1=:Y8X/Rg1tIUbvwUdye6kmLLItTxpxlhvr5mvlOLYBhvi2aOr35WXOQS9Gq/XFSzgZ66QzHFnUKtyM7fvGlv3sCA==:"
+      },
+      "body": ""
+    }
+  ]
+}
