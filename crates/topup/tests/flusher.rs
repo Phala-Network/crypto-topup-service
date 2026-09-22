@@ -352,6 +352,156 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
 }
 
 #[tokio::test]
+async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let anvil = Anvil::start()?;
+            let root = repository_root();
+            let factory = deploy(
+                &root,
+                &anvil.rpc_url,
+                "src/ForwarderFactory.sol:ForwarderFactory",
+                &[ADMIN_ADDRESS, TREASURY],
+            )?;
+            let token = deploy(
+                &root,
+                &anvil.rpc_url,
+                "test/mocks/MockTokens.sol:MockERC20",
+                &[],
+            )?;
+            grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
+            let implementation =
+                cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
+            let route = test_route(factory, token)?;
+            let seeded = seed_addresses(&database.pool, factory, implementation).await?;
+            let address = &seeded[0];
+            let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
+            let alerts = Arc::new(Alerts::default());
+            let signer = signer_handle(OPERATOR_KEY)?;
+            let planner = Planner::new(
+                database.pool.clone(),
+                chain.clone(),
+                signer.clone(),
+                Arc::new(FixedPrice),
+                alerts.clone(),
+            );
+            let flusher = Flusher::new(
+                database.pool.clone(),
+                chain,
+                signer,
+                alerts,
+                FlusherPolicy::default(),
+            );
+
+            mint(&anvil.rpc_url, token, address.physical)?;
+            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await?.is_none());
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+            }
+            set_route_flush_pause(&database.pool, &route.route, false).await?;
+            let route_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan before route pause")?;
+            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await? == Some(route_plan));
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+                ensure!(flush_status(&database.pool, route_plan).await? == "planned");
+            }
+            let pause_audits: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE action = 'flush.send_paused' AND subject = $1",
+            )
+            .bind(route_plan.to_string())
+            .fetch_one(&database.pool)
+            .await?;
+            ensure!(pause_audits == 1);
+
+            set_route_flush_pause(&database.pool, &route.route, false).await?;
+            ensure!(
+                flusher.run_once(&route).await?
+                    == RunResult::Sent {
+                        flush_id: route_plan
+                    }
+            );
+            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher.run_once(&route).await?
+                    == RunResult::Confirmed {
+                        flush_id: route_plan
+                    }
+            );
+            set_route_flush_pause(&database.pool, &route.route, false).await?;
+
+            mint(&anvil.rpc_url, token, address.physical)?;
+            set_product_flush_pause(&database.pool, address.product_id, true).await?;
+            let completed_before_product = completed_flush_count(&database.pool).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await?.is_none());
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+                ensure!(completed_flush_count(&database.pool).await? == completed_before_product);
+            }
+            set_product_flush_pause(&database.pool, address.product_id, false).await?;
+            let product_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan after product resume")?;
+            set_product_flush_pause(&database.pool, address.product_id, true).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await? == Some(product_plan));
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+                ensure!(flush_status(&database.pool, product_plan).await? == "planned");
+            }
+            set_product_flush_pause(&database.pool, address.product_id, false).await?;
+            ensure!(
+                flusher.run_once(&route).await?
+                    == RunResult::Sent {
+                        flush_id: product_plan
+                    }
+            );
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher.run_once(&route).await?
+                    == RunResult::Confirmed {
+                        flush_id: product_plan
+                    }
+            );
+
+            mint(&anvil.rpc_url, token, address.physical)?;
+            set_account_flush_pause(&database.pool, address.account_id, true).await?;
+            let completed_before_account = completed_flush_count(&database.pool).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await?.is_none());
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+                ensure!(completed_flush_count(&database.pool).await? == completed_before_account);
+            }
+            set_account_flush_pause(&database.pool, address.account_id, false).await?;
+            let account_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan after account resume")?;
+            set_account_flush_pause(&database.pool, address.account_id, true).await?;
+            for _ in 0..2 {
+                ensure!(planner.plan(&route).await? == Some(account_plan));
+                ensure!(flusher.run_once(&route).await? == RunResult::Idle);
+                ensure!(flush_status(&database.pool, account_plan).await? == "planned");
+            }
+            set_account_flush_pause(&database.pool, address.account_id, false).await?;
+            ensure!(
+                flusher.run_once(&route).await?
+                    == RunResult::Sent {
+                        flush_id: account_plan
+                    }
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_bisect()
 -> Result<()> {
     with_database(|database| {
@@ -1024,6 +1174,7 @@ fn test_route(factory: Address, token: Address) -> Result<RouteFile> {
 struct SeededAddress {
     id: Uuid,
     account_id: Uuid,
+    product_id: Uuid,
     physical: Address,
 }
 
@@ -1068,10 +1219,74 @@ async fn seed_addresses(
         result.push(SeededAddress {
             id: address.id,
             account_id: account.id,
+            product_id: product.id,
             physical,
         });
     }
     Ok(result)
+}
+
+fn mint(rpc_url: &str, token: Address, address: Address) -> Result<()> {
+    cast_send(
+        rpc_url,
+        token,
+        ADMIN_KEY,
+        "mint(address,uint256)",
+        &[&format!("{address:#x}"), TOKEN_AMOUNT],
+    )
+}
+
+async fn set_route_flush_pause(pool: &PgPool, route: &str, paused: bool) -> Result<()> {
+    let scopes = if paused { vec!["flush"] } else { Vec::new() };
+    sqlx::query(
+        r#"
+        INSERT INTO route_pauses (route, paused_scopes)
+        VALUES ($1, $2)
+        ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes
+        "#,
+    )
+    .bind(route)
+    .bind(scopes)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_product_flush_pause(pool: &PgPool, product_id: Uuid, paused: bool) -> Result<()> {
+    let scopes = if paused {
+        vec!["flush".to_owned()]
+    } else {
+        Vec::new()
+    };
+    topup::db::set_product_paused_scopes(pool, product_id, &scopes).await?;
+    Ok(())
+}
+
+async fn set_account_flush_pause(pool: &PgPool, account_id: Uuid, paused: bool) -> Result<()> {
+    let scopes = if paused {
+        vec!["flush".to_owned()]
+    } else {
+        Vec::new()
+    };
+    topup::db::set_account_paused_scopes(pool, account_id, &scopes).await?;
+    Ok(())
+}
+
+async fn flush_status(pool: &PgPool, flush_id: Uuid) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT status FROM flushes WHERE id = $1")
+            .bind(flush_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+async fn completed_flush_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM flushes WHERE status IN ('sent', 'confirmed', 'reverted')",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn insert_deposit(
