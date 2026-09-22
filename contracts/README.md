@@ -14,7 +14,8 @@ This Foundry project implements the deterministic EIP-1167 deposit forwarders de
 ## Deployment
 
 1. Deploy and verify the treasury Safe at the intended address.
-2. Deploy `ForwarderFactory(admin, treasury)`. Its constructor deploys the shared `Forwarder`
+2. Follow `deploy/CONTRACTS.md` to deploy `ForwarderFactory(admin, treasury)` through the
+   Arachnid deterministic deployment proxy. Its constructor deploys the shared `Forwarder`
    implementation, binding both immutable addresses.
 3. Grant `OPERATOR_ROLE` to the service key and verify `implementation()`, the implementation's
    `treasury()` and `factory()`, and `addressOf()` against the route configuration.
@@ -22,6 +23,9 @@ This Foundry project implements the deterministic EIP-1167 deposit forwarders de
 Deployment determinism depends on the compiler settings as well as constructor inputs. This
 project pins Solidity `0.8.24`, EVM target `cancun`, optimizer settings, and metadata settings in
 `foundry.toml`; deployments must use those checked-in settings so factory init code is identical.
+`deploy/contracts/check-build.sh --check` enforces those settings and the committed artifact
+fingerprints. `make deploy-check` also proves the proxy, factory, implementation, and a forwarder
+resolve to identical addresses on two local Anvil chains with different chain IDs.
 
 Changing the treasury requires a new factory and a new route version. There is no setter,
 owner, proxy upgrade, or per-clone mutable state.
