@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use topup::db::{
     self, AddressKind, LockConsumption, NewAccount, NewAddress, NewDeposit, NewProduct,
-    OutboxEvent, SettlementIntent, StoredValuation, TransitionEffects,
+    OutboxEvent, SettlementAdoption, SettlementIntent, StoredValuation, TransitionEffects,
 };
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, PumpMetrics, RunOnceResult, Step,
@@ -484,6 +484,179 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             .fetch_one(&context.app_pool)
             .await?;
             ensure!(confirmed == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restored_lock_answer_consumes_lock_before_a_second_payment() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 16).await?;
+            sqlx::query(
+                "UPDATE addresses SET kind = 'lock', lock_ref = 'restore-lock' WHERE id = $1",
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let restored_id = insert_deposit(&context.app_pool, seed, 16).await?;
+            let second_id = insert_deposit(&context.app_pool, seed, 17).await?;
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
+            )
+            .bind(second_id)
+            .execute(&context.app_pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
+                        now() + interval '15 minutes')
+                "#,
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+
+            let restored = StepResult {
+                outcome: StepOutcome::AdoptProductAnswer { credited: true },
+                evidence: json!({"stage": "product_lookup", "result": "accepted"}),
+                events: Vec::new(),
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 9_000_000,
+                        price_source: "lock".to_owned(),
+                        credit_minor: MinorAmount::new(777),
+                        quote: json!({"restored": true}),
+                    }),
+                    settlement_adoption: Some(SettlementAdoption {
+                        key: format!("deposit:{restored_id}"),
+                        payload: json!({
+                            "amount_minor": "777",
+                            "evidence": {
+                                "price_scaled": "9000000",
+                                "valuation_at": "2026-09-22T00:00:00Z",
+                                "lock_ref": "restore-lock"
+                            }
+                        }),
+                        accepted: true,
+                        destination_tx_id: Some("credit-restored".to_owned()),
+                    }),
+                    lock_consumption: Some(LockConsumption {
+                        address_id: seed.address_id,
+                        idempotent: true,
+                    }),
+                },
+            };
+            let restore_pump = test_pump(
+                &context.app_pool,
+                result_steps(restored),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                restore_pump.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: restored_id
+                    }
+            );
+            let consumed_by: Uuid =
+                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(consumed_by == restored_id);
+
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
+            )
+            .bind(restored_id)
+            .execute(&context.app_pool)
+            .await?;
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(second_id)
+            .execute(&context.app_pool)
+            .await?;
+            let lock_attempt = StepResult {
+                outcome: StepOutcome::Advance,
+                evidence: json!({"price_source": "lock"}),
+                events: Vec::new(),
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 9_000_000,
+                        price_source: "lock".to_owned(),
+                        credit_minor: MinorAmount::new(777),
+                        quote: json!({"lock": true}),
+                    }),
+                    settlement_adoption: None,
+                    lock_consumption: Some(LockConsumption {
+                        address_id: seed.address_id,
+                        idempotent: false,
+                    }),
+                },
+            };
+            let lock_pump = test_pump(
+                &context.app_pool,
+                result_steps(lock_attempt),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                lock_pump.run_once().await?
+                    == RunOnceResult::Contended {
+                        deposit_id: second_id
+                    }
+            );
+            let still_detected = db::get_deposit(&context.app_pool, second_id)
+                .await?
+                .context("second payment")?;
+            ensure!(still_detected.state == DepositState::Detected);
+            ensure!(still_detected.price_source.is_none());
+
+            let spot = StepResult {
+                outcome: StepOutcome::Advance,
+                evidence: json!({"price_source": "spot"}),
+                events: Vec::new(),
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 10_000_000,
+                        price_source: "spot".to_owned(),
+                        credit_minor: MinorAmount::new(100),
+                        quote: json!({"spot": true}),
+                    }),
+                    settlement_adoption: None,
+                    lock_consumption: None,
+                },
+            };
+            let spot_pump = test_pump(
+                &context.app_pool,
+                result_steps(spot),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                spot_pump.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: second_id
+                    }
+            );
+            let second = db::get_deposit(&context.app_pool, second_id)
+                .await?
+                .context("confirmed second payment")?;
+            ensure!(second.price_source.as_deref() == Some("spot"));
+            ensure!(second.credit_minor == Some(MinorAmount::new(100)));
             Ok(())
         })
     })

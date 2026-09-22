@@ -726,6 +726,22 @@ async fn finalized_evidence(
                 }));
             }
         };
+    let required_block = primary
+        .as_ref()
+        .map(|log| log.block_number)
+        .into_iter()
+        .chain(secondary.as_ref().map(|log| log.block_number))
+        .max()
+        .unwrap_or(deposit.block_number);
+    if primary_head < required_block || secondary_head < required_block {
+        return FinalityResult::Wait(json!({
+            "stage": "finality",
+            "result": "not_final",
+            "required_block": required_block,
+            "provider_a_finalized": primary_head,
+            "provider_b_finalized": secondary_head,
+        }));
+    }
     match (primary, secondary) {
         (Some(primary), Some(secondary)) if primary == secondary => {
             if primary.to != address {
@@ -737,17 +753,7 @@ async fn finalized_evidence(
                     "provider_b": provider_evidence(&secondary),
                 }));
             }
-            if primary_head < primary.block_number || secondary_head < primary.block_number {
-                FinalityResult::Wait(json!({
-                    "stage": "finality",
-                    "result": "not_final",
-                    "required_block": primary.block_number,
-                    "provider_a_finalized": primary_head,
-                    "provider_b_finalized": secondary_head,
-                }))
-            } else {
-                FinalityResult::Ready(primary)
-            }
+            FinalityResult::Ready(primary)
         }
         (primary, secondary) => FinalityResult::Retry(json!({
             "stage": "finality",
@@ -1119,6 +1125,7 @@ fn provider_evidence(log: &TransferLog) -> Value {
 #[cfg(test)]
 mod tests {
     use std::future::ready;
+    use std::time::Duration;
 
     use topup_adapters::pricing::PriceError;
     use topup_core::valuation::SourceId;
@@ -1139,14 +1146,13 @@ mod tests {
             ready(self.head.clone())
         }
 
-        fn transfer_logs_to(
+        async fn transfer_logs_to(
             &self,
             _addresses: &[Address],
             _from_block: u64,
             _to_block: u64,
-        ) -> impl std::future::Future<Output = Result<Vec<TransferLog>, ChainError>> + Send
-        {
-            ready(self.logs.clone())
+        ) -> Result<Vec<TransferLog>, ChainError> {
+            panic!("confirm finality must locate the log by receipt identity")
         }
 
         fn transfer_log_by_identity(
@@ -1168,6 +1174,20 @@ mod tests {
     impl PriceSource for MockPrice {
         async fn observe(&self) -> Result<Observation, PriceError> {
             self.0.clone()
+        }
+    }
+
+    struct DelayedPrice {
+        source: &'static str,
+        value: u64,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl PriceSource for DelayedPrice {
+        async fn observe(&self) -> Result<Observation, PriceError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(observation(self.source, self.value, now_seconds()))
         }
     }
 
@@ -1226,10 +1246,14 @@ mod tests {
             result.effects.valuation.expect("valuation").credit_minor,
             MinorAmount::new(1_234)
         );
+        assert!(result.effects.lock_consumption.is_none());
     }
 
     #[tokio::test]
     async fn adopts_rejected_product_answer() {
+        let deposit = deposit(1_000);
+        let context = context_with_lock_ref(None, Some("lock-1"));
+        let product_id = context.product_id;
         let result = step(
             route(PricingMode::Spot),
             chain(100, Vec::new()),
@@ -1240,9 +1264,9 @@ mod tests {
                 destination_tx_id: None,
                 payload: product_payload(Some("lock-1")),
             })))),
-            context(None),
+            context,
         )
-        .run(&deposit(1_000))
+        .run(&deposit)
         .await;
         assert_eq!(
             result.outcome,
@@ -1251,6 +1275,15 @@ mod tests {
         assert_eq!(
             result.effects.valuation.expect("valuation").price_source,
             "lock"
+        );
+        assert_eq!(result.events.len(), 1);
+        assert_rejected_event(&result.events[0], RejectReason::ProductRefused, product_id);
+        assert_eq!(
+            result.effects.lock_consumption,
+            Some(LockConsumption {
+                address_id: deposit.address_id,
+                idempotent: true,
+            })
         );
     }
 
@@ -1302,6 +1335,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lagging_provider_without_receipt_waits_for_finality() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, vec![log]),
+            chain(9, Vec::new()),
+            prices(now_seconds()),
+            no_product(),
+            context(None),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Finality
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn agreed_canonical_evidence_corrects_provisional_row() {
         let deposit = deposit(1_000);
         let mut canonical = transfer(&deposit);
@@ -1322,6 +1377,151 @@ mod tests {
         assert_eq!(correction.block_hash, canonical.block_hash);
         assert_eq!(correction.from_address, canonical.from);
         assert_eq!(result.evidence["corrected"], true);
+    }
+
+    #[tokio::test]
+    async fn wrong_provisional_block_is_corrected_from_receipt_identity() {
+        let mut deposit = deposit(1_000);
+        deposit.block_number = 4;
+        let mut canonical = transfer(&deposit);
+        canonical.block_number = 80;
+        canonical.block_hash = B256::repeat_byte(8);
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, vec![canonical.clone()]),
+            chain(100, vec![canonical.clone()]),
+            prices(now_seconds()),
+            no_product(),
+            context(None),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(result.outcome, StepOutcome::Advance);
+        assert_eq!(
+            result
+                .effects
+                .canonical_evidence
+                .expect("block correction")
+                .block_number,
+            canonical.block_number
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_token_reselects_route_and_its_valuation_policy() {
+        let deposit = deposit(1_000);
+        let mut canonical_route = route(PricingMode::Spot);
+        canonical_route.route = "canonical-token-route".to_owned();
+        canonical_route.version = 7;
+        canonical_route.asset.contract = Address::repeat_byte(9);
+        canonical_route.asset.decimals = 1;
+        canonical_route.screening.min_credit_minor = 5;
+        let mut canonical = transfer(&deposit);
+        canonical.token = canonical_route.asset.contract;
+        let original_route = route(PricingMode::Spot);
+        let original_key = (original_route.route.clone(), original_route.version);
+        let canonical_key = (canonical_route.route.clone(), canonical_route.version);
+        let now = now_seconds();
+        let runtime = |route: RouteFile| RouteRuntime {
+            route,
+            primary: Arc::new(MockPrice(Ok(observation("primary", 10_000_000, now)))),
+            check: Some(Arc::new(MockPrice(Ok(observation(
+                "check", 10_000_000, now,
+            ))))),
+            fx: Some(Arc::new(MockPrice(Ok(observation("fx", 100_000_000, now))))),
+        };
+        let context = context(None);
+        let product_id = context.product_id;
+        let step = ConfirmStep {
+            context_lookup: Arc::new(MockContext(context)),
+            routes: BTreeMap::from([
+                (original_key.clone(), runtime(original_route)),
+                (canonical_key.clone(), runtime(canonical_route.clone())),
+            ]),
+            asset_routes: BTreeMap::from([
+                ((deposit.chain_id, deposit.asset_contract), original_key),
+                ((deposit.chain_id, canonical.token), canonical_key),
+            ]),
+            chains: BTreeMap::from([(
+                deposit.chain_id,
+                ChainPair {
+                    primary: Arc::new(chain(100, vec![canonical.clone()])),
+                    secondary: Arc::new(chain(100, vec![canonical])),
+                },
+            )]),
+            product_lookup: no_product(),
+        };
+        let result = step.run(&deposit).await;
+        assert_eq!(result.outcome, StepOutcome::Advance);
+        let correction = result.effects.canonical_evidence.expect("token correction");
+        assert_eq!(correction.route.as_deref(), Some("canonical-token-route"));
+        assert_eq!(correction.route_version, Some(7));
+        assert_eq!(
+            result.effects.valuation.expect("valuation").credit_minor,
+            MinorAmount::new(10)
+        );
+        assert_eq!(
+            result.events[0].payload["product_id"],
+            product_id.to_string()
+        );
+        assert_eq!(result.events[0].payload["route"], "canonical-token-route");
+        assert_eq!(result.events[0].payload["route_version"], 7);
+    }
+
+    #[tokio::test]
+    async fn unsupported_canonical_token_rejects_with_event() {
+        let deposit = deposit(1_000);
+        let mut canonical = transfer(&deposit);
+        canonical.token = Address::repeat_byte(9);
+        let context = context(None);
+        let product_id = context.product_id;
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, vec![canonical.clone()]),
+            chain(100, vec![canonical]),
+            prices(now_seconds()),
+            no_product(),
+            context,
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Reject(RejectReason::UnsupportedAsset)
+        );
+        assert_rejected_event(
+            &result.events[0],
+            RejectReason::UnsupportedAsset,
+            product_id,
+        );
+    }
+
+    #[tokio::test]
+    async fn freshness_reference_is_captured_after_slow_price_fetches() {
+        let mut route = route(PricingMode::Spot);
+        route.pricing.max_age_s = 1;
+        let runtime = RouteRuntime {
+            route,
+            primary: Arc::new(DelayedPrice {
+                source: "primary",
+                value: 10_000_000,
+                delay: Duration::from_secs(2),
+            }),
+            check: Some(Arc::new(DelayedPrice {
+                source: "check",
+                value: 10_000_000,
+                delay: Duration::from_secs(2),
+            })),
+            fx: Some(Arc::new(DelayedPrice {
+                source: "fx",
+                value: 100_000_000,
+                delay: Duration::from_secs(2),
+            })),
+        };
+        let quote = fetch_quote(&runtime)
+            .await
+            .expect("slow quote remains fresh");
+        assert_eq!(quote.price.value(), 10_000_000);
     }
 
     #[tokio::test]
@@ -1459,13 +1659,15 @@ mod tests {
         route.screening.min_credit_minor = 200;
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
+        let context = context(None);
+        let product_id = context.product_id;
         let result = step(
             route,
             chain(100, vec![log.clone()]),
             chain(100, vec![log]),
             prices(now),
             no_product(),
-            context(None),
+            context,
         )
         .run(&deposit)
         .await;
@@ -1476,6 +1678,32 @@ mod tests {
         let valuation = result.effects.valuation.expect("valuation");
         assert_eq!(valuation.credit_minor, MinorAmount::new(100));
         assert!(valuation.quote.is_object());
+        assert_rejected_event(&result.events[0], RejectReason::BelowMinimum, product_id);
+    }
+
+    #[tokio::test]
+    async fn arithmetic_out_of_range_rejects_with_event() {
+        let now = now_seconds();
+        let mut deposit = deposit(1);
+        deposit.amount_atomic = AtomicAmount::new(U256::MAX);
+        let log = transfer(&deposit);
+        let context = context(None);
+        let product_id = context.product_id;
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, vec![log.clone()]),
+            chain(100, vec![log]),
+            prices(now),
+            no_product(),
+            context,
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Reject(RejectReason::OutOfRange)
+        );
+        assert_rejected_event(&result.events[0], RejectReason::OutOfRange, product_id);
     }
 
     struct PriceSet {
@@ -1639,6 +1867,13 @@ mod tests {
 
     fn no_product() -> Arc<dyn ProductLookup> {
         Arc::new(MockProduct(Ok(None)))
+    }
+
+    fn assert_rejected_event(event: &OutboxEvent, reason: RejectReason, product_id: Uuid) {
+        assert_eq!(event.event_type, "deposit.rejected");
+        assert_eq!(event.payload["product_id"], product_id.to_string());
+        assert!(event.payload["deposit_id"].as_str().is_some());
+        assert_eq!(event.payload["reason"], reason.code());
     }
 
     fn product_payload(lock_ref: Option<&str>) -> Value {
