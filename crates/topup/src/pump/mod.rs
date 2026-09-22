@@ -86,6 +86,13 @@ impl StepSet {
         }
     }
 
+    /// Replaces the step registered for `confirmed` deposits.
+    #[must_use]
+    pub fn with_confirmed(mut self, confirmed: Box<dyn Step>) -> Self {
+        self.confirmed = confirmed;
+        self
+    }
+
     fn get(&self, state: DepositState) -> Option<&dyn Step> {
         match state {
             DepositState::Detected => Some(self.detected.as_ref()),

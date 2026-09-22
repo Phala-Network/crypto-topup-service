@@ -14,7 +14,7 @@ use sqlx::{PgPool, Row};
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
 use topup_core::route::RouteFile;
-use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
+use topup_core::screening::{Bounds, ParsePauseScopeError, PauseScopes, SanctionsResult, screen};
 use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
@@ -24,6 +24,13 @@ use crate::pump::{Step, StepResult};
 struct RouteKey {
     name: String,
     version: u64,
+}
+
+struct PauseScopeSources {
+    account: PauseScopes,
+    product: PauseScopes,
+    route: PauseScopes,
+    effective: PauseScopes,
 }
 
 /// Screening policy and sanctions source for one immutable route version.
@@ -60,8 +67,7 @@ impl ScreenRoute {
         &self,
         deposit: &Deposit,
         product_id: Uuid,
-        account_scopes: PauseScopes,
-        product_scopes: PauseScopes,
+        pause_scopes: PauseScopeSources,
     ) -> StepResult {
         let sanctions = self
             .sanctions
@@ -74,16 +80,10 @@ impl ScreenRoute {
             deposit.amount_atomic,
             &sanctions,
             &self.bounds,
-            &account_scopes,
-            &product_scopes,
+            &pause_scopes.effective,
+            &PauseScopes::default(),
         );
-        let evidence = screening_evidence(
-            self.oracle,
-            sanctions,
-            self.bounds,
-            &account_scopes,
-            &product_scopes,
-        );
+        let evidence = screening_evidence(self.oracle, sanctions, self.bounds, &pause_scopes);
         let mut result = StepResult::new(outcome, evidence);
         if let StepOutcome::Reject(reason) = outcome {
             result
@@ -264,19 +264,23 @@ impl ScreenStep {
     async fn pause_scopes(
         &self,
         account_id: Uuid,
-    ) -> Result<Option<(Uuid, PauseScopes, PauseScopes)>, sqlx::Error> {
+        route: &str,
+    ) -> Result<Option<(Uuid, PauseScopeSources)>, sqlx::Error> {
         let row = sqlx::query(
             r#"
             SELECT
                 product.id AS product_id,
                 account.paused_scopes AS account_scopes,
-                product.paused_scopes AS product_scopes
+                product.paused_scopes AS product_scopes,
+                COALESCE(route_pause.paused_scopes, '{}'::text[]) AS route_scopes
             FROM accounts AS account
             JOIN products AS product ON product.id = account.product_id
+            LEFT JOIN route_pauses AS route_pause ON route_pause.route = $2
             WHERE account.id = $1
             "#,
         )
         .bind(account_id)
+        .bind(route)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -285,12 +289,30 @@ impl ScreenStep {
         let product_id = row.try_get("product_id")?;
         let account_codes: Vec<String> = row.try_get("account_scopes")?;
         let product_codes: Vec<String> = row.try_get("product_scopes")?;
-        let account_scopes = PauseScopes::from_codes(account_codes)
-            .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?;
-        let product_scopes = PauseScopes::from_codes(product_codes)
-            .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?;
-        Ok(Some((product_id, account_scopes, product_scopes)))
+        let route_codes: Vec<String> = row.try_get("route_scopes")?;
+        let pause_scopes = parse_pause_scope_sources(
+            account_codes.as_slice(),
+            product_codes.as_slice(),
+            route_codes.as_slice(),
+        )
+        .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?;
+        Ok(Some((product_id, pause_scopes)))
     }
+}
+
+fn parse_pause_scope_sources(
+    account_codes: &[String],
+    product_codes: &[String],
+    route_codes: &[String],
+) -> Result<PauseScopeSources, ParsePauseScopeError> {
+    Ok(PauseScopeSources {
+        account: PauseScopes::from_codes(account_codes)?,
+        product: PauseScopes::from_codes(product_codes)?,
+        route: PauseScopes::from_codes(route_codes)?,
+        effective: PauseScopes::from_codes(
+            account_codes.iter().chain(product_codes).chain(route_codes),
+        )?,
+    })
 }
 
 fn configured_provider_url(provider: &str) -> Result<String, String> {
@@ -334,14 +356,14 @@ impl Step for ScreenStep {
         let Some(screening_route) = self.routes.get(&key) else {
             return invariant_result("unknown_deposit_route", deposit.block_number);
         };
-        let pauses = match self.pause_scopes(deposit.account_id).await {
+        let pauses = match self.pause_scopes(deposit.account_id, route).await {
             Ok(Some(pauses)) => pauses,
             Ok(None) => return invariant_result("account_not_found", deposit.block_number),
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
         };
-        let (product_id, account_scopes, product_scopes) = pauses;
+        let (product_id, pause_scopes) = pauses;
         screening_route
-            .evaluate(deposit, product_id, account_scopes, product_scopes)
+            .evaluate(deposit, product_id, pause_scopes)
             .await
     }
 }
@@ -350,8 +372,7 @@ fn screening_evidence(
     oracle: Address,
     sanctions: SanctionsResult,
     bounds: Bounds,
-    account_scopes: &PauseScopes,
-    product_scopes: &PauseScopes,
+    pause_scopes: &PauseScopeSources,
 ) -> serde_json::Value {
     json!({
         "oracle": format!("{oracle:#x}"),
@@ -363,8 +384,9 @@ fn screening_evidence(
             "max_atomic": bounds.max_atomic,
         },
         "pause_scopes": {
-            "account": account_scopes,
-            "product": product_scopes,
+            "account": pause_scopes.account,
+            "product": pause_scopes.product,
+            "route": pause_scopes.route,
         },
     })
 }
@@ -492,6 +514,13 @@ mod tests {
         )
     }
 
+    fn pauses(account: &[&str], product: &[&str], route: &[&str]) -> PauseScopeSources {
+        let account = account.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let product = product.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let route = route.iter().map(ToString::to_string).collect::<Vec<_>>();
+        parse_pause_scope_sources(&account, &product, &route).expect("valid pause scopes")
+    }
+
     #[tokio::test]
     async fn sanctions_truth_table_maps_to_step_results() {
         use SanctionsAnswer::{Clear, Sanctioned, Unavailable};
@@ -550,12 +579,7 @@ mod tests {
             let deposit = deposit(amount(15));
             let product_id = Uuid::new_v4();
             let result = route(provider_a, provider_b)
-                .evaluate(
-                    &deposit,
-                    product_id,
-                    PauseScopes::default(),
-                    PauseScopes::default(),
-                )
+                .evaluate(&deposit, product_id, pauses(&[], &[], &[]))
                 .await;
             assert_eq!(result.outcome, expected);
             assert_eq!(result.evidence["block_number"], 123);
@@ -575,15 +599,9 @@ mod tests {
 
     #[tokio::test]
     async fn bounds_and_pause_outcomes_preserve_evidence_and_event_rules() {
-        let active = PauseScopes::default();
         let product_id = Uuid::new_v4();
         let out_of_bounds = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(
-                &deposit(amount(21)),
-                product_id,
-                active.clone(),
-                active.clone(),
-            )
+            .evaluate(&deposit(amount(21)), product_id, pauses(&[], &[], &[]))
             .await;
         assert_eq!(
             out_of_bounds.outcome,
@@ -593,9 +611,12 @@ mod tests {
         assert_eq!(out_of_bounds.evidence["bounds"]["min_atomic"], "10");
         assert_eq!(out_of_bounds.evidence["bounds"]["max_atomic"], "20");
 
-        let paused = PauseScopes::from_codes(["settlement"]).expect("valid scope");
         let waiting = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(15)), product_id, paused, active)
+            .evaluate(
+                &deposit(amount(15)),
+                product_id,
+                pauses(&["settlement"], &[], &[]),
+            )
             .await;
         assert_eq!(
             waiting.outcome,
@@ -605,6 +626,33 @@ mod tests {
         );
         assert!(waiting.events.is_empty());
         assert_eq!(waiting.evidence["pause_scopes"]["account"][0], "settlement");
+
+        let route_paused = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
+            .evaluate(
+                &deposit(amount(15)),
+                product_id,
+                pauses(&[], &[], &["settlement"]),
+            )
+            .await;
+        assert_eq!(
+            route_paused.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Paused,
+            }
+        );
+        assert_eq!(
+            route_paused.evidence["pause_scopes"]["route"][0],
+            "settlement"
+        );
+
+        let non_settlement_route_pause = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
+            .evaluate(
+                &deposit(amount(15)),
+                product_id,
+                pauses(&[], &[], &["flush"]),
+            )
+            .await;
+        assert_eq!(non_settlement_route_pause.outcome, StepOutcome::Advance);
     }
 
     #[tokio::test]
@@ -616,12 +664,7 @@ mod tests {
             block_number: 124,
         }));
         let result = route
-            .evaluate(
-                &deposit(amount(15)),
-                Uuid::new_v4(),
-                PauseScopes::default(),
-                PauseScopes::default(),
-            )
+            .evaluate(&deposit(amount(15)), Uuid::new_v4(), pauses(&[], &[], &[]))
             .await;
         assert_eq!(
             result.outcome,

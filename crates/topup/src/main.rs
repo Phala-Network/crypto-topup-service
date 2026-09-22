@@ -14,7 +14,9 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
-use topup::pump::{AgeAlertConfig, AgeAlerter, NoopStep, Pump, PumpConfig, PumpMetrics, StepSet};
+use topup::pump::{
+    AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
+};
 use topup::steps::screen::ScreenStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
@@ -297,12 +299,7 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let steps = Arc::new(StepSet::new(
-        Box::new(NoopStep),
-        Box::new(screen_step),
-        Box::new(NoopStep),
-        Box::new(NoopStep),
-    ));
+    let steps = Arc::new(NoopStepSet::build().with_confirmed(Box::new(screen_step)));
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
