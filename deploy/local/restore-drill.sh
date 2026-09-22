@@ -78,8 +78,10 @@ psql_value() {
     dc exec -T postgres psql -U postgres -d topup -Atq -v ON_ERROR_STOP=1 -c "$1"
 }
 
-wal_switched() {
-    test "$(psql_value 'SELECT pg_walfile_name(pg_current_wal_lsn())')" != "$1"
+# PostgreSQL creates archive_status/<segment>.ready exactly when the segment closes.
+wal_closed() {
+    test "$(psql_value "SELECT count(*) FROM pg_ls_archive_statusdir() \
+        WHERE name IN ('$1.ready', '$1.done')")" -gt 0
 }
 
 wal_manifest_visible() {
@@ -394,15 +396,17 @@ else
     rotation_v2_wals=not-run
 fi
 
-timed_wal=$(psql_value 'SELECT pg_walfile_name(pg_current_wal_lsn())')
+# Name the segment from the insert position just after the first write: at a segment boundary
+# pg_walfile_name returns the previous segment, which holds that write's last byte.
+first_marker=$(record_sample)
+timed_wal=$(psql_value 'SELECT pg_walfile_name(pg_current_wal_insert_lsn())')
 if [ "$mode" = controlled ]; then
-    first_marker=$(record_sample)
     last_marker=$(record_sample)
     psql_value 'SELECT pg_switch_wal()' >/dev/null
-    wait_for_fast "forced WAL close" wal_switched "$timed_wal"
+    wait_for_fast "forced WAL close" wal_closed "$timed_wal"
 else
     samples_file=$(mktemp)
-    record_sample >"$samples_file"
+    printf '%s\n' "$first_marker" >"$samples_file"
     (
         while :; do
             sleep 1
@@ -410,14 +414,13 @@ else
         done
     ) &
     writer_pid=$!
-    wait_for_fast "archive_timeout WAL close" wal_switched "$timed_wal"
+    wait_for_fast "archive_timeout WAL close" wal_closed "$timed_wal"
 fi
 wait_for_fast "archived WAL metadata" wal_manifest_visible "$timed_wal"
 if [ "$mode" = crash ]; then
     kill "$writer_pid" >/dev/null 2>&1 || true
     wait "$writer_pid" >/dev/null 2>&1 || true
     writer_pid=
-    first_marker=$(head -1 "$samples_file")
     last_marker=$(tail -1 "$samples_file")
     rm -f "$samples_file"
     samples_file=
@@ -428,6 +431,12 @@ segment_closed_at=$(wal_closed_epoch "$timed_wal")
 object_uploaded_at=$(wal_object_uploaded_epoch "$timed_wal")
 archive_wait_seconds=$(seconds_between "$first_write_at" "$segment_closed_at")
 upload_latency_seconds=$(seconds_between "$segment_closed_at" "$object_uploaded_at")
+for seconds in "$archive_wait_seconds" "$upload_latency_seconds"; do
+    awk -v value="$seconds" 'BEGIN { exit !(value >= 0) }' || {
+        echo "WAL timing is negative (${seconds}s); the timed segment is wrong" >&2
+        exit 1
+    }
+done
 
 expected_heartbeat_at=$(psql_value \
     "SELECT to_char(max(recorded_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM heartbeat")
