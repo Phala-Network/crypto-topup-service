@@ -295,6 +295,10 @@ listener, `GET /healthz` for HTTP 200, `GET /openapi.json`, and the running back
 provider URL is deliberately unreachable, exercising scanner retry behavior without contacting a
 real chain. A skipped service smoke is not a successful service check.
 
+Backup encryption, MinIO object storage, point-in-time recovery, and the weekly destructive drill
+are documented in [RESTORE.md](RESTORE.md). Run `make restore-drill`; it uses an isolated Compose
+project and removes all drill containers and volumes on exit.
+
 ## Pinned upstream references
 
 - dstack boundaries and encrypted env:

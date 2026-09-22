@@ -37,6 +37,16 @@ wait_for backup docker compose -p "$project" -f "$compose" \
     exec -T backup wal-g --version
 echo "local backup service is running"
 
+key_metadata=$(docker compose -p "$project" -f "$compose" exec -T postgres \
+    stat -c '%a:%u:%g' /run/wal-g/backup.key)
+test "$key_metadata" = "600:999:999"
+if docker inspect "${project}-postgres-1" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+    grep -q '^WALG_LIBSODIUM_KEY='; then
+    echo "backup key value must not be present in the container environment" >&2
+    exit 1
+fi
+echo "backup key tmpfs permissions passed"
+
 docker compose -p "$project" -f "$compose" run --rm migrate
 docker compose -p "$project" -f "$compose" run --rm --no-deps topup \
     topup route validate --template /etc/topup/routes/phala-cloud-sepolia-pha.yaml

@@ -2,11 +2,35 @@ x-walg-environment: &walg-environment
   WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
   AWS_ENDPOINT: ${AWS_ENDPOINT:-}
   AWS_REGION: ${AWS_REGION:-}
+  AWS_S3_FORCE_PATH_STYLE: ${AWS_S3_FORCE_PATH_STYLE:-false}
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
   AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+  WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
 services:
+  backup-key:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    user: "999:999"
+    command:
+      - topup
+      - backup-key
+      - --version
+      - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --output
+      - /run/wal-g/backup.key
+      - --hold
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - walg_key:/run/wal-g
+    healthcheck:
+      test: ["CMD", "topup", "backup-key", "--check", "--output", "/run/wal-g/backup.key"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   postgres:
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
@@ -17,6 +41,7 @@ services:
       TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
     configs:
       - source: postgres_init_topup_role
         target: /docker-entrypoint-initdb.d/10-topup-role.sh
@@ -26,6 +51,9 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    depends_on:
+      backup-key:
+        condition: service_healthy
     restart: unless-stopped
 
   migrate:
@@ -86,6 +114,16 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  heartbeat:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["topup", "heartbeat", "--interval-s", "60"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   backup:
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: postgres
@@ -100,18 +138,40 @@ services:
       WALG_RETENTION_FULL: "7"
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
+      - walg_key:/run/wal-g:ro
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
       interval: 60s
       timeout: 10s
       retries: 3
     depends_on:
+      backup-key:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  restore:
+    image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    profiles: ["tools"]
+    user: postgres
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    environment:
+      <<: *walg-environment
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+    restart: "no"
+
 volumes:
   pgdata:
+  walg_key:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
 
 configs:
   postgres_init_topup_role:

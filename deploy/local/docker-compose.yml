@@ -1,4 +1,39 @@
+x-walg-environment: &walg-environment
+  WALG_S3_PREFIX: s3://topup-backups/postgres
+  AWS_ENDPOINT: http://minio:9000
+  AWS_REGION: us-east-1
+  AWS_S3_FORCE_PATH_STYLE: "true"
+  AWS_ACCESS_KEY_ID: topup-minio
+  AWS_SECRET_ACCESS_KEY: topup-minio-secret
+  WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+  WALG_LIBSODIUM_KEY_TRANSFORM: hex
+
 services:
+  minio:
+    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: topup-minio
+      MINIO_ROOT_PASSWORD: topup-minio-secret
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - mc alias set local http://minio:9000 topup-minio topup-minio-secret >/dev/null && mc mb --ignore-existing local/topup-backups >/dev/null
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
   dstack-simulator:
     build:
       context: ../..
@@ -13,26 +48,57 @@ services:
       retries: 30
     restart: unless-stopped
 
+  backup-key:
+    image: crypto-topup-service:local
+    user: "999:999"
+    command:
+      - topup
+      - backup-key
+      - --version
+      - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --output
+      - /run/wal-g/backup.key
+      - --hold
+    environment:
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+    volumes:
+      - dstack_socket:/var/run
+      - walg_key:/run/wal-g
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "topup", "backup-key", "--check", "--output", "/run/wal-g/backup.key"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
   postgres:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile.postgres-walg
     image: crypto-topup-postgres-walg:local
     environment:
+      <<: *walg-environment
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       TOPUP_APP_PASSWORD: topup
-      WALG_FILE_PREFIX: /var/lib/wal-g
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - walg_data:/var/lib/wal-g
+      - walg_key:/run/wal-g:ro
       - ../postgres-init/10-topup-role.sh:/docker-entrypoint-initdb.d/10-topup-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d topup"]
       interval: 2s
       timeout: 3s
       retries: 30
+    depends_on:
+      backup-key:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   migrate:
@@ -91,35 +157,63 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  heartbeat:
+    image: crypto-topup-service:local
+    command: ["topup", "heartbeat", "--interval-s", "60"]
+    environment:
+      DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   backup:
     image: crypto-topup-postgres-walg:local
     user: postgres
     command: ["walg-cron", "backup-push", "0 3 * * *"]
     environment:
+      <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
       PGHOST: postgres
       PGDATABASE: topup
       PGUSER: postgres
       PGPASSWORD: postgres
-      WALG_FILE_PREFIX: /var/lib/wal-g
       WALG_RETENTION_FULL: "2"
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
-      - walg_data:/var/lib/wal-g
+      - walg_key:/run/wal-g:ro
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
       interval: 60s
       timeout: 10s
       retries: 3
     depends_on:
+      backup-key:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  restore:
+    image: crypto-topup-postgres-walg:local
+    profiles: ["tools"]
+    user: postgres
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    environment:
+      <<: *walg-environment
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+    restart: "no"
+
 volumes:
   dstack_socket:
+  minio_data:
   pgdata:
-  walg_data:
+  walg_key:
     driver: local
     driver_opts:
       type: tmpfs
