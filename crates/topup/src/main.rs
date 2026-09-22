@@ -18,12 +18,17 @@ use topup::pump::{
     AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
 };
 use topup::steps::screen::ScreenStep;
+use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
 use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
+<<<<<<< HEAD
+=======
+use topup_adapters::signer::actor::SignerHandle;
+>>>>>>> origin/main
 use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
 use topup_core::route::RouteFile;
@@ -479,7 +484,27 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let steps = Arc::new(NoopStepSet::build().with_confirmed(Box::new(screen_step)));
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+        Duration::from_secs(10),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let steps = Arc::new(
+        NoopStepSet::build()
+            .with_confirmed(Box::new(screen_step))
+            .with_cleared(Box::new(SettleStep::new(
+                pool.clone(),
+                signer,
+                Duration::from_secs(30),
+            ))),
+    );
+    tracing::warn!("placeholder steps remain active in detected and credited states");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
