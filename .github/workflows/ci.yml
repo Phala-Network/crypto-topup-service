@@ -134,6 +134,23 @@ jobs:
           cargo test --locked -p topup --all-features
           --tests -- --nocapture
 
+  sdk:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.14"
+      - name: Install the locked SDK environment
+        run: make -C sdk/python sync
+      - name: Lint, type-check, test, and check that client regeneration is a no-op
+        run: make -C sdk/python check
+      - name: Check sandbox scripts
+        run: |
+          for file in deploy/sandbox/*.sh; do bash -n "$file"; done
+          docker compose -f deploy/local/docker-compose.yml \
+            -f deploy/sandbox/docker-compose.local.yml config >/dev/null
+
   deny:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
