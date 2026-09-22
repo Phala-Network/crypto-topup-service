@@ -58,10 +58,11 @@ impl FlusherTask {
     ///
     /// New flushes are planned and sent only while the configured operator holds
     /// `OPERATOR_ROLE` on the factory, so an operator-key version is used only after the admin
-    /// Safe has granted it. Without the role, the task re-checks at the maintenance interval and
+    /// Safe has granted it and stops being used as soon as the role is revoked. The role is
+    /// checked on every maintenance tick, the first of which is immediate; without it, the task
     /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
-        let mut authorized = self.operator_authorized(false).await;
+        let mut authorized = false;
         if let Err(error) = self.flusher.maintain_sent(&self.route).await {
             tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
         }
@@ -78,9 +79,7 @@ impl FlusherTask {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
-                    if !authorized {
-                        authorized = self.operator_authorized(false).await;
-                    }
+                    authorized = self.operator_authorized(authorized).await;
                     let result = if authorized {
                         self.flusher.run_once(&self.route).await.map(drop)
                     } else {

@@ -1218,7 +1218,37 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                         "planned".to_owned()
                     )
             );
-            ensure!(flusher_v2.operator_role(&route_v2).await?.granted);
+
+            // Revoking the operator of a running, authorized task stops its queued sends at the
+            // next maintenance tick instead of letting them revert on chain.
+            let mut slow_v2 = route_v2.clone();
+            slow_v2.chain.flush.maintenance_interval_s = 3;
+            ensure!(flusher_v2.operator_role(&slow_v2).await?.granted);
+            let before = role_alerts(operator_v2);
+            let task_v2 = spawn_task(&slow_v2, &signer_v2)?;
+            tokio::time::sleep(StdDuration::from_millis(500)).await;
+            ensure!(role_alerts(operator_v2) == before);
+            ensure!(planner_v2.plan(&slow_v2).await? == Some(orphan));
+            revoke_operator(
+                &anvil.rpc_url,
+                factory,
+                &format!("{operator_v2:#x}"),
+                ADMIN_KEY,
+            )?;
+            tokio::time::sleep(StdDuration::from_millis(4_000)).await;
+            ensure!(
+                role_alerts(operator_v2) > before,
+                "revocation must be noticed by the running task"
+            );
+            stop(task_v2).await?;
+            ensure!(
+                binding(orphan).await?
+                    == (
+                        format!("{operator_v2:#x}"),
+                        "1".to_owned(),
+                        "planned".to_owned()
+                    )
+            );
             Ok(())
         })
     })
