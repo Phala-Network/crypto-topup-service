@@ -69,6 +69,8 @@ impl RejectReason {
 pub enum RetryError {
     /// An external dependency or other transient operation failed.
     Transient,
+    /// The two sanctions checks did not produce a conclusive clear result.
+    SanctionsInconclusive,
     /// Stored or returned data violated an invariant and requires attention.
     InvariantViolation,
 }
