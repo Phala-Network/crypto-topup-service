@@ -85,9 +85,14 @@ fn is_lock_overpayment(deposit: RefundDeposit) -> bool {
     if deposit.address_kind != RefundAddressKind::Lock {
         return false;
     }
-    let actual = U512::from(deposit.amount.value()) * U512::from(10_000_u64);
+    let scale = U512::from(10_000_u64);
+    let actual = U512::from(deposit.amount.value())
+        .checked_mul(scale)
+        .unwrap_or(U512::MAX);
+    let tolerance_scale = 10_000_u64.saturating_add(u64::from(deposit.lock_tolerance.value()));
     let maximum = U512::from(lock_amount.value())
-        * U512::from(10_000_u64 + u64::from(deposit.lock_tolerance.value()));
+        .checked_mul(U512::from(tolerance_scale))
+        .unwrap_or(U512::MAX);
     actual > maximum
 }
 
