@@ -9,6 +9,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[dev-dependencies]
+[dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+noyalib.workspace = true
 serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 serde_json.workspace = true

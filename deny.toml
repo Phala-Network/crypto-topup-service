@@ -3,6 +3,9 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# `paste` is a compile-time transitive dependency of pinned alloy-primitives 1.7.3.
+# RUSTSEC-2024-0436 reports maintenance status only and has no safe upgrade path.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 confidence-threshold = 0.8
@@ -15,6 +18,7 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "Zlib",
 ]
 
 [bans]

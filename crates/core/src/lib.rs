@@ -12,3 +12,8 @@
         clippy::unwrap_used
     )
 )]
+
+pub mod address;
+pub mod identity;
+pub mod money;
+pub mod route;
