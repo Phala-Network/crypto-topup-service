@@ -38,7 +38,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/local/Dockerfile.dstack-simulator
-    image: crypto-topup-dstack-simulator:local
+    image: ${TOPUP_LOCAL_DSTACK_SIMULATOR_IMAGE:-crypto-topup-dstack-simulator:local}
     volumes:
       - dstack_socket:/var/run
     healthcheck:
@@ -49,7 +49,7 @@ services:
     restart: unless-stopped
 
   backup-key:
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_IMAGE:-crypto-topup-service:local}
     user: "999:999"
     command:
       - topup
@@ -80,7 +80,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile.postgres-walg
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     environment:
       <<: *walg-environment
       POSTGRES_DB: topup
@@ -110,7 +110,7 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_IMAGE:-crypto-topup-service:local}
     command: ["topup", "migrate"]
     environment:
       MIGRATE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
@@ -125,7 +125,7 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_IMAGE:-crypto-topup-service:local}
     command:
       - topup
       - run
@@ -161,7 +161,7 @@ services:
     restart: unless-stopped
 
   heartbeat:
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_IMAGE:-crypto-topup-service:local}
     command: ["topup", "heartbeat", "--interval-s", "60"]
     environment:
       DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
@@ -183,7 +183,7 @@ services:
     restart: unless-stopped
 
   backup:
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     user: postgres
     command: ["walg-cron", "backup-push", "0 3 * * *"]
     environment:
@@ -213,7 +213,7 @@ services:
     restart: unless-stopped
 
   restore:
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     profiles: ["tools"]
     user: postgres
     entrypoint: ["/bin/sh", "-eu", "-c"]

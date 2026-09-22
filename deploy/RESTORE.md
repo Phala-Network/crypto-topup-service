@@ -57,13 +57,16 @@ deploy/local/restore-drill.sh crash
 
 `controlled` forces a WAL switch and requires the last source marker and LSN. `crash` waits for a
 natural `archive_timeout=60` upload, continues writing, kills PostgreSQL without another switch, and
-reports observed loss. The output separates `archive_wait_seconds`, measured until the source WAL
-segment closes, from `upload_latency_seconds`, measured from segment close until that segment's key
-metadata is visible in MinIO. Controlled mode also creates a multi-segment v1 backlog, proves one
-wrapper call did not upload an adjacent segment, rotates to v2 while segments remain pending, and
-restores through both key versions. Both modes pass the externally recorded source heartbeat and LSN
+reports observed loss. The output separates two server-side measurements: `archive_wait_seconds`
+runs from the first drill write into the WAL segment until PostgreSQL closes it (its
+`archive_status/<segment>.ready` mtime), and `upload_latency_seconds` runs from that close until
+MinIO's `LastModified` for the uploaded WAL object. Controlled mode also builds a WAL backlog under
+key v1 while object storage is down, archives one segment with a single v1 wrapper call and proves
+no adjacent segment was uploaded, rotates PostgreSQL to v2 while the rest are pending, lets the
+archiver finish them under v2, decrypts every rotation segment with its recorded key version (and
+proves the other version fails), and restores across the rotation boundary. Both modes pass the externally recorded source heartbeat and LSN
 to `restore-check`, assert RTO is at most 3600 seconds, exercise a signed product GET, and remove
-their uniquely named Compose projects and volumes. The full image build plus real 60-second archive
+their uniquely named Compose projects, volumes, and per-run image tags. The full image build plus real 60-second archive
 window is intentionally a weekly job; the bounded deployment CI job runs the WAL-G wrapper tests
 instead.
 

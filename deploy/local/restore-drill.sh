@@ -16,8 +16,13 @@ case "$mode" in
 esac
 
 project="topup-restore-drill-$mode-$$"
+# Per-run image tags keep concurrent checkouts from replacing this drill's images mid-run.
+export TOPUP_LOCAL_IMAGE="crypto-topup-service:$project"
+export TOPUP_LOCAL_POSTGRES_IMAGE="crypto-topup-postgres-walg:$project"
+export TOPUP_LOCAL_DSTACK_SIMULATOR_IMAGE="crypto-topup-dstack-simulator:$project"
 writer_pid=
 samples_file=
+routes_dir=
 dc() {
     docker compose -p "$project" -f "$compose" "$@"
 }
@@ -31,6 +36,11 @@ cleanup() {
         rm -f "$samples_file"
     fi
     dc --profile tools down --volumes --remove-orphans >/dev/null 2>&1 || true
+    docker image rm "$TOPUP_LOCAL_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
+        "$TOPUP_LOCAL_DSTACK_SIMULATOR_IMAGE" >/dev/null 2>&1 || true
+    if [ -n "$routes_dir" ]; then
+        rm -rf "$routes_dir"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -77,14 +87,33 @@ wal_manifest_visible() {
 }
 
 wal_object_visible() {
-    dc exec -T backup wal-g st ls wal_005 --recursive | grep -F "$1"
+    dc exec -T backup wal-g st ls wal_005/ | grep -F " $1."
 }
 
-ready_wal_count_at_least() {
-    expected=$1
-    actual=$(dc exec -T postgres sh -c \
-        "find /var/lib/postgresql/data/pg_wal/archive_status -maxdepth 1 -type f -name '*.ready' -printf '%f\\n' | sed 's/\\.ready$//' | grep -Ec '^[0-9A-F]{24}$' || true")
-    test "$actual" -ge "$expected"
+# Upload time of a WAL object as recorded by MinIO, in epoch seconds with milliseconds.
+wal_object_uploaded_epoch() {
+    line=$(dc exec -T backup wal-g st ls wal_005/ | grep -F " $1.")
+    set -- $line
+    date -u -d "$3 $4" +%s.%3N
+}
+
+# PostgreSQL creates <segment>.ready when the segment closes; the rename to .done keeps its mtime.
+wal_closed_epoch() {
+    psql_value "SELECT extract(epoch FROM modification)::numeric(20,3) FROM pg_ls_archive_statusdir() \
+        WHERE name IN ('$1.ready', '$1.done')"
+}
+
+pending_wals() {
+    psql_value "SELECT left(name, 24) FROM pg_ls_archive_statusdir() \
+        WHERE name ~ '^[0-9A-F]{24}[.]ready$' ORDER BY name"
+}
+
+pending_wal_count_at_least() {
+    test "$(pending_wals | grep -c .)" -ge "$1"
+}
+
+seconds_between() {
+    awk -v start="$1" -v end="$2" 'BEGIN { printf "%.3f", end - start }'
 }
 
 recovery_promoted() {
@@ -93,6 +122,10 @@ recovery_promoted() {
 
 record_sample() {
     psql_value "INSERT INTO heartbeat DEFAULT VALUES; INSERT INTO restore_drill_marker(mode) VALUES ('$mode') RETURNING id" | tail -1
+}
+
+marker_epoch() {
+    psql_value "SELECT extract(epoch FROM recorded_at)::numeric(20,3) FROM restore_drill_marker WHERE id = $1"
 }
 
 seed_reconciliation_fixture() {
@@ -225,53 +258,80 @@ manifest_version() {
     dc exec -T backup wal-g st cat "key-versions/wal/$1.json" | jq -er '.key_version'
 }
 
+# Decrypts every rotation segment with its own key version and proves the other version fails.
+verify_rotation_keys() {
+    dc run --rm --no-deps -e V1_WALS="$1" -e V2_WALS="$2" restore '
+        fetch() {
+            rm -f /tmp/wal
+            WALG_LIBSODIUM_KEY_PATH=/run/wal-g/backup-v$2.key WALG_DOWNLOAD_CONCURRENCY=1 \
+                wal-g wal-fetch "$1" /tmp/wal >/dev/null 2>&1 && test -s /tmp/wal
+        }
+        check() {
+            fetch "$1" "$2" || { echo "WAL $1 does not decrypt with backup/v$2" >&2; exit 1; }
+            if fetch "$1" "$3"; then
+                echo "WAL $1 also decrypts with backup/v$3" >&2
+                exit 1
+            fi
+        }
+        for wal in $V1_WALS; do check "$wal" 1 2; done
+        for wal in $V2_WALS; do check "$wal" 2 1; done
+    '
+}
+
+# Builds a WAL backlog under key v1 with object storage down, archives exactly one segment with
+# one v1 wrapper call, rotates PostgreSQL to v2, and lets its archiver finish the backlog.
 exercise_key_rotation() {
     dc stop minio >/dev/null
     for _ in 1 2 3 4; do
         record_sample >/dev/null
         psql_value 'SELECT pg_switch_wal()' >/dev/null
     done
-    wait_for "WAL backlog" ready_wal_count_at_least 3
+    wait_for "WAL backlog" pending_wal_count_at_least 3
+    rotation_wals=$(pending_wals)
     dc stop postgres >/dev/null
     dc start minio >/dev/null
     wait_for minio dc exec -T minio curl -fsS http://localhost:9000/minio/health/live
 
-    ready_wals=$(dc run --rm --no-deps restore '
-        find "$PGDATA/pg_wal/archive_status" -maxdepth 1 -type f -name "*.ready" -printf "%f\n" |
-            sed "s/\.ready$//" | grep -E "^[0-9A-F]{24}$" | sort
-    ')
-    set -- $ready_wals
+    set -- $rotation_wals
     test "$#" -ge 3 || {
         echo "key rotation test needs at least three pending WAL segments" >&2
         return 1
     }
-
     rotation_v1_wal=$1
     shift
     rotation_v2_wals=$*
-    first_v2_wal=$1
     upload_pending_wal 1 "$rotation_v1_wal"
     test "$(manifest_version "$rotation_v1_wal")" -eq 1
-    if wal_manifest_visible "$first_v2_wal" >/dev/null 2>&1 || \
-        wal_object_visible "$first_v2_wal" >/dev/null 2>&1; then
-        echo "WAL-G uploaded an adjacent pending segment" >&2
-        return 1
-    fi
-
-    export TOPUP_BACKUP_KEY_VERSION=2
     for wal_name in $rotation_v2_wals; do
-        upload_pending_wal 2 "$wal_name"
-        test "$(manifest_version "$wal_name")" -eq 2
+        if wal_manifest_visible "$wal_name" >/dev/null 2>&1 || \
+            wal_object_visible "$wal_name" >/dev/null 2>&1; then
+            echo "WAL-G uploaded pending segment $wal_name outside its own archive call" >&2
+            return 1
+        fi
     done
 
-    dc rm -f postgres >/dev/null 2>&1 || true
+    export TOPUP_BACKUP_KEY_VERSION=2
+    dc rm -f postgres >/dev/null
     dc up -d --no-deps postgres
     wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
+    for wal_name in $rotation_v2_wals; do
+        wait_for "v2 archive of $wal_name" wal_manifest_visible "$wal_name"
+        test "$(manifest_version "$wal_name")" -eq 2
+    done
+    verify_rotation_keys "$rotation_v1_wal" "$rotation_v2_wals"
 }
 
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 export TOPUP_BACKUP_KEY_VERSION=2
 export TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=1,0
+
+routes_dir=$(mktemp -d)
+sed 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
+    "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
+    >"$routes_dir/phala-cloud-sepolia-pha.yaml"
+chmod 0755 "$routes_dir"
+chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"
+export TOPUP_LOCAL_ROUTES_DIR="$routes_dir"
 
 dc build postgres dstack-simulator topup
 dc up -d backup-key minio-init mock-product
@@ -299,11 +359,11 @@ else
 fi
 
 timed_wal=$(psql_value 'SELECT pg_walfile_name(pg_current_wal_lsn())')
-archive_started_ms=$(date +%s%3N)
 if [ "$mode" = controlled ]; then
     first_marker=$(record_sample)
     last_marker=$(record_sample)
     psql_value 'SELECT pg_switch_wal()' >/dev/null
+    wait_for_fast "forced WAL close" wal_switched "$timed_wal"
 else
     samples_file=$(mktemp)
     record_sample >"$samples_file"
@@ -315,9 +375,9 @@ else
     ) &
     writer_pid=$!
     wait_for_fast "archive_timeout WAL close" wal_switched "$timed_wal"
-    archive_closed_ms=$(date +%s%3N)
-    wait_for_fast "archived WAL metadata" wal_manifest_visible "$timed_wal"
-    upload_visible_ms=$(date +%s%3N)
+fi
+wait_for_fast "archived WAL metadata" wal_manifest_visible "$timed_wal"
+if [ "$mode" = crash ]; then
     kill "$writer_pid" >/dev/null 2>&1 || true
     wait "$writer_pid" >/dev/null 2>&1 || true
     writer_pid=
@@ -326,14 +386,12 @@ else
     rm -f "$samples_file"
     samples_file=
 fi
-if [ "$mode" = controlled ]; then
-    wait_for_fast "forced WAL close" wal_switched "$timed_wal"
-    archive_closed_ms=$(date +%s%3N)
-    wait_for_fast "archived WAL metadata" wal_manifest_visible "$timed_wal"
-    upload_visible_ms=$(date +%s%3N)
-fi
-archive_wait_seconds=$(( (archive_closed_ms - archive_started_ms + 999) / 1000 ))
-upload_latency_seconds=$(( (upload_visible_ms - archive_closed_ms + 999) / 1000 ))
+# Server-side timestamps: first write into the segment, segment close, and object upload.
+first_write_at=$(marker_epoch "$first_marker")
+segment_closed_at=$(wal_closed_epoch "$timed_wal")
+object_uploaded_at=$(wal_object_uploaded_epoch "$timed_wal")
+archive_wait_seconds=$(seconds_between "$first_write_at" "$segment_closed_at")
+upload_latency_seconds=$(seconds_between "$segment_closed_at" "$object_uploaded_at")
 
 expected_heartbeat_at=$(psql_value \
     "SELECT to_char(max(recorded_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM heartbeat")
@@ -397,7 +455,8 @@ set +e
 restore_report=$(dc run --rm --no-deps restore-check \
     topup restore-check \
     --expected-heartbeat-at "$expected_heartbeat_at" \
-    --expected-lsn "$expected_lsn")
+    --expected-lsn "$expected_lsn" \
+    --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml)
 restore_status=$?
 set -e
 if [ "$restore_status" -ne 0 ]; then
