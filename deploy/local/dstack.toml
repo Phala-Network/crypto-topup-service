@@ -1,0 +1,33 @@
+[default]
+workers = 4
+max_blocking = 32
+ident = "crypto-topup dstack simulator"
+temp_dir = "/tmp"
+keep_alive = 10
+log_level = "info"
+
+[default.core]
+keys_file = "/opt/dstack-simulator/appkeys.json"
+compose_file = "/opt/dstack-simulator/app-compose.json"
+sys_config_file = "/opt/dstack-simulator/sys-config.json"
+data_disks = ["/"]
+
+[default.core.simulator]
+attestation_file = "/opt/dstack-simulator/attestation.bin"
+patch_report_data = true
+
+[internal-v0]
+address = "unix:/var/run/tappd.sock"
+reuse = true
+
+[internal]
+address = "unix:/var/run/dstack.sock"
+reuse = true
+
+[external]
+address = "unix:/var/run/external.sock"
+reuse = true
+
+[guest-api]
+address = "unix:/var/run/guest.sock"
+reuse = true
