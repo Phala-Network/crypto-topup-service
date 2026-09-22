@@ -37,8 +37,9 @@ with a 45-second rate-lock window, issues the product, starts the service, runs
 `sdk/examples/phala_cloud_integration.py`, and then `scenarios/run.py`. The example and the
 scenarios run in a pinned uv/Python 3.12 container on the compose network, where the service
 reaches the product endpoints as `http://product:8089`; this works even where a host firewall drops
-traffic from containers to the host. That container gets the Docker socket only so
-`restart_mid_flow` can restart the local service (`scenarios/docker_restart.py`). Prices come from
+traffic from containers to the host. `restart_mid_flow` runs last in its own container, the
+only one given the Docker socket, which it uses to restart the local service
+(`scenarios/docker_restart.py`). Prices come from
 the live Coin Metrics, Binance, and Kraken endpoints, as in production. All containers, volumes,
 and temporary files are removed on exit.
 
@@ -86,10 +87,12 @@ gas from a public faucet.
 ## Issuing credentials and deploying the Sepolia sandbox (operators)
 
 1. **HUMAN-ONLY:** deploy the forwarder factory on Sepolia with the A2 procedure in
-   `deploy/CONTRACTS.md`, then the sandbox-only contracts with a funded deployer key:
+   `deploy/CONTRACTS.md`, then the sandbox-only contracts, signed by a Foundry keystore account:
 
    ```sh
-   PRIVATE_KEY=... deploy/sandbox/deploy-test-contracts.sh --rpc-url "$SEPOLIA_RPC_URL"
+   cast wallet import sandbox-deployer --interactive   # once, with a funded throwaway key
+   ETH_PASSWORD=... deploy/sandbox/deploy-test-contracts.sh \
+     --rpc-url "$SEPOLIA_RPC_URL" --account sandbox-deployer
    ```
 
 2. Render and validate the integrator's route (one route per product; the product slug and key
@@ -115,6 +118,15 @@ gas from a public faucet.
 4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment whose
    RPC providers point at Sepolia.
+
+   **Known risk, verify before opening the sandbox to integrators:** the service rebuilds the
+   signed `@target-uri` from the `Host` header and uses `http` unless the request carries
+   `X-Forwarded-Proto` (`crates/topup/src/api/auth.rs`). Integrators sign the `https://` URL
+   they call, so if the dstack gateway terminates TLS without forwarding
+   `X-Forwarded-Proto: https`, every product request fails with `401`. Run
+   `sdk/examples/phala_cloud_integration.py` against the deployed sandbox URL first. If it fails
+   this way, keep the sandbox closed until the service can be configured with its public origin
+   (tracked in #77).
 5. **HUMAN-ONLY:** issue the product through the sandbox's administrative database access
    (there is deliberately no product-creation API):
 

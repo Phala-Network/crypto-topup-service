@@ -21,7 +21,12 @@ def run(ctx: Context) -> None:
         "the service never sent the settlement request",
         timeout=600,
     )
+    gets_before_restart = ctx.settlement.gets[team]
     ctx.restart_service()
     ctx.credited(team, persistent)
-    check(ctx.settlement.gets[team] >= 1, "the service did not look up the key after restart")
+    check(
+        ctx.settlement.gets[team] > gets_before_restart,
+        "the service did not look up the key after restart",
+    )
+    check(ctx.settlement.posts[team] == 1, "the service resent instead of adopting the answer")
     check(len(ctx.ledger.credits_for(team)) == 1, "the deposit was credited more than once")

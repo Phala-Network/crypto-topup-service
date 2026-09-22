@@ -40,10 +40,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run sandbox scenarios.")
     parser.add_argument("--config", default=os.environ.get("SANDBOX_CONFIG"))
     parser.add_argument("names", nargs="*", metavar="NAME", help=", ".join(SCENARIOS))
+    parser.add_argument(
+        "--skip", action="append", default=[], metavar="NAME", help="scenario to leave out"
+    )
     args = parser.parse_args()
     if not args.config:
         parser.error("--config or SANDBOX_CONFIG is required")
-    unknown = sorted(set(args.names) - set(SCENARIOS))
+    unknown = sorted((set(args.names) | set(args.skip)) - set(SCENARIOS))
     if unknown:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -60,7 +63,7 @@ def main() -> int:
             context = harness.Context(
                 config, client, ledger, settlement, reference.Payer(config, rpc)
             )
-            for name in args.names or list(SCENARIOS):
+            for name in [name for name in args.names or SCENARIOS if name not in args.skip]:
                 results.append(_run(name, SCENARIOS[name].run, context))
 
     print("\nscenario            result   seconds  detail")

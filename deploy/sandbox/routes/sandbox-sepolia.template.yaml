@@ -42,7 +42,7 @@ destination:
   unit: USD
   unit_decimals: 2
   settlement_url: "${SETTLEMENT_URL}"
-  product_kid: ${PRODUCT_KID}
+  product_kid: "${PRODUCT_KID}"
 
 pricing:
   mode: spot

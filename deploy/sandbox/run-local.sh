@@ -74,7 +74,7 @@ owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     --private-key "$ANVIL_PRIVATE_KEY" --broadcast --silent)
 factory=$(predicted_factory "$owner" "$owner")
 implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url")
-PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "$root/deploy/sandbox/deploy-test-contracts.sh" \
+"$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" \
     --rpc-url "$rpc_url" >"$tmp/contracts.json"
 jq . "$tmp/contracts.json"
 
@@ -114,16 +114,40 @@ jq -n \
     >"$tmp/sandbox.json"
 mkdir -p "$tmp/home"
 
-echo "== running the Phala Cloud integration example, then the sandbox scenarios"
-# The Docker socket is mounted only so restart_mid_flow can restart the local service.
-docker run --rm --name "$client" --network "${project}_default" --network-alias product \
-    --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
-    -v /var/run/docker.sock:/var/run/docker.sock -v "$root:/repo:ro" -v "$tmp:/sandbox" \
-    -e HOME=/sandbox/home -e UV_CACHE_DIR=/sandbox/uv-cache \
-    -e UV_PROJECT_ENVIRONMENT=/sandbox/venv -e UV_PYTHON_DOWNLOADS=never \
-    -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$client_image" \
-    sh -c 'uv run --locked --project sdk/python --quiet python \
-               sdk/examples/phala_cloud_integration.py --config /sandbox/sandbox.json &&
-           uv run --locked --project sdk/python --quiet python \
-               deploy/sandbox/scenarios/run.py --config /sandbox/sandbox.json "$@"' \
-    scenarios "$@"
+# Runs a repository Python script in the product container on the compose network.
+run_product() {
+    local socket=()
+    if [[ "$1" == --docker-socket ]]; then
+        socket=(--group-add "$(stat -c %g /var/run/docker.sock)"
+            -v /var/run/docker.sock:/var/run/docker.sock)
+        shift
+    fi
+    docker run --rm --name "$client" --network "${project}_default" --network-alias product \
+        --user "$(id -u):$(id -g)" "${socket[@]}" -v "$root:/repo:ro" -v "$tmp:/sandbox" \
+        -e HOME=/sandbox/home -e UV_CACHE_DIR=/sandbox/uv-cache \
+        -e UV_PROJECT_ENVIRONMENT=/sandbox/venv -e UV_PYTHON_DOWNLOADS=never \
+        -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$client_image" \
+        uv run --locked --project sdk/python --quiet python "$@"
+}
+
+echo "== running the Phala Cloud integration example"
+run_product sdk/examples/phala_cloud_integration.py --config /sandbox/sandbox.json
+
+echo "== running sandbox scenarios"
+scenarios=(deploy/sandbox/scenarios/run.py --config /sandbox/sandbox.json)
+restart=$(($# == 0))
+others=()
+for name in "$@"; do
+    if [[ "$name" == restart_mid_flow ]]; then restart=1; else others+=("$name"); fi
+done
+status=0
+if (($# == 0)); then
+    run_product "${scenarios[@]}" --skip restart_mid_flow || status=1
+elif ((${#others[@]})); then
+    run_product "${scenarios[@]}" "${others[@]}" || status=1
+fi
+if ((restart)); then
+    # Only this scenario gets the Docker socket, which it uses to restart the local service.
+    run_product --docker-socket "${scenarios[@]}" restart_mid_flow || status=1
+fi
+exit "$status"

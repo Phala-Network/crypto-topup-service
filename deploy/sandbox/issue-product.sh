@@ -8,6 +8,7 @@
 #   PSQL="docker compose -p NAME -f ... exec -T postgres psql -U postgres -d topup"
 # The product's route file must name the same slug and key id (render-route.sh).
 set -euo pipefail
+export LC_ALL=C
 
 usage() {
     echo "usage: $0 --slug SLUG --keyid KID --public-key BASE64 --settlement-url URL" \
