@@ -19,9 +19,10 @@ use topup_adapters::chain::evm::{
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::retry::backoff;
 use topup_core::route::{ChainConfig, RouteFile};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
-use crate::db::{self, NewDeposit, ScanAddress};
+use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
 
 /// Maximum inclusive block count scanned in one window.
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
@@ -153,6 +154,8 @@ pub struct ScanStats {
     pub inserted: u64,
     /// Highest cursor committed during the pass.
     pub cursor: u64,
+    /// Finalized head observed during the pass.
+    pub finalized: u64,
     /// Addresses whose one-time historical backfill completed.
     pub backfilled_addresses: u64,
 }
@@ -277,6 +280,7 @@ pub async fn scan_once<R: ChainReader>(
     let address_index = address_index(&addresses);
     let mut stats = ScanStats {
         cursor,
+        finalized,
         ..ScanStats::default()
     };
 
@@ -287,12 +291,19 @@ pub async fn scan_once<R: ChainReader>(
         .collect::<Vec<_>>();
     for address in &pending_backfills {
         for (from_block, to_block) in scan_windows(address.created_block, cursor.min(finalized))? {
-            let logs = reader
-                .transfer_logs_to(&[address.address], from_block, to_block)
-                .await?;
-            let deposits = resolve_logs(logs, &address_index, routes)?;
-            let committed = db::commit_scan(pool, chain_id, &deposits, &[], None).await?;
-            stats.record_inserted(committed.inserted)?;
+            let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
+            let committed = async {
+                let logs = reader
+                    .transfer_logs_to(&[address.address], from_block, to_block)
+                    .await?;
+                let deposits = resolve_logs(logs, &address_index, routes)?;
+                db::commit_scan(pool, chain_id, &deposits, &[], None)
+                    .await
+                    .map_err(ScannerError::from)
+            }
+            .instrument(span)
+            .await?;
+            record_committed(chain_id, &mut stats, committed)?;
         }
         db::commit_scan(pool, chain_id, &[], &[address.id], None).await?;
         stats.record_backfilled(1)?;
@@ -319,10 +330,17 @@ pub async fn scan_once<R: ChainReader>(
 
     for (from_block, to_block) in scan_windows(start, finalized)? {
         for batch in tracked.chunks(MAX_ADDRESSES_PER_REQUEST) {
-            let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
-            let deposits = resolve_logs(logs, &address_index, routes)?;
-            let committed = db::commit_scan(pool, chain_id, &deposits, &[], None).await?;
-            stats.record_inserted(committed.inserted)?;
+            let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
+            let committed = async {
+                let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
+                let deposits = resolve_logs(logs, &address_index, routes)?;
+                db::commit_scan(pool, chain_id, &deposits, &[], None)
+                    .await
+                    .map_err(ScannerError::from)
+            }
+            .instrument(span)
+            .await?;
+            record_committed(chain_id, &mut stats, committed)?;
         }
         let backfilled = pending_backfill_marks
             .iter()
@@ -357,7 +375,10 @@ pub async fn run(
         let rpc_url = std::env::var(&environment).map_err(|_| {
             ScannerError::Configuration(format!("{environment} is required for provider A"))
         })?;
-        let reader = EvmChain::new(&rpc_url)?;
+        let rpc_url = crate::observability::Redacted::parse(&rpc_url).map_err(|_| {
+            ScannerError::Configuration(format!("{environment} is not a valid provider URL"))
+        })?;
+        let reader = EvmChain::new(rpc_url.expose().as_str())?;
         let chain_pool = pool.clone();
         let chain_cancellation = cancellation.child_token();
         tasks.spawn(async move {
@@ -452,7 +473,10 @@ where
     Jitter: FnMut() -> u64,
 {
     let mut retry_attempt = 0_u32;
+    let mut last_success = std::time::Instant::now();
+    let mut last_progress = (0_u64, 0_u64);
     loop {
+        crate::observability::heartbeat("scanner");
         let result = tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
             result = scan() => result,
@@ -460,6 +484,14 @@ where
         let delay = match result {
             Ok(stats) => {
                 retry_attempt = 0;
+                last_success = std::time::Instant::now();
+                last_progress = (stats.finalized, stats.cursor);
+                crate::observability::record_scanner_lag(
+                    chain_id,
+                    stats.finalized,
+                    stats.cursor,
+                    0,
+                );
                 tracing::info!(
                     chain_id,
                     cursor = stats.cursor,
@@ -470,6 +502,12 @@ where
                 poll_interval
             }
             Err(error) if error.is_retryable() => {
+                crate::observability::record_scanner_lag(
+                    chain_id,
+                    last_progress.0,
+                    last_progress.1,
+                    last_success.elapsed().as_secs(),
+                );
                 let delay = backoff(retry_attempt, jitter());
                 retry_attempt = retry_attempt.saturating_add(1);
                 tracing::warn!(
@@ -499,6 +537,22 @@ where
 fn retry_jitter() -> u64 {
     let value = Uuid::new_v4().as_u128() & u128::from(u64::MAX);
     u64::try_from(value).unwrap_or_default()
+}
+
+fn record_committed(
+    chain_id: u64,
+    stats: &mut ScanStats,
+    committed: ScanCommit,
+) -> Result<(), ScannerError> {
+    stats.record_inserted(committed.inserted)?;
+    if committed.unsupported_inserted > 0 {
+        metrics::counter!(
+            "topup_unsupported_inflows_total",
+            "chain" => chain_id.to_string(),
+        )
+        .increment(committed.unsupported_inserted);
+    }
+    Ok(())
 }
 
 fn poll_interval_from_env() -> Result<Duration, ScannerError> {
@@ -634,6 +688,7 @@ mod tests {
             Ok(ScanStats {
                 inserted: 1,
                 cursor: 2,
+                finalized: 2,
                 backfilled_addresses: 0,
             }),
             Err(ScannerError::Chain(ChainError::ProviderUnhealthy)),

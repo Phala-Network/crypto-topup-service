@@ -26,6 +26,8 @@ chrono = { version = "=0.4.42", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive"] }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "zeroize"] }
 hex = "=0.4.3"
+metrics = "=0.24.6"
+metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 proptest = "=1.11.0"
 rand = "=0.9.5"
 reqwest = { version = "=0.12.23", default-features = false, features = ["rustls-tls-webpki-roots"] }

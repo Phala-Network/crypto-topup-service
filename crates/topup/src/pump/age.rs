@@ -182,6 +182,17 @@ impl AgeAlerter {
         let alert_now = Instant::now();
         let mut alert_count = 0_u64;
         let mut observed_states = BTreeMap::new();
+        let mut oldest_by_policy = BTreeMap::<(String, u64, &'static str), (i64, u64)>::new();
+        for ((route, version), thresholds) in &self.config.thresholds {
+            for (state, threshold) in [
+                ("detected", thresholds.detected),
+                ("confirmed", thresholds.confirmed),
+                ("cleared", thresholds.cleared),
+                ("credited", thresholds.credited),
+            ] {
+                oldest_by_policy.insert((route.clone(), *version, state), (0, threshold));
+            }
+        }
         let mut alerts = self.alerts.lock().await;
         for row in rows {
             let Some(route) = row.route.as_deref() else {
@@ -204,6 +215,11 @@ impl AgeAlerter {
             let Ok(threshold_seconds) = i64::try_from(threshold) else {
                 continue;
             };
+            let state_label = state_code(state);
+            oldest_by_policy
+                .entry((route.to_owned(), version, state_label))
+                .and_modify(|(oldest, _)| *oldest = (*oldest).max(age_seconds))
+                .or_insert((age_seconds, threshold));
             let reminder_due = alerts.get(&row.id).is_none_or(|alert| {
                 alert.state != state
                     || alert_now.duration_since(alert.last_alerted_at) >= self.reminder_interval
@@ -229,8 +245,36 @@ impl AgeAlerter {
                 );
             }
         }
+        for ((route, version, state), (age, threshold)) in oldest_by_policy {
+            let version = version.to_string();
+            metrics::gauge!(
+                "topup_deposit_state_age_seconds",
+                "state" => state,
+                "route" => route.clone(),
+                "route_version" => version.clone(),
+            )
+            .set(age.max(0) as f64);
+            metrics::gauge!(
+                "topup_deposit_state_age_policy_seconds",
+                "state" => state,
+                "route" => route,
+                "route_version" => version,
+            )
+            .set(threshold as f64);
+        }
         alerts.retain(|id, alert| observed_states.get(id) == Some(&alert.state));
         Ok(alert_count)
+    }
+}
+
+const fn state_code(state: DepositState) -> &'static str {
+    match state {
+        DepositState::Detected => "detected",
+        DepositState::Confirmed => "confirmed",
+        DepositState::Cleared => "cleared",
+        DepositState::Credited => "credited",
+        DepositState::Swept => "swept",
+        DepositState::Rejected => "rejected",
     }
 }
 

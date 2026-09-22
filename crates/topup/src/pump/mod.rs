@@ -21,6 +21,7 @@ use topup_core::deposit::{
     DepositState, RejectReason, RetryError, StepOutcome, TransitionKind, WaitReason, next,
 };
 use topup_core::retry::backoff;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::db::{
@@ -270,6 +271,7 @@ impl Pump {
             if cancellation.is_cancelled() {
                 return;
             }
+            crate::observability::heartbeat("pump");
 
             match self.run_once().await {
                 Ok(RunOnceResult::Idle) => {
@@ -400,7 +402,11 @@ impl Pump {
             );
         };
 
-        match timeout(self.config.step_timeout, step.run(deposit)).await {
+        let span = crate::observability::deposit_step_span(deposit);
+        match timeout(self.config.step_timeout, step.run(deposit))
+            .instrument(span)
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(state = ?state, "deposit step timed out");

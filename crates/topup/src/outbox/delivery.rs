@@ -12,6 +12,7 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use topup_core::{Signer, retry::backoff};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{EventEnvelope, SignedWebhook};
@@ -162,6 +163,7 @@ where
             if *shutdown.borrow() {
                 return;
             }
+            crate::observability::heartbeat("outbox");
 
             let should_pause = match self.run_once().await {
                 Ok(claimed) => claimed == 0,
@@ -196,7 +198,12 @@ where
                 ClaimResult::Ready(delivery) => {
                     claimed = claimed.saturating_add(1);
                     self.warn_if_old(&delivery.event);
-                    self.deliver_claimed(delivery).await?;
+                    let span = crate::observability::outbox_delivery_span(
+                        delivery.event.id,
+                        &delivery.event.payload,
+                        delivery.event.attempts,
+                    );
+                    self.deliver_claimed(delivery).instrument(span).await?;
                 }
             }
         }

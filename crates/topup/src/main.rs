@@ -122,6 +122,10 @@ async fn main() -> ExitCode {
         eprintln!("failed to initialize tracing: {error}");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = topup::observability::init() {
+        tracing::error!(%error, "failed to initialize observability");
+        return ExitCode::FAILURE;
+    }
 
     let cli = Cli::parse();
 
@@ -349,6 +353,11 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
     });
+    let metrics_cancellation = cancellation.child_token();
+    let metrics_pool = pool.clone();
+    let metrics_task = tokio::spawn(async move {
+        topup::observability::collect_database_metrics(metrics_pool, metrics_cancellation).await;
+    });
 
     tracing::info!(
         pumps = args.pumps.get(),
@@ -421,6 +430,10 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     if let Err(error) = age_task.await {
         tracing::error!(%error, "age alert task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if let Err(error) = metrics_task.await {
+        tracing::error!(%error, "observability collector task failed during shutdown");
         clean_shutdown = false;
     }
     pool.close().await;

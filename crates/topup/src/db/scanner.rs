@@ -51,6 +51,8 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
 pub struct ScanCommit {
     /// Number of newly inserted deposits; duplicates are excluded.
     pub inserted: u64,
+    /// Newly inserted deposits rejected as unsupported assets.
+    pub unsupported_inserted: u64,
 }
 
 /// Returns the last completely committed block for a chain.
@@ -96,11 +98,17 @@ pub async fn commit_scan(
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let mut inserted = 0_u64;
+    let mut unsupported_inserted = 0_u64;
     for deposit in deposits {
         if insert_deposit(&mut transaction, deposit).await? {
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
+            if deposit.reason == Some(RejectReason::UnsupportedAsset) {
+                unsupported_inserted = unsupported_inserted.checked_add(1).ok_or_else(|| {
+                    sqlx::Error::Protocol("unsupported deposit count overflowed u64".to_owned())
+                })?;
+            }
         }
     }
 
@@ -130,7 +138,10 @@ pub async fn commit_scan(
     }
 
     transaction.commit().await?;
-    Ok(ScanCommit { inserted })
+    Ok(ScanCommit {
+        inserted,
+        unsupported_inserted,
+    })
 }
 
 async fn insert_deposit(
