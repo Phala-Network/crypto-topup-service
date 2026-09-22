@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,14 +11,19 @@ use alloy_primitives::Address;
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
-use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
+use topup_adapters::chain::evm::{
+    ChainError, ChainReader, EvmChain, MAX_ADDRESSES_PER_REQUEST, MAX_BLOCKS_PER_REQUEST,
+    TransferLog,
+};
 use topup_core::deposit::{DepositState, RejectReason};
+use topup_core::retry::backoff;
 use topup_core::route::{ChainConfig, RouteFile};
+use uuid::Uuid;
 
 use crate::db::{self, NewDeposit, ScanAddress};
 
-/// Maximum inclusive block count committed by one scanner transaction.
-pub const MAX_SCAN_WINDOW: u64 = 2_000;
+/// Maximum inclusive block count scanned in one window.
+pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
 
 /// Scanner failure.
 #[derive(Debug)]
@@ -96,6 +102,35 @@ impl From<sqlx::Error> for ScannerError {
     }
 }
 
+impl ScannerError {
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(_)
+                | Self::Chain(
+                    ChainError::Rpc(_)
+                        | ChainError::MissingField(_)
+                        | ChainError::InvalidTimestamp(_)
+                        | ChainError::InvalidTransfer(_)
+                )
+        )
+    }
+
+    fn category(&self) -> &'static str {
+        match self {
+            Self::Configuration(_) => "configuration",
+            Self::Io(_) => "configuration_io",
+            Self::Chain(ChainError::FinalizedHeadRegressed { .. }) => "finalized_regression",
+            Self::Chain(ChainError::ProviderUnhealthy) => "provider_unhealthy",
+            Self::Chain(_) => "chain_read",
+            Self::Database(_) => "database",
+            Self::FinalizedBehindCursor { .. } => "finalized_behind_cursor",
+            Self::UnknownRecipient(_) => "unknown_recipient",
+            Self::Task(_) => "task",
+        }
+    }
+}
+
 /// Active routes and chain settings for one EVM chain.
 #[derive(Clone, Debug)]
 pub struct ChainRoutes {
@@ -119,6 +154,27 @@ pub struct ScanStats {
     pub cursor: u64,
     /// Addresses whose one-time historical backfill completed.
     pub backfilled_addresses: u64,
+}
+
+impl ScanStats {
+    fn record_inserted(&mut self, inserted: u64) -> Result<(), ScannerError> {
+        self.inserted = self
+            .inserted
+            .checked_add(inserted)
+            .ok_or_else(|| ScannerError::Configuration("scan count overflow".to_owned()))?;
+        Ok(())
+    }
+
+    fn record_backfilled(&mut self, count: usize) -> Result<(), ScannerError> {
+        let count = u64::try_from(count).map_err(|error| {
+            ScannerError::Configuration(format!("backfill count is outside u64: {error}"))
+        })?;
+        self.backfilled_addresses = self
+            .backfilled_addresses
+            .checked_add(count)
+            .ok_or_else(|| ScannerError::Configuration("backfill count overflow".to_owned()))?;
+        Ok(())
+    }
 }
 
 /// Loads and validates route files, grouped by chain identifier.
@@ -206,30 +262,17 @@ pub async fn scan_once<R: ChainReader>(
         .filter(|address| !address.backfilled && address.created_block <= cursor)
         .cloned()
         .collect::<Vec<_>>();
-    if !pending_backfills.is_empty() {
-        let mut deposits = Vec::new();
-        for address in &pending_backfills {
+    for address in &pending_backfills {
+        for (from_block, to_block) in scan_windows(address.created_block, cursor.min(finalized))? {
             let logs = reader
-                .transfer_logs_to(
-                    &[address.address],
-                    address.created_block,
-                    cursor.min(finalized),
-                )
+                .transfer_logs_to(&[address.address], from_block, to_block)
                 .await?;
-            deposits.extend(resolve_logs(logs, &address_index, routes)?);
+            let deposits = resolve_logs(logs, &address_index, routes)?;
+            let committed = db::commit_scan(pool, chain_id, &deposits, &[], None).await?;
+            stats.record_inserted(committed.inserted)?;
         }
-        let ids = pending_backfills
-            .iter()
-            .map(|address| address.id)
-            .collect::<Vec<_>>();
-        let committed = db::commit_scan(pool, chain_id, &deposits, &ids, None).await?;
-        stats.inserted = stats
-            .inserted
-            .checked_add(committed.inserted)
-            .ok_or_else(|| ScannerError::Configuration("scan count overflow".to_owned()))?;
-        stats.backfilled_addresses = u64::try_from(ids.len()).map_err(|error| {
-            ScannerError::Configuration(format!("backfill count is outside u64: {error}"))
-        })?;
+        db::commit_scan(pool, chain_id, &[], &[address.id], None).await?;
+        stats.record_backfilled(1)?;
     }
 
     let tracked = addresses
@@ -252,27 +295,19 @@ pub async fn scan_once<R: ChainReader>(
     }
 
     for (from_block, to_block) in scan_windows(start, finalized)? {
-        let logs = reader
-            .transfer_logs_to(&tracked, from_block, to_block)
-            .await?;
-        let deposits = resolve_logs(logs, &address_index, routes)?;
+        for batch in tracked.chunks(MAX_ADDRESSES_PER_REQUEST) {
+            let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
+            let deposits = resolve_logs(logs, &address_index, routes)?;
+            let committed = db::commit_scan(pool, chain_id, &deposits, &[], None).await?;
+            stats.record_inserted(committed.inserted)?;
+        }
         let backfilled = pending_backfill_marks
             .iter()
             .filter(|(_, created_block)| **created_block <= to_block)
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
-        let committed =
-            db::commit_scan(pool, chain_id, &deposits, &backfilled, Some(to_block)).await?;
-        stats.inserted = stats
-            .inserted
-            .checked_add(committed.inserted)
-            .ok_or_else(|| ScannerError::Configuration("scan count overflow".to_owned()))?;
-        stats.backfilled_addresses = stats
-            .backfilled_addresses
-            .checked_add(u64::try_from(backfilled.len()).map_err(|error| {
-                ScannerError::Configuration(format!("backfill count is outside u64: {error}"))
-            })?)
-            .ok_or_else(|| ScannerError::Configuration("backfill count overflow".to_owned()))?;
+        db::commit_scan(pool, chain_id, &[], &backfilled, Some(to_block)).await?;
+        stats.record_backfilled(backfilled.len())?;
         for id in &backfilled {
             pending_backfill_marks.remove(id);
         }
@@ -302,16 +337,27 @@ pub async fn run_from_env(pool: PgPool) -> Result<(), ScannerError> {
         tasks.spawn(async move { run_chain(chain_pool, reader, routes, poll_interval).await });
     }
 
-    match tasks.join_next().await {
-        Some(Ok(Err(error))) => Err(error),
-        Some(Err(error)) => Err(ScannerError::Task(error.to_string())),
-        Some(Ok(Ok(()))) => Err(ScannerError::Task(
-            "chain scanner exited unexpectedly".to_owned(),
-        )),
-        None => Err(ScannerError::Configuration(
+    if tasks.is_empty() {
+        return Err(ScannerError::Configuration(
             "no chain scanners were configured".to_owned(),
-        )),
+        ));
     }
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Err(error)) => tracing::error!(
+                error_category = error.category(),
+                "chain scanner task stopped"
+            ),
+            Err(error) => tracing::error!(
+                error = %error,
+                "chain scanner task failed to join"
+            ),
+            Ok(Ok(())) => tracing::error!("chain scanner task exited unexpectedly"),
+        }
+    }
+    Err(ScannerError::Task(
+        "all chain scanner tasks stopped".to_owned(),
+    ))
 }
 
 async fn run_chain(
@@ -320,17 +366,71 @@ async fn run_chain(
     routes: ChainRoutes,
     poll_interval: Duration,
 ) -> Result<(), ScannerError> {
+    let chain_id = routes.chain.chain_id;
+    run_scan_loop(
+        chain_id,
+        poll_interval,
+        || scan_once(&pool, &reader, &routes),
+        tokio::time::sleep,
+        retry_jitter,
+    )
+    .await
+}
+
+async fn run_scan_loop<Scan, ScanFuture, Sleep, SleepFuture, Jitter>(
+    chain_id: u64,
+    poll_interval: Duration,
+    mut scan: Scan,
+    mut sleep: Sleep,
+    mut jitter: Jitter,
+) -> Result<(), ScannerError>
+where
+    Scan: FnMut() -> ScanFuture,
+    ScanFuture: Future<Output = Result<ScanStats, ScannerError>>,
+    Sleep: FnMut(Duration) -> SleepFuture,
+    SleepFuture: Future<Output = ()>,
+    Jitter: FnMut() -> u64,
+{
+    let mut retry_attempt = 0_u32;
     loop {
-        let stats = scan_once(&pool, &reader, &routes).await?;
-        tracing::info!(
-            chain_id = routes.chain.chain_id,
-            cursor = stats.cursor,
-            inserted = stats.inserted,
-            backfilled_addresses = stats.backfilled_addresses,
-            "finalized chain scan committed"
-        );
-        tokio::time::sleep(poll_interval).await;
+        match scan().await {
+            Ok(stats) => {
+                retry_attempt = 0;
+                tracing::info!(
+                    chain_id,
+                    cursor = stats.cursor,
+                    inserted = stats.inserted,
+                    backfilled_addresses = stats.backfilled_addresses,
+                    "finalized chain scan committed"
+                );
+                sleep(poll_interval).await;
+            }
+            Err(error) if error.is_retryable() => {
+                let delay = backoff(retry_attempt, jitter());
+                retry_attempt = retry_attempt.saturating_add(1);
+                tracing::warn!(
+                    chain_id,
+                    error_category = error.category(),
+                    retry_after_seconds = delay.as_secs(),
+                    "finalized chain scan failed transiently"
+                );
+                sleep(delay).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    chain_id,
+                    error_category = error.category(),
+                    "finalized chain scanner stopped"
+                );
+                return Err(error);
+            }
+        }
     }
+}
+
+fn retry_jitter() -> u64 {
+    let value = Uuid::new_v4().as_u128() & u128::from(u64::MAX);
+    u64::try_from(value).unwrap_or_default()
 }
 
 fn route_paths_from_env() -> Result<Vec<PathBuf>, ScannerError> {
@@ -452,6 +552,8 @@ fn scan_windows(from_block: u64, to_block: u64) -> Result<Vec<(u64, u64)>, Scann
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::future;
     use std::sync::Mutex;
 
     use alloy_primitives::{B256, U256};
@@ -460,31 +562,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-
-    #[derive(Default)]
-    struct MockChainReader {
-        requests: Mutex<Vec<(usize, u64, u64)>>,
-    }
-
-    impl ChainReader for MockChainReader {
-        async fn finalized_head(&self) -> Result<u64, ChainError> {
-            Ok(0)
-        }
-
-        async fn transfer_logs_to(
-            &self,
-            addresses: &[Address],
-            from_block: u64,
-            to_block: u64,
-        ) -> Result<Vec<TransferLog>, ChainError> {
-            self.requests.lock().expect("request lock").push((
-                addresses.len(),
-                from_block,
-                to_block,
-            ));
-            Ok(Vec::new())
-        }
-    }
 
     #[test]
     fn scanner_windows_are_inclusive_and_bounded() {
@@ -495,23 +572,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mocked_chain_reader_observes_scanner_windows() {
-        let reader = MockChainReader::default();
-        let addresses = vec![Address::ZERO; 1_001];
-        for (from_block, to_block) in scan_windows(1, 4_001).expect("valid range") {
-            reader
-                .transfer_logs_to(&addresses, from_block, to_block)
-                .await
-                .expect("mocked request");
-        }
+    async fn scan_loop_recovers_after_a_transient_failure() {
+        let results = Mutex::new(VecDeque::from([
+            Err(ScannerError::Database(sqlx::Error::PoolTimedOut)),
+            Ok(ScanStats {
+                inserted: 1,
+                cursor: 2,
+                backfilled_addresses: 0,
+            }),
+            Err(ScannerError::Chain(ChainError::ProviderUnhealthy)),
+        ]));
+        let sleeps = Mutex::new(Vec::new());
+
+        let error = run_scan_loop(
+            1,
+            Duration::from_secs(15),
+            || {
+                future::ready(
+                    results
+                        .lock()
+                        .expect("results lock")
+                        .pop_front()
+                        .expect("scripted scan result"),
+                )
+            },
+            |duration| {
+                sleeps.lock().expect("sleeps lock").push(duration);
+                future::ready(())
+            },
+            || u64::MAX,
+        )
+        .await
+        .expect_err("provider health violation must stop the loop");
+
+        assert!(matches!(
+            error,
+            ScannerError::Chain(ChainError::ProviderUnhealthy)
+        ));
         assert_eq!(
-            *reader.requests.lock().expect("request lock"),
-            vec![
-                (1_001, 1, 2_000),
-                (1_001, 2_001, 4_000),
-                (1_001, 4_001, 4_001),
-            ]
+            *sleeps.lock().expect("sleeps lock"),
+            vec![Duration::ZERO, Duration::from_secs(15)]
         );
+        assert!(results.lock().expect("results lock").is_empty());
     }
 
     #[test]

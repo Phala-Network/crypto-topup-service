@@ -5,22 +5,148 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
+use chrono::DateTime;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
 use topup::scanner::{load_route_files, scan_once};
-use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain};
+use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
+use topup_core::money::AtomicAmount;
 use url::Url;
 use uuid::Uuid;
 
 const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const CHAIN_ID: u64 = 31_337;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedRequest {
+    addresses: Vec<Address>,
+    from_block: u64,
+    to_block: u64,
+}
+
+struct RecordingReader {
+    finalized: u64,
+    requests: Mutex<Vec<RecordedRequest>>,
+}
+
+impl RecordingReader {
+    fn new(finalized: u64) -> Self {
+        Self {
+            finalized,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
+}
+
+impl ChainReader for RecordingReader {
+    async fn finalized_head(&self) -> Result<u64, ChainError> {
+        Ok(self.finalized)
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        self.requests
+            .lock()
+            .map_err(|_| ChainError::HealthStateUnavailable)?
+            .push(RecordedRequest {
+                addresses: addresses.to_vec(),
+                from_block,
+                to_block,
+            });
+        Ok(Vec::new())
+    }
+}
+
+struct BackfillReader {
+    recipient: Address,
+    token: Address,
+    fail_request: Mutex<Option<usize>>,
+    requests: Mutex<Vec<RecordedRequest>>,
+}
+
+impl BackfillReader {
+    fn new(recipient: Address, token: Address, fail_request: usize) -> Self {
+        Self {
+            recipient,
+            token,
+            fail_request: Mutex::new(Some(fail_request)),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().expect("request lock").len()
+    }
+}
+
+impl ChainReader for BackfillReader {
+    async fn finalized_head(&self) -> Result<u64, ChainError> {
+        Ok(4_000)
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        let request_number = {
+            let mut requests = self
+                .requests
+                .lock()
+                .map_err(|_| ChainError::HealthStateUnavailable)?;
+            requests.push(RecordedRequest {
+                addresses: addresses.to_vec(),
+                from_block,
+                to_block,
+            });
+            requests.len()
+        };
+        let should_fail = {
+            let mut fail_request = self
+                .fail_request
+                .lock()
+                .map_err(|_| ChainError::HealthStateUnavailable)?;
+            if *fail_request == Some(request_number) {
+                *fail_request = None;
+                true
+            } else {
+                false
+            }
+        };
+        if should_fail {
+            return Err(ChainError::Rpc("scripted backfill failure"));
+        }
+        if !addresses.contains(&self.recipient) {
+            return Ok(Vec::new());
+        }
+
+        let mut logs = Vec::new();
+        if from_block <= 100 && 100 <= to_block {
+            logs.push(mock_transfer_log(self.token, self.recipient, 100, 1));
+        }
+        if from_block <= 3_000 && 3_000 <= to_block {
+            logs.push(mock_transfer_log(self.token, self.recipient, 3_000, 2));
+        }
+        Ok(logs)
+    }
+}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -231,11 +357,38 @@ async fn finalized_scanner_is_idempotent_atomic_and_backfills_new_addresses() ->
     result.and(cleanup)
 }
 
+#[tokio::test]
+async fn backfill_failure_keeps_marker_unset_then_retries_without_duplicates() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+
+    let result = run_backfill_retry_scenario(&database).await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn scanner_shards_actual_requests_and_includes_lock_addresses() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+
+    let result = run_sharding_scenario(&database).await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
     run_checked("forge", &["build"], Some(&contracts))?;
     let supported_token = deploy_token(&contracts, &anvil.rpc_url)?;
     let unsupported_token = deploy_token(&contracts, &anvil.rpc_url)?;
+    let nft = deploy_contract(
+        &contracts,
+        &anvil.rpc_url,
+        "test/mocks/MockTokens.sol:MockERC721Transfer",
+    )?;
     let tracked_one = Address::from([0x11_u8; 20]);
     let tracked_two = Address::from([0x22_u8; 20]);
     let tracked_later = Address::from([0x33_u8; 20]);
@@ -246,6 +399,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     transfer(&anvil.rpc_url, supported_token, tracked_one, 101)?;
     transfer(&anvil.rpc_url, supported_token, tracked_two, 202)?;
     transfer(&anvil.rpc_url, unsupported_token, tracked_one, 303)?;
+    mint_nft(&anvil.rpc_url, nft, tracked_one, 404)?;
     anvil.mine(2)?;
 
     let route_fixture = RouteFixture::create(supported_token)?;
@@ -254,12 +408,17 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         .next()
         .context("one chain route")?;
     let reader = EvmChain::new(&anvil.rpc_url)?;
+    let expected_cursor = reader.finalized_head().await?;
     let first = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(
         first.inserted == 3,
         "expected three deposits, got {first:?}"
     );
     assert_deposit_counts(&database.app_pool, 3, 1).await?;
+    ensure!(
+        db::get_cursor(&database.app_pool, CHAIN_ID).await? == Some(expected_cursor),
+        "cursor did not advance past the skipped ERC-721 Transfer"
+    );
 
     sqlx::query("UPDATE cursors SET scanned_block = 0 WHERE chain_id = $1")
         .bind(i64::try_from(CHAIN_ID)?)
@@ -330,6 +489,126 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     Ok(())
 }
 
+async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
+    let token = Address::from([0x44_u8; 20]);
+    let recipient = Address::from([0x55_u8; 20]);
+    let account_id = seed_account(&database.app_pool).await?;
+    let address_id = insert_address(&database.app_pool, account_id, recipient, 1).await?;
+    sqlx::query("UPDATE addresses SET created_block = 1 WHERE id = $1")
+        .bind(address_id)
+        .execute(&database.app_pool)
+        .await?;
+    sqlx::query("INSERT INTO cursors (chain_id, scanned_block) VALUES ($1, 4000)")
+        .bind(i64::try_from(CHAIN_ID)?)
+        .execute(&database.app_pool)
+        .await?;
+
+    let route_fixture = RouteFixture::create(token)?;
+    let routes = load_route_files(std::slice::from_ref(&route_fixture.path))?
+        .into_iter()
+        .next()
+        .context("one chain route")?;
+    let reader = BackfillReader::new(recipient, token, 2);
+
+    ensure!(
+        matches!(
+            scan_once(&database.app_pool, &reader, &routes).await,
+            Err(topup::scanner::ScannerError::Chain(ChainError::Rpc(_)))
+        ),
+        "the scripted second backfill window must fail"
+    );
+    ensure!(!address_backfilled(&database.app_pool, address_id).await?);
+    ensure!(deposit_count(&database.app_pool).await? == 1);
+
+    let recovered = scan_once(&database.app_pool, &reader, &routes).await?;
+    ensure!(
+        recovered.inserted == 1,
+        "only the missing window should insert"
+    );
+    ensure!(address_backfilled(&database.app_pool, address_id).await?);
+    ensure!(deposit_count(&database.app_pool).await? == 2);
+
+    let completed_request_count = reader.request_count();
+    let completed = scan_once(&database.app_pool, &reader, &routes).await?;
+    ensure!(completed.inserted == 0);
+    ensure!(
+        reader.request_count() == completed_request_count,
+        "a completed address was backfilled again"
+    );
+    Ok(())
+}
+
+async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
+    let token = Address::from([0x66_u8; 20]);
+    let account_id = seed_account(&database.app_pool).await?;
+    insert_address(&database.app_pool, account_id, indexed_address(1), 1).await?;
+    let lock_address = indexed_address(2);
+    for index in 0..1_000_u64 {
+        insert_lock_address(
+            &database.app_pool,
+            account_id,
+            indexed_address(index.saturating_add(2)),
+            index,
+        )
+        .await?;
+    }
+    sqlx::query("UPDATE addresses SET backfilled = true WHERE chain_id = $1")
+        .bind(i64::try_from(CHAIN_ID)?)
+        .execute(&database.app_pool)
+        .await?;
+
+    let route_fixture = RouteFixture::create(token)?;
+    let routes = load_route_files(std::slice::from_ref(&route_fixture.path))?
+        .into_iter()
+        .next()
+        .context("one chain route")?;
+    let reader = RecordingReader::new(4_001);
+    let stats = scan_once(&database.app_pool, &reader, &routes).await?;
+    ensure!(stats.cursor == 4_001);
+
+    let requests = reader.requests();
+    ensure!(requests.len() == 6, "unexpected requests: {requests:?}");
+    for request in &requests {
+        ensure!(request.addresses.len() <= 1_000);
+        ensure!(
+            request
+                .to_block
+                .checked_sub(request.from_block)
+                .and_then(|width| width.checked_add(1))
+                .is_some_and(|width| width <= 2_000)
+        );
+    }
+    ensure!(
+        requests
+            .iter()
+            .any(|request| request.addresses.contains(&lock_address)),
+        "lock address was omitted from the scanner filter"
+    );
+    let shapes = requests
+        .iter()
+        .map(|request| {
+            (
+                request.addresses.len(),
+                request.from_block,
+                request.to_block,
+            )
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        shapes
+            == vec![
+                (1_000, 1, 2_000),
+                (1, 1, 2_000),
+                (1_000, 2_001, 4_000),
+                (1, 2_001, 4_000),
+                (1_000, 4_001, 4_001),
+                (1, 4_001, 4_001),
+            ],
+        "unexpected request sharding: {shapes:?}"
+    );
+    Ok(())
+}
+
 fn required_url(name: &str) -> Option<String> {
     match env::var(name).ok().filter(|value| !value.is_empty()) {
         Some(value) => Some(value),
@@ -375,6 +654,10 @@ fn run_checked(command: &str, arguments: &[&str], directory: Option<&Path>) -> R
 }
 
 fn deploy_token(contracts: &Path, rpc_url: &str) -> Result<Address> {
+    deploy_contract(contracts, rpc_url, "test/mocks/MockTokens.sol:MockERC20")
+}
+
+fn deploy_contract(contracts: &Path, rpc_url: &str, contract: &str) -> Result<Address> {
     let output = run_checked(
         "forge",
         &[
@@ -385,7 +668,7 @@ fn deploy_token(contracts: &Path, rpc_url: &str) -> Result<Address> {
             ANVIL_PRIVATE_KEY,
             "--broadcast",
             "--json",
-            "test/mocks/MockTokens.sol:MockERC20",
+            contract,
         ],
         Some(contracts),
     )?;
@@ -395,6 +678,25 @@ fn deploy_token(contracts: &Path, rpc_url: &str) -> Result<Address> {
         .and_then(Value::as_str)
         .context("forge create omitted deployedTo")?;
     Address::from_str(address).context("parse deployed token address")
+}
+
+fn mint_nft(rpc_url: &str, token: Address, recipient: Address, token_id: u64) -> Result<()> {
+    run_checked(
+        "cast",
+        &[
+            "send",
+            "--rpc-url",
+            rpc_url,
+            "--private-key",
+            ANVIL_PRIVATE_KEY,
+            &format!("{token:#x}"),
+            "mint(address,uint256)",
+            &format!("{recipient:#x}"),
+            &token_id.to_string(),
+        ],
+        None,
+    )?;
+    Ok(())
 }
 
 fn transfer(rpc_url: &str, token: Address, recipient: Address, amount: u64) -> Result<()> {
@@ -494,6 +796,77 @@ async fn insert_address(
     )
     .await?;
     Ok(id)
+}
+
+async fn insert_lock_address(
+    pool: &PgPool,
+    account_id: Uuid,
+    address: Address,
+    index: u64,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    db::insert_address(
+        pool,
+        &NewAddress {
+            id,
+            account_id,
+            chain_id: CHAIN_ID,
+            kind: AddressKind::Lock,
+            version: 0,
+            lock_ref: Some(format!("lock-{index}")),
+            salt: indexed_word(index),
+            address,
+            retired_at: None,
+        },
+    )
+    .await?;
+    Ok(id)
+}
+
+fn indexed_address(index: u64) -> Address {
+    Address::from_word(indexed_word(index))
+}
+
+fn indexed_word(index: u64) -> B256 {
+    let mut bytes = [0_u8; 32];
+    bytes[24..].copy_from_slice(&index.to_be_bytes());
+    B256::from(bytes)
+}
+
+fn mock_transfer_log(
+    token: Address,
+    recipient: Address,
+    block_number: u64,
+    marker: u8,
+) -> TransferLog {
+    TransferLog {
+        tx_hash: B256::from([marker; 32]),
+        log_index: 0,
+        block_number,
+        block_hash: B256::from([marker.saturating_add(10); 32]),
+        block_time: DateTime::from_timestamp(i64::from(marker), 0).expect("test timestamp"),
+        token,
+        from: Address::from([0x77_u8; 20]),
+        to: recipient,
+        amount: AtomicAmount::new(U256::from(u64::from(marker))),
+    }
+}
+
+async fn address_backfilled(pool: &PgPool, id: Uuid) -> Result<bool> {
+    Ok(
+        sqlx::query("SELECT backfilled FROM addresses WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?
+            .try_get(0)?,
+    )
+}
+
+async fn deposit_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query("SELECT count(*) FROM deposits")
+        .fetch_one(pool)
+        .await?
+        .try_get(0)?)
 }
 
 async fn assert_deposit_counts(pool: &PgPool, total: i64, unsupported: i64) -> Result<()> {

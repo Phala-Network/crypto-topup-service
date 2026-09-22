@@ -16,8 +16,10 @@ use chrono::{DateTime, Utc};
 use topup_core::money::AtomicAmount;
 use url::Url;
 
-const MAX_BLOCKS_PER_REQUEST: u64 = 2_000;
-const MAX_ADDRESSES_PER_REQUEST: usize = 1_000;
+/// Maximum inclusive block count in one `eth_getLogs` request.
+pub const MAX_BLOCKS_PER_REQUEST: u64 = 2_000;
+/// Maximum recipient count in one `eth_getLogs` request.
+pub const MAX_ADDRESSES_PER_REQUEST: usize = 1_000;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
@@ -208,9 +210,30 @@ impl EvmChain {
             .map_err(|_| ChainError::Rpc("transfer log fetch"))?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
-            let decoded = log
-                .log_decode_validate::<Transfer>()
-                .map_err(|error| ChainError::InvalidTransfer(error.to_string()))?;
+            let topic_count = log.topics().len();
+            let data_length = log.data().data.len();
+            if topic_count != 3 || data_length != 32 {
+                tracing::warn!(
+                    transaction_hash = ?log.transaction_hash,
+                    log_index = ?log.log_index,
+                    topic_count,
+                    data_length,
+                    "skipping Transfer log with a non-ERC-20 layout"
+                );
+                continue;
+            }
+            let decoded = match log.log_decode_validate::<Transfer>() {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    tracing::warn!(
+                        transaction_hash = ?log.transaction_hash,
+                        log_index = ?log.log_index,
+                        %error,
+                        "skipping invalid ERC-20 Transfer log"
+                    );
+                    continue;
+                }
+            };
             let block_number = decoded
                 .block_number
                 .ok_or(ChainError::MissingField("log.block_number"))?;
@@ -286,8 +309,8 @@ impl ChainReader for EvmChain {
         }
 
         let mut transfers = Vec::new();
-        let mut timestamps = BTreeMap::new();
         for (window_from, window_to) in block_windows(from_block, to_block)? {
+            let mut timestamps = BTreeMap::new();
             for batch in addresses.chunks(MAX_ADDRESSES_PER_REQUEST) {
                 transfers.extend(
                     self.transfer_logs_request(batch, window_from, window_to, &mut timestamps)

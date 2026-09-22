@@ -4956,6 +4956,7 @@ dependencies = [
  "sha2",
  "tokio",
  "topup-core",
+ "tracing",
  "url",
  "zeroize",
 ]
