@@ -33,8 +33,8 @@ done
     && -n "$operator" ]] || usage
 
 [[ "$slug" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "invalid slug" >&2; exit 2; }
-[[ "$keyid" =~ ^[[:print:]]{1,128}$ && "$keyid" != *'"'* && "$keyid" != *'\'* ]] || {
-    echo "keyid must be printable ASCII without quotes or backslashes" >&2
+[[ "$keyid" =~ ^[[:print:]]{1,128}$ && "$keyid" != *[\"\\\$]* ]] || {
+    echo "keyid must be printable ASCII without quotes, backslashes, or \$" >&2
     exit 2
 }
 key_bytes=$(printf '%s' "$public_key" | base64 -d 2>/dev/null | wc -c) || key_bytes=0

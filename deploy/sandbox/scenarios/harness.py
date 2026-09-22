@@ -63,6 +63,8 @@ class ScenarioSettlement(reference.SettlementService):
         self.posts: Counter[str] = Counter()
         self.gets: Counter[str] = Counter()
         self.lose_answer_once: set[str] = set()
+        # Teams whose GET-by-key answers 503 until released, so a lookup cannot happen early.
+        self.hold_lookups: set[str] = set()
         self._lock = threading.Lock()
 
     def handle_post(self, target: str, headers: Mapping[str, str], body: bytes) -> reference.Answer:
@@ -82,11 +84,15 @@ class ScenarioSettlement(reference.SettlementService):
         return answer
 
     def handle_get(self, target: str, headers: Mapping[str, str]) -> reference.Answer:
-        answer = super().handle_get(target, headers)
         order = self.ledger.find_order(target.rsplit("/", 1)[-1])
-        if order is not None and order.team_id is not None:
+        team = None if order is None else order.team_id
+        with self._lock:
+            if team is not None and team in self.hold_lookups:
+                return reference.Answer(503)
+        answer = super().handle_get(target, headers)
+        if team is not None:
             with self._lock:
-                self.gets[order.team_id] += 1
+                self.gets[team] += 1
         return answer
 
 

@@ -130,8 +130,11 @@ gas from a public faucet.
 5. **HUMAN-ONLY:** issue the product through the sandbox's administrative database access
    (there is deliberately no product-creation API):
 
+   Keep the connection details and password out of the command line: define a
+   `topup-sandbox-admin` entry in `~/.pg_service.conf` and the password in `~/.pgpass` (mode 0600).
+
    ```sh
-   PSQL="psql $SANDBOX_ADMIN_DATABASE_URL" deploy/sandbox/issue-product.sh \
+   PSQL="psql service=topup-sandbox-admin" deploy/sandbox/issue-product.sh \
      --slug acme --keyid acme/v1 --public-key '<base64>' \
      --settlement-url https://acme.example/topup/settlements \
      --webhook-url https://acme.example/topup/webhooks --operator "$USER"
