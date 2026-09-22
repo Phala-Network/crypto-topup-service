@@ -71,6 +71,26 @@ impl ApiError {
         )
     }
 
+    /// Returns a conflict for a rate lock whose address already received funds.
+    #[must_use]
+    pub fn pending_payment() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "pending_payment",
+            "rate lock address already received a payment",
+        )
+    }
+
+    /// Returns a conflict for an idempotent replay whose body differs from the original.
+    #[must_use]
+    pub fn idempotency_mismatch() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "idempotency_mismatch",
+            "request does not match the original request for this reference",
+        )
+    }
+
     /// Returns a typed per-account rate-limit response.
     #[must_use]
     pub fn rate_limited() -> Self {

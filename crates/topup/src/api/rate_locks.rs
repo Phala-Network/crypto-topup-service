@@ -205,6 +205,8 @@ fn map_error(error: RateLockError) -> ApiError {
         RateLockError::ExposureCap(scope) => ApiError::exposure_cap(scope),
         RateLockError::NotFound => ApiError::not_found(),
         RateLockError::NotOpen => ApiError::conflict("rate lock is not open"),
+        RateLockError::PendingPayment => ApiError::pending_payment(),
+        RateLockError::IdempotencyMismatch => ApiError::idempotency_mismatch(),
         RateLockError::Arithmetic | RateLockError::DatabaseInvariant => ApiError::internal(),
         RateLockError::Database(error) => ApiError::from(error),
     }

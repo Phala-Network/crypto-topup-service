@@ -197,6 +197,10 @@ pub enum RateLockError {
     NotFound,
     /// The lock can no longer be cancelled.
     NotOpen,
+    /// The lock address already received a deposit, so it cannot be cancelled.
+    PendingPayment,
+    /// A replay of an existing reference stated a different amount.
+    IdempotencyMismatch,
     /// Money arithmetic could not be represented.
     Arithmetic,
     /// Persisted data violated an internal invariant.
@@ -215,6 +219,12 @@ impl Display for RateLockError {
             Self::ExposureCap(scope) => write!(formatter, "{scope} exposure cap exceeded"),
             Self::NotFound => formatter.write_str("rate lock not found"),
             Self::NotOpen => formatter.write_str("rate lock is not open"),
+            Self::PendingPayment => {
+                formatter.write_str("rate lock address already received a payment")
+            }
+            Self::IdempotencyMismatch => {
+                formatter.write_str("rate-lock reference was reused with a different amount")
+            }
             Self::Arithmetic => formatter.write_str("rate-lock arithmetic is out of range"),
             Self::DatabaseInvariant => formatter.write_str("rate-lock database invariant failed"),
             Self::Database(error) => Display::fmt(error, formatter),
@@ -238,7 +248,10 @@ impl From<sqlx::Error> for RateLockError {
 }
 
 /// Creates a lock or returns the existing row for the same account reference.
-#[allow(clippy::too_many_arguments)]
+///
+/// A replay of an existing reference must state the same amount in the same unit as the stored
+/// lock (`amount_atomic` against the locked token amount, `amount_minor` against the locked
+/// credit); any other amount is an idempotency mismatch.
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
@@ -253,8 +266,11 @@ pub async fn create(
     }
     validate_lock_ref(lock_ref)?;
     if let Some(existing) = get(pool, product.id, account.id, lock_ref).await? {
-        return Ok(existing);
+        return replay(existing, requested);
     }
+    // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
+    // authoritative check repeats under the account row lock below.
+    check_creation_rate(pool, account.id, route).await?;
 
     let quote = quotes
         .quote(route)
@@ -277,24 +293,9 @@ pub async fn create(
     lock_account(&mut transaction, product.id, account.id).await?;
     if let Some(existing) = get_in(&mut transaction, product.id, account.id, lock_ref).await? {
         transaction.commit().await?;
-        return Ok(existing);
+        return replay(existing, requested);
     }
-    let recent: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM rate_locks AS rate_lock
-        JOIN addresses AS address ON address.id = rate_lock.address_id
-        WHERE address.account_id = $1
-          AND rate_lock.created_at >= now() - interval '1 minute'
-        "#,
-    )
-    .bind(account.id)
-    .fetch_one(&mut *transaction)
-    .await?;
-    let recent = u64::try_from(recent).map_err(|_| RateLockError::DatabaseInvariant)?;
-    if recent >= route.rate_lock.max_creations_per_minute {
-        return Err(RateLockError::RateLimited);
-    }
+    check_creation_rate(&mut *transaction, account.id, route).await?;
 
     reserve_exposure(
         &mut transaction,
@@ -311,12 +312,18 @@ pub async fn create(
         salt,
     );
     let address_id = Uuid::new_v4();
+    // A freshly derived single-use address cannot hold earlier payments, so the scanner only
+    // needs to cover it from the chain's committed cursor instead of backfilling from genesis.
     sqlx::query(
         r#"
         INSERT INTO addresses (
-            id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
+            id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at,
+            created_block
         )
-        VALUES ($1, $2, $3, 'lock', 0, $4, $5, $6, NULL)
+        VALUES (
+            $1, $2, $3, 'lock', 0, $4, $5, $6, NULL,
+            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $3), 0)
+        )
         "#,
     )
     .bind(address_id)
@@ -426,6 +433,10 @@ pub async fn exposure_availability(
 }
 
 /// Cancels an unpaid open lock, releases exposure, and appends an audit row atomically.
+///
+/// Any deposit row for the lock address, including a rejected one, means funds already arrived at
+/// the single-use address, so the lock is no longer unpaid and cancellation is refused; such a
+/// lock stays open until it is consumed or expires.
 pub async fn cancel(
     pool: &PgPool,
     product: &Product,
@@ -443,6 +454,14 @@ pub async fn cancel(
     }
     if row.status != RateLockStatus::Open || row.expires_at <= Utc::now() {
         return Err(RateLockError::NotOpen);
+    }
+    let paid: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1)")
+            .bind(row.address_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if paid {
+        return Err(RateLockError::PendingPayment);
     }
     let reservation = lock_reservation(&mut transaction, row.address_id).await?;
     sqlx::query(
@@ -528,13 +547,19 @@ pub(crate) async fn consume(
 }
 
 /// Expires one bounded batch and returns the number of rows closed.
+///
+/// Exposure releases are aggregated per scope key and applied in sorted key order, the same order
+/// creation, cancellation, and consumption lock scope rows in, so a batch spanning several
+/// accounts cannot deadlock with them.
 pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query_as::<_, ExpiringRow>(
         r#"
         SELECT rate_lock.address_id, rate_lock.credit_minor::text AS credit_minor,
+               rate_lock.amount_atomic::text AS amount_atomic,
                rate_lock.exposure_reserved, address.account_id, account.product_id,
-               address.lock_ref, rate_lock.route, rate_lock.expires_at
+               account.external_id, address.chain_id, address.address, address.lock_ref,
+               rate_lock.route, rate_lock.expires_at
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
         JOIN accounts AS account ON account.id = address.account_id
@@ -549,30 +574,36 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     .bind(EXPIRY_BATCH_SIZE)
     .fetch_all(&mut *transaction)
     .await?;
+    if rows.is_empty() {
+        transaction.commit().await?;
+        return Ok(0);
+    }
     let count = u64::try_from(rows.len()).map_err(|_| RateLockError::DatabaseInvariant)?;
-    for row in rows {
+    let address_ids = rows.iter().map(|row| row.address_id).collect::<Vec<_>>();
+    let updated = sqlx::query(
+        r#"
+        UPDATE rate_locks
+        SET status = 'expired', exposure_reserved = false, closed_at = now()
+        WHERE address_id = ANY($1) AND status = 'open' AND consumed_by IS NULL
+        "#,
+    )
+    .bind(&address_ids)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() != count {
+        return Err(RateLockError::DatabaseInvariant);
+    }
+
+    let mut releases = BTreeMap::<String, u64>::new();
+    for row in &rows {
         let credit_minor = parse_minor(&row.credit_minor)?;
-        sqlx::query(
-            r#"
-            UPDATE rate_locks
-            SET status = 'expired', exposure_reserved = false, closed_at = now()
-            WHERE address_id = $1 AND status = 'open' AND consumed_by IS NULL
-            "#,
-        )
-        .bind(row.address_id)
-        .execute(&mut *transaction)
-        .await?;
         if row.exposure_reserved {
-            release_exposure(
-                &mut transaction,
-                &Reservation {
-                    account_id: row.account_id,
-                    product_id: row.product_id,
-                    credit_minor,
-                    reserved: true,
-                },
-            )
-            .await?;
+            for key in scope_keys(row.account_id, row.product_id) {
+                let total = releases.entry(key).or_default();
+                *total = total
+                    .checked_add(credit_minor.value())
+                    .ok_or(RateLockError::Arithmetic)?;
+            }
         }
         sqlx::query(
             r#"
@@ -583,13 +614,20 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
         .bind(Uuid::new_v4())
         .bind(json!({
             "product_id": row.product_id,
-            "account_id": row.account_id,
+            "external_id": row.external_id,
             "product_lock_ref": row.lock_ref,
             "route": row.route,
+            "chain_id": row.chain_id,
+            "address": row.address,
+            "amount_atomic": row.amount_atomic,
+            "credit_minor": credit_minor.value().to_string(),
             "expires_at": row.expires_at,
         }))
         .execute(&mut *transaction)
         .await?;
+    }
+    for (key, amount) in releases {
+        decrement_exposure(&mut transaction, &key, amount).await?;
     }
     transaction.commit().await?;
     Ok(count)
@@ -721,16 +759,58 @@ fn validate_lock_ref(lock_ref: &str) -> Result<(), RateLockError> {
     Ok(())
 }
 
+fn replay(existing: RateLock, requested: RequestedAmount) -> Result<RateLock, RateLockError> {
+    let matches = match requested {
+        RequestedAmount::Minor(credit) => existing.credit_minor == credit,
+        RequestedAmount::Atomic(amount) => existing.amount_atomic == amount,
+    };
+    if matches {
+        Ok(existing)
+    } else {
+        Err(RateLockError::IdempotencyMismatch)
+    }
+}
+
+async fn check_creation_rate<'e, E>(
+    executor: E,
+    account_id: Uuid,
+    route: &RouteFile,
+) -> Result<(), RateLockError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let recent: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM rate_locks AS rate_lock
+        JOIN addresses AS address ON address.id = rate_lock.address_id
+        WHERE address.account_id = $1
+          AND rate_lock.created_at >= now() - interval '1 minute'
+        "#,
+    )
+    .bind(account_id)
+    .fetch_one(executor)
+    .await?;
+    let recent = u64::try_from(recent).map_err(|_| RateLockError::DatabaseInvariant)?;
+    if recent >= route.rate_lock.max_creations_per_minute {
+        return Err(RateLockError::RateLimited);
+    }
+    Ok(())
+}
+
 async fn lock_account(
     transaction: &mut Transaction<'_, Postgres>,
     product_id: Uuid,
     account_id: Uuid,
 ) -> Result<(), RateLockError> {
-    let found = sqlx::query("SELECT id FROM accounts WHERE id = $1 AND product_id = $2 FOR UPDATE")
-        .bind(account_id)
-        .bind(product_id)
-        .fetch_optional(&mut **transaction)
-        .await?;
+    // `NO KEY UPDATE` serializes creations per account without blocking the `KEY SHARE` locks
+    // that foreign-key checks take when the scanner inserts deposits for this account.
+    let found =
+        sqlx::query("SELECT id FROM accounts WHERE id = $1 AND product_id = $2 FOR NO KEY UPDATE")
+            .bind(account_id)
+            .bind(product_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
     if found.is_none() {
         return Err(RateLockError::NotFound);
     }
@@ -775,7 +855,7 @@ async fn reserve_exposure(
         .map(|scope| scope.0.clone())
         .collect::<Vec<_>>();
     let rows = sqlx::query(
-        "SELECT scope_key, open_minor::text AS open_minor FROM lock_exposure WHERE scope_key = ANY($1) ORDER BY scope_key FOR UPDATE",
+        "SELECT scope_key, open_minor::text AS open_minor FROM lock_exposure WHERE scope_key = ANY($1) ORDER BY scope_key COLLATE \"C\" FOR UPDATE",
     )
     .bind(&keys)
     .fetch_all(&mut **transaction)
@@ -856,27 +936,41 @@ async fn release_exposure(
     transaction: &mut Transaction<'_, Postgres>,
     reservation: &Reservation,
 ) -> Result<(), RateLockError> {
-    let mut keys = vec![
-        format!("account:{}", reservation.account_id),
-        format!("product:{}", reservation.product_id),
+    for key in scope_keys(reservation.account_id, reservation.product_id) {
+        decrement_exposure(transaction, &key, reservation.credit_minor.value()).await?;
+    }
+    Ok(())
+}
+
+/// Returns the exposure scope keys for one lock in the byte order every writer locks them in.
+fn scope_keys(account_id: Uuid, product_id: Uuid) -> [String; 3] {
+    let mut keys = [
+        format!("account:{account_id}"),
+        format!("product:{product_id}"),
         "global".to_owned(),
     ];
     keys.sort();
-    for key in keys {
-        let result = sqlx::query(
-            r#"
-            UPDATE lock_exposure
-            SET open_minor = open_minor - $2::text::numeric, updated_at = now()
-            WHERE scope_key = $1 AND open_minor >= $2::text::numeric
-            "#,
-        )
-        .bind(key)
-        .bind(reservation.credit_minor.value().to_string())
-        .execute(&mut **transaction)
-        .await?;
-        if result.rows_affected() != 1 {
-            return Err(RateLockError::DatabaseInvariant);
-        }
+    keys
+}
+
+async fn decrement_exposure(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: &str,
+    amount: u64,
+) -> Result<(), RateLockError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE lock_exposure
+        SET open_minor = open_minor - $2::text::numeric, updated_at = now()
+        WHERE scope_key = $1 AND open_minor >= $2::text::numeric
+        "#,
+    )
+    .bind(key)
+    .bind(amount.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(RateLockError::DatabaseInvariant);
     }
     Ok(())
 }
@@ -953,9 +1047,13 @@ async fn get_in(
 struct ExpiringRow {
     address_id: Uuid,
     credit_minor: String,
+    amount_atomic: String,
     exposure_reserved: bool,
     account_id: Uuid,
     product_id: Uuid,
+    external_id: String,
+    chain_id: i64,
+    address: String,
     lock_ref: String,
     route: String,
     expires_at: DateTime<Utc>,
