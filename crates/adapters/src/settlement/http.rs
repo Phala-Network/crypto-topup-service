@@ -274,6 +274,27 @@ impl SettlementClient {
         )
         .await
     }
+
+    /// Builds the signed `GET {endpoint}/{key}` lookup without sending it.
+    pub async fn signed_get_request(&self, key: &str) -> Result<Request, SettlementClientError> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|()| SettlementClientError::InvalidEndpoint)?
+            .pop_if_empty()
+            .push(key);
+        self.signed_request(
+            Method::GET,
+            url,
+            key,
+            Vec::new(),
+            false,
+            SigningOptions {
+                created: unix_timestamp()?,
+                cover_idempotency_key: true,
+            },
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -295,24 +316,7 @@ impl SettlementApi for SettlementClient {
         &self,
         key: &str,
     ) -> Result<Option<SettlementAnswer>, SettlementClientError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut()
-            .map_err(|()| SettlementClientError::InvalidEndpoint)?
-            .pop_if_empty()
-            .push(key);
-        let signed = self
-            .signed_request(
-                Method::GET,
-                url,
-                key,
-                Vec::new(),
-                false,
-                SigningOptions {
-                    created: unix_timestamp()?,
-                    cover_idempotency_key: true,
-                },
-            )
-            .await?;
+        let signed = self.signed_get_request(key).await?;
         let response = self
             .client
             .execute(signed)

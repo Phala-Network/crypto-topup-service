@@ -5130,6 +5130,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sfv",
  "sha2",
  "tokio",
  "topup-core",
