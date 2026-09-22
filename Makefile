@@ -1,4 +1,4 @@
-.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image
+.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image runbook-check
 
 build:
 	cargo build --workspace --locked
@@ -32,3 +32,6 @@ service-smoke:
 
 verify-image:
 	deploy/verify-image.sh
+
+runbook-check:
+	deploy/runbooks/check.sh
