@@ -30,7 +30,10 @@ pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark
 pub use products::{
     NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,
 };
-pub use settlements::{Settlement, SettlementIntent, upsert_intent};
+pub use settlements::{
+    Settlement, SettlementIntent, SettlementStatus, mark_accepted, mark_rejected, mark_sent,
+    mark_sent_with_receipt, upsert_intent, upsert_intent_in,
+};
 
 /// Embedded SQL migrations for the service database.
 pub static MIGRATOR: Migrator = sqlx::migrate!();

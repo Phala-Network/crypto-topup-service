@@ -17,11 +17,14 @@ use tokio_util::sync::CancellationToken;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
 };
+use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
+use topup_adapters::signer::actor::SignerHandle;
+use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
 use topup_core::route::RouteFile;
 #[cfg(feature = "dev-signer")]
@@ -269,8 +272,23 @@ async fn run(
             return ExitCode::FAILURE;
         }
     };
-    let steps = Arc::new(NoopStepSet::build());
-    tracing::warn!("NoopStepSet is active; deposit steps perform no real work");
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+        Duration::from_secs(10),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let steps = Arc::new(NoopStepSet::build().with_cleared(Box::new(SettleStep::new(
+        pool.clone(),
+        signer,
+        Duration::from_secs(30),
+    ))));
+    tracing::warn!("placeholder steps remain active outside the cleared state");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
