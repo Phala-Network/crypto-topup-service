@@ -531,6 +531,14 @@ fn address_index(addresses: &[ScanAddress]) -> BTreeMap<Address, ScanAddress> {
         .collect()
 }
 
+pub(crate) fn resolve_logs_for_reconciliation(
+    logs: Vec<TransferLog>,
+    addresses: &[ScanAddress],
+    routes: &ChainRoutes,
+) -> Result<Vec<NewDeposit>, ScannerError> {
+    resolve_logs(logs, &address_index(addresses), routes)
+}
+
 fn resolve_logs(
     logs: Vec<TransferLog>,
     addresses: &BTreeMap<Address, ScanAddress>,

@@ -53,6 +53,7 @@ enum TopupCommand {
         #[command(subcommand)]
         command: OutboxCommand,
     },
+    Reconcile(ReconcileArgs),
     Attest(AttestArgs),
     RestoreCheck,
 }
@@ -80,6 +81,22 @@ struct RunArgs {
     /// Minimum interval between repeated alerts for the same deposit state.
     #[arg(long, default_value_t = 60 * 60)]
     age_alert_reminder_s: u64,
+    /// Interval between full reconciliation passes.
+    #[arg(long, default_value_t = 10 * 60)]
+    reconciliation_interval_s: u64,
+}
+
+#[derive(Args)]
+struct ReconcileArgs {
+    /// Run one pass and exit.
+    #[arg(long, required = true)]
+    once: bool,
+    /// Run the restore gate and fail while any deposit is incomplete.
+    #[arg(long, requires = "once")]
+    post_restore: bool,
+    /// Validated route file; repeat for every enabled route version.
+    #[arg(long = "route", required = true, value_name = "FILE")]
+    routes: Vec<PathBuf>,
 }
 
 #[derive(Args)]
@@ -138,6 +155,7 @@ async fn main() -> ExitCode {
         TopupCommand::Outbox {
             command: OutboxCommand::Replay { id, since, force },
         } => return replay_outbox(id, since.as_deref(), force).await,
+        TopupCommand::Reconcile(args) => return reconcile(&args).await,
         TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::RestoreCheck => Err("restore-check is not implemented"),
     };
@@ -210,6 +228,10 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!("age alert reminder interval must be positive");
         return ExitCode::FAILURE;
     }
+    if args.reconciliation_interval_s == 0 {
+        tracing::error!("reconciliation interval must be positive");
+        return ExitCode::FAILURE;
+    }
     let routes = match load_routes(&args.routes) {
         Ok(routes) => routes,
         Err(error) => {
@@ -271,7 +293,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         .zip(u32::try_from(scanner_count).ok())
         .zip(u32::try_from(route_count).ok())
         .and_then(|((pumps, scanners), routes)| pumps.checked_add(scanners)?.checked_add(routes))
-        .and_then(|count| count.checked_add(2))
+        .and_then(|count| count.checked_add(3))
     {
         Some(count) => count,
         None => {
@@ -298,6 +320,36 @@ async fn run(args: &RunArgs) -> ExitCode {
         Ok(signer) => signer,
         Err(error) => {
             tracing::error!(%error, "failed to start signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let configured_chains = routes
+        .iter()
+        .map(|route| route.chain.chain_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for chain_id in configured_chains {
+        match topup::reconciler::chain_is_blocked(&pool, chain_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::error!(chain_id, "reconciliation block freezes configured chain");
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                tracing::error!(%error, chain_id, "failed to load reconciliation blocks");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let reconciliation_metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
+    let reconciler = match topup::reconciler::Reconciler::from_routes(
+        pool.clone(),
+        routes.clone(),
+        signer.clone(),
+        Arc::clone(&reconciliation_metrics),
+    ) {
+        Ok(reconciler) => Arc::new(reconciler),
+        Err(error) => {
+            tracing::error!(%error, "failed to configure reconciler");
             return ExitCode::FAILURE;
         }
     };
@@ -401,6 +453,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             task.run(flusher_cancellation).await;
         }));
     }
+    let reconciliation_cancellation = cancellation.child_token();
+    let reconciliation_interval = Duration::from_secs(args.reconciliation_interval_s);
+    let mut reconciliation_task = tokio::spawn(async move {
+        reconciler
+            .run_loop(reconciliation_interval, reconciliation_cancellation)
+            .await;
+    });
 
     tracing::info!(
         pumps = args.pumps.get(),
@@ -410,6 +469,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     let mut clean_shutdown = true;
     let mut api_finished = false;
     let mut scanner_finished = false;
+    let mut reconciliation_finished = false;
     tokio::select! {
         signal = wait_for_shutdown_signal() => {
             if let Err(error) = signal {
@@ -432,6 +492,14 @@ async fn run(args: &RunArgs) -> ExitCode {
                 Ok(Ok(())) => tracing::error!("scanner stopped before shutdown"),
                 Ok(Err(error)) => tracing::error!(%error, "scanner task failed"),
                 Err(error) => tracing::error!(%error, "scanner task failed to join"),
+            }
+            clean_shutdown = false;
+        }
+        result = &mut reconciliation_task => {
+            reconciliation_finished = true;
+            match result {
+                Ok(()) => tracing::error!("reconciler stopped before shutdown"),
+                Err(error) => tracing::error!(%error, "reconciler task failed"),
             }
             clean_shutdown = false;
         }
@@ -465,6 +533,10 @@ async fn run(args: &RunArgs) -> ExitCode {
             }
         }
     }
+    if !reconciliation_finished && let Err(error) = reconciliation_task.await {
+        tracing::error!(%error, "reconciler task failed during shutdown");
+        clean_shutdown = false;
+    }
     for task in pump_tasks {
         if let Err(error) = task.await {
             tracing::error!(%error, "deposit pump task failed during shutdown");
@@ -484,6 +556,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     pool.close().await;
     tracing::info!(
         stuck_deposit_alerts = metrics.stuck_deposit_alerts(),
+        reconciliation_heartbeat = reconciliation_metrics.last_heartbeat_unix(),
         "topup service stopped"
     );
 
@@ -491,6 +564,81 @@ async fn run(args: &RunArgs) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+async fn reconcile(args: &ReconcileArgs) -> ExitCode {
+    if !args.once {
+        tracing::error!("--once is required");
+        return ExitCode::FAILURE;
+    }
+    let routes = match load_routes(&args.routes) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::error!(%error, "failed to load route configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_url = match required_env("DATABASE_URL") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "missing reconciliation configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
+        Duration::from_secs(15),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer, metrics) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
+    let result = if args.post_restore {
+        topup::reconciler::post_restore_once(&reconciler).await
+    } else {
+        reconciler.run_once().await
+    };
+    pool.close().await;
+    match result {
+        Ok(report) if args.post_restore && report.incomplete => {
+            tracing::error!(
+                findings = report.findings.len(),
+                "post-restore reconciliation is incomplete"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(report) => {
+            tracing::info!(findings = report.findings.len(), "reconciliation completed");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(%error, "reconciliation failed");
+            ExitCode::FAILURE
+        }
     }
 }
 

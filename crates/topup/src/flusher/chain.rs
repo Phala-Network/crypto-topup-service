@@ -9,7 +9,9 @@ use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::time::timeout;
-use topup_adapters::chain::flush::{decode_balance_of, encode_balance_of, encode_flush};
+use topup_adapters::chain::flush::{
+    decode_address_of, decode_balance_of, encode_address_of, encode_balance_of, encode_flush,
+};
 
 use super::{ChainClient, ChainError, ChainLog, ChainReceipt, FeeQuote, NonceReceiptSearch};
 
@@ -108,6 +110,42 @@ impl AlloyChainClient {
             success,
             logs,
         })
+    }
+
+    /// Reads deterministic forwarder addresses in bounded JSON-RPC batches.
+    pub async fn factory_addresses(
+        &self,
+        factory: Address,
+        salts: &[B256],
+    ) -> Result<Vec<Address>, ChainError> {
+        let mut result = Vec::with_capacity(salts.len());
+        for chunk in salts.chunks(self.balance_batch_size) {
+            let params = chunk
+                .iter()
+                .map(|salt| {
+                    let tx = TransactionRequest::default()
+                        .to(factory)
+                        .input(TransactionInput::new(encode_address_of(*salt)));
+                    serde_json::to_value((tx, BlockNumberOrTag::Latest))
+                        .map_err(|error| ChainError::rpc(format!("serialize eth_call: {error}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let decoded = self
+                .batch_calls("eth_call", params)
+                .await?
+                .into_iter()
+                .map(|value| {
+                    let encoded: Bytes = serde_json::from_value(value).map_err(|error| {
+                        ChainError::rpc(format!("decode eth_call bytes: {error}"))
+                    })?;
+                    decode_address_of(&encoded).map_err(|error| {
+                        ChainError::rpc(format!("decode addressOf result: {error}"))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            result.extend(decoded);
+        }
+        Ok(result)
     }
 }
 
