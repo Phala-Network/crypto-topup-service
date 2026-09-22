@@ -38,12 +38,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
 tower.workspace = true
-url = "=2.5.7"
 
 [lints.rust]
 unsafe_code = "forbid"
