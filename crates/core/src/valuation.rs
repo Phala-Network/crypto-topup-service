@@ -86,17 +86,6 @@ pub struct ValuationPolicy {
     pub max_deviation_bps: Bps,
     /// Maximum USDT/USD divergence from one dollar in basis points.
     pub max_fx_deviation_bps: Bps,
-    /// Marks fixed-one-dollar stablecoin valuation mode.
-    pub stablecoin_peg: Option<()>,
-}
-
-impl ValuationPolicy {
-    /// Enables fixed-one-dollar stablecoin valuation mode.
-    #[must_use]
-    pub const fn with_stablecoin_peg(mut self) -> Self {
-        self.stablecoin_peg = Some(());
-        self
-    }
 }
 
 impl From<&PricingConfig> for ValuationPolicy {
@@ -105,7 +94,6 @@ impl From<&PricingConfig> for ValuationPolicy {
             max_age_s: config.max_age_s,
             max_deviation_bps: config.max_deviation_bps,
             max_fx_deviation_bps: config.max_fx_deviation_bps,
-            stablecoin_peg: None,
         }
     }
 }
@@ -143,6 +131,8 @@ pub struct LockTerms {
     pub amount: AtomicAmount,
     /// Locked asset price.
     pub price: ScaledPrice,
+    /// Frozen destination credit shown when the lock was created.
+    pub credit_minor: MinorAmount,
     /// Last accepted block timestamp.
     pub expires_at: UnixSeconds,
     /// Timestamp of the deposit's block.
@@ -188,7 +178,7 @@ pub enum ValuationError {
     FxMissing,
     /// A stablecoin reference rate exceeded its allowed deviation from one dollar.
     Depeg,
-    /// The computed credit was below the route minimum.
+    /// Spot-priced credit was below the route minimum.
     BelowMinimum,
     /// Checked fixed-point arithmetic could not represent the result.
     ArithmeticOutOfRange,
@@ -211,7 +201,9 @@ impl fmt::Display for ValuationError {
             Self::Depeg => {
                 formatter.write_str("stablecoin reference rate is outside its peg range")
             }
-            Self::BelowMinimum => formatter.write_str("computed credit is below the route minimum"),
+            Self::BelowMinimum => {
+                formatter.write_str("spot-priced credit is below the route minimum")
+            }
             Self::ArithmeticOutOfRange => {
                 formatter.write_str("valuation arithmetic is out of range")
             }
@@ -296,21 +288,24 @@ pub fn stablecoin_price(
         .map_err(|_| ValuationError::ArithmeticOutOfRange)
 }
 
-/// Selects an eligible lock or the supplied spot price, then computes destination credit.
+/// Returns frozen lock credit when eligible, otherwise computes and validates spot credit.
 pub fn value_deposit(
     amount: AtomicAmount,
     spot_price: ScaledPrice,
     route: &RouteValuation<'_>,
     lock: Option<&LockTerms>,
 ) -> Result<Valuation, ValuationError> {
-    let selected = lock.filter(|terms| lock_applies(amount, route, terms));
-    let (price, source) = match selected {
-        Some(terms) => (terms.price, ValuationSource::Lock),
-        None => (spot_price, ValuationSource::Spot),
-    };
+    if let Some(terms) = lock.filter(|terms| lock_applies(amount, route, terms)) {
+        return Ok(Valuation {
+            price: terms.price,
+            source: ValuationSource::Lock,
+            credit_minor: terms.credit_minor,
+        });
+    }
+
     let credit_minor = credit(
         amount,
-        price,
+        spot_price,
         route.asset.decimals,
         route.destination.unit_decimals,
     )?;
@@ -318,8 +313,8 @@ pub fn value_deposit(
         return Err(ValuationError::BelowMinimum);
     }
     Ok(Valuation {
-        price,
-        source,
+        price: spot_price,
+        source: ValuationSource::Spot,
         credit_minor,
     })
 }
@@ -465,7 +460,6 @@ mod tests {
             max_age_s,
             max_deviation_bps: bps(deviation),
             max_fx_deviation_bps: bps(fx_deviation),
-            stablecoin_peg: None,
         }
     }
 
@@ -784,12 +778,8 @@ mod tests {
 
         for case in cases {
             let reference = observation("reference", case.rate, case.observed_at);
-            let actual = stablecoin_price(
-                &reference,
-                UnixSeconds::new(100),
-                policy(20, 100, 50).with_stablecoin_peg(),
-            )
-            .map(ScaledPrice::value);
+            let actual = stablecoin_price(&reference, UnixSeconds::new(100), policy(20, 100, 50))
+                .map(ScaledPrice::value);
             assert_eq!(actual, case.expected, "{}", case.name);
         }
     }
@@ -821,6 +811,7 @@ mod tests {
             asset,
             amount,
             price: price(50_000_000),
+            credit_minor: MinorAmount::new(5_000),
             expires_at: UnixSeconds::new(200),
             block_time: UnixSeconds::new(200),
         };
@@ -863,28 +854,57 @@ mod tests {
     #[test]
     fn amount_exactly_at_lock_tolerance_is_accepted() {
         let asset = Address::from([1_u8; 20]);
-        let route = TestRoute::new(asset, 0, 100);
+        let mut route = TestRoute::new(asset, 0, 100);
+        route.asset.decimals = 0;
+        route.destination.unit_decimals = 0;
         let lock = LockTerms {
             asset,
             amount: AtomicAmount::new(U256::from(1_000_u64)),
             price: price(50_000_000),
+            credit_minor: MinorAmount::new(1_234),
             expires_at: UnixSeconds::new(200),
             block_time: UnixSeconds::new(200),
         };
 
         for amount in [990_u64, 1_010_u64] {
-            assert_eq!(
-                value_deposit(
-                    AtomicAmount::new(U256::from(amount)),
-                    price(40_000_000),
-                    &route.valuation(),
-                    Some(&lock),
-                )
-                .expect("boundary amount values successfully")
-                .source,
-                ValuationSource::Lock
-            );
+            let valuation = value_deposit(
+                AtomicAmount::new(U256::from(amount)),
+                price(40_000_000),
+                &route.valuation(),
+                Some(&lock),
+            )
+            .expect("boundary amount values successfully");
+            assert_eq!(valuation.source, ValuationSource::Lock);
+            assert_eq!(valuation.price, lock.price);
+            assert_eq!(valuation.credit_minor, lock.credit_minor);
         }
+    }
+
+    #[test]
+    fn amount_outside_lock_tolerance_falls_back_to_spot() {
+        let asset = Address::from([1_u8; 20]);
+        let mut route = TestRoute::new(asset, 0, 100);
+        route.asset.decimals = 0;
+        route.destination.unit_decimals = 0;
+        let lock = LockTerms {
+            asset,
+            amount: AtomicAmount::new(U256::from(1_000_u64)),
+            price: price(50_000_000),
+            credit_minor: MinorAmount::new(1_234),
+            expires_at: UnixSeconds::new(200),
+            block_time: UnixSeconds::new(200),
+        };
+
+        let valuation = value_deposit(
+            AtomicAmount::new(U256::from(989_u64)),
+            price(40_000_000),
+            &route.valuation(),
+            Some(&lock),
+        )
+        .expect("outside-tolerance amount uses spot valuation");
+        assert_eq!(valuation.source, ValuationSource::Spot);
+        assert_eq!(valuation.price, price(40_000_000));
+        assert_eq!(valuation.credit_minor, MinorAmount::new(395));
     }
 
     #[test]
@@ -898,6 +918,30 @@ mod tests {
                 None,
             ),
             Err(ValuationError::BelowMinimum)
+        );
+    }
+
+    #[test]
+    fn lock_credit_is_not_subject_to_spot_minimum() {
+        let asset = Address::from([1_u8; 20]);
+        let route = TestRoute::new(asset, 10_000, 0);
+        let amount = AtomicAmount::new(U256::from(1_000_u64));
+        let lock = LockTerms {
+            asset,
+            amount,
+            price: price(50_000_000),
+            credit_minor: MinorAmount::new(1),
+            expires_at: UnixSeconds::new(200),
+            block_time: UnixSeconds::new(200),
+        };
+
+        assert_eq!(
+            value_deposit(amount, price(40_000_000), &route.valuation(), Some(&lock)),
+            Ok(Valuation {
+                price: lock.price,
+                source: ValuationSource::Lock,
+                credit_minor: lock.credit_minor,
+            })
         );
     }
 
@@ -941,7 +985,6 @@ mod tests {
                 max_age_s: 120,
                 max_deviation_bps: bps(100),
                 max_fx_deviation_bps: bps(50),
-                stablecoin_peg: None,
             }
         );
     }
@@ -986,11 +1029,14 @@ mod tests {
                     max_age_s: 0,
                     max_deviation_bps: maximum_bps,
                     max_fx_deviation_bps: bps(0),
-                    stablecoin_peg: None,
                 },
             );
-            if result.is_ok() {
-                prop_assert!(within_deviation(primary_value, check_value, maximum_bps).unwrap());
+            let difference = primary_value.abs_diff(check_value);
+            let expected_accept = u128::from(difference) * 10_000
+                <= u128::from(primary_value) * u128::from(maximum);
+            prop_assert_eq!(result.is_ok(), expected_accept);
+            if let Ok(returned) = result {
+                prop_assert_eq!(returned, primary.price);
             }
         }
 
@@ -1023,18 +1069,26 @@ mod tests {
                 asset: if asset_matches { route_asset } else { Address::from([2_u8; 20]) },
                 amount: AtomicAmount::new(U256::from(locked)),
                 price: price(2),
+                credit_minor: MinorAmount::new(777),
                 expires_at: UnixSeconds::new(100),
                 block_time: UnixSeconds::new(if on_time { 100 } else { 101 }),
             };
             let amount = AtomicAmount::new(U256::from(actual));
             let selected_lock = has_lock.then_some(&lock);
             let result = value_deposit(amount, price(1), &route.valuation(), selected_lock);
+            let difference = actual.abs_diff(locked);
+            let within_tolerance = u128::from(difference) * 10_000
+                <= u128::from(locked) * u128::from(tolerance);
             let expected_lock = has_lock
                 && on_time
                 && asset_matches
-                && amount_within_tolerance(amount, lock.amount, bps(tolerance));
+                && within_tolerance;
             let valuation = result.expect("bounded lock selection always values the deposit");
             prop_assert_eq!(valuation.source == ValuationSource::Lock, expected_lock);
+            if expected_lock {
+                prop_assert_eq!(valuation.price, lock.price);
+                prop_assert_eq!(valuation.credit_minor, lock.credit_minor);
+            }
         }
     }
 }
