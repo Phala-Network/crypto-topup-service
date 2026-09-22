@@ -10,14 +10,15 @@ use alloy_primitives::Address;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
 use topup_core::route::RouteFile;
-use topup_core::screening::{Bounds, ParsePauseScopeError, PauseScopes, SanctionsResult, screen};
+use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
 use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
+use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
 use crate::rpc_provider::configured_provider_url;
 
@@ -25,13 +26,6 @@ use crate::rpc_provider::configured_provider_url;
 struct RouteKey {
     name: String,
     version: u64,
-}
-
-struct PauseScopeSources {
-    account: PauseScopes,
-    product: PauseScopes,
-    route: PauseScopes,
-    effective: PauseScopes,
 }
 
 /// Screening policy and sanctions source for one immutable route version.
@@ -267,53 +261,8 @@ impl ScreenStep {
         account_id: Uuid,
         route: &str,
     ) -> Result<Option<(Uuid, PauseScopeSources)>, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                product.id AS product_id,
-                account.paused_scopes AS account_scopes,
-                product.paused_scopes AS product_scopes,
-                COALESCE(route_pause.paused_scopes, '{}'::text[]) AS route_scopes
-            FROM accounts AS account
-            JOIN products AS product ON product.id = account.product_id
-            LEFT JOIN route_pauses AS route_pause ON route_pause.route = $2
-            WHERE account.id = $1
-            "#,
-        )
-        .bind(account_id)
-        .bind(route)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let product_id = row.try_get("product_id")?;
-        let account_codes: Vec<String> = row.try_get("account_scopes")?;
-        let product_codes: Vec<String> = row.try_get("product_scopes")?;
-        let route_codes: Vec<String> = row.try_get("route_scopes")?;
-        let pause_scopes = parse_pause_scope_sources(
-            account_codes.as_slice(),
-            product_codes.as_slice(),
-            route_codes.as_slice(),
-        )
-        .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?;
-        Ok(Some((product_id, pause_scopes)))
+        pause::account_pause_scopes(&self.pool, account_id, route).await
     }
-}
-
-fn parse_pause_scope_sources(
-    account_codes: &[String],
-    product_codes: &[String],
-    route_codes: &[String],
-) -> Result<PauseScopeSources, ParsePauseScopeError> {
-    Ok(PauseScopeSources {
-        account: PauseScopes::from_codes(account_codes)?,
-        product: PauseScopes::from_codes(product_codes)?,
-        route: PauseScopes::from_codes(route_codes)?,
-        effective: PauseScopes::from_codes(
-            account_codes.iter().chain(product_codes).chain(route_codes),
-        )?,
-    })
 }
 
 #[async_trait]
@@ -485,7 +434,7 @@ mod tests {
         let account = account.iter().map(ToString::to_string).collect::<Vec<_>>();
         let product = product.iter().map(ToString::to_string).collect::<Vec<_>>();
         let route = route.iter().map(ToString::to_string).collect::<Vec<_>>();
-        parse_pause_scope_sources(&account, &product, &route).expect("valid pause scopes")
+        PauseScopeSources::from_codes(&account, &product, &route).expect("valid pause scopes")
     }
 
     #[tokio::test]

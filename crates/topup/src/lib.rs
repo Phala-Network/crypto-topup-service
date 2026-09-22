@@ -18,6 +18,7 @@ pub mod flusher;
 pub mod locks;
 pub mod observability;
 pub mod outbox;
+mod pause;
 pub mod pump;
 pub mod reconciler;
 pub mod refunds;
