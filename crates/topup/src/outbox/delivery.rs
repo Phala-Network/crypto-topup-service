@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use rand::{TryRngCore, rngs::OsRng};
 use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, Postgres, Row, Transaction};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use topup_core::{Signer, retry::backoff};
@@ -56,8 +57,8 @@ pub enum DeliveryError {
     Client(reqwest::Error),
     /// PostgreSQL could not claim or persist an event.
     Database(sqlx::Error),
-    /// A session-level product lock could not be released normally.
-    AdvisoryUnlock,
+    /// The operating system did not provide retry entropy.
+    Entropy,
 }
 
 impl Display for DeliveryError {
@@ -66,7 +67,7 @@ impl Display for DeliveryError {
             Self::InvalidConfig(message) => write!(formatter, "invalid delivery config: {message}"),
             Self::Client(error) => write!(formatter, "failed to build webhook client: {error}"),
             Self::Database(error) => write!(formatter, "outbox database operation failed: {error}"),
-            Self::AdvisoryUnlock => formatter.write_str("failed to release product delivery lock"),
+            Self::Entropy => formatter.write_str("failed to obtain retry entropy"),
         }
     }
 }
@@ -76,7 +77,7 @@ impl Error for DeliveryError {
         match self {
             Self::Client(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::InvalidConfig(_) | Self::AdvisoryUnlock => None,
+            Self::InvalidConfig(_) | Self::Entropy => None,
         }
     }
 }
@@ -97,12 +98,37 @@ struct ClaimedEvent {
     claim_until: DateTime<Utc>,
 }
 
+struct ClaimedDelivery {
+    transaction: Transaction<'static, Postgres>,
+    event: ClaimedEvent,
+    product_id: Result<Uuid, &'static str>,
+}
+
+enum ClaimResult {
+    Empty,
+    Deferred,
+    Ready(ClaimedDelivery),
+}
+
+trait RetryEntropy: Send + Sync {
+    fn next_u64(&self) -> Result<u64, DeliveryError>;
+}
+
+struct OsRetryEntropy;
+
+impl RetryEntropy for OsRetryEntropy {
+    fn next_u64(&self) -> Result<u64, DeliveryError> {
+        OsRng.try_next_u64().map_err(|_| DeliveryError::Entropy)
+    }
+}
+
 /// PostgreSQL-backed Standard Webhooks sender.
 pub struct DeliveryWorker<S> {
     pool: PgPool,
     client: Client,
     signer: Arc<S>,
     config: DeliveryConfig,
+    entropy: Arc<dyn RetryEntropy>,
 }
 
 impl<S> DeliveryWorker<S>
@@ -126,6 +152,7 @@ where
             client,
             signer,
             config,
+            entropy: Arc::new(OsRetryEntropy),
         })
     }
 
@@ -159,13 +186,21 @@ where
 
     /// Claims one small batch and attempts each event once.
     pub async fn run_once(&self) -> Result<usize, DeliveryError> {
-        let events = claim_due(&self.pool, &self.config).await?;
-        let count = events.len();
-        for event in events {
-            self.warn_if_old(&event);
-            self.deliver_claimed(event).await?;
+        let mut claimed = 0_usize;
+        for _ in 0..self.config.batch_size {
+            match claim_next(&self.pool, &self.config).await? {
+                ClaimResult::Empty => break,
+                ClaimResult::Deferred => {
+                    claimed = claimed.saturating_add(1);
+                }
+                ClaimResult::Ready(delivery) => {
+                    claimed = claimed.saturating_add(1);
+                    self.warn_if_old(&delivery.event);
+                    self.deliver_claimed(delivery).await?;
+                }
+            }
         }
-        Ok(count)
+        Ok(claimed)
     }
 
     fn warn_if_old(&self, event: &ClaimedEvent) {
@@ -184,62 +219,29 @@ where
         }
     }
 
-    async fn deliver_claimed(&self, event: ClaimedEvent) -> Result<(), DeliveryError> {
-        let product_id = match product_id(&event.payload) {
+    async fn deliver_claimed(&self, delivery: ClaimedDelivery) -> Result<(), DeliveryError> {
+        let ClaimedDelivery {
+            mut transaction,
+            event,
+            product_id,
+        } = delivery;
+        let product_id = match product_id {
             Ok(product_id) => product_id,
             Err(message) => {
-                record_failure(
-                    &self.pool,
-                    &event,
-                    None,
-                    None,
-                    message,
-                    self.retry_delay(&event),
-                )
-                .await?;
+                self.record_failure(&mut transaction, &event, None, None, message)
+                    .await?;
+                transaction.commit().await?;
                 return Ok(());
             }
         };
 
-        let mut connection = self.pool.acquire().await?;
-        let lock_key = product_id.to_string();
-        let locked =
-            sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
-                .bind(&lock_key)
-                .fetch_one(&mut *connection)
-                .await?;
-        if !locked {
-            release_claim(&mut connection, &event, self.config.poll_interval).await?;
-            return Ok(());
-        }
-
-        let result = self
-            .deliver_with_product_lock(&mut connection, &event, product_id)
-            .await;
-        let unlock_result =
-            sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
-                .bind(&lock_key)
-                .fetch_one(&mut *connection)
-                .await;
-
-        match unlock_result {
-            Ok(true) => result,
-            Ok(false) => {
-                let _ = connection.close().await;
-                result?;
-                Err(DeliveryError::AdvisoryUnlock)
-            }
-            Err(unlock_error) => {
-                let _ = connection.close().await;
-                match result {
-                    Ok(()) => Err(DeliveryError::Database(unlock_error)),
-                    Err(delivery_error) => Err(delivery_error),
-                }
-            }
-        }
+        self.deliver_in_transaction(&mut transaction, &event, product_id)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
-    async fn deliver_with_product_lock(
+    async fn deliver_in_transaction(
         &self,
         connection: &mut PgConnection,
         event: &ClaimedEvent,
@@ -251,15 +253,8 @@ where
                 .fetch_optional(&mut *connection)
                 .await?;
         let Some(webhook_url) = webhook_url else {
-            record_failure_on(
-                connection,
-                event,
-                None,
-                None,
-                "product_not_found",
-                self.retry_delay(event),
-            )
-            .await?;
+            self.record_failure(connection, event, None, None, "product_not_found")
+                .await?;
             return Ok(());
         };
 
@@ -272,15 +267,8 @@ where
         let body = match serde_json::to_vec(&envelope) {
             Ok(body) => body,
             Err(_) => {
-                record_failure_on(
-                    connection,
-                    event,
-                    None,
-                    None,
-                    "envelope_serialization",
-                    self.retry_delay(event),
-                )
-                .await?;
+                self.record_failure(connection, event, None, None, "envelope_serialization")
+                    .await?;
                 return Ok(());
             }
         };
@@ -294,15 +282,8 @@ where
         {
             Ok(signed) => signed,
             Err(_) => {
-                record_failure_on(
-                    connection,
-                    event,
-                    None,
-                    None,
-                    "signing_failed",
-                    self.retry_delay(event),
-                )
-                .await?;
+                self.record_failure(connection, event, None, None, "signing_failed")
+                    .await?;
                 return Ok(());
             }
         };
@@ -321,15 +302,8 @@ where
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                record_failure_on(
-                    connection,
-                    event,
-                    None,
-                    None,
-                    request_error_code(&error),
-                    self.retry_delay(event),
-                )
-                .await?;
+                self.record_failure(connection, event, None, None, request_error_code(&error))
+                    .await?;
                 return Ok(());
             }
         };
@@ -342,22 +316,29 @@ where
             let stored = response_value(Some(status.as_u16()), body, body_error);
             mark_delivered(connection, event, &stored).await?;
         } else {
-            record_failure_on(
+            self.record_failure(
                 connection,
                 event,
                 Some(status.as_u16()),
                 body,
                 body_error.unwrap_or("non_2xx_status"),
-                self.retry_delay(event),
             )
             .await?;
         }
         Ok(())
     }
 
-    fn retry_delay(&self, event: &ClaimedEvent) -> Duration {
-        let attempt = u32::try_from(event.attempts).unwrap_or(u32::MAX);
-        backoff(attempt, event_jitter(event.id))
+    async fn record_failure(
+        &self,
+        connection: &mut PgConnection,
+        event: &ClaimedEvent,
+        status: Option<u16>,
+        body: Option<String>,
+        error: &'static str,
+    ) -> Result<(), DeliveryError> {
+        let delay = retry_delay(event.attempts, self.entropy.as_ref())?;
+        record_failure_on(connection, event, status, body, error, delay).await?;
+        Ok(())
     }
 }
 
@@ -391,13 +372,10 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
     Ok(())
 }
 
-async fn claim_due(
-    pool: &PgPool,
-    config: &DeliveryConfig,
-) -> Result<Vec<ClaimedEvent>, sqlx::Error> {
-    let batch_size = i64::from(config.batch_size);
+async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResult, sqlx::Error> {
     let lease_seconds = i32::try_from(config.claim_lease.as_secs()).unwrap_or(i32::MAX);
-    let rows = sqlx::query(
+    let mut transaction = pool.begin().await?;
+    let row = sqlx::query(
         r#"
         WITH candidates AS (
             SELECT id
@@ -405,33 +383,51 @@ async fn claim_due(
             WHERE delivered_at IS NULL AND next_attempt_at <= now()
             ORDER BY next_attempt_at, id
             FOR UPDATE SKIP LOCKED
-            LIMIT $1
+            LIMIT 1
         )
         UPDATE outbox AS event
-        SET next_attempt_at = now() + make_interval(secs => $2)
+        SET next_attempt_at = now() + make_interval(secs => $1)
         FROM candidates
         WHERE event.id = candidates.id
         RETURNING event.id, event.event_type, event.payload, event.attempts,
                   event.created_at, event.next_attempt_at
         "#,
     )
-    .bind(batch_size)
     .bind(lease_seconds)
-    .fetch_all(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
+    let Some(row) = row else {
+        transaction.commit().await?;
+        return Ok(ClaimResult::Empty);
+    };
+    let event = ClaimedEvent {
+        id: row.try_get("id")?,
+        event_type: row.try_get("event_type")?,
+        payload: row.try_get("payload")?,
+        attempts: row.try_get("attempts")?,
+        created_at: row.try_get("created_at")?,
+        claim_until: row.try_get("next_attempt_at")?,
+    };
+    let product_id = product_id(&event.payload);
+    if let Ok(product_id) = product_id {
+        let locked = sqlx::query_scalar::<_, bool>(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+        )
+        .bind(product_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !locked {
+            release_claim(&mut transaction, &event, config.poll_interval).await?;
+            transaction.commit().await?;
+            return Ok(ClaimResult::Deferred);
+        }
+    }
 
-    rows.into_iter()
-        .map(|row| {
-            Ok(ClaimedEvent {
-                id: row.try_get("id")?,
-                event_type: row.try_get("event_type")?,
-                payload: row.try_get("payload")?,
-                attempts: row.try_get("attempts")?,
-                created_at: row.try_get("created_at")?,
-                claim_until: row.try_get("next_attempt_at")?,
-            })
-        })
-        .collect()
+    Ok(ClaimResult::Ready(ClaimedDelivery {
+        transaction,
+        event,
+        product_id,
+    }))
 }
 
 fn product_id(payload: &Value) -> Result<Uuid, &'static str> {
@@ -480,18 +476,6 @@ async fn mark_delivered(
     .execute(connection)
     .await?;
     Ok(())
-}
-
-async fn record_failure(
-    pool: &PgPool,
-    event: &ClaimedEvent,
-    status: Option<u16>,
-    body: Option<String>,
-    error: &'static str,
-    delay: Duration,
-) -> Result<(), sqlx::Error> {
-    let mut connection = pool.acquire().await?;
-    record_failure_on(&mut connection, event, status, body, error, delay).await
 }
 
 async fn record_failure_on(
@@ -566,9 +550,51 @@ fn request_error_code(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn event_jitter(event_id: Uuid) -> u64 {
-    let bytes = event_id.as_bytes();
-    let mut prefix = [0_u8; 8];
-    prefix.copy_from_slice(&bytes[..8]);
-    u64::from_be_bytes(prefix)
+fn retry_delay(attempts: i32, entropy: &dyn RetryEntropy) -> Result<Duration, DeliveryError> {
+    let attempt = u32::try_from(attempts).unwrap_or(u32::MAX);
+    Ok(backoff(attempt, entropy.next_u64()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct SequenceEntropy {
+        values: Mutex<VecDeque<u64>>,
+    }
+
+    impl SequenceEntropy {
+        fn new(values: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                values: Mutex::new(values.into_iter().collect()),
+            }
+        }
+    }
+
+    impl RetryEntropy for SequenceEntropy {
+        fn next_u64(&self) -> Result<u64, DeliveryError> {
+            self.values
+                .lock()
+                .map_err(|_| DeliveryError::Entropy)?
+                .pop_front()
+                .ok_or(DeliveryError::Entropy)
+        }
+    }
+
+    #[test]
+    fn retry_delay_uses_fresh_entropy_and_caps_the_exponential_ceiling() -> Result<(), DeliveryError>
+    {
+        let entropy = SequenceEntropy::new([0, u64::MAX, 0]);
+
+        assert_eq!(retry_delay(0, &entropy)?, Duration::from_secs(30));
+        assert_eq!(retry_delay(0, &entropy)?, Duration::ZERO);
+        assert_eq!(
+            retry_delay(i32::MAX, &entropy)?,
+            Duration::from_secs(60 * 60)
+        );
+        Ok(())
+    }
 }

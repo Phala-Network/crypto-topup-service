@@ -1,15 +1,18 @@
 //! PostgreSQL and reference-receiver tests for Standard Webhooks delivery.
 
+use std::collections::VecDeque;
 use std::env;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, ensure};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -65,20 +68,50 @@ impl CoreSigner for TestSigner {
 #[derive(Clone, Debug)]
 struct ReceivedWebhook {
     id: String,
-    body: Value,
+    body: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct ResponsePlan {
+    status: StatusCode,
+    delay: StdDuration,
+    location: Option<String>,
+}
+
+impl ResponsePlan {
+    fn new(status: StatusCode, delay: StdDuration) -> Self {
+        Self {
+            status,
+            delay,
+            location: None,
+        }
+    }
+
+    fn redirect(location: &str) -> Self {
+        Self {
+            status: StatusCode::FOUND,
+            delay: StdDuration::ZERO,
+            location: Some(location.to_owned()),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct ReceiverState {
     verifying_key: VerifyingKey,
-    status: StatusCode,
-    delay: StdDuration,
+    plans: Arc<Mutex<VecDeque<ResponsePlan>>>,
+    fallback_plan: ResponsePlan,
     received: Arc<Mutex<Vec<ReceivedWebhook>>>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+    redirect_hits: Arc<AtomicUsize>,
 }
 
 struct ReferenceReceiver {
     url: String,
     received: Arc<Mutex<Vec<ReceivedWebhook>>>,
+    max_in_flight: Arc<AtomicUsize>,
+    redirect_hits: Arc<AtomicUsize>,
     task: JoinHandle<()>,
 }
 
@@ -88,15 +121,32 @@ impl ReferenceReceiver {
         status: StatusCode,
         delay: StdDuration,
     ) -> Result<Self> {
+        Self::start_with_plans(verifying_key, vec![ResponsePlan::new(status, delay)]).await
+    }
+
+    async fn start_with_plans(
+        verifying_key: VerifyingKey,
+        plans: Vec<ResponsePlan>,
+    ) -> Result<Self> {
+        let fallback_plan = plans
+            .last()
+            .cloned()
+            .context("reference receiver requires at least one response plan")?;
         let received = Arc::new(Mutex::new(Vec::new()));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let redirect_hits = Arc::new(AtomicUsize::new(0));
         let state = ReceiverState {
             verifying_key,
-            status,
-            delay,
+            plans: Arc::new(Mutex::new(plans.into_iter().collect())),
+            fallback_plan,
             received: Arc::clone(&received),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::clone(&max_in_flight),
+            redirect_hits: Arc::clone(&redirect_hits),
         };
         let app = Router::new()
             .route("/webhooks", post(reference_webhook))
+            .route("/redirect-target", post(redirect_target))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -106,6 +156,8 @@ impl ReferenceReceiver {
         Ok(Self {
             url: format!("http://{address}/webhooks"),
             received,
+            max_in_flight,
+            redirect_hits,
             task,
         })
     }
@@ -128,7 +180,38 @@ impl ReferenceReceiver {
             .lock()
             .await
             .first()
+            .and_then(|delivery| serde_json::from_slice(&delivery.body).ok())
+    }
+
+    async fn bodies(&self) -> Vec<Vec<u8>> {
+        self.received
+            .lock()
+            .await
+            .iter()
             .map(|delivery| delivery.body.clone())
+            .collect()
+    }
+
+    async fn wait_for_count(&self, expected: usize) -> Result<()> {
+        tokio::time::timeout(StdDuration::from_secs(2), async {
+            loop {
+                if self.count().await >= expected {
+                    return;
+                }
+                sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("timed out waiting for webhook request")?;
+        Ok(())
+    }
+
+    fn maximum_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    fn redirect_hits(&self) -> usize {
+        self.redirect_hits.load(Ordering::SeqCst)
     }
 
     async fn stop(self) {
@@ -137,11 +220,19 @@ impl ReferenceReceiver {
     }
 }
 
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 async fn reference_webhook(
     State(state): State<ReceiverState>,
     headers: HeaderMap,
     body: Bytes,
-) -> (StatusCode, &'static str) {
+) -> Response {
     let id = match verify_standard_webhook(
         &state.verifying_key,
         &headers,
@@ -149,20 +240,47 @@ async fn reference_webhook(
         Utc::now().timestamp(),
     ) {
         Ok(id) => id,
-        Err(()) => return (StatusCode::BAD_REQUEST, "invalid signature"),
+        Err(()) => return (StatusCode::BAD_REQUEST, "invalid signature").into_response(),
     };
-    let Ok(body) = serde_json::from_slice(&body) else {
-        return (StatusCode::BAD_REQUEST, "invalid JSON");
-    };
-    if !state.delay.is_zero() {
-        sleep(state.delay).await;
+    if serde_json::from_slice::<Value>(&body).is_err() {
+        return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
     }
-    state
-        .received
+    let plan = state
+        .plans
         .lock()
         .await
-        .push(ReceivedWebhook { id, body });
-    (state.status, "receiver-response-body")
+        .pop_front()
+        .unwrap_or_else(|| state.fallback_plan.clone());
+    let current = state
+        .in_flight
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
+    state.max_in_flight.fetch_max(current, Ordering::SeqCst);
+    let _guard = InFlightGuard(Arc::clone(&state.in_flight));
+    state.received.lock().await.push(ReceivedWebhook {
+        id,
+        body: body.to_vec(),
+    });
+    if !plan.delay.is_zero() {
+        sleep(plan.delay).await;
+    };
+    let mut response = (plan.status, "receiver-response-body").into_response();
+    if let Some(location) = plan.location {
+        let Ok(location) = HeaderValue::from_str(&location) else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid redirect location",
+            )
+                .into_response();
+        };
+        response.headers_mut().insert(LOCATION, location);
+    }
+    response
+}
+
+async fn redirect_target(State(state): State<ReceiverState>) -> StatusCode {
+    state.redirect_hits.fetch_add(1, Ordering::SeqCst);
+    StatusCode::OK
 }
 
 fn verify_standard_webhook(
@@ -309,12 +427,20 @@ fn required_url(name: &str) -> Option<String> {
 }
 
 fn worker(pool: &PgPool, signer: Arc<TestSigner>) -> Result<DeliveryWorker<TestSigner>> {
+    worker_with_timeout(pool, signer, StdDuration::from_secs(2))
+}
+
+fn worker_with_timeout(
+    pool: &PgPool,
+    signer: Arc<TestSigner>,
+    request_timeout: StdDuration,
+) -> Result<DeliveryWorker<TestSigner>> {
     DeliveryWorker::new(
         pool.clone(),
         signer,
         DeliveryConfig {
             batch_size: 1,
-            request_timeout: StdDuration::from_secs(2),
+            request_timeout,
             claim_lease: StdDuration::from_secs(30),
             poll_interval: StdDuration::from_millis(10),
             response_body_limit: 16,
@@ -324,7 +450,7 @@ fn worker(pool: &PgPool, signer: Arc<TestSigner>) -> Result<DeliveryWorker<TestS
     .map_err(Into::into)
 }
 
-async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<Uuid> {
+async fn seed_product(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
     let product_id = Uuid::new_v4();
     db::create_product(
         pool,
@@ -339,6 +465,10 @@ async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<
         },
     )
     .await?;
+    Ok(product_id)
+}
+
+async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> Result<()> {
     db::enqueue(
         pool,
         &NewOutboxEvent {
@@ -352,6 +482,12 @@ async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<
         },
     )
     .await?;
+    Ok(())
+}
+
+async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<Uuid> {
+    let product_id = seed_product(pool, webhook_url).await?;
+    seed_product_event(pool, product_id, event_id).await?;
     Ok(product_id)
 }
 
@@ -444,6 +580,7 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
     let before = Utc::now();
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
+    let after = Utc::now();
     let row = sqlx::query(
         "SELECT delivered_at, attempts, next_attempt_at, response FROM outbox WHERE id = $1",
     )
@@ -456,7 +593,8 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
     );
     ensure!(row.try_get::<i32, _>("attempts")? == 1);
     let next_attempt_at: chrono::DateTime<Utc> = row.try_get("next_attempt_at")?;
-    ensure!(next_attempt_at >= before + Duration::seconds(29));
+    ensure!(next_attempt_at >= before);
+    ensure!(next_attempt_at <= after + Duration::seconds(30));
     let response: Value = row.try_get("response")?;
     ensure!(response["status"] == 500);
     ensure!(response["error"] == "non_2xx_status");
@@ -485,6 +623,189 @@ async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
     let (first_count, second_count) = tokio::join!(first.run_once(), second.run_once());
     ensure!(first_count? + second_count? == 1);
     ensure!(receiver.count().await == 1);
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver = ReferenceReceiver::start_with_plans(
+        signer.verifying_key(),
+        vec![
+            ResponsePlan::new(StatusCode::OK, StdDuration::from_secs(5)),
+            ResponsePlan::new(StatusCode::OK, StdDuration::ZERO),
+        ],
+    )
+    .await?;
+    let event_id = Uuid::new_v4();
+    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    let first = worker(&context.app_pool, Arc::clone(&signer))?;
+    let first_task = tokio::spawn(async move { first.run_once().await });
+
+    receiver.wait_for_count(1).await?;
+    first_task.abort();
+    let cancelled = first_task.await;
+    ensure!(cancelled.is_err_and(|error| error.is_cancelled()));
+
+    let second = worker(&context.app_pool, signer)?;
+    let claimed = tokio::time::timeout(StdDuration::from_secs(2), second.run_once())
+        .await
+        .context("second worker remained blocked after cancellation")??;
+    ensure!(claimed == 1);
+    receiver.wait_for_count(2).await?;
+    let delivered_at: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("SELECT delivered_at FROM outbox WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+    ensure!(delivered_at.is_some());
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn different_events_for_one_product_are_delivered_sequentially() -> Result<()> {
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver = ReferenceReceiver::start(
+        signer.verifying_key(),
+        StatusCode::OK,
+        StdDuration::from_millis(150),
+    )
+    .await?;
+    let product_id = seed_product(&context.app_pool, &receiver.url).await?;
+    let first_event = Uuid::new_v4();
+    let second_event = Uuid::new_v4();
+    seed_product_event(&context.app_pool, product_id, first_event).await?;
+    seed_product_event(&context.app_pool, product_id, second_event).await?;
+    let first = worker(&context.app_pool, Arc::clone(&signer))?;
+    let second = worker(&context.app_pool, Arc::clone(&signer))?;
+
+    let (first_count, second_count) = tokio::join!(first.run_once(), second.run_once());
+    ensure!(first_count? + second_count? == 2);
+    sqlx::query(
+        "UPDATE outbox SET next_attempt_at = now() - interval '1 second' WHERE delivered_at IS NULL",
+    )
+    .execute(&context.app_pool)
+    .await?;
+    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
+    ensure!(receiver.count().await == 2);
+    ensure!(receiver.maximum_in_flight() == 1);
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver = ReferenceReceiver::start(
+        signer.verifying_key(),
+        StatusCode::OK,
+        StdDuration::from_millis(250),
+    )
+    .await?;
+    let event_id = Uuid::new_v4();
+    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+
+    let delivery = worker_with_timeout(&context.app_pool, signer, StdDuration::from_millis(50))?;
+    ensure!(delivery.run_once().await? == 1);
+    let row = sqlx::query("SELECT delivered_at, attempts, response FROM outbox WHERE id = $1")
+        .bind(event_id)
+        .fetch_one(&context.app_pool)
+        .await?;
+    ensure!(
+        row.try_get::<Option<chrono::DateTime<Utc>>, _>("delivered_at")?
+            .is_none()
+    );
+    ensure!(row.try_get::<i32, _>("attempts")? == 1);
+    let response: Value = row.try_get("response")?;
+    ensure!(response["status"].is_null());
+    ensure!(response["error"] == "request_timeout");
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn redirect_is_not_followed_and_is_recorded() -> Result<()> {
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver = ReferenceReceiver::start_with_plans(
+        signer.verifying_key(),
+        vec![ResponsePlan::redirect("/redirect-target")],
+    )
+    .await?;
+    let event_id = Uuid::new_v4();
+    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+
+    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
+    let row = sqlx::query("SELECT attempts, response FROM outbox WHERE id = $1")
+        .bind(event_id)
+        .fetch_one(&context.app_pool)
+        .await?;
+    ensure!(row.try_get::<i32, _>("attempts")? == 1);
+    let response: Value = row.try_get("response")?;
+    ensure!(response["status"] == 302);
+    ensure!(response["error"] == "non_2xx_status");
+    ensure!(receiver.redirect_hits() == 0);
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver = ReferenceReceiver::start_with_plans(
+        signer.verifying_key(),
+        vec![
+            ResponsePlan::new(StatusCode::INTERNAL_SERVER_ERROR, StdDuration::ZERO),
+            ResponsePlan::new(StatusCode::OK, StdDuration::ZERO),
+        ],
+    )
+    .await?;
+    let event_id = Uuid::new_v4();
+    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    let delivery = worker(&context.app_pool, signer)?;
+
+    ensure!(delivery.run_once().await? == 1);
+    sqlx::query("UPDATE outbox SET next_attempt_at = now() - interval '1 second' WHERE id = $1")
+        .bind(event_id)
+        .execute(&context.app_pool)
+        .await?;
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(receiver.ids().await == vec![event_id.to_string(), event_id.to_string()]);
+    let mut bodies = receiver.bodies().await.into_iter();
+    let first_body = bodies.next().context("missing failed delivery body")?;
+    let second_body = bodies.next().context("missing successful retry body")?;
+    ensure!(first_body == second_body);
+    ensure!(bodies.next().is_none());
+    let row = sqlx::query("SELECT delivered_at, attempts FROM outbox WHERE id = $1")
+        .bind(event_id)
+        .fetch_one(&context.app_pool)
+        .await?;
+    ensure!(
+        row.try_get::<Option<chrono::DateTime<Utc>>, _>("delivered_at")?
+            .is_some()
+    );
+    ensure!(row.try_get::<i32, _>("attempts")? == 1);
 
     receiver.stop().await;
     context.cleanup().await
