@@ -404,10 +404,34 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let refund_config = topup::refunds::RefundConfirmationConfig::default();
+    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(
+        &routes,
+        refund_config.request_timeout,
+    ) {
+        Ok(reader) => reader,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure refund confirmation chain reader");
+            return ExitCode::FAILURE;
+        }
+    };
+    let refund_worker = match topup::refunds::RefundConfirmationWorker::new(
+        pool.clone(),
+        refund_reader,
+        &routes,
+        refund_config,
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure refund confirmation worker");
+            return ExitCode::FAILURE;
+        }
+    };
     let cancellation = CancellationToken::new();
+    let routes = Arc::new(routes);
     let state = topup::api::AppState {
         pool: pool.clone(),
-        routes: Arc::new(routes),
+        routes: Arc::clone(&routes),
         admin_key,
         attestor: Arc::new(DstackAttestor::new()),
     };
@@ -424,6 +448,10 @@ async fn run(args: &RunArgs) -> ExitCode {
     let scanner_cancellation = cancellation.child_token();
     let mut scanner_task = tokio::spawn(async move {
         topup::scanner::run(scanner_pool, scanner_routes, scanner_cancellation).await
+    });
+    let refund_cancellation = cancellation.child_token();
+    let mut refund_task = tokio::spawn(async move {
+        refund_worker.run(refund_cancellation).await;
     });
     let mut pump_tasks = Vec::with_capacity(args.pumps.get());
     for worker in 0..args.pumps.get() {
@@ -470,6 +498,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     let mut api_finished = false;
     let mut scanner_finished = false;
     let mut reconciliation_finished = false;
+    let mut refund_finished = false;
     tokio::select! {
         signal = wait_for_shutdown_signal() => {
             if let Err(error) = signal {
@@ -500,6 +529,14 @@ async fn run(args: &RunArgs) -> ExitCode {
             match result {
                 Ok(()) => tracing::error!("reconciler stopped before shutdown"),
                 Err(error) => tracing::error!(%error, "reconciler task failed"),
+            }
+            clean_shutdown = false;
+        }
+        result = &mut refund_task => {
+            refund_finished = true;
+            match result {
+                Ok(()) => tracing::error!("refund confirmation worker stopped before shutdown"),
+                Err(error) => tracing::error!(%error, "refund confirmation task failed"),
             }
             clean_shutdown = false;
         }
@@ -535,6 +572,10 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     if !reconciliation_finished && let Err(error) = reconciliation_task.await {
         tracing::error!(%error, "reconciler task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if !refund_finished && let Err(error) = refund_task.await {
+        tracing::error!(%error, "refund confirmation task failed during shutdown");
         clean_shutdown = false;
     }
     for task in pump_tasks {
