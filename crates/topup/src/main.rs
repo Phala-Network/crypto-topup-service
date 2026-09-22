@@ -2,6 +2,7 @@
 
 mod route;
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -56,7 +57,7 @@ enum TopupCommand {
     Attest(AttestArgs),
     BackupKey(BackupKeyArgs),
     Heartbeat(HeartbeatArgs),
-    RestoreCheck,
+    RestoreCheck(RestoreCheckArgs),
 }
 
 #[derive(Args)]
@@ -101,6 +102,9 @@ struct BackupKeyArgs {
     /// dstack backup key version, producing the domain backup/vN.
     #[arg(long, default_value_t = 1)]
     version: u32,
+    /// Comma-separated retained domains written as backup-vN.key for restore fallback.
+    #[arg(long, value_delimiter = ',', default_value = "0")]
+    fallback_versions: Vec<u32>,
     /// Keep the process alive so the shared tmpfs remains mounted.
     #[arg(long, conflicts_with = "check")]
     hold: bool,
@@ -110,6 +114,16 @@ struct BackupKeyArgs {
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use deterministic local-only backup key material")]
     dev: bool,
+}
+
+#[derive(Args)]
+struct RestoreCheckArgs {
+    /// Last source heartbeat committed before the recorded failure point.
+    #[arg(long, value_name = "RFC3339")]
+    expected_heartbeat_at: DateTime<Utc>,
+    /// Source WAL insert location recorded at the same failure point.
+    #[arg(long, value_name = "PG_LSN")]
+    expected_lsn: String,
 }
 
 #[derive(Args)]
@@ -169,7 +183,7 @@ async fn main() -> ExitCode {
         TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::BackupKey(args) => return backup_key(&args).await,
         TopupCommand::Heartbeat(args) => return heartbeat(&args).await,
-        TopupCommand::RestoreCheck => return restore_check().await,
+        TopupCommand::RestoreCheck(args) => return restore_check(&args).await,
     };
 
     match result {
@@ -190,38 +204,44 @@ async fn backup_key(args: &BackupKeyArgs) -> ExitCode {
         };
     }
 
-    #[cfg(feature = "dev-signer")]
-    let key = if args.dev {
-        let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
-        signer.derive_backup_key_version(args.version)
-    } else {
-        match DstackSigner::new()
-            .derive_backup_key_version(args.version)
-            .await
-        {
+    let versions = std::iter::once(args.version)
+        .chain(args.fallback_versions.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for version in versions {
+        #[cfg(feature = "dev-signer")]
+        let key = if args.dev {
+            let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
+            signer.derive_backup_key_version(version)
+        } else {
+            match DstackSigner::new().derive_backup_key_version(version).await {
+                Ok(key) => key,
+                Err(_) => {
+                    tracing::error!(version, "failed to derive backup key");
+                    return ExitCode::FAILURE;
+                }
+            }
+        };
+
+        #[cfg(not(feature = "dev-signer"))]
+        let key = match DstackSigner::new().derive_backup_key_version(version).await {
             Ok(key) => key,
             Err(_) => {
-                tracing::error!(version = args.version, "failed to derive backup key");
+                tracing::error!(version, "failed to derive backup key");
                 return ExitCode::FAILURE;
             }
-        }
-    };
+        };
 
-    #[cfg(not(feature = "dev-signer"))]
-    let key = match DstackSigner::new()
-        .derive_backup_key_version(args.version)
-        .await
-    {
-        Ok(key) => key,
-        Err(_) => {
-            tracing::error!(version = args.version, "failed to derive backup key");
+        let versioned = topup::backup::versioned_key_path(&args.output, version);
+        if topup::backup::write_libsodium_key(&versioned, &key).is_err() {
+            tracing::error!(path = %versioned.display(), version, "failed to write backup key file");
             return ExitCode::FAILURE;
         }
-    };
-
-    if topup::backup::write_libsodium_key(&args.output, &key).is_err() {
-        tracing::error!(path = %args.output.display(), "failed to write backup key file");
-        return ExitCode::FAILURE;
+        if version == args.version
+            && topup::backup::write_libsodium_key(&args.output, &key).is_err()
+        {
+            tracing::error!(path = %args.output.display(), version, "failed to write current backup key file");
+            return ExitCode::FAILURE;
+        }
     }
     tracing::info!(
         path = %args.output.display(),
@@ -286,7 +306,7 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
     }
 }
 
-async fn restore_check() -> ExitCode {
+async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
     let database_url = [
         "RESTORE_DATABASE_URL",
         "MIGRATE_DATABASE_URL",
@@ -327,7 +347,11 @@ async fn restore_check() -> ExitCode {
             .map(|client| Arc::new(client) as Arc<dyn SettlementApi>)
             .map_err(|_| "invalid product settlement endpoint during restore-check".to_owned())
     };
-    let report = match topup::restore::check(&pool, &client_factory).await {
+    let expectations = topup::restore::RestoreExpectations {
+        expected_heartbeat_at: args.expected_heartbeat_at,
+        expected_lsn: args.expected_lsn.clone(),
+    };
+    let report = match topup::restore::check(&pool, &expectations, &client_factory).await {
         Ok(report) => report,
         Err(message) => {
             tracing::error!(%message, "restore check failed");
@@ -337,7 +361,11 @@ async fn restore_check() -> ExitCode {
     match serde_json::to_string(&report) {
         Ok(encoded) => {
             println!("{encoded}");
-            ExitCode::SUCCESS
+            if report.status == "ok" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         Err(_) => {
             tracing::error!("failed to encode restore check report");
@@ -356,7 +384,13 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
             .settlement_public_key()
             .await
             .map_err(|_| "development settlement key is invalid")?;
-        return print_attestation(&public_key.0, &report_data(&nonce, &public_key), &[]);
+        return print_attestation(
+            &public_key.0,
+            &report_data(&nonce, &public_key),
+            &[],
+            &[],
+            &[],
+        );
     }
 
     let evidence = DstackAttestor::new()
@@ -367,6 +401,8 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
         &evidence.settlement_public_key.0,
         &evidence.report_data,
         &evidence.quote,
+        &evidence.info.app_id,
+        &evidence.info.compose_hash,
     )
 }
 
@@ -384,12 +420,16 @@ fn print_attestation(
     settlement_public_key: &[u8; 32],
     report_data: &[u8; 32],
     quote: &[u8],
+    app_id: &[u8],
+    compose_hash: &[u8],
 ) -> Result<(), &'static str> {
     let output = json!({
         "keyid": SETTLEMENT_KEY_DOMAIN,
         "settlement_pubkey": hex::encode(settlement_public_key),
         "report_data": hex::encode(report_data),
         "quote": hex::encode(quote),
+        "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
+        "compose_hash": if compose_hash.is_empty() { String::new() } else { format!("0x{}", hex::encode(compose_hash)) },
     });
     let encoded = serde_json::to_string(&output).map_err(|_| "failed to encode attestation")?;
     println!("{encoded}");

@@ -21,6 +21,12 @@ fn help_and_version_succeed() {
 fn restore_check_requires_a_database_url() {
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .arg("restore-check")
+        .args([
+            "--expected-heartbeat-at",
+            "2026-09-22T00:00:00Z",
+            "--expected-lsn",
+            "0/0",
+        ])
         .env_remove("RESTORE_DATABASE_URL")
         .env_remove("MIGRATE_DATABASE_URL")
         .env_remove("DATABASE_URL")
@@ -112,11 +118,13 @@ fn dev_attestation_prints_the_required_json_shape() {
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
     let object = value.as_object().expect("attestation should be an object");
 
-    assert_eq!(object.len(), 4);
+    assert_eq!(object.len(), 6);
     assert_eq!(value["keyid"], "settlement/v1");
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
+    assert_eq!(value["app_id"], "");
+    assert_eq!(value["compose_hash"], "");
 }
 
 #[cfg(feature = "dev-signer")]
@@ -133,7 +141,10 @@ fn development_backup_key_is_written_without_printing_it() {
 
     assert!(output.status.success());
     let key = std::fs::read_to_string(&path).expect("backup key should be written");
+    let fallback = std::fs::read_to_string(directory.join("backup-v0.key"))
+        .expect("fallback backup key should be written");
     assert_eq!(key.len(), 64);
+    assert_eq!(fallback.len(), 64);
     assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&key));
     std::fs::remove_dir_all(directory).expect("temporary directory should be removed");

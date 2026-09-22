@@ -42,6 +42,13 @@ pub fn check_libsodium_key(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns the sibling key path used for one retained backup key version.
+#[must_use]
+pub fn versioned_key_path(path: &Path, version: u32) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("backup-v{version}.key"))
+}
+
 fn temporary_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
     let mut name = file_name.to_os_string();
     name.push(format!(".{}.tmp", Uuid::new_v4().simple()));
@@ -82,6 +89,10 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600);
         check_libsodium_key(&path).expect("key metadata should pass readiness check");
+        assert_eq!(
+            versioned_key_path(&path, 7),
+            directory.join("backup-v7.key")
+        );
         fs::remove_dir_all(directory).expect("temporary directory should be removed");
     }
 }

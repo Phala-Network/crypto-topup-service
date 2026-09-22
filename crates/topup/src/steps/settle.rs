@@ -115,9 +115,14 @@ impl SettleStep {
         intent_transaction.commit().await?;
 
         if let Some(answer) = terminal_answer(&settlement)? {
-            return self
-                .apply_answer(deposit, account.product_id, &account.external_id, answer)
-                .await;
+            return Self::adopt_product_answer(
+                &self.pool,
+                deposit,
+                account.product_id,
+                &account.external_id,
+                answer,
+            )
+            .await;
         }
 
         let request = SettlementRequest {
@@ -127,9 +132,14 @@ impl SettleStep {
         if settlement.status != SettlementStatus::Intent {
             match client.get_by_key(&settlement.key).await {
                 Ok(Some(answer)) => {
-                    return self
-                        .apply_answer(deposit, account.product_id, &account.external_id, answer)
-                        .await;
+                    return Self::adopt_product_answer(
+                        &self.pool,
+                        deposit,
+                        account.product_id,
+                        &account.external_id,
+                        answer,
+                    )
+                    .await;
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -165,23 +175,36 @@ impl SettleStep {
                 db::mark_payload_mismatch(&self.pool, deposit.id).await?;
                 match client.get_by_key(&settlement.key).await {
                     Ok(Some(answer)) => {
-                        self.apply_answer(deposit, account.product_id, &account.external_id, answer)
-                            .await
+                        Self::adopt_product_answer(
+                            &self.pool,
+                            deposit,
+                            account.product_id,
+                            &account.external_id,
+                            answer,
+                        )
+                        .await
                     }
                     Ok(None) => Ok(invariant_result("settlement_payload_mismatch")),
                     Err(error) => Ok(transport_result("settlement_get_failed", &error)),
                 }
             }
             Ok(answer) => {
-                self.apply_answer(deposit, account.product_id, &account.external_id, answer)
-                    .await
+                Self::adopt_product_answer(
+                    &self.pool,
+                    deposit,
+                    account.product_id,
+                    &account.external_id,
+                    answer,
+                )
+                .await
             }
             Err(error) => Ok(transport_result("settlement_post_failed", &error)),
         }
     }
 
-    async fn apply_answer(
-        &self,
+    /// Validates and persists the product's authoritative settlement answer.
+    pub(crate) async fn adopt_product_answer(
+        pool: &PgPool,
         deposit: &db::Deposit,
         product_id: Uuid,
         account_external_id: &str,
@@ -199,10 +222,10 @@ impl SettleStep {
                     "destination_tx_id": &destination_tx_id,
                     "payload": &payload,
                 });
-                db::mark_accepted(&self.pool, deposit.id, &destination_tx_id, &receipt).await?;
+                db::mark_accepted(pool, deposit.id, &destination_tx_id, &receipt).await?;
                 let pricing = payload.pricing()?;
                 db::adopt_settlement_pricing(
-                    &self.pool,
+                    pool,
                     deposit.id,
                     pricing.amount_minor,
                     pricing.price_scaled,
@@ -232,7 +255,7 @@ impl SettleStep {
                 let payload =
                     SettlementPayload::from_product(payload, deposit, account_external_id)?;
                 db::mark_sent_with_receipt(
-                    &self.pool,
+                    pool,
                     deposit.id,
                     &json!({"status": "processing", "payload": payload}),
                 )
@@ -245,7 +268,7 @@ impl SettleStep {
                 ))
             }
             SettlementAnswer::Conflict409 => {
-                db::mark_sent_with_receipt(&self.pool, deposit.id, &json!({"status": "conflict"}))
+                db::mark_sent_with_receipt(pool, deposit.id, &json!({"status": "conflict"}))
                     .await?;
                 Ok(StepResult::new(
                     StepOutcome::Wait {
@@ -258,10 +281,10 @@ impl SettleStep {
                 let payload =
                     SettlementPayload::from_product(payload, deposit, account_external_id)?;
                 let receipt = json!({"status": "rejected", "reason": reason, "payload": &payload});
-                db::mark_rejected(&self.pool, deposit.id, &receipt).await?;
+                db::mark_rejected(pool, deposit.id, &receipt).await?;
                 let pricing = payload.pricing()?;
                 db::adopt_settlement_pricing(
-                    &self.pool,
+                    pool,
                     deposit.id,
                     pricing.amount_minor,
                     pricing.price_scaled,
@@ -284,12 +307,12 @@ impl SettleStep {
                 })
             }
             SettlementAnswer::PayloadMismatch422 => {
-                db::mark_payload_mismatch(&self.pool, deposit.id).await?;
+                db::mark_payload_mismatch(pool, deposit.id).await?;
                 Ok(invariant_result("settlement_payload_mismatch"))
             }
             SettlementAnswer::Unknown { status, body } => {
                 db::mark_sent_with_receipt(
-                    &self.pool,
+                    pool,
                     deposit.id,
                     &json!({"status": "unknown", "http_status": status, "body": body}),
                 )
@@ -329,7 +352,7 @@ impl Step for SettleStep {
 }
 
 #[derive(Debug)]
-enum SettleStepError {
+pub(crate) enum SettleStepError {
     Database(sqlx::Error),
     MissingAccount,
     MissingAddress,
