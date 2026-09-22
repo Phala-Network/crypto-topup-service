@@ -53,7 +53,7 @@ Until it merges, route the metric or symptom to the same runbook.
 | `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `rate-lock expiry scan failed` log, overdue open locks (no alert in #56) | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
 | `TopupBackupTooOld` | [Backup age](backup-age.md) |
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
