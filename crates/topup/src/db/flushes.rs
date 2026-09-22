@@ -442,6 +442,31 @@ pub async fn next_planned_flush(
     row.map(parse_flush_row).transpose()
 }
 
+/// Records the first send-time pause observed for a planned flush.
+pub async fn record_flush_send_paused(
+    transaction: &mut Transaction<'_, Postgres>,
+    flush_id: Uuid,
+    route: &str,
+) -> Result<bool, sqlx::Error> {
+    let subject = flush_id.to_string();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO audit (id, actor, action, subject, reason)
+        SELECT gen_random_uuid(), 'flusher', 'flush.send_paused', $1, $2
+        WHERE NOT EXISTS (
+            SELECT 1 FROM audit WHERE action = 'flush.send_paused' AND subject = $1
+        )
+        "#,
+    )
+    .bind(subject)
+    .bind(format!(
+        "route `{route}` or one of its planned accounts has the flush scope paused"
+    ))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Marks a planned flush as sent before its raw transaction is broadcast.
 pub async fn mark_flush_sent(
     transaction: &mut Transaction<'_, Postgres>,

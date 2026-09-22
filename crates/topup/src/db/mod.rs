@@ -17,6 +17,7 @@ use sqlx::migrate::Migrator;
 pub use accounts::{
     Account, NewAccount, create_account, delete_account, get_account, set_account_paused_scopes,
 };
+pub(crate) use addresses::list_chain_addresses_with_pause_scopes;
 pub use addresses::{
     Address, AddressKind, NewAddress, find_active_persistent, find_address_by_chain, get_address,
     insert_address, list_chain_addresses,
@@ -34,8 +35,8 @@ pub use flushes::{
     insert_flushed, insert_planned_flush, list_active_flush_exclusions, list_flushes,
     lock_flush_plan, lock_operator, mark_flush_reverted, mark_flush_reverted_locked,
     mark_flush_sent, next_flush_nonce, next_planned_flush, rebind_planned_flushes,
-    store_flush_replacement, store_flush_replacement_cas, update_sent_evidence,
-    upsert_flush_exclusion,
+    record_flush_send_paused, store_flush_replacement, store_flush_replacement_cas,
+    update_sent_evidence, upsert_flush_exclusion,
 };
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
 pub use products::{

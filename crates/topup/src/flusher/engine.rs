@@ -11,6 +11,7 @@ use topup_core::{Signer, TxRequest};
 use uuid::Uuid;
 
 use crate::db::{self, Flush, FlushStatus, FlushedEvent};
+use crate::pause;
 
 use super::planner::{parse_address, parse_salt, parse_u256};
 use super::{
@@ -100,6 +101,32 @@ impl Flusher {
             return Ok(RunResult::Idle);
         };
         let mut evidence = parse_evidence(&flush)?;
+        let address_ids = evidence
+            .plan
+            .iter()
+            .map(|address| address.address_id)
+            .collect::<Vec<_>>();
+        if pause::flush_paused_for_addresses_locked(
+            &mut transaction,
+            &evidence.binding.route,
+            &address_ids,
+        )
+        .await?
+        {
+            let recorded =
+                db::record_flush_send_paused(&mut transaction, flush.id, &evidence.binding.route)
+                    .await?;
+            transaction.commit().await?;
+            if recorded {
+                tracing::info!(
+                    flush_id = %flush.id,
+                    route = %evidence.binding.route,
+                    outcome = "wait",
+                    "planned flush send paused"
+                );
+            }
+            return Ok(RunResult::Idle);
+        }
         let (factory, token, salts) = bound_call(&flush, &evidence)?;
         let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
         let priority = fees.max_priority_fee_per_gas.min(max_fee);
