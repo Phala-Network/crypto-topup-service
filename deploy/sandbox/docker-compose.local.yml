@@ -1,0 +1,46 @@
+# Local sandbox overlay: `docker compose -f deploy/local/docker-compose.yml
+# -f deploy/sandbox/docker-compose.local.yml ...`. Adds a disposable Anvil chain with Sepolia's
+# chain id and points the service at it; run-local.sh drives the whole flow.
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.8.3@sha256:2e4287278639262de76db72477301d5d3212fa1b1cce710d7d148750a46ce9e7
+    entrypoint: ["anvil"]
+    # One-second blocks with `finalized` two blocks behind the head keep scenarios fast while
+    # still exercising the service's finality rule.
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8545"
+      - --chain-id
+      - "11155111"
+      - --block-time
+      - "1"
+      - --slots-in-an-epoch
+      - "1"
+    ports:
+      - "127.0.0.1:${SANDBOX_ANVIL_PORT:-18545}:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+  topup:
+    command:
+      - topup
+      - run
+      - --bind
+      - 0.0.0.0:8080
+      - --route
+      - /etc/topup/routes/sandbox.yaml
+      - --wait-interval-s
+      - "2"
+    environment:
+      TOPUP_RPC_PROVIDER_A_URL: http://anvil:8545
+      TOPUP_RPC_PROVIDER_B_URL: http://anvil:8545
+      TOPUP_SCANNER_POLL_INTERVAL_SECONDS: "1"
+    depends_on:
+      anvil:
+        condition: service_healthy

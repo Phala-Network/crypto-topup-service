@@ -1,0 +1,79 @@
+[project]
+name = "crypto-topup-sdk"
+version = "0.1.0"
+description = "Python SDK for the crypto top-up service product API"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# Runtime ranges stay open within the tested major version so integrators can resolve them
+# alongside their own dependencies; uv.lock pins the exact versions used by CI and the examples.
+dependencies = [
+    "attrs>=26.1,<27",
+    "cryptography>=50.0.1,<51",
+    "http-sf>=1.3,<2",
+    "httpx>=0.28.1,<0.29",
+    "pycryptodome>=3.23,<4",
+    "python-dateutil>=2.9.0.post0,<3",
+    "typing-extensions>=4.16,<5",
+]
+
+[project.scripts]
+topup-sdk = "topup_sdk.__main__:main"
+
+[dependency-groups]
+dev = [
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "ruff==0.16.8",
+]
+codegen = [
+    "openapi-python-client==0.29.1",
+    "ruff==0.16.8",
+]
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/topup_client", "src/topup_sdk"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "../examples", "../../deploy/sandbox/scenarios"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF", "PL", "PT"]
+ignore = [
+    "PLR0913", # public helpers mirror the API's keyword parameters
+    "PLR2004", # protocol constants such as HTTP status codes are clearer inline
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/topup_client/**" = ["ALL"]
+"tests/**" = ["S101", "PLR0915"]
+"../examples/**" = ["S101", "S603", "S607", "PLR0915", "PLR0912", "PLR0911", "PLC0415"]
+"../../deploy/sandbox/scenarios/**" = ["S101", "S603", "S607", "PLR0915", "PLR0912", "PLR0911", "N818"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = ["src", "../examples", "../../deploy/sandbox/scenarios"]
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["topup_client.*"]
+disallow_untyped_defs = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = ["Crypto.*", "http_sf.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

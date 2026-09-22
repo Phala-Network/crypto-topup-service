@@ -322,23 +322,28 @@ impl SettlementClient {
 
     /// Builds the signed `GET {endpoint}/{key}` lookup without sending it.
     pub async fn signed_get_request(&self, key: &str) -> Result<Request, SettlementClientError> {
-        let mut url = self.endpoint.expose().clone();
-        url.path_segments_mut()
-            .map_err(|()| SettlementClientError::InvalidEndpoint)?
-            .pop_if_empty()
-            .push(key);
-        self.signed_request(
-            Method::GET,
-            url,
+        self.signed_get(
             key,
-            Vec::new(),
-            false,
             SigningOptions {
                 created: unix_timestamp()?,
                 cover_idempotency_key: true,
             },
         )
         .await
+    }
+
+    async fn signed_get(
+        &self,
+        key: &str,
+        options: SigningOptions,
+    ) -> Result<Request, SettlementClientError> {
+        let mut url = self.endpoint.expose().clone();
+        url.path_segments_mut()
+            .map_err(|()| SettlementClientError::InvalidEndpoint)?
+            .pop_if_empty()
+            .push(key);
+        self.signed_request(Method::GET, url, key, Vec::new(), false, options)
+            .await
     }
 }
 
@@ -524,6 +529,135 @@ mod tests {
     use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _};
 
     use super::*;
+
+    struct FixedSigner(SigningKey);
+
+    impl topup_core::Signer for FixedSigner {
+        async fn sign_operator_tx(
+            &self,
+            _tx: topup_core::TxRequest,
+        ) -> Result<topup_core::SignedTx, SignerError> {
+            Err(SignerError::SigningFailed)
+        }
+
+        async fn sign_settlement(
+            &self,
+            payload: &[u8],
+        ) -> Result<topup_core::Ed25519Signature, SignerError> {
+            Ok(topup_core::Ed25519Signature(
+                self.0.sign(payload).to_bytes(),
+            ))
+        }
+
+        async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
+            Err(SignerError::KeyUnavailable)
+        }
+
+        async fn settlement_public_key(&self) -> Result<topup_core::Ed25519PublicKey, SignerError> {
+            Ok(topup_core::Ed25519PublicKey(
+                self.0.verifying_key().to_bytes(),
+            ))
+        }
+    }
+
+    fn fixture_vector(name: &str, request: &Request) -> serde_json::Value {
+        let headers = [
+            "content-type",
+            "content-digest",
+            "idempotency-key",
+            "signature-input",
+            "signature",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            let value = request.headers().get(name)?.to_str().ok()?;
+            Some((name.to_owned(), serde_json::Value::from(value)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+        let body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .map(|body| String::from_utf8_lossy(body).into_owned())
+            .unwrap_or_default();
+        serde_json::json!({
+            "name": name,
+            "method": request.method().as_str(),
+            "target_uri": request.url().as_str(),
+            "headers": headers,
+            "body": body,
+        })
+    }
+
+    /// Settlement requests signed here are verified by the Python SDK
+    /// (`sdk/python/tests/test_rust_settlement_vectors.py`).
+    #[tokio::test]
+    async fn settlement_signatures_match_the_cross_language_fixture() {
+        const CREATED: i64 = 1_790_000_000;
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let public_key = STANDARD.encode(key.verifying_key().as_bytes());
+        let signer = SignerHandle::spawn(
+            FixedSigner(key),
+            std::num::NonZeroUsize::new(2).expect("non-zero queue"),
+            Duration::from_secs(5),
+        )
+        .expect("signer starts");
+        let client = SettlementClient::new(
+            "https://product.example/topup/settlements",
+            signer,
+            Duration::from_secs(5),
+        )
+        .expect("client builds");
+        let idempotency_key = "deposit:20513a59-9b80-53df-9832-08749de3dcc5";
+        let payload = serde_json::json!({
+            "version": 1,
+            "idempotency_key": idempotency_key,
+            "account_id": "workspace-42",
+            "unit": "USD",
+            "amount_minor": "1234",
+            "source": "crypto_deposit",
+        });
+        let post = client
+            .signed_post_request_at(
+                &SettlementRequest {
+                    idempotency_key: idempotency_key.to_owned(),
+                    payload,
+                },
+                CREATED,
+                true,
+            )
+            .await
+            .expect("POST signs");
+        let get = client
+            .signed_get(
+                idempotency_key,
+                SigningOptions {
+                    created: CREATED,
+                    cover_idempotency_key: true,
+                },
+            )
+            .await
+            .expect("GET signs");
+        let actual = serde_json::json!({
+            "description": concat!(
+                "RFC 9421 settlement requests signed by crates/adapters SettlementClient. ",
+                "Verified by sdk/python/tests/test_rust_settlement_vectors.py."
+            ),
+            "keyid": SETTLEMENT_KEY_DOMAIN,
+            "public_key": public_key,
+            "created": CREATED,
+            "vectors": [fixture_vector("post", &post), fixture_vector("get_by_key", &get)],
+        });
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/rfc9421-rust-settlement.json"
+        ))
+        .expect("fixture parses");
+        assert_eq!(
+            actual,
+            expected,
+            "update crates/adapters/tests/fixtures/rfc9421-rust-settlement.json to:\n{}",
+            serde_json::to_string_pretty(&actual).expect("fixture encodes")
+        );
+    }
 
     #[test]
     fn settlement_profile_signature_base_has_exact_components() {
