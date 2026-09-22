@@ -13,5 +13,6 @@
 )]
 
 pub mod db;
+pub mod flusher;
 pub mod outbox;
 pub mod pump;
