@@ -10,6 +10,9 @@ publish.workspace = true
 name = "topup"
 path = "src/main.rs"
 
+[features]
+dev-signer = ["topup-adapters/dev-signer"]
+
 [dependencies]
 alloy-primitives.workspace = true
 base64.workspace = true
@@ -17,11 +20,13 @@ chrono.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+hex.workspace = true
+serde-saphyr.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
-tokio.workspace = true
-serde-saphyr.workspace = true
+topup-adapters = { path = "../adapters" }
 topup-core = { path = "../core" }
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -29,7 +34,7 @@ uuid.workspace = true
 [dev-dependencies]
 anyhow = "=1.0.104"
 axum = { version = "=0.8.4", default-features = false, features = ["http1", "tokio"] }
-ed25519-dalek = "=2.2.0"
+ed25519-dalek.workspace = true
 url = "=2.5.7"
 
 [lints.rust]

@@ -22,7 +22,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use topup::db::{self, NewOutboxEvent, NewProduct};
-use topup::outbox::{DeliveryConfig, DeliveryWorker, EventSignError, EventSigner, SignedWebhook};
+use topup::outbox::{DeliveryConfig, DeliveryWorker, SignedWebhook};
+use topup_core::{
+    Ed25519PublicKey, Ed25519Signature, SignedTx, Signer as CoreSigner, SignerError, TxRequest,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -41,9 +44,21 @@ impl TestSigner {
     }
 }
 
-impl EventSigner for TestSigner {
-    fn sign_event(&self, content: &[u8]) -> Result<[u8; 64], EventSignError> {
-        Ok(self.0.sign(content).to_bytes())
+impl CoreSigner for TestSigner {
+    async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
+        Err(SignerError::SigningFailed)
+    }
+
+    async fn sign_settlement(&self, content: &[u8]) -> Result<Ed25519Signature, SignerError> {
+        Ok(Ed25519Signature(self.0.sign(content).to_bytes()))
+    }
+
+    async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
+        Err(SignerError::KeyUnavailable)
+    }
+
+    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
+        Ok(Ed25519PublicKey(self.0.verifying_key().to_bytes()))
     }
 }
 
@@ -349,7 +364,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
     let event_id = Uuid::new_v4();
     let body = br#"{"type":"deposit.confirmed","data":{}}"#;
 
-    let signed = SignedWebhook::new(&signer, event_id, Utc::now().timestamp(), body)?;
+    let signed = SignedWebhook::new(&signer, event_id, Utc::now().timestamp(), body).await?;
     let tampered = client
         .post(&receiver.url)
         .header("webhook-id", &signed.id)
@@ -361,7 +376,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
     ensure!(tampered.status() == StatusCode::BAD_REQUEST);
 
     let stale_timestamp = Utc::now().timestamp() - TIMESTAMP_TOLERANCE_SECONDS - 1;
-    let stale = SignedWebhook::new(&signer, event_id, stale_timestamp, body)?;
+    let stale = SignedWebhook::new(&signer, event_id, stale_timestamp, body).await?;
     let stale_response = client
         .post(&receiver.url)
         .header("webhook-id", &stale.id)

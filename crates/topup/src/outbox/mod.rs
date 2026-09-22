@@ -8,4 +8,4 @@ mod signature;
 pub use delivery::{DeliveryConfig, DeliveryError, DeliveryWorker};
 pub use envelope::EventEnvelope;
 pub use replay::{ReplaySelector, replay};
-pub use signature::{EventSignError, EventSigner, SignedWebhook};
+pub use signature::SignedWebhook;

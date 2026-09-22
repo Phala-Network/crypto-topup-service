@@ -10,10 +10,10 @@ use sqlx::postgres::PgPool;
 use sqlx::{PgConnection, Row};
 use tokio::sync::watch;
 use tokio::time::sleep;
-use topup_core::retry::backoff;
+use topup_core::{Signer, retry::backoff};
 use uuid::Uuid;
 
-use super::{EventEnvelope, EventSigner, SignedWebhook};
+use super::{EventEnvelope, SignedWebhook};
 
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
 
@@ -107,7 +107,7 @@ pub struct DeliveryWorker<S> {
 
 impl<S> DeliveryWorker<S>
 where
-    S: EventSigner,
+    S: Signer,
 {
     /// Builds a worker with redirects disabled and a bounded request timeout.
     pub fn new(
@@ -289,7 +289,9 @@ where
             event.id,
             Utc::now().timestamp(),
             &body,
-        ) {
+        )
+        .await
+        {
             Ok(signed) => signed,
             Err(_) => {
                 record_failure_on(
