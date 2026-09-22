@@ -73,10 +73,21 @@ impl RouteFile {
             self.chain.flush.max_gas_ratio_bps,
         )?;
         validate_bps("pricing.max_deviation_bps", self.pricing.max_deviation_bps)?;
-        validate_bps(
-            "pricing.max_fx_deviation_bps",
-            self.pricing.max_fx_deviation_bps,
-        )?;
+        if self.pricing.mode == PricingMode::Spot {
+            if self.pricing.check.is_none() {
+                return Err(RouteError::validation(
+                    "pricing.check",
+                    "is required when pricing.mode is spot",
+                ));
+            }
+            let max_fx_deviation_bps = self.pricing.max_fx_deviation_bps.ok_or_else(|| {
+                RouteError::validation(
+                    "pricing.max_fx_deviation_bps",
+                    "is required when pricing.mode is spot",
+                )
+            })?;
+            validate_bps("pricing.max_fx_deviation_bps", max_fx_deviation_bps)?;
+        }
         validate_bps("rate_lock.spread_bps", self.rate_lock.spread_bps)?;
         validate_bps(
             "rate_lock.lock_tolerance_bps",
@@ -191,10 +202,12 @@ pub struct DestinationConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PricingConfig {
+    /// Valuation mode selected explicitly by the route.
+    pub mode: PricingMode,
     /// Primary reference-rate source.
     pub primary: PrimaryPriceConfig,
-    /// Independent market cross-check.
-    pub check: CheckPriceConfig,
+    /// Independent market cross-check, required for spot pricing.
+    pub check: Option<CheckPriceConfig>,
     /// Decimal scale for stored prices; currently fixed at eight.
     pub price_scale: u8,
     /// Maximum quote age in seconds.
@@ -202,7 +215,17 @@ pub struct PricingConfig {
     /// Maximum primary/check divergence.
     pub max_deviation_bps: Bps,
     /// Maximum FX deviation.
-    pub max_fx_deviation_bps: Bps,
+    pub max_fx_deviation_bps: Option<Bps>,
+}
+
+/// Explicit route valuation mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingMode {
+    /// Validate a primary asset/USD rate against an independent market and FX leg.
+    Spot,
+    /// Credit at one dollar after validating the primary rate as a depeg guard.
+    Stablecoin,
 }
 
 /// Primary reference-rate descriptor.

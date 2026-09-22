@@ -88,4 +88,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn pricing_mode_is_required_and_stablecoin_may_omit_check() {
+        let missing_mode = VALID.replacen("  mode: spot\n", "", 1);
+        assert!(parse_and_validate(&missing_mode, false).is_err());
+
+        let stablecoin = VALID
+            .replacen("  mode: spot", "  mode: stablecoin", 1)
+            .replacen(
+                "  check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }\n",
+                "",
+                1,
+            )
+            .replacen("  max_fx_deviation_bps: 50\n", "", 1);
+        parse_and_validate(&stablecoin, false).expect("stablecoin check is optional");
+
+        let spot_without_fx_limit = VALID.replacen("  max_fx_deviation_bps: 50\n", "", 1);
+        assert!(
+            parse_and_validate(&spot_without_fx_limit, false)
+                .expect_err("spot FX limit must be required")
+                .contains("max_fx_deviation_bps")
+        );
+    }
 }
