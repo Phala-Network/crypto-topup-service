@@ -78,15 +78,19 @@ Until it merges, route the metric or symptom to the same runbook.
   flush on its chain until the pause is lifted, and no supported command voids that plan. Runbooks
   pause before a plan exists for targeted stops and keep the Finance Safe `OPERATOR_ROLE` revocation
   as the hard chain-wide stop.
-- [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60): there is no CLI/config
+- [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60) (open
+  [PR #74](https://github.com/Phala-Network/crypto-topup-service/pull/74)): there is no CLI/config
   path to derive or select `operator/v2`, so a replacement operator cannot be brought into service.
+  Until then, stopping the service halts crediting on every route, so the compromise runbook pauses
+  `flush` and stops the service only for a suspected CVM compromise.
 - `topup restore-check` is listed by `topup --help` but exits `restore-check is not implemented`;
   encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58. The restore
   runbook reads `_sqlx_migrations` with the application role instead.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
-- `deploy/config/routes/phala-cloud-sepolia-pha.yaml` fails `topup route validate --template` on
-  `main` because C10 made `rate_lock.max_creations_per_minute` required and the template lacks it.
+- [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`
+  counter can only be repaired by a human-only owner transaction; an in-service repair path and a
+  drift alert are follow-up work.
 
 ## Exercise status
 
@@ -112,7 +116,7 @@ for any runbook until #56 merges.
 | Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
 | Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
 | Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
-| Lock expiry worker failure | Partial: detection query; worker fault injection needs a running service | [ ] |
+| Lock expiry worker failure | Complete: running service, injected ledger drift, owner repair while running | [x] |
 | Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
 | Backup age | Blocked on #58 backup automation | [ ] |

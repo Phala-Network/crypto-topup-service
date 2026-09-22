@@ -17,7 +17,7 @@ the pump. Blast radius is one chain and every route on it.
 ```sh
 cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {number,hash}'
 cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '(.data // .) | {number,hash}'
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT chain_id,scanned_block FROM cursors ORDER BY chain_id; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT chain_id,scanned_block FROM cursors ORDER BY chain_id; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
 printf '%s' '{"scopes":["quotes","addresses"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"

@@ -14,7 +14,7 @@ webhook or all products may be affected.
 ## First 5 minutes
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT id,event_type,attempts,created_at,next_attempt_at,response FROM outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 100; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT id,event_type,attempts,created_at,next_attempt_at,response FROM outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 100; COMMIT;"
 curl --fail-with-body -sS "$BASE_URL/healthz"
 ```
 

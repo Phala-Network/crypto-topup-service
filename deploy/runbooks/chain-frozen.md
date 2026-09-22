@@ -60,11 +60,18 @@ Tell the product that deposits on the chain are temporarily unavailable and foll
 
 ## Remediation
 
-There is no in-service repair for a derivation mismatch. Correct the cause through a reviewed change
-(route/config version, or restore of the affected rows per [Restore](restore.md)). The application
-role cannot delete blocks. After Engineering, Security, and Finance sign off, the database owner
-lifts the freeze from an owner session outside the service container (**HUMAN-ONLY**; never place
-owner credentials in the service container):
+There is no in-service repair for a derivation mismatch. When the contracts are wrong, correct them
+with a new route/config version. When stored rows are wrong, there is no per-row restore; the two
+options are:
+
+- a full database restore to a point before the corruption, following [Restore](restore.md); or
+- a **HUMAN-ONLY** forward fix of the affected `addresses` rows by the database owner, signed off by
+  Security and Finance, with the finding, both providers' `addressOf` answers, and the before and
+  after rows recorded as incident evidence.
+
+The application role cannot delete blocks. After Engineering, Security, and Finance sign off, the
+database owner lifts the freeze from an owner session outside the service container (**HUMAN-ONLY**;
+never place owner credentials in the service container):
 
 ```sql
 DELETE FROM reconciliation_blocks WHERE block_key = 'chain:<chain_id>';

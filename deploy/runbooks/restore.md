@@ -15,7 +15,7 @@ database are affected. Deposit addresses remain derivable, but every settlement 
 
 ```sh
 curl --fail-with-body -sS "$BASE_URL/healthz"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
 docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=200 postgres backup topup
 docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-list
 ```
@@ -58,7 +58,7 @@ docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconci
 Then review the restored state read-only:
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,s.key,s.status,s.resend_forbidden FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state IN ('cleared','credited','swept') ORDER BY d.updated_at; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,s.key,s.status,s.resend_forbidden FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state IN ('cleared','credited','swept') ORDER BY d.updated_at; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; COMMIT;"
 ```
 
 ## Verification

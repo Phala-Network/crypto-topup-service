@@ -17,7 +17,7 @@ raw payloads, or internal reason codes.
 curl --fail-with-body -sS "$BASE_URL/healthz"
 export NONCE="$(openssl rand -hex 32)"
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup attest --nonce "$NONCE" > /tmp/topup-attestation.json
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; SELECT route,paused_scopes FROM route_pauses ORDER BY route; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; SELECT route,paused_scopes FROM route_pauses ORDER BY route; COMMIT;"
 ```
 
 **HUMAN-ONLY:** assign incident commander, operations lead, communications lead, and scribe. Publish

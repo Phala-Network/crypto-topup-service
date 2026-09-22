@@ -14,7 +14,7 @@ reporting misunderstanding, a refundable customer case, or a custody reconciliat
 ## First 5 minutes
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.reason,d.asset_contract,d.amount_atomic::text,d.flush_id,f.tx_hash,f.block_number FROM deposits d LEFT JOIN flushes f ON f.id=d.flush_id WHERE d.state='rejected' ORDER BY d.updated_at DESC LIMIT 100; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.reason,d.asset_contract,d.amount_atomic::text,d.flush_id,f.tx_hash,f.block_number FROM deposits d LEFT JOIN flushes f ON f.id=d.flush_id WHERE d.state='rejected' ORDER BY d.updated_at DESC LIMIT 100; COMMIT;"
 cast call "$TOKEN" 'balanceOf(address)(uint256)' "$TREASURY" --rpc-url "$RPC_PROVIDER_A_URL"
 cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,logs}'
 ```

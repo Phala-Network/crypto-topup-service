@@ -14,7 +14,7 @@ a data-loss incident across all routes.
 ## First 5 minutes
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT archived_count,failed_count,last_archived_wal,last_archived_time,last_failed_wal,last_failed_time FROM pg_stat_archiver; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT archived_count,failed_count,last_archived_wal,last_archived_time,last_failed_wal,last_failed_time FROM pg_stat_archiver; COMMIT;"
 docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-list
 docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 postgres backup
 ```

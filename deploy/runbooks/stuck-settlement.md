@@ -14,7 +14,7 @@ affected; funds remain attributable and flushing is independent unless reconcili
 ## First 5 minutes
 
 ```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,d.attempt,d.next_attempt_at,d.updated_at,s.key,s.status,s.sent_at,s.destination_tx_id,s.resend_forbidden,s.receipt FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state='cleared' ORDER BY d.updated_at LIMIT 100; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,d.attempt,d.next_attempt_at,d.updated_at,s.key,s.status,s.sent_at,s.destination_tx_id,s.resend_forbidden,s.receipt FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state='cleared' ORDER BY d.updated_at LIMIT 100; COMMIT;"
 printf '%s' '{"scopes":["settlement"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"

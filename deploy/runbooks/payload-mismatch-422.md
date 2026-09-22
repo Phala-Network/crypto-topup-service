@@ -18,7 +18,7 @@ can affect one product route.
 printf '%s' '{"scopes":["settlement"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.tx_hash,d.log_index,d.route,d.route_version,d.valuation_at,d.price_scaled::text,d.credit_minor::text,s.key,s.payload,s.status,s.receipt,s.resend_forbidden FROM deposits d JOIN settlements s ON s.deposit_id=d.id WHERE s.resend_forbidden ORDER BY d.updated_at DESC LIMIT 50; COMMIT;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.tx_hash,d.log_index,d.route,d.route_version,d.valuation_at,d.price_scaled::text,d.credit_minor::text,s.key,s.payload,s.status,s.receipt,s.resend_forbidden FROM deposits d JOIN settlements s ON s.deposit_id=d.id WHERE s.resend_forbidden ORDER BY d.updated_at DESC LIMIT 50; COMMIT;"
 ```
 
 **HUMAN-ONLY:** preserve the product's original stored payload and response under the incident ID.

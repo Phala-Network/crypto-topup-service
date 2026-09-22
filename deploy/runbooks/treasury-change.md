@@ -14,14 +14,15 @@ historical deposits.
 ## First 5 minutes
 
 For an emergency migration, pause every scope on the route. Since C7b (#70) the `flush` scope stops
-new sends: paused plans stay `planned` with one `flush.send_paused` audit row, while an already
-broadcast transaction still confirms. Snapshot the `sent` ids first, then verify none were added:
+new sends: paused plans stay `planned` and the lowest-nonce paused plan gets a `flush.send_paused`
+audit record (once per flush id), while an already broadcast transaction still confirms. Snapshot
+the `sent` ids after the pause returns HTTP 200, then verify none were added:
 
 ```sh
 printf '%s' '{"scopes":["quotes","addresses","settlement","flush","refunds"]}' > /tmp/pause.json
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
 cast call "$FACTORY" 'implementation()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 cast call "$IMPLEMENTATION" 'treasury()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 sleep 15

@@ -30,20 +30,33 @@ cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATO
 ```
 
 Both calls must return `false`; do not begin any other remediation before the Safe revocation is
-executed. Then stop the service container as an additional local control while provisioning the
-replacement, and confirm that no new flush row became `sent` after the stop:
+executed. Then pause the `flush` scope on every route of the chain so the service stops trying to
+send with the revoked key, and confirm that no new flush row became `sent` after the pause (repeat
+the signed request per route):
 
 ```sh
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-stop
-docker compose -f deploy/docker-compose.staging.yml stop topup
+printf '%s' '{"scopes":["flush"]}' > /tmp/pause.json
+mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
 sleep 15
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-stop
-comm -13 /tmp/sent-before-stop /tmp/sent-after-stop > /tmp/new-sent-after-stop
-test ! -s /tmp/new-sent-after-stop
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-pause
+comm -13 /tmp/sent-before-pause /tmp/sent-after-pause > /tmp/new-sent-after-pause
+test ! -s /tmp/new-sent-after-pause
 ```
 
-Since C7b (#70) a `flush` pause also stops the service from sending, but it cannot stop anyone else
-holding the key; the Safe revocation is the control for a compromise.
+The pause only stops this service; the Safe revocation is what stops anyone else holding the key.
+Deposits keep being detected, settled, and credited while flushing is paused.
+
+Stop the service container only if the CVM itself is suspected of leaking the key. That halts
+detection, settlement, and crediting on **every route** until a release that derives a replacement
+operator is running, which is blocked on
+[#60](https://github.com/Phala-Network/crypto-topup-service/issues/60) and
+[PR #74](https://github.com/Phala-Network/crypto-topup-service/pull/74):
+
+```sh
+docker compose -f deploy/docker-compose.staging.yml stop topup
+```
 
 Preserve evidence and assess the affected nonces:
 
@@ -88,12 +101,12 @@ SQL
 ```
 
 Require `stale_plans=0`, the expected new operator on every planned row, and one matching
-`flush.plan_operator_rebound` audit record per re-bound plan before restarting normal operation.
+`flush.plan_operator_rebound` audit record per re-bound plan before resuming `flush`.
 
 ### Verification
 
 Require the old role to remain false on both providers, the new role to be true, no unexpected sent
-row after the stop, no stale old-operator plans, and expected rebound audits.
+row after the pause, no stale old-operator plans, and expected rebound audits.
 
 ## Routine rotation
 
@@ -120,13 +133,14 @@ cast calldata 'revokeRole(bytes32,address)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"
 ## Verification
 
 For compromise, require the old role to remain false on both providers, the new role to be true,
-no unexpected sent row after the stop, no stale old-operator plans, and expected rebound audits.
+no unexpected sent row after the pause, no stale old-operator plans, and expected rebound audits.
 For routine rotation, additionally require a confirmed flush from the new operator before revoking
 the old role.
 
 ## Rollback
 
-Keep the service stopped and deploy a corrected new version/key. A compromised key is never
+Keep `flush` paused (or the service stopped, which halts crediting on every route until #60 /
+PR #74 lands) and deploy a corrected new version/key. A compromised key is never
 re-granted. During routine rotation only, a non-compromised old key may be retained briefly until
 the new operator has completed verification; any re-grant still requires explicit Security and
 Finance approval through the Safe.
