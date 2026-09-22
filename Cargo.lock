@@ -5139,6 +5139,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "topup-conformance"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "topup-adapters",
+ "topup-core",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "topup-core"
 version = "0.1.0"
 dependencies = [
