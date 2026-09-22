@@ -7,7 +7,16 @@ if [ "$#" -ne 1 ]; then
 fi
 
 walg=${WALG_BIN:-wal-g}
-"$walg" backup-push "$1"
+version=${TOPUP_BACKUP_KEY_VERSION:-}
+case "$version" in
+    ''|*[!0-9]*) echo "TOPUP_BACKUP_KEY_VERSION must be a decimal integer" >&2; exit 64 ;;
+esac
+key_path=${WALG_KEY_DIR:-/run/wal-g}/backup-v${version}.key
+if [ ! -f "$key_path" ]; then
+    echo "base backup key version $version is unavailable" >&2
+    exit 126
+fi
+WALG_LIBSODIUM_KEY_PATH=$key_path "$walg" backup-push "$1"
 backup_name=$("$walg" backup-list --json | jq -er 'sort_by(.start_time) | last | .backup_name')
 walg-key-manifest base "$backup_name"
 printf '%s\n' "$backup_name"

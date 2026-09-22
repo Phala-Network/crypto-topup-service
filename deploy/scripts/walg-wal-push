@@ -9,5 +9,21 @@ fi
 walg=${WALG_BIN:-wal-g}
 wal_path=$1
 wal_name=${wal_path##*/}
-"$walg" wal-push "$wal_path"
+version=${TOPUP_BACKUP_KEY_VERSION:-}
+case "$version" in
+    ''|*[!0-9]*) echo "TOPUP_BACKUP_KEY_VERSION must be a decimal integer" >&2; exit 64 ;;
+esac
+key_path=${WALG_KEY_DIR:-/run/wal-g}/backup-v${version}.key
+if [ ! -f "$key_path" ]; then
+    echo "WAL key version $version is unavailable" >&2
+    exit 126
+fi
+
+# WAL-G otherwise uploads adjacent ready segments in the background. Keep each
+# archive_command invocation bound to the one segment annotated below.
+WALG_LIBSODIUM_KEY_PATH=$key_path \
+WALG_UPLOAD_CONCURRENCY=1 \
+WALG_UPLOAD_DISK_CONCURRENCY=1 \
+TOTAL_BG_UPLOADED_LIMIT=1 \
+    "$walg" wal-push "$wal_path"
 walg-key-manifest wal "$wal_name"

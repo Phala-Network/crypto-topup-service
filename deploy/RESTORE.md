@@ -32,6 +32,14 @@ key-versions/current.json
 key independently, so one recovery range may cross key rotations. Keep all listed `backup/vN`
 domains until the corresponding base backups and WAL have expired.
 
+WAL archive and recovery wrappers force `WALG_UPLOAD_CONCURRENCY=1`,
+`WALG_UPLOAD_DISK_CONCURRENCY=1`, `TOTAL_BG_UPLOADED_LIMIT=1`, and
+`WALG_DOWNLOAD_CONCURRENCY=1`. WAL-G otherwise uploads adjacent ready segments in background
+workers and prefetches adjacent segments during recovery. Serial operation guarantees that the WAL
+object and its version metadata are written by the same wrapper invocation and that every restored
+segment is fetched with the key selected from its own metadata. Do not relax these values without
+replacing the per-object metadata protocol.
+
 `wal-g backup-list` does not decrypt backup data. Never use it as a key test. A key is verified only
 by fetching the selected base backup into an empty volume and checking the extracted `PG_VERSION`.
 
@@ -48,10 +56,15 @@ deploy/local/restore-drill.sh crash
 
 `controlled` forces a WAL switch and requires the last source marker and LSN. `crash` waits for a
 natural `archive_timeout=60` upload, continues writing, kills PostgreSQL without another switch, and
-reports observed loss. Both pass the externally recorded source heartbeat and LSN to
-`restore-check`, assert RTO is at most 3600 seconds, exercise a signed product GET, and remove their
-uniquely named Compose projects and volumes. The full image build plus real 60-second archive window
-is intentionally a weekly job; the bounded deployment CI job runs the WAL-G wrapper tests instead.
+reports observed loss. The output separates `archive_wait_seconds`, measured until the source WAL
+segment closes, from `upload_latency_seconds`, measured from segment close until that segment's key
+metadata is visible in MinIO. Controlled mode also creates a multi-segment v1 backlog, proves one
+wrapper call did not upload an adjacent segment, rotates to v2 while segments remain pending, and
+restores through both key versions. Both modes pass the externally recorded source heartbeat and LSN
+to `restore-check`, assert RTO is at most 3600 seconds, exercise a signed product GET, and remove
+their uniquely named Compose projects and volumes. The full image build plus real 60-second archive
+window is intentionally a weekly job; the bounded deployment CI job runs the WAL-G wrapper tests
+instead.
 
 ## Authorize the replacement CVM
 

@@ -44,7 +44,8 @@ if [ ! -f "$key_path" ]; then
 fi
 
 set +e
-WALG_LIBSODIUM_KEY_PATH=$key_path "$walg" wal-fetch "$wal_name" "$destination"
+WALG_LIBSODIUM_KEY_PATH=$key_path WALG_DOWNLOAD_CONCURRENCY=1 \
+    "$walg" wal-fetch "$wal_name" "$destination"
 status=$?
 set -e
 case "$status" in
