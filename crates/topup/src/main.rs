@@ -37,26 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum TopupCommand {
-    Run {
-        /// Validated route file; repeat for every enabled route version.
-        #[arg(long = "route", required = true, value_name = "FILE")]
-        routes: Vec<PathBuf>,
-        /// Number of concurrent deposit pumps in this process.
-        #[arg(long, default_value_t = NonZeroUsize::MIN)]
-        pumps: NonZeroUsize,
-        /// Maximum duration of one step; must be shorter than five minutes.
-        #[arg(long, default_value_t = 240)]
-        step_timeout_s: u64,
-        /// Delay before retrying an expected wait outcome.
-        #[arg(long, default_value_t = 60)]
-        wait_interval_s: u64,
-        /// Interval between deposit state-age scans.
-        #[arg(long, default_value_t = 60)]
-        age_alert_interval_s: u64,
-        /// Minimum interval between repeated alerts for the same deposit state.
-        #[arg(long, default_value_t = 60 * 60)]
-        age_alert_reminder_s: u64,
-    },
+    Run(RunArgs),
     Migrate,
     Route {
         #[command(subcommand)]
@@ -68,6 +49,31 @@ enum TopupCommand {
     },
     Attest(AttestArgs),
     RestoreCheck,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// API socket address; defaults to the deployment port on all interfaces.
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    bind: std::net::SocketAddr,
+    /// Validated route file; repeat for every enabled route version.
+    #[arg(long = "route", required = true, value_name = "FILE")]
+    routes: Vec<PathBuf>,
+    /// Number of concurrent deposit pumps in this process.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    pumps: NonZeroUsize,
+    /// Maximum duration of one step; must be shorter than five minutes.
+    #[arg(long, default_value_t = 240)]
+    step_timeout_s: u64,
+    /// Delay before retrying an expected wait outcome.
+    #[arg(long, default_value_t = 60)]
+    wait_interval_s: u64,
+    /// Interval between deposit state-age scans.
+    #[arg(long, default_value_t = 60)]
+    age_alert_interval_s: u64,
+    /// Minimum interval between repeated alerts for the same deposit state.
+    #[arg(long, default_value_t = 60 * 60)]
+    age_alert_reminder_s: u64,
 }
 
 #[derive(Args)]
@@ -118,24 +124,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        TopupCommand::Run {
-            routes,
-            pumps,
-            step_timeout_s,
-            wait_interval_s,
-            age_alert_interval_s,
-            age_alert_reminder_s,
-        } => {
-            return run(
-                &routes,
-                pumps,
-                step_timeout_s,
-                wait_interval_s,
-                age_alert_interval_s,
-                age_alert_reminder_s,
-            )
-            .await;
-        }
+        TopupCommand::Run(args) => return run(&args).await,
         TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
@@ -206,23 +195,16 @@ fn print_attestation(
     Ok(())
 }
 
-async fn run(
-    route_paths: &[PathBuf],
-    pump_count: NonZeroUsize,
-    step_timeout_s: u64,
-    wait_interval_s: u64,
-    age_alert_interval_s: u64,
-    age_alert_reminder_s: u64,
-) -> ExitCode {
-    if age_alert_interval_s == 0 {
+async fn run(args: &RunArgs) -> ExitCode {
+    if args.age_alert_interval_s == 0 {
         tracing::error!("age alert interval must be positive");
         return ExitCode::FAILURE;
     }
-    if age_alert_reminder_s == 0 {
+    if args.age_alert_reminder_s == 0 {
         tracing::error!("age alert reminder interval must be positive");
         return ExitCode::FAILURE;
     }
-    let routes = match load_routes(route_paths) {
+    let routes = match load_routes(&args.routes) {
         Ok(routes) => routes,
         Err(error) => {
             tracing::error!(%error, "failed to load route configuration");
@@ -244,20 +226,44 @@ async fn run(
         }
     };
     let pump_config = PumpConfig {
-        step_timeout: Duration::from_secs(step_timeout_s),
-        wait_interval: Duration::from_secs(wait_interval_s),
+        step_timeout: Duration::from_secs(args.step_timeout_s),
+        wait_interval: Duration::from_secs(args.wait_interval_s),
         ..PumpConfig::default()
     };
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) if !value.is_empty() => value,
-        Ok(_) | Err(_) => {
-            tracing::error!("DATABASE_URL is required for run");
+    let database_url = match required_env("DATABASE_URL") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
             return ExitCode::FAILURE;
         }
     };
-    let connection_count = match u32::try_from(pump_count.get())
+    let admin_kid = match required_env("TOPUP_ADMIN_KID") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let admin_public_key = match required_env("TOPUP_ADMIN_PUBLIC_KEY") {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let admin_key = match topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key) {
+        Ok(key) => key,
+        Err(error) => {
+            tracing::error!(%error, "invalid administrative verification key");
+            return ExitCode::FAILURE;
+        }
+    };
+    let scanner_count = scanner_routes.len();
+    let connection_count = match u32::try_from(args.pumps.get())
         .ok()
-        .and_then(|count| count.checked_add(3))
+        .zip(u32::try_from(scanner_count).ok())
+        .and_then(|(pumps, scanners)| pumps.checked_add(scanners))
+        .and_then(|count| count.checked_add(2))
     {
         Some(count) => count,
         None => {
@@ -276,6 +282,13 @@ async fn run(
             return ExitCode::FAILURE;
         }
     };
+    let listener = match tokio::net::TcpListener::bind(args.bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(%error, bind = %args.bind, "failed to bind API listener");
+            return ExitCode::FAILURE;
+        }
+    };
     let steps = Arc::new(NoopStepSet::build());
     tracing::warn!("NoopStepSet is active; deposit steps perform no real work");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
@@ -286,14 +299,28 @@ async fn run(
         }
     };
     let cancellation = CancellationToken::new();
-    let scanner_count = scanner_routes.len();
+    let state = topup::api::AppState {
+        pool: pool.clone(),
+        routes: Arc::new(routes),
+        admin_key,
+        attestor: Arc::new(DstackAttestor::new()),
+    };
+    let (application, _) = topup::api::router(state);
+    let api_cancellation = cancellation.child_token();
+    let mut api_task = tokio::spawn(async move {
+        axum::serve(listener, application)
+            .with_graceful_shutdown(api_cancellation.cancelled_owned())
+            .await
+    });
+    tracing::info!(bind = %args.bind, "API listening");
+
     let scanner_pool = pool.clone();
     let scanner_cancellation = cancellation.child_token();
-    let scanner_task = tokio::spawn(async move {
+    let mut scanner_task = tokio::spawn(async move {
         topup::scanner::run(scanner_pool, scanner_routes, scanner_cancellation).await
     });
-    let mut pump_tasks = Vec::with_capacity(pump_count.get());
-    for worker in 0..pump_count.get() {
+    let mut pump_tasks = Vec::with_capacity(args.pumps.get());
+    for worker in 0..args.pumps.get() {
         let worker_pump = pump.clone();
         let worker_cancellation = cancellation.child_token();
         pump_tasks.push(tokio::spawn(async move {
@@ -306,8 +333,8 @@ async fn run(
         pool.clone(),
         age_config,
         Arc::clone(&metrics),
-        Duration::from_secs(age_alert_interval_s),
-        Duration::from_secs(age_alert_reminder_s),
+        Duration::from_secs(args.age_alert_interval_s),
+        Duration::from_secs(args.age_alert_reminder_s),
     );
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
@@ -315,18 +342,68 @@ async fn run(
     });
 
     tracing::info!(
-        pumps = pump_count.get(),
+        pumps = args.pumps.get(),
         scanners = scanner_count,
         "topup service started"
     );
     let mut clean_shutdown = true;
-    if let Err(error) = wait_for_shutdown_signal().await {
-        tracing::error!(%error, "failed to listen for shutdown signal");
-        clean_shutdown = false;
+    let mut api_finished = false;
+    let mut scanner_finished = false;
+    tokio::select! {
+        signal = wait_for_shutdown_signal() => {
+            if let Err(error) = signal {
+                tracing::error!(%error, "failed to listen for shutdown signal");
+                clean_shutdown = false;
+            }
+        }
+        result = &mut api_task => {
+            api_finished = true;
+            match result {
+                Ok(Ok(())) => tracing::error!("API server stopped before shutdown"),
+                Ok(Err(error)) => tracing::error!(%error, "API server failed"),
+                Err(error) => tracing::error!(%error, "API task failed"),
+            }
+            clean_shutdown = false;
+        }
+        result = &mut scanner_task => {
+            scanner_finished = true;
+            match result {
+                Ok(Ok(())) => tracing::error!("scanner stopped before shutdown"),
+                Ok(Err(error)) => tracing::error!(%error, "scanner task failed"),
+                Err(error) => tracing::error!(%error, "scanner task failed to join"),
+            }
+            clean_shutdown = false;
+        }
     }
-    tracing::info!("shutdown requested; finishing in-flight deposit steps");
+    tracing::info!("shutdown requested; finishing in-flight service work");
     cancellation.cancel();
 
+    if !api_finished {
+        match api_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "API server failed during shutdown");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::error!(%error, "API task failed during shutdown");
+                clean_shutdown = false;
+            }
+        }
+    }
+    if !scanner_finished {
+        match scanner_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "scanner task failed during shutdown");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::error!(%error, "scanner task failed to join during shutdown");
+                clean_shutdown = false;
+            }
+        }
+    }
     for task in pump_tasks {
         if let Err(error) = task.await {
             tracing::error!(%error, "deposit pump task failed during shutdown");
@@ -336,17 +413,6 @@ async fn run(
     if let Err(error) = age_task.await {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
-    }
-    match scanner_task.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::error!(%error, "scanner task failed during shutdown");
-            clean_shutdown = false;
-        }
-        Err(error) => {
-            tracing::error!(%error, "scanner task failed to join during shutdown");
-            clean_shutdown = false;
-        }
     }
     pool.close().await;
     tracing::info!(
@@ -381,7 +447,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 }
 
 fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
-    paths
+    let routes = paths
         .iter()
         .map(|path| {
             let yaml = std::fs::read_to_string(path)
@@ -389,7 +455,29 @@ fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
             route::parse_and_validate(&yaml, false)
                 .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_route_versions(&routes)?;
+    Ok(routes)
+}
+
+fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
+    let mut versions = std::collections::BTreeSet::new();
+    for route in routes {
+        if !versions.insert((route.route.as_str(), route.version)) {
+            return Err(format!(
+                "duplicate route `{}` version {}",
+                route.route, route.version
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn required_env(name: &'static str) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{name} is required for run"))
 }
 
 async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> ExitCode {
@@ -499,7 +587,8 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_nonce;
+    use super::{parse_nonce, validate_route_versions};
+    use topup_core::route::RouteFile;
 
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
@@ -516,5 +605,20 @@ mod tests {
         );
         assert_eq!(parse_nonce("0"), Err("nonce must be valid hexadecimal"));
         assert_eq!(parse_nonce("zz"), Err("nonce must be valid hexadecimal"));
+    }
+
+    #[test]
+    fn route_loading_accepts_versions_and_rejects_exact_duplicates() {
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let mut newer = route.clone();
+        newer.version = route.version + 1;
+
+        assert_eq!(validate_route_versions(&[route.clone(), newer]), Ok(()));
+        assert_eq!(
+            validate_route_versions(&[route.clone(), route]),
+            Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
+        );
     }
 }

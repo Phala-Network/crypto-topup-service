@@ -148,7 +148,8 @@ accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (produ
 addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
               UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
-rate_locks    address_id PK, route, amount_atomic, price_scaled, expires_at, consumed_by (deposit_id) UNIQUE
+rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
+              consumed_by (deposit_id) UNIQUE
 cursors       chain_id PK, scanned_block
 deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
               address_id, account_id, route, route_version, asset_contract, from_address, amount_atomic,
@@ -214,11 +215,13 @@ flush time. Each chain's finality rule is declared in its chain file (Ethereum: 
 a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the finality observation
-and the price is always current at fetch time. Spot: primary Coin Metrics `ReferenceRateUSD`
-(1-minute), check Binance `PHAUSDT` × Kraken `USDT/USD`; each observation aged ≤ `max_age`
-*(policy)* at fetch; `|primary − check| / primary ≤ max_deviation_bps / 10 000`; FX within
-`max_fx_deviation_bps`; the primary is used. Any failure retries the whole step. Stablecoin
-routes use fixed `1.0` with the reference rate as a depeg guard.
+and the price is always current at fetch time. Every route's pricing configuration declares
+`mode: spot | stablecoin`; the service never infers the mode from an asset symbol. Spot: primary
+Coin Metrics `ReferenceRateUSD` (1-minute), check Binance `PHAUSDT` × Kraken `USDT/USD`; each
+observation aged ≤ `max_age` *(policy)* at fetch; `|primary − check| / primary ≤
+max_deviation_bps / 10 000`; FX within `max_fx_deviation_bps`; the primary is used. Any failure
+retries the whole step. Stablecoin routes use fixed `1.0` with the primary reference rate as a
+depeg guard; check and FX observations are not required for that mode.
 
 **Screening** is direct sanctions-list screening plus per-deposit bounds. KYT is a separate
 adapter that compliance may require before GA.
@@ -349,6 +352,9 @@ POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
 GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, exposure, PnL vs valuation
 ```
 
+Signatures are single-use within the acceptance window. `rotate` is idempotent on
+`from_version`.
+
 Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
 `deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`. Events never
 change balances. OpenAPI from `utoipa`; SDKs generated from it, shipped with a runnable
@@ -396,6 +402,9 @@ version and compose hash; deposits keep the version that created them. Pause fla
 runtime-mutable state. Secrets arrive as dstack encrypted environment variables. Startup
 refuses to run without the dstack socket, two RPC providers, or the on-chain contract checks
 of §4.
+
+All enabled versions are loaded at startup. The highest enabled version of a route is current for
+new API operations, while older versions remain available for historical deposits.
 
 ```yaml
 services:
