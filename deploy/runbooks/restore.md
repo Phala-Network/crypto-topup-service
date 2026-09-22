@@ -34,7 +34,10 @@ its dedicated tools service with owner credentials and checks the same migration
 
 ## Decision tree
 
-- Planned drill and a verified backup exists: proceed only in a throwaway CVM.
+- Planned drill and a verified backup exists: proceed only in a throwaway CVM, following the
+  "Staging restore drill" section of `deploy/RESTORE.md` (`TOPUP_WAL_ARCHIVE=off`, read-only
+  object-storage credentials, stop after `restore-check`, never start `topup`, `heartbeat`, or
+  `backup`, then destroy the CVM).
 - Primary database unavailable: declare incident and restore to a new encrypted volume/CVM.
 - Backup list empty, stale, or unverifiable: do not resume; escalate data-loss risk.
 

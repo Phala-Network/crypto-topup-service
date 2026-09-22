@@ -483,8 +483,13 @@ EOF
     '
 fi
 
+# Like a staging drill, the restored instance must not archive into the source WAL prefix.
+storage_before=$(storage_listing)
+test -n "$storage_before"
+export TOPUP_WAL_ARCHIVE=off
 dc up -d --no-deps postgres
 wait_for "restored PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
+test "$(psql_value 'SHOW archive_mode')" = off
 wait_for "archive recovery promotion" recovery_promoted
 
 set +e
@@ -521,6 +526,16 @@ if [ "$mode" = controlled ]; then
     test "$wal_bytes_behind" -eq 0
 fi
 
+# Promotion wrote a new timeline; close its segment and confirm nothing reached object storage.
+psql_value 'SELECT pg_switch_wal()' >/dev/null
+psql_value 'CHECKPOINT' >/dev/null
+restored_timeline=$(psql_value 'SELECT timeline_id FROM pg_control_checkpoint()')
+test "$restored_timeline" -gt 1
+test "$(storage_listing)" = "$storage_before" || {
+    echo "restored instance with TOPUP_WAL_ARCHIVE=off changed object storage" >&2
+    exit 1
+}
+
 printf 'mode=%s\n' "$mode"
 printf 'restore-check: %s\n' "$restore_report"
 printf 'base_backup=%s\n' "$backup_name"
@@ -534,5 +549,6 @@ printf 'archive_wait_seconds=%s\n' "$archive_wait_seconds"
 printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'key_rotation_v1_wal=%s\n' "$rotation_v1_wal"
 printf 'key_rotation_v2_wals=%s\n' "$rotation_v2_wals"
+printf 'restored_timeline=%s storage_unchanged_with_archive_off=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 echo "restore drill $mode passed"

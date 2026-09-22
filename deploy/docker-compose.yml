@@ -42,6 +42,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - walg_key:/run/wal-g:ro

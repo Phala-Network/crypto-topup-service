@@ -217,6 +217,8 @@ jobs:
         run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
       - name: Check WAL-G runtime
         run: docker run --rm postgres-walg:ci wal-g --version
+      - name: Check the WAL archive switch
+        run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 
   contracts:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}

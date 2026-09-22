@@ -187,7 +187,8 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
    ```
 
    Omit `recovery_target_lsn` only when the incident decision is to replay every available WAL.
-   Create `recovery.signal`, set `$PGDATA` mode `0700`, then start only PostgreSQL.
+   Create `recovery.signal`, set `$PGDATA` mode `0700`, then start only PostgreSQL. In a
+   [staging drill](#staging-restore-drill), confirm `TOPUP_WAL_ARCHIVE=off` first.
 
 5. Require `pg_isready` and `SELECT NOT pg_is_in_recovery()` to return true. Keep the public service,
    heartbeat, and backup processes stopped.
@@ -205,6 +206,8 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
      --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
    ```
 
+   A staging drill stops after this step; see [Staging restore drill](#staging-restore-drill).
+
    `status` must be `ok`. The check verifies migration checksums, WAL state and distance, externally
    anchored RPO, and table counts, then runs the same library post-restore round as
    `topup reconcile --once --post-restore` (architecture section 13): every deposit in `cleared`,
@@ -215,10 +218,44 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
    checks run in the same round; their findings and `failed_checks` (for example an unreachable
    chain RPC) are reported as alerts but do not gate resume.
 
-7. Compare incident markers and expected row counts. Start `heartbeat` and `backup`, require a new
+7. **Real restore only.** Compare incident markers and expected row counts. Start `heartbeat` and
+   `backup`, require a new
    WAL segment and its `key-versions/wal/<segment>.json` object, then start `topup` without ingress.
    Enable ingress only after health and reconciliation remain clean. Addresses need no separate
    restore because their salts are deterministic from product data.
+
+## Staging restore drill
+
+The weekly staging drill restores the staging app's backups into a throwaway replacement CVM. That
+CVM must never write to the source WAL prefix: after promotion it creates a new timeline, and its
+`.history` file, segments, and `key-versions/current.json` would make a later real restore follow
+`recovery_target_timeline=latest` onto the drill's timeline. It must also never run `backup`
+(`wal-g delete retain` on the shared prefix) or `topup` (operator nonces, settlements).
+
+1. Issue object-storage credentials for the drill that can only list and read `WALG_S3_PREFIX`.
+   Put them and `TOPUP_WAL_ARCHIVE=off` in the drill CVM's encrypted environment. The PostgreSQL
+   entrypoint then appends `-c archive_mode=off` after any other flag, so it cannot be overridden
+   by a command-line flag; `deploy/tests/walg-archive-switch.sh` verifies this on the image.
+2. Follow [Authorize the replacement CVM](#authorize-the-replacement-cvm) and
+   [Restore the database](#restore-the-database) steps 1-6. Before starting PostgreSQL in step 4,
+   require the rendered value, and right after starting it require the running setting:
+
+   ```sh
+   docker compose config --format json | jq -er '.services.postgres.environment.TOPUP_WAL_ARCHIVE'
+   # Expected: off
+   docker compose exec -T postgres psql -U postgres -d topup -Atc 'SHOW archive_mode'
+   # Expected: off; otherwise stop PostgreSQL immediately
+   ```
+
+3. Never run step 7 and never start `topup`, `heartbeat`, or `backup` on the drill CVM. Record the
+   `restore-check` report, RPO, and RTO in the drill log.
+4. Destroy the drill CVM and its volumes. **Finance Safe:** remove the drill device from the
+   original app contract with `removeDevice(bytes32)` and verify `allowedDeviceIds` returns
+   `false`. Keep the compose hash; production uses the same attested compose. Revoke the read-only
+   drill credentials.
+
+`deploy/local/restore-drill.sh` follows the same rule: it starts the restored instance with
+`TOPUP_WAL_ARCHIVE=off` and fails if the object-storage listing changes after promotion.
 
 ## Failure handling
 
