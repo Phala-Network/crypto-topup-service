@@ -19,6 +19,7 @@ pub mod flusher;
 pub mod heartbeat;
 pub mod outbox;
 pub mod pump;
+pub mod refunds;
 pub mod restore;
 mod rpc_provider;
 pub mod scanner;
