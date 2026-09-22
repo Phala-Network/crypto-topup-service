@@ -191,9 +191,9 @@ pub struct LimitsResponse {
     pub product_open_minor: u64,
     /// Global open rate-lock cap in minor units.
     pub global_open_minor: u64,
-    /// Remaining account exposure; `null` until C10 owns reservations.
+    /// Remaining account exposure.
     pub remaining_account_minor: Option<u64>,
-    /// Exposure reset time; `null` until C10 defines reservation windows.
+    /// Earliest open-lock expiry, when any exposure is reserved.
     pub reset_at: Option<DateTime<Utc>>,
 }
 
@@ -235,6 +235,10 @@ pub struct RateLockResponse {
     pub credit_minor: String,
     /// Lock expiry time.
     pub expires_at: DateTime<Utc>,
+    /// Stable lifecycle status.
+    pub status: String,
+    /// Whole seconds remaining while the lock is open.
+    pub remaining_seconds: u64,
     /// EIP-681 payment URI.
     pub eip681_uri: String,
     /// Inputs encoded into the rate-lock salt.

@@ -359,7 +359,21 @@ impl Pump {
             return Ok(RunOnceResult::Idle);
         };
         let deposit_id = deposit.id;
-        let result = self.run_step(&deposit).await;
+        let result = if crate::reconciler::chain_is_blocked(&self.pool, deposit.chain_id).await? {
+            tracing::warn!(
+                deposit_id = %deposit.id,
+                chain = deposit.chain_id,
+                "deposit step deferred because reconciliation froze the chain"
+            );
+            StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::Paused,
+                },
+                json!({"outcome": "wait", "reason": "chain_frozen"}),
+            )
+        } else {
+            self.run_step(&deposit).await
+        };
         let result = match next(deposit.state, &result.outcome) {
             Ok(transition) => (result, transition),
             Err(error) => {

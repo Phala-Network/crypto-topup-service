@@ -185,7 +185,7 @@ async fn rate_lock_credit_migration_upgrades_preexisting_rows() -> Result<()> {
             let deposit_id = insert_numbered_deposit(&context.app_pool, &seed, 61).await?;
             let lock_address = insert_lock_address(&context.app_pool, seed.account_id, 61).await?;
             sqlx::query(
-                "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes', $2)",
+                "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at, consumed_by, status, closed_at) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes', $2, 'consumed', now())",
             )
             .bind(lock_address)
             .bind(deposit_id)
@@ -970,11 +970,18 @@ async fn insert_rate_lock(
     address_id: Uuid,
     consumed_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
+    let (status, closed_at) = if consumed_by.is_some() {
+        ("consumed", Some(Utc::now()))
+    } else {
+        ("open", None)
+    };
     sqlx::query(
-        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, 250, now() + interval '15 minutes', $2)",
+        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, expires_at, consumed_by, status, closed_at) VALUES ($1, 'ethereum-pha', 1000, 25000000, 250, now() + interval '15 minutes', $2, $3, $4)",
     )
     .bind(address_id)
     .bind(consumed_by)
+    .bind(status)
+    .bind(closed_at)
     .execute(pool)
     .await?;
     Ok(())

@@ -188,133 +188,157 @@ impl SettleStep {
         account_external_id: &str,
         answer: SettlementAnswer,
     ) -> Result<StepResult, SettleStepError> {
-        match answer {
-            SettlementAnswer::Accepted {
-                destination_tx_id,
-                payload,
-            } => {
-                let payload =
-                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
-                let receipt = json!({
-                    "status": "accepted",
-                    "destination_tx_id": &destination_tx_id,
-                    "payload": &payload,
-                });
-                db::mark_accepted(&self.pool, deposit.id, &destination_tx_id, &receipt).await?;
-                let pricing = payload.pricing()?;
-                db::adopt_settlement_pricing(
-                    &self.pool,
-                    deposit.id,
-                    pricing.amount_minor,
-                    pricing.price_scaled,
-                    pricing.valuation_at,
-                )
-                .await?;
-                let evidence = terminal_evidence("accepted", deposit, &payload, &receipt)?;
-                Ok(StepResult {
-                    outcome: StepOutcome::Advance,
-                    evidence,
-                    events: vec![event(
-                        "deposit.credited",
-                        json!({
-                            "product_id": product_id,
-                            "deposit_id": deposit.id,
-                            "chain_id": deposit.chain_id,
-                            "state": "credited",
-                            "route": deposit.route.as_deref(),
-                            "destination_tx_id": receipt["destination_tx_id"],
-                            "amount_minor": payload.amount_minor,
-                            "unit": payload.unit,
-                            "price_scaled": payload.evidence.price_scaled,
-                            "price_scale": payload.evidence.price_scale,
-                            "valuation_at": payload.evidence.valuation_at,
-                        }),
-                    )],
-                    effects: db::TransitionEffects::default(),
-                })
-            }
-            SettlementAnswer::Processing { payload } => {
-                let payload =
-                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
-                db::mark_sent_with_receipt(
-                    &self.pool,
-                    deposit.id,
-                    &json!({"status": "processing", "payload": payload}),
-                )
-                .await?;
-                Ok(StepResult::new(
-                    StepOutcome::Wait {
-                        reason: WaitReason::ProductProcessing,
-                    },
-                    json!({"outcome": "wait", "reason": "product_processing"}),
-                ))
-            }
-            SettlementAnswer::Conflict409 => {
-                db::mark_sent_with_receipt(&self.pool, deposit.id, &json!({"status": "conflict"}))
-                    .await?;
-                Ok(StepResult::new(
-                    StepOutcome::Wait {
-                        reason: WaitReason::ProductProcessing,
-                    },
-                    json!({"outcome": "wait", "reason": "product_processing"}),
-                ))
-            }
-            SettlementAnswer::Rejected { reason, payload } => {
-                let payload =
-                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
-                let receipt = json!({"status": "rejected", "reason": reason, "payload": &payload});
-                db::mark_rejected(&self.pool, deposit.id, &receipt).await?;
-                let pricing = payload.pricing()?;
-                db::adopt_settlement_pricing(
-                    &self.pool,
-                    deposit.id,
-                    pricing.amount_minor,
-                    pricing.price_scaled,
-                    pricing.valuation_at,
-                )
-                .await?;
-                let evidence = terminal_evidence("rejected", deposit, &payload, &receipt)?;
-                Ok(StepResult {
-                    outcome: StepOutcome::Reject(RejectReason::ProductRefused),
-                    evidence,
-                    events: vec![event(
-                        "deposit.rejected",
-                        json!({
-                            "product_id": product_id,
-                            "deposit_id": deposit.id,
-                            "chain_id": deposit.chain_id,
-                            "state": "rejected",
-                            "route": deposit.route.as_deref(),
-                            "reason": RejectReason::ProductRefused.code(),
-                            "product_reason": receipt["reason"],
-                        }),
-                    )],
-                    effects: db::TransitionEffects::default(),
-                })
-            }
-            SettlementAnswer::PayloadMismatch422 => {
-                db::mark_payload_mismatch(&self.pool, deposit.id).await?;
-                Ok(invariant_result("settlement_payload_mismatch"))
-            }
-            SettlementAnswer::Unknown { status, body } => {
-                db::mark_sent_with_receipt(
-                    &self.pool,
-                    deposit.id,
-                    &json!({"status": "unknown", "http_status": status, "body": body}),
-                )
-                .await?;
-                Ok(StepResult::new(
-                    StepOutcome::Retry {
-                        error: RetryError::Transient,
-                    },
+        adopt_answer(&self.pool, deposit, product_id, account_external_id, answer).await
+    }
+}
+
+pub(crate) fn validate_answer_identity(
+    deposit: &db::Deposit,
+    account_external_id: &str,
+    answer: &SettlementAnswer,
+) -> Result<(), SettleStepError> {
+    match answer {
+        SettlementAnswer::Accepted { payload, .. }
+        | SettlementAnswer::Processing { payload }
+        | SettlementAnswer::Rejected { payload, .. } => {
+            SettlementPayload::from_product(payload.clone(), deposit, account_external_id)?;
+        }
+        SettlementAnswer::Conflict409
+        | SettlementAnswer::PayloadMismatch422
+        | SettlementAnswer::Unknown { .. } => {}
+    }
+    Ok(())
+}
+
+pub(crate) async fn adopt_answer(
+    pool: &PgPool,
+    deposit: &db::Deposit,
+    product_id: Uuid,
+    account_external_id: &str,
+    answer: SettlementAnswer,
+) -> Result<StepResult, SettleStepError> {
+    match answer {
+        SettlementAnswer::Accepted {
+            destination_tx_id,
+            payload,
+        } => {
+            let payload = SettlementPayload::from_product(payload, deposit, account_external_id)?;
+            let receipt = json!({
+                "status": "accepted",
+                "destination_tx_id": &destination_tx_id,
+                "payload": &payload,
+            });
+            db::mark_accepted(pool, deposit.id, &destination_tx_id, &receipt).await?;
+            let pricing = payload.pricing()?;
+            db::adopt_settlement_pricing(
+                pool,
+                deposit.id,
+                pricing.amount_minor,
+                pricing.price_scaled,
+                pricing.valuation_at,
+            )
+            .await?;
+            let evidence = terminal_evidence("accepted", deposit, &payload, &receipt)?;
+            Ok(StepResult {
+                outcome: StepOutcome::Advance,
+                evidence,
+                events: vec![event(
+                    "deposit.credited",
                     json!({
-                        "outcome": "retry",
-                        "error": "unknown_settlement_response",
-                        "status": status,
-                        "body": body,
+                        "product_id": product_id,
+                        "deposit_id": deposit.id,
+                        "chain_id": deposit.chain_id,
+                        "state": "credited",
+                        "route": deposit.route.as_deref(),
+                        "destination_tx_id": receipt["destination_tx_id"],
+                        "amount_minor": payload.amount_minor,
+                        "unit": payload.unit,
+                        "price_scaled": payload.evidence.price_scaled,
+                        "price_scale": payload.evidence.price_scale,
+                        "valuation_at": payload.evidence.valuation_at,
                     }),
-                ))
-            }
+                )],
+                effects: db::TransitionEffects::default(),
+            })
+        }
+        SettlementAnswer::Processing { payload } => {
+            let payload = SettlementPayload::from_product(payload, deposit, account_external_id)?;
+            db::mark_sent_with_receipt(
+                pool,
+                deposit.id,
+                &json!({"status": "processing", "payload": payload}),
+            )
+            .await?;
+            Ok(StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::ProductProcessing,
+                },
+                json!({"outcome": "wait", "reason": "product_processing"}),
+            ))
+        }
+        SettlementAnswer::Conflict409 => {
+            db::mark_sent_with_receipt(pool, deposit.id, &json!({"status": "conflict"})).await?;
+            Ok(StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::ProductProcessing,
+                },
+                json!({"outcome": "wait", "reason": "product_processing"}),
+            ))
+        }
+        SettlementAnswer::Rejected { reason, payload } => {
+            let payload = SettlementPayload::from_product(payload, deposit, account_external_id)?;
+            let receipt = json!({"status": "rejected", "reason": reason, "payload": &payload});
+            db::mark_rejected(pool, deposit.id, &receipt).await?;
+            let pricing = payload.pricing()?;
+            db::adopt_settlement_pricing(
+                pool,
+                deposit.id,
+                pricing.amount_minor,
+                pricing.price_scaled,
+                pricing.valuation_at,
+            )
+            .await?;
+            let evidence = terminal_evidence("rejected", deposit, &payload, &receipt)?;
+            Ok(StepResult {
+                outcome: StepOutcome::Reject(RejectReason::ProductRefused),
+                evidence,
+                events: vec![event(
+                    "deposit.rejected",
+                    json!({
+                        "product_id": product_id,
+                        "deposit_id": deposit.id,
+                        "chain_id": deposit.chain_id,
+                        "state": "rejected",
+                        "route": deposit.route.as_deref(),
+                        "reason": RejectReason::ProductRefused.code(),
+                        "product_reason": receipt["reason"],
+                    }),
+                )],
+                effects: db::TransitionEffects::default(),
+            })
+        }
+        SettlementAnswer::PayloadMismatch422 => {
+            db::mark_payload_mismatch(pool, deposit.id).await?;
+            Ok(invariant_result("settlement_payload_mismatch"))
+        }
+        SettlementAnswer::Unknown { status, body } => {
+            db::mark_sent_with_receipt(
+                pool,
+                deposit.id,
+                &json!({"status": "unknown", "http_status": status, "body": body}),
+            )
+            .await?;
+            Ok(StepResult::new(
+                StepOutcome::Retry {
+                    error: RetryError::Transient,
+                },
+                json!({
+                    "outcome": "retry",
+                    "error": "unknown_settlement_response",
+                    "status": status,
+                    "body": body,
+                }),
+            ))
         }
     }
 }
@@ -322,7 +346,7 @@ impl SettleStep {
 #[async_trait]
 impl Step for SettleStep {
     async fn run(&self, deposit: &db::Deposit) -> StepResult {
-        let result = match self.run_inner(deposit).await {
+        match self.run_inner(deposit).await {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(
@@ -340,38 +364,12 @@ impl Step for SettleStep {
                     json!({"outcome": "retry", "error": error.code()}),
                 )
             }
-        };
-        let outcome = match result.outcome {
-            StepOutcome::Advance | StepOutcome::AdoptProductAnswer { credited: true } => "accepted",
-            StepOutcome::Reject(_) | StepOutcome::AdoptProductAnswer { credited: false } => {
-                "rejected"
-            }
-            StepOutcome::Retry { .. } => "retry",
-            StepOutcome::Wait {
-                reason: WaitReason::ProductProcessing,
-            } => "processing",
-            StepOutcome::Wait {
-                reason: WaitReason::Paused,
-            } => "paused",
-            StepOutcome::Wait {
-                reason: WaitReason::FlushNotConfirmed,
-            } => "waiting",
-            StepOutcome::Wait {
-                reason: WaitReason::Finality,
-            } => "finality",
-        };
-        metrics::counter!(
-            "topup_settlement_outcomes_total",
-            "outcome" => outcome,
-            "producer_enabled" => "true",
-        )
-        .increment(1);
-        result
+        }
     }
 }
 
 #[derive(Debug)]
-enum SettleStepError {
+pub(crate) enum SettleStepError {
     Database(sqlx::Error),
     MissingAccount,
     MissingAddress,
@@ -401,7 +399,7 @@ impl SettleStepError {
         }
     }
 
-    const fn code(&self) -> &'static str {
+    pub(crate) const fn code(&self) -> &'static str {
         match self {
             Self::Database(_) => "settlement_database_error",
             Self::MissingAccount => "settlement_account_missing",
