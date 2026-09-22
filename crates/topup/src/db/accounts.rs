@@ -10,6 +10,8 @@ pub struct Account {
     pub product_id: Uuid,
     /// Product-provided account identifier.
     pub external_id: String,
+    /// Workspace lifecycle state (`active` or `closed`).
+    pub status: String,
     /// Runtime pause scopes.
     pub paused_scopes: Vec<String>,
 }
@@ -34,7 +36,7 @@ pub async fn create_account(pool: &PgPool, account: &NewAccount) -> Result<Accou
         r#"
         INSERT INTO accounts (id, product_id, external_id, paused_scopes)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, product_id, external_id, paused_scopes
+        RETURNING id, product_id, external_id, status, paused_scopes
         "#,
         account.id,
         account.product_id,
@@ -49,7 +51,7 @@ pub async fn create_account(pool: &PgPool, account: &NewAccount) -> Result<Accou
 pub async fn get_account(pool: &PgPool, id: Uuid) -> Result<Option<Account>, sqlx::Error> {
     sqlx::query_as!(
         Account,
-        "SELECT id, product_id, external_id, paused_scopes FROM accounts WHERE id = $1",
+        "SELECT id, product_id, external_id, status, paused_scopes FROM accounts WHERE id = $1",
         id
     )
     .fetch_optional(pool)
@@ -68,7 +70,7 @@ pub async fn set_account_paused_scopes(
         UPDATE accounts
         SET paused_scopes = $2
         WHERE id = $1
-        RETURNING id, product_id, external_id, paused_scopes
+        RETURNING id, product_id, external_id, status, paused_scopes
         "#,
         id,
         paused_scopes
