@@ -243,4 +243,82 @@ mod tests {
             .map_err(|()| "settlement signature must verify")?;
         Ok(())
     }
+
+    fn signed_message<'a>(
+        vector: &'a serde_json::Value,
+        target_uri: &'a str,
+        body: &'a [u8],
+    ) -> SignedMessage<'a> {
+        let header = |name: &str| vector["headers"][name].as_str();
+        SignedMessage {
+            method: vector["method"].as_str().unwrap_or_default(),
+            target_uri,
+            content_digest: header("content-digest").unwrap_or_default(),
+            idempotency_key: header("idempotency-key"),
+            signature_input: header("signature-input").unwrap_or_default(),
+            signature: header("signature").unwrap_or_default(),
+            body,
+        }
+    }
+
+    /// Requests signed by the Python SDK (`sdk/python/tests/vectors.py`) verify with the shared
+    /// verifier, and this module rebuilds the same `@target-uri` from their `Host` and target.
+    #[test]
+    fn python_sdk_signatures_verify() -> Result<(), Box<dyn Error>> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/rfc9421-python-signer.json"
+        ))?;
+        let key = VerificationKey::from_base64(
+            fixture["keyid"].as_str().ok_or("keyid")?.to_owned(),
+            fixture["public_key"].as_str().ok_or("public_key")?,
+        )?;
+        let other_key = SigningKey::from_bytes(&[9; 32]).verifying_key();
+        let created = fixture["created"].as_i64().ok_or("created")?;
+        let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
+        assert_eq!(vectors.len(), 5);
+        assert!(
+            vectors
+                .iter()
+                .any(|vector| vector["headers"]["signature-input"]
+                    .as_str()
+                    .is_some_and(|input| input.contains(";nonce=\""))),
+            "the fixture must cover the nonce parameter"
+        );
+
+        for vector in vectors {
+            let name = vector["name"].as_str().ok_or("name")?;
+            let mut headers = HeaderMap::new();
+            let host = vector["headers"]["host"].as_str().ok_or("host")?;
+            headers.insert(HOST, host.parse()?);
+            let target: Uri = vector["target"].as_str().ok_or("target")?.parse()?;
+            let target_uri = target_uri(&target, &headers).map_err(|()| "target URI")?;
+            assert_eq!(
+                Some(target_uri.as_str()),
+                vector["target_uri"].as_str(),
+                "{name}"
+            );
+            let body = vector["body"].as_str().ok_or("body")?.as_bytes();
+            let message = |body| signed_message(vector, &target_uri, body);
+
+            let verified =
+                http_signature::verify(&message(body), &key.kid, &key.key, created + 300)
+                    .map_err(|_| format!("{name}: Python signature must verify"))?;
+            assert_eq!(verified.keyid, "sdk-vector/v1", "{name}");
+            assert_eq!(verified.created, created, "{name}");
+
+            assert!(
+                http_signature::verify(&message(body), &key.kid, &key.key, created + 301).is_err(),
+                "{name}: stale signature must fail"
+            );
+            assert!(
+                http_signature::verify(&message(b"altered"), &key.kid, &key.key, created).is_err(),
+                "{name}: altered body must fail"
+            );
+            assert!(
+                http_signature::verify(&message(body), &key.kid, &other_key, created).is_err(),
+                "{name}: wrong key must fail"
+            );
+        }
+        Ok(())
+    }
 }

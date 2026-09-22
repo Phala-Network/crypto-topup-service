@@ -608,6 +608,17 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let delivery_worker = match topup::outbox::DeliveryWorker::new(
+        pool.clone(),
+        Arc::new(signer.clone()),
+        topup::outbox::DeliveryConfig::default(),
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure webhook delivery");
+            return ExitCode::FAILURE;
+        }
+    };
     match topup::reconciler::frozen_chains(&pool, &routes).await {
         Ok(frozen) => {
             for chain_id in frozen {
@@ -774,6 +785,10 @@ async fn run(args: &RunArgs) -> ExitCode {
     let expiry_task = tokio::spawn(async move {
         expiry_worker.run(expiry_cancellation).await;
     });
+    let (delivery_shutdown, delivery_shutdown_receiver) = tokio::sync::watch::channel(false);
+    let delivery_task = tokio::spawn(async move {
+        delivery_worker.run(delivery_shutdown_receiver).await;
+    });
     let mut flusher_handles = Vec::with_capacity(flusher_tasks.len());
     for task in flusher_tasks {
         let flusher_cancellation = cancellation.child_token();
@@ -843,6 +858,8 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     tracing::info!("shutdown requested; finishing in-flight service work");
     cancellation.cancel();
+    // A closed receiver means the worker already stopped, which the join below reports.
+    let _ = delivery_shutdown.send(true);
 
     if !api_finished {
         match api_task.await {
@@ -890,6 +907,10 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     if let Err(error) = expiry_task.await {
         tracing::error!(%error, "rate-lock expiry task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if let Err(error) = delivery_task.await {
+        tracing::error!(%error, "webhook delivery task failed during shutdown");
         clean_shutdown = false;
     }
     for task in flusher_handles {

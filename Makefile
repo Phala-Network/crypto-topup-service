@@ -1,4 +1,5 @@
-.PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image restore-drill deploy-check runbook-check
+.PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image \
+	restore-drill deploy-check runbook-check sdk-check sdk-generate sandbox-local
 
 build:
 	cargo build --workspace --locked
@@ -49,3 +50,12 @@ deploy-check:
 
 runbook-check:
 	deploy/runbooks/check.sh
+
+sdk-check:
+	$(MAKE) -C sdk/python sync check
+
+sdk-generate:
+	$(MAKE) -C sdk/python generate
+
+sandbox-local:
+	deploy/sandbox/run-local.sh

@@ -471,6 +471,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "expected three deposits, got {first:?}"
     );
     assert_deposit_counts(&database.app_pool, 3, 1).await?;
+    assert_unsupported_asset_events(&database.app_pool, account_id).await?;
     ensure!(
         db::get_cursor(&database.app_pool, CHAIN_ID).await? == Some(expected_cursor),
         "cursor did not advance past the skipped ERC-721 Transfer"
@@ -483,6 +484,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let duplicate = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(duplicate.inserted == 0, "duplicate logs inserted again");
     assert_deposit_counts(&database.app_pool, 3, 1).await?;
+    assert_unsupported_asset_events(&database.app_pool, account_id).await?;
 
     let cursor_before_failure = db::get_cursor(&database.app_pool, CHAIN_ID)
         .await?
@@ -541,6 +543,39 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
             Err(ChainError::ProviderUnhealthy)
         ),
         "provider must remain unhealthy after regression"
+    );
+    Ok(())
+}
+
+/// A deposit born `rejected(unsupported_asset)` emits exactly one `deposit.rejected` event.
+async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Result<()> {
+    let rows = sqlx::query(
+        r#"
+        SELECT event.payload
+        FROM outbox AS event
+        JOIN deposits AS deposit ON deposit.id = (event.payload->>'deposit_id')::uuid
+        WHERE event.event_type = 'deposit.rejected'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    ensure!(
+        rows.len() == 1,
+        "expected one deposit.rejected event, got {}",
+        rows.len()
+    );
+    let payload: Value = rows[0].try_get("payload")?;
+    let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(
+        payload["reason"] == "unsupported_asset",
+        "unexpected reason: {payload}"
+    );
+    ensure!(
+        payload["product_id"] == product_id.to_string(),
+        "event does not name the owning product: {payload}"
     );
     Ok(())
 }

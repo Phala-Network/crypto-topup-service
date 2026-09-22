@@ -1,5 +1,7 @@
 use alloy_primitives::Address as EvmAddress;
 use sqlx::PgPool;
+use topup_core::deposit::DepositState;
+use topup_core::identity::deposit_id;
 use uuid::Uuid;
 
 use super::deposits::{NewDeposit, insert_deposit_in};
@@ -50,6 +52,43 @@ pub struct ScanCommit {
     pub inserted: u64,
 }
 
+async fn insert_rejected_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deposit: &NewDeposit,
+) -> Result<(), sqlx::Error> {
+    let reason = deposit.reason.ok_or_else(|| {
+        sqlx::Error::Protocol("rejected deposit is missing its reason".to_owned())
+    })?;
+    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO outbox (id, event_type, payload, next_attempt_at)
+        SELECT $1, 'deposit.rejected',
+               jsonb_build_object(
+                   'product_id', account.product_id,
+                   'deposit_id', $2::uuid,
+                   'reason', $3::text
+               ),
+               now()
+        FROM accounts AS account
+        WHERE account.id = $4
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .bind(reason.code())
+    .bind(deposit.account_id)
+    .execute(&mut **transaction)
+    .await?;
+    if inserted.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(
+            "rejected deposit account does not exist".to_owned(),
+        ))
+    }
+}
+
 /// Returns the last completely committed block for a chain.
 pub async fn get_cursor(pool: &PgPool, chain_id: u64) -> Result<Option<u64>, sqlx::Error> {
     let chain_id = to_i64(chain_id, "cursors.chain_id")?;
@@ -84,6 +123,9 @@ pub async fn list_scan_addresses(
 }
 
 /// Commits deposits, backfill markers, and an optional cursor advance atomically.
+///
+/// A deposit born `rejected` (no route for its asset) never passes through a pump step, so its
+/// `deposit.rejected` event is written here, in the same transaction and only on first insert.
 pub async fn commit_scan(
     pool: &PgPool,
     chain_id: u64,
@@ -98,6 +140,9 @@ pub async fn commit_scan(
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
+            if deposit.state == DepositState::Rejected {
+                insert_rejected_event(&mut transaction, deposit).await?;
+            }
         }
     }
 
