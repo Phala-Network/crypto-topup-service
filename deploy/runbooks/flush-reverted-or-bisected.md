@@ -3,8 +3,8 @@
 ## Trigger
 
 Trigger on a `flushes.status='reverted'`, `FlushAlert::Reverted`, `IsolatedAddress`,
-`PlanningExcluded`, or repeated singleton estimation failure. PR #56 has no exact alert name on
-`main`.
+`PlanningExcluded`, or repeated singleton estimation failure, or on
+`TopupLoopStopped{loop="flusher"}` from PR #56. PR #56 has no dedicated reverted-flush alert.
 
 ## Impact and blast radius
 
@@ -14,17 +14,17 @@ affected token/address set.
 
 ## First 5 minutes
 
-The `flush` pause API is not an effective stop until [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61)
-lands. Record the intent, then stop the local service container and/or have the Finance Safe revoke
-`OPERATOR_ROLE`. Revocation is required if the operator itself must be prevented from sending.
+**Gap:** the `flush` pause scope is recorded by the API but the flusher does not honor it until
+[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) (C7b) lands; it is not a
+stop. The verified manual stop is to stop the service container and, when the operator itself must
+be prevented from sending, have the Finance Safe revoke `OPERATOR_ROLE`. The signed pause below only
+records operator intent for customers and the audit trail.
 
 ```sh
 printf '%s' '{"scopes":["flush"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='planned' ORDER BY id; COMMIT;" > /tmp/planned-before-stop
-test -s /tmp/planned-before-stop
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-stop
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-stop
 docker compose -f deploy/docker-compose.staging.yml stop topup
 ```
 
@@ -36,11 +36,11 @@ cast calldata 'revokeRole(bytes32,address)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"
 cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 ```
 
-Verify that a non-empty planned set existed and no new row became `sent` after the stop:
+Verify that no new row became `sent` after the stop:
 
 ```sh
 sleep 15
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-stop
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-stop
 comm -13 /tmp/sent-before-stop /tmp/sent-after-stop > /tmp/new-sent-after-stop
 test ! -s /tmp/new-sent-after-stop
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<'SQL'
@@ -51,7 +51,7 @@ SELECT chain_id,token,address_id,reason,retry_after,failures
 FROM flush_exclusions ORDER BY updated_at DESC LIMIT 50;
 COMMIT;
 SQL
-cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '{status,blockNumber,transactionHash,logs}'
+cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,transactionHash,logs}'
 ```
 
 ## Decision tree
@@ -72,8 +72,8 @@ exclusions in SQL.
 ## Verification
 
 A new flush row confirms with finalized `Flushed` logs, unaffected addresses are processed, the
-isolated address balance is accounted for, and treasury delta equals stored events. The API pause
-record may be resumed, but it does not control the flusher until #61 lands.
+isolated address balance is accounted for, and treasury delta equals stored events. Resume the API
+pause record once the service is running again; it does not control the flusher until #61 lands.
 
 ## Rollback
 

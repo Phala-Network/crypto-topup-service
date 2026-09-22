@@ -1,8 +1,9 @@
 # Operations runbooks
 
-These runbooks implement architecture sections 14-16 and plan work package D5. PRs #56 (alerts),
-#57 (C12 admin operations), and #58 (D3 restore) were not on `main` when these commands were
-re-exercised on 2026-09-22.
+These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
+operations), C8 (reconciliation), C10 (rate locks), and A2 (deterministic deployment) are on `main`.
+PRs #56 (alerts) and #58 (D3 backup/restore) were still open when these commands were re-exercised
+on 2026-09-22.
 
 ## Required environment
 
@@ -13,6 +14,7 @@ ticket:
 ```sh
 export BASE_URL=https://topup.example.internal
 export ROUTE=phala-cloud-sepolia-pha-usd
+export ROUTE_FILE=deploy/config/routes/phala-cloud-sepolia-pha.yaml
 export CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example
 export RPC_PROVIDER_B_URL=https://provider-b.example
@@ -40,70 +42,77 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
   "$BASE_URL/v1/admin/routes/$ROUTE/pause"
 ```
 
-## Trigger map
+## Alert and symptom index
 
-PR #56 is not on `main`, so the canonical alert names do not yet exist under `deploy/alerts`.
-Until it merges, route the metric or symptom below to the named runbook.
+Alert names are from `deploy/alerts/prometheus-rules.yml` in PR #56, which is not yet on `main`.
+Until it merges, route the metric or symptom to the same runbook.
 
-| Metric or symptom | Runbook |
+| Alert (PR #56) or symptom | Runbook |
 |---|---|
-| Unauthorized operator transaction, consumed nonce without receipt | [Operator key compromise](operator-key-compromise.md) |
-| Two finalized providers disagree | [Provider disagreement](provider-disagreement.md) |
-| Stale/unavailable/divergent price sources | [Price outage](price-outage.md) |
-| Settlement age or repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
+| `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
+| `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
+| `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
+| `rate-lock expiry scan failed` log, overdue open locks (no alert in #56) | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
+| `TopupBackupTooOld` | [Backup age](backup-age.md) |
+| `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
+| `TopupDepositStateAgeExceeded{state="detected"}`, `topup_provider_disagreements_total` | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
+| `TopupDepositStateAgeExceeded{state="confirmed"}` (sanctions screen retrying) | [Provider disagreement](provider-disagreement.md) |
+| `TopupDepositStateAgeExceeded{state="cleared"}`, repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
 | Settlement HTTP `422`, `resend_forbidden=true` | [422 payload mismatch](payload-mismatch-422.md) |
+| `TopupLoopStopped{loop="flusher"}`, reverted flush, isolated forwarder | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
+| `TopupLoopStopped{loop="outbox"}`, `topup_outbox_backlog` growth | [Outbox backlog](outbox-backlog.md) |
+| `TopupLoopStopped{loop="pump"}` | [Stuck settlement](stuck-settlement.md) |
+| `TopupUnsupportedInflows`, rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
+| Unauthorized operator transaction, consumed nonce without receipt | [Operator key compromise](operator-key-compromise.md) |
 | Database loss or restore drill | [Restore](restore.md) |
 | Approved treasury migration | [Treasury change](treasury-change.md) |
-| Operator gas reserve below policy | [Gas refill](gas-refill.md) |
 | Approved refund ready for Safe execution | [Refund execution](refund-execution.md) |
-| Rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
-| Old undelivered outbox rows | [Outbox backlog](outbox-backlog.md) |
-| Finalized head minus cursor exceeds policy | [Scanner lag](scanner-lag.md) |
-| Reverted flush or isolated forwarder | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
-| Open lock exposure approaches a configured cap | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| Last successful backup older than 120 seconds | [Backup age](backup-age.md) |
 | Any customer-impacting incident | [Incident communication](incident-communication.md) |
 
-## Known command gaps on main
+## Known gaps on main
 
-- `topup restore-check` is present in `topup --help` but exits with `restore-check is not
-  implemented`.
-- Admin nudge, refund approve/record, and daily report are documented in OpenAPI but return HTTP
-  `501` owned by C12.
+- [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) (C7b): the flusher does not
+  honor the `flush` pause scope, so the API pause is not a stop. Runbooks stop the service and/or
+  have the Finance Safe revoke `OPERATOR_ROLE`, then check that no new flush row becomes `sent`.
+  The same issue tracks the application-role grant on `_sqlx_migrations`.
 - [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60): there is no CLI/config
-  path to derive or select `operator/v2`; Safe role rotation cannot be completed until the service
-  can start with the new operator derivation.
-- [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61): the flusher does not honor
-  the `flush` pause scope, and `topup_app` cannot read `_sqlx_migrations`. Runbooks use Safe role
-  revocation and/or service stop for flush control, and `topup restore-check` as the future
-  supported migration/restore entry point.
-- There is no deterministic factory deployment command on `main`; treasury migration stops before
-  deployment rather than substituting an ad hoc deployment.
-- Alert rules and stable metric names are pending PR #56. D3 encrypted backup/restore automation is
-  pending PR #58. C10 lock reservation operations are not on `main`.
+  path to derive or select `operator/v2`, so a replacement operator cannot be brought into service.
+- `topup restore-check` is listed by `topup --help` but exits `restore-check is not implemented`;
+  encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58.
+- Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
+  expiry worker, so that worker has no heartbeat alert yet.
+- `deploy/config/routes/phala-cloud-sepolia-pha.yaml` fails `topup route validate --template` on
+  `main` because C10 made `rate_lock.max_creations_per_minute` required and the template lacks it.
 
 ## Exercise status
 
-Only complete local scenarios carry a checked G2 box. Empty tables, HTTP 501 placeholders, and
-unreachable RPC probes are partial evidence and do not satisfy the gate.
+Exercises ran against a task-scoped PostgreSQL 16 container and local Anvil, with real `topup` CLI
+invocations or the repository's PostgreSQL/Anvil integration tests. A box is checked only when the
+runbook's service-side procedure ran end to end with seeded, non-empty data. Human-only Safe,
+Compliance, and publication steps are never exercised locally, and alert firing is not evidence
+for any runbook until #56 merges.
 
 | Runbook | Local status | G2 exercised once |
 |---|---|---|
 | Operator key compromise | Blocked on #60 and Finance Safe execution | [ ] |
-| Provider disagreement | Partial; blocked on a dual-provider evidence fixture | [ ] |
+| Provider disagreement | Partial: sanctions truth table; chain-evidence fixture missing | [ ] |
 | Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
-| Stuck settlement | Blocked on #57 and a mock product scenario | [ ] |
-| 422 payload mismatch | Complete PostgreSQL/mock-product integration scenario | [x] |
-| Restore | Blocked on #58 | [ ] |
+| Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |
+| 422 payload mismatch | Complete: 422, no resend, GET-first adoption with the mock product | [x] |
+| Restore | Partial: post-restore gate; blocked on #58 | [ ] |
 | Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
 | Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
-| Refund execution | Blocked on #57 and Safe execution | [ ] |
-| Rejected funds at treasury | Blocked on #57 and Compliance/Safe disposition | [ ] |
+| Refund execution | Complete: request, approve, record, finality-checked confirm | [x] |
+| Rejected funds at treasury | Partial: seeded report; Compliance/Safe work remains | [ ] |
 | Outbox backlog | Partial; blocked on a seeded delivered event and receiver | [ ] |
 | Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
-| Flush reverted or bisected | Complete PostgreSQL/Anvil/selective-revert scenario | [x] |
-| Lock exposure near cap | Partial non-zero aggregation; blocked on C10 enforcement | [ ] |
-| Backup age | Blocked on #58 backup/restore automation | [ ] |
+| Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
+| Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
+| Lock expiry worker failure | Partial: detection query; worker fault injection needs a running service | [ ] |
+| Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
+| Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
+| Backup age | Blocked on #58 backup automation | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |
 
 Run `make runbook-check` after editing any runbook. Exercise evidence is under

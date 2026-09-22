@@ -21,11 +21,11 @@ docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 ```
 
-The application role cannot read `_sqlx_migrations`; that grant is tracked in
-[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61). Never place owner or
-migration credentials in the app container to bypass this boundary. The supported check will be
-`topup restore-check`, but current `main` exits `restore-check is not implemented`; D3 is pending in
-#58.
+**Gap:** `topup restore-check` is the supported read-only entry point for the restored schema and
+migration state, but on `main` it exits `restore-check is not implemented` (D3, PR #58). Do not
+substitute a `_sqlx_migrations` query: the application role has no grant on it until
+[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) lands, and owner or migration
+credentials must never be placed in the service container to work around that.
 
 ## Decision tree
 
@@ -38,9 +38,18 @@ migration credentials in the app container to bypass this boundary. The supporte
 **HUMAN-ONLY:** execute D3's reviewed `deploy/RESTORE.md` once #58 merges. This runbook delegates
 restore execution to that procedure. Current `main` does not contain the encrypted key fallback,
 WAL fetch, throwaway-CVM drill, or implemented restore check, so it intentionally stops rather than
-inventing commands or using database-owner credentials in the app container.
+inventing commands or using database-owner credentials in the service container.
 
-After restore, run read-only reconciliation:
+With PostgreSQL restored and the service still stopped, run the architecture section 13 restore
+gate from C8. It `GET`s the product for every deposit at or beyond `cleared`, adopts the product's
+answer, and exits non-zero while any settlement is incomplete. Repeat until it exits `0`; never
+resume traffic on a failing gate:
+
+```sh
+docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconcile --once --post-restore --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+```
+
+Then review the restored state read-only:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,s.key,s.status,s.resend_forbidden FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state IN ('cleared','credited','swept') ORDER BY d.updated_at; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; COMMIT;"
@@ -48,8 +57,9 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT 
 
 ## Verification
 
-Require an implemented `topup restore-check`, clean GET-first adoption, no duplicate credit, RPO
-and RTO evidence, attestation verification, and a human review before traffic resumes.
+Require `topup reconcile --once --post-restore` to exit `0`, no open `post_restore_settlement`
+finding, an implemented `topup restore-check` once D3 lands, no duplicate credit, RPO and RTO
+evidence, attestation verification, and a human review before traffic resumes.
 
 ## Rollback
 

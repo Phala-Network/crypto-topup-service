@@ -2,8 +2,9 @@
 
 ## Trigger
 
-Trigger when a `cleared` deposit exceeds route `stuck_after_s`, a settlement remains `sent`, or the
-product repeatedly answers `processing`/`409`.
+Trigger on `TopupDepositStateAgeExceeded{state="cleared"}` (PR #56: a deposit exceeded route
+`alerts.stuck_after_s`), a settlement that remains `sent`, or a product that repeatedly answers
+`processing`/`409`.
 
 ## Impact and blast radius
 
@@ -30,13 +31,13 @@ Pause only for a systemic product fault; for one deposit, allow GET-first recove
 
 ## Remediation
 
-The documented nudge endpoint exists but returns C12 HTTP `501` on `main`; do not update
-`next_attempt_at` directly. Record this gap and let the pump retry. A signed probe is:
+Nudge the deposit to set `next_attempt_at=now()` and append audit evidence; do not update the row
+directly:
 
 ```sh
 : > /tmp/empty
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge" /tmp/empty "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl -sS -X POST -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/empty "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
+curl --fail-with-body -sS -X POST -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/empty "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
 ```
 
 ## Verification

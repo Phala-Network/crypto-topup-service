@@ -3,8 +3,8 @@
 ## Trigger
 
 Trigger on an operator transaction not linked to a `flushes` row, an unexpected pending nonce,
-`MissingConsumedReceipt`, or evidence that operator key material was exposed. PR #56 has not
-defined an exact alert name on `main`.
+`MissingConsumedReceipt`, or evidence that operator key material was exposed. PR #56 defines no
+dedicated alert; an unexplained drop behind `TopupOperatorGasReserveLow` is a common first signal.
 
 ## Impact and blast radius
 
@@ -29,16 +29,15 @@ cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATO
 cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_B_URL"
 ```
 
-Both calls must return `false`. If Safe execution is delayed, stop the service container as an
-additional local control, but do not treat that as a substitute for revocation:
+Both calls must return `false`; do not begin any other remediation before the Safe revocation is
+executed. Then stop the service container as an additional local control while provisioning the
+replacement, and confirm that no new flush row became `sent` after the stop:
 
 ```sh
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='planned' ORDER BY id; COMMIT;" > /tmp/planned-before-stop
-test -s /tmp/planned-before-stop
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-stop
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-stop
 docker compose -f deploy/docker-compose.staging.yml stop topup
 sleep 15
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" -c "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-stop
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-stop
 comm -13 /tmp/sent-before-stop /tmp/sent-after-stop > /tmp/new-sent-after-stop
 test ! -s /tmp/new-sent-after-stop
 ```

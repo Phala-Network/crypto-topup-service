@@ -2,8 +2,8 @@
 
 ## Trigger
 
-Trigger when the operator native balance falls below the configured gas reserve or cannot cover a
-bounded flush at the configured fee cap. PR #56 alert names are not on `main`.
+Trigger on `TopupOperatorGasReserveLow` (PR #56: operator balance below 0.001 native token for
+five minutes) or when the balance cannot cover a bounded flush at the configured fee cap.
 
 ## Impact and blast radius
 
@@ -26,9 +26,9 @@ SQL
 ```
 
 If the balance cannot fund the next bounded attempt, stop the `topup` service container to prevent
-fee-estimation/send churn. The signed admin body `{"scopes":["flush"]}` may record operator intent,
-but it is not an effective flusher stop until
-[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) lands. Revoke
+fee-estimation/send churn. **Gap:** the signed admin body `{"scopes":["flush"]}` records operator
+intent but is not a flusher stop until
+[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) (C7b) lands. Revoke
 `OPERATOR_ROLE` through the Finance Safe if a chain-level stop is required.
 
 ## Decision tree
@@ -43,7 +43,7 @@ but it is not an effective flusher stop until
 approved amount. Record the Safe transaction hash and do not send from a personal key.
 
 ```sh
-cast receipt "$SAFE_TRANSACTION_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '{status,blockNumber,transactionHash}'
+cast receipt "$SAFE_TRANSACTION_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,transactionHash}'
 cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 ```
 

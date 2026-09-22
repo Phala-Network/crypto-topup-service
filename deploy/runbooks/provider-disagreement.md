@@ -2,8 +2,11 @@
 
 ## Trigger
 
-Trigger when the two configured providers return different finalized block hashes or log evidence,
-or when sanctions screening is unavailable or reports a hit. PR #56 alert names are not on `main`.
+Trigger when the two configured providers return different finalized block hashes or log evidence
+(`topup_provider_disagreements_total` in PR #56, which defines no dedicated alert), when
+`TopupDepositStateAgeExceeded{state="detected"}` fires, or when sanctions screening is unavailable or
+reports a hit (screening runs in `confirmed → cleared`, so an unavailable screen shows as
+`TopupDepositStateAgeExceeded{state="confirmed"}`).
 
 ## Impact and blast radius
 
@@ -13,32 +16,47 @@ has different precedence: any provider returning `Sanctioned` rejects the deposi
 
 ## First 5 minutes
 
+Compare both providers and read the latest step evidence for waiting deposits. Rows in `detected`
+carry chain evidence; rows in `confirmed` carry the per-provider sanctions answers:
+
 ```sh
-printf '%s' '{"scopes":["settlement"]}' > /tmp/pause.json
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '{number,hash}'
-cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '{number,hash}'
+cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {number,hash}'
+cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '(.data // .) | {number,hash}'
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<'SQL'
 BEGIN TRANSACTION READ ONLY;
-SELECT d.id,d.tx_hash,d.log_index,d.block_number,d.block_hash,d.state,d.updated_at,t.evidence
+SELECT d.id,d.tx_hash,d.log_index,d.block_number,d.block_hash,d.state,d.attempt,d.updated_at,
+       t.evidence
 FROM deposits d
 LEFT JOIN LATERAL (
   SELECT evidence FROM transitions WHERE deposit_id=d.id ORDER BY created_at DESC LIMIT 1
 ) t ON true
-WHERE d.chain_id=:chain_id AND d.state='detected'
+WHERE d.chain_id=:chain_id AND d.state IN ('detected','confirmed')
 ORDER BY d.updated_at LIMIT 50;
+SELECT id,state,reason,from_address,updated_at FROM deposits
+WHERE chain_id=:chain_id AND state='rejected' AND reason='sanctioned'
+ORDER BY updated_at DESC LIMIT 20;
 COMMIT;
 SQL
 ```
 
+For chain-evidence disagreement only, pause settlement on the route while providers are
+investigated. Do not pause for a sanctions hit; the screen step rejects it regardless:
+
+```sh
+printf '%s' '{"scopes":["settlement"]}' > /tmp/pause.json
+mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
+```
+
 ## Decision tree
 
-- Same finalized height, different hash or log: retry with an alert; keep settlement paused.
+- Same finalized height, different hash or log: the step retries and the age alert fires; keep
+  settlement paused. Never pick a provider's answer by hand.
 - One chain provider behind but internally consistent: retry within provider SLA, then
   escalate/replace.
 - Any sanctions provider returns `Sanctioned`: the deposit is `rejected(sanctioned)` immediately,
-  even when a settlement pause exists; do not leave it waiting.
+  before pause state is considered and whatever the other provider says. There is no waiting state
+  for a sanctions hit; go to the compliance path below.
 - At least one sanctions provider returns `Unavailable` and neither reports `Sanctioned`: retry the
   screen step and alert after the route's age threshold.
 - Both sanctions providers return `Clear`: continue normal screening and apply pause state only

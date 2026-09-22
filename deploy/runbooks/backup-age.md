@@ -2,8 +2,9 @@
 
 ## Trigger
 
-Trigger when the last successful archived WAL/base backup is older than 120 seconds, WAL archiving
-fails, or `wal-g backup-list` cannot read storage. PR #56 and D3 are not on `main`.
+Trigger on `TopupBackupTooOld` (PR #56: successful backup marker older than 120 seconds), WAL
+archiving failures, or `wal-g backup-list` failing to read storage. The marker and encrypted
+backups come from D3 (PR #58), which is not on `main`.
 
 ## Impact and blast radius
 

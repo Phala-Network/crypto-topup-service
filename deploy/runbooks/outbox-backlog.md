@@ -2,8 +2,9 @@
 
 ## Trigger
 
-Trigger when undelivered outbox age or count exceeds policy, delivery attempts grow, or product
-notifications stop. PR #56 alert names are not on `main`.
+Trigger on `TopupLoopStopped{loop="outbox"}`, growth of `topup_outbox_backlog` or
+`topup_outbox_oldest_age_seconds` (PR #56 metrics without a dedicated alert), growing delivery
+attempts, or product reports that notifications stopped.
 
 ## Impact and blast radius
 

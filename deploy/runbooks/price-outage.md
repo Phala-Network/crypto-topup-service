@@ -2,8 +2,11 @@
 
 ## Trigger
 
-Trigger on stale primary/check observations, source request failures, excessive price deviation,
-FX guard failure, or stablecoin depeg. PR #56 metric and alert names are not on `main`.
+Trigger on `TopupDepositStateAgeExceeded{state="detected"}` (quotes are taken in the
+`detected → confirmed` step), high
+`topup_price_deviation_basis_points` or `topup_fx_deviation_basis_points` (PR #56 metrics without a
+dedicated alert), stale primary/check observations, source request failures, FX guard failure, or a
+stablecoin depeg.
 
 ## Impact and blast radius
 

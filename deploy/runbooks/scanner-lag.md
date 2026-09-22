@@ -2,8 +2,10 @@
 
 ## Trigger
 
-Trigger when finalized chain height minus `cursors.scanned_block` exceeds policy or scanner loop
-logs stop. PR #56 alert names are not on `main`.
+Trigger on `TopupScannerLag` (PR #56: no successful scan for 120 s or `topup_scanner_lag_blocks`
+above zero for five minutes) or `TopupLoopStopped{loop="scanner"}`. If the chain has a
+`reconciliation_blocks` row with `scope='chain'`, the scanner is paused on purpose: follow
+[Chain frozen](chain-frozen.md) instead.
 
 ## Impact and blast radius
 
@@ -13,8 +15,8 @@ the pump. Blast radius is one chain and every route on it.
 ## First 5 minutes
 
 ```sh
-cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '{number,hash}'
-cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '{number,hash}'
+cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {number,hash}'
+cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '(.data // .) | {number,hash}'
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT chain_id,scanned_block FROM cursors ORDER BY chain_id; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
 printf '%s' '{"scopes":["quotes","addresses"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
