@@ -37,7 +37,7 @@ struct Dependency {
 }
 
 #[test]
-fn core_has_no_runtime_dependencies() -> Result<(), Box<dyn Error>> {
+fn core_runtime_dependencies_are_pure_and_reviewed() -> Result<(), Box<dyn Error>> {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -66,11 +66,18 @@ fn core_has_no_runtime_dependencies() -> Result<(), Box<dyn Error>> {
         .find(|package| package.name == "topup-core")
         .ok_or("topup-core was not present in cargo metadata")?;
 
-    assert!(
-        core.dependencies.iter().all(|dependency| {
-            dependency.kind.as_deref() == Some("dev") || dependency.name == "serde"
-        }),
-        "topup-core runtime dependencies must be serde or explicitly reviewed as pure and I/O-free"
+    let mut runtime_dependencies: Vec<&str> = core
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.kind.is_none())
+        .map(|dependency| dependency.name.as_str())
+        .collect();
+    runtime_dependencies.sort_unstable();
+
+    assert_eq!(
+        runtime_dependencies,
+        ["secrecy", "serde"],
+        "topup-core runtime dependencies must be explicitly reviewed as pure and I/O-free"
     );
 
     Ok(())
