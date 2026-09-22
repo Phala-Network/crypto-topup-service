@@ -19,7 +19,7 @@ fn help_and_version_succeed() {
 
 #[test]
 fn placeholder_commands_fail_with_a_clear_message() {
-    let commands: &[&[&str]] = &[&["attest"], &["restore-check"]];
+    let commands: &[&[&str]] = &[&["restore-check"]];
 
     for args in commands {
         let output = topup(args);
@@ -53,6 +53,51 @@ fn run_requires_runtime_configuration() {
     assert!(
         stdout.contains("DATABASE_URL is required") || stderr.contains("DATABASE_URL is required")
     );
+}
+
+#[test]
+fn attest_requires_a_hex_nonce() {
+    let missing = topup(&["attest"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--nonce"));
+
+    let invalid = topup(&["attest", "--nonce", "not-hex"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("valid hexadecimal"));
+
+    let empty = topup(&["attest", "--nonce", ""]);
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("non-empty hexadecimal"));
+
+    let oversized = "ab".repeat(33);
+    let oversized = topup(&["attest", "--nonce", &oversized]);
+    assert!(!oversized.status.success());
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("at most 32 bytes"));
+}
+
+#[cfg(not(feature = "dev-signer"))]
+#[test]
+fn dev_attestation_is_not_available_without_the_feature() {
+    let output = topup(&["attest", "--nonce", "00", "--dev"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--dev'"));
+}
+
+#[cfg(feature = "dev-signer")]
+#[test]
+fn dev_attestation_prints_the_required_json_shape() {
+    let nonce = "ab".repeat(32);
+    let output = topup(&["attest", "--nonce", &nonce, "--dev"]);
+    assert!(output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
+    let object = value.as_object().expect("attestation should be an object");
+
+    assert_eq!(object.len(), 4);
+    assert_eq!(value["keyid"], "settlement/v1");
+    assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
+    assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
+    assert_eq!(value["quote"], "");
 }
 
 #[test]

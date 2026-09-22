@@ -12,3 +12,8 @@
         clippy::unwrap_used
     )
 )]
+
+mod dev_feature_guard;
+
+pub mod attestation;
+pub mod signer;
