@@ -11,6 +11,7 @@ use topup_core::{
 };
 use zeroize::Zeroizing;
 
+pub mod actor;
 pub mod dstack;
 
 #[cfg(any(test, feature = "dev-signer"))]
