@@ -14,7 +14,9 @@ The suite runs in two phases so the product can be configured in between.
 
 1. `prepare` connects to a disposable development chain (Anvil or equivalent) with an unlocked,
    funded account, deploys the A1 `ForwarderFactory` and two `MockERC20` tokens with `forge
-   create` (or adopts pre-deployed ones), and writes a manifest.
+   create` (or adopts pre-deployed ones), and writes a manifest. The chain must support
+   `anvil_mine`, and its `finalized` block must be at most 64 blocks behind `latest`, as with
+   Anvil's default of 32 slots per epoch: the suite mines 65 blocks to finalize a fixture log.
 2. Configure the product test environment from the manifest, start it, then `run` reads the same
    manifest, mints fresh Transfer logs for every request, and exercises the endpoint.
 
@@ -78,7 +80,8 @@ Run the product in an isolated test environment with:
 - its own RPC connection to the manifest chain, used to verify every cited log;
 - the per-deposit cap, the per-period cap, and the period passed to `run`;
 - the accounts below, or different ids passed with `--accepted-account-id`,
-  `--refused-account-id`, `--processing-account-id`, and `--period-account-id`.
+  `--refused-account-id`, `--processing-account-id`, `--period-account-id`, and
+  `--cap-account-id`.
 
 | Account | Required behavior |
 |---|---|
@@ -86,14 +89,28 @@ Run the product in an isolated test environment with:
 | `conformance-refused` | Every settlement returns `200 {"status":"rejected","reason":"…"}` without a ledger credit. |
 | `conformance-processing` | Every settlement returns `200 {"status":"processing"}`, retained for `GET`, without a ledger credit. |
 | `conformance-period` | Creditable, subject to the per-period cap, and empty when the run starts. |
+| `conformance-cap` | Creditable and empty when the run starts; used only by the per-deposit cap case. |
 
 The literal signing-key value `dev` uses the public test seed `[7; 32]`. A file may instead contain
 exactly 32 raw seed bytes or 64 hexadecimal characters. Never use a production settlement seed.
 
-Cap constraints: the per-deposit cap must be at least 201 minor units, the per-period cap at least
-2000 and at most 32 per-deposit caps, and the period at least 30 seconds. The per-period case must
-finish inside one period: if it takes longer, or the product's period resets during the run, the
-case is `incomplete`. Rolling windows avoid resets entirely.
+Caps are inclusive: an amount equal to a cap must be accepted. Cap constraints: the per-deposit
+cap must be at least 201 minor units, the per-period cap at least 2000, at least the per-deposit
+cap, and at most 32 per-deposit caps, and the period at least 30 seconds. If the per-period case
+takes longer than one period it is `incomplete`. The suite assumes the period does not reset
+while the case runs, which holds for a rolling window (the reference's choice); a product with
+fixed windows must not start the run near a reset point.
+
+### Transient chain reads
+
+A product must distinguish two kinds of evidence failure. When its receipt is mined and
+finalized and the cited log is missing, or its emitter, recipient, or amount differ, the evidence
+is wrong forever: answer `200 {"status":"rejected"}` and keep that record. When its RPC fails,
+has no receipt yet, or the block is not finalized yet, nothing is known: answer so that the
+service resends unchanged, for example `503`, and store nothing for the key. A stored rejection
+for a transient condition would permanently refuse a legitimate deposit whenever the product's
+RPC lags the service's. This follows section 11: any answer outside the contract makes the
+service resend the same payload.
 
 ### Required ledger observation hook
 
@@ -137,9 +154,9 @@ Every case carries the section 11 obligation it checks; protocol cases have `nul
 | `get_original` | — | `GET` returns the status, destination id, and the original payload. Semantic JSON equality is required; `payload_byte_equal` separately reports whether the raw `payload` member of the `GET` body equals the exact bytes the suite sent, with SHA-256 of both. |
 | `authentication` | 1 | Invalid signature bytes, a valid signature under the wrong `keyid`, an expired `created`, and a tampered body are each rejected with `401` or `403`. |
 | `idempotency_coverage` | 1 | A request whose signature omits `idempotency-key` is rejected. |
-| `per_deposit_cap` | 4 | `cap + 1` minor units is refused. |
+| `per_deposit_cap` | 4 | On the fresh cap account, `cap + 1` minor units is refused and exactly `cap` is accepted. |
 | `per_period_cap` | 4 | Distinct deposits credit the period account up to `cap − r` (`r` = the smaller cap); eight concurrent requests of `r` with distinct keys then yield exactly one acceptance, a further request of 1 is refused, and the ledger holds exactly the cap. This fails unless the cumulative check is atomic with the credit. |
-| `chain_evidence` | 5 | Five on-chain counter-examples, each claiming the approved token, the account's forwarder, and a consistent deposit id, are refused: a log index past the receipt's logs, a real mint by the unapproved token, a real mint to a different recipient, a claimed amount differing from the real one, and a real log not yet finalized. A finalized valid log is accepted. A product which only checks request fields accepts all five. |
+| `chain_evidence` | 5 | Four finalized on-chain counter-examples, each claiming the approved token, the account's forwarder, and a consistent deposit id, are refused: a log index past the receipt's logs, a real mint by the unapproved token, a real mint to a different recipient, and a claimed amount differing from the real one. A product which only checks request fields accepts them. A real, valid log that is not finalized yet must not be accepted or credited; unless that first answer was a terminal rejection, the suite then mines to finality and resends the identical request, which must be accepted. A finalized valid log is accepted, and the ledger reflects exactly the accepted credits. |
 | `deposit_identity` | 6 | A key other than `deposit:` plus the UUIDv5 recomputed from chain id, transaction hash, and log index is refused. |
 | `business_refusal` | — | The refused account yields a typed `200 rejected` with a reason and no ledger change. |
 | `processing` | — | The processing account yields a typed `200 processing`, retained by `GET`, with no ledger change. |
@@ -180,7 +197,8 @@ ids, ledger observations, hashes, transaction hashes, reasons, and assertion det
 same `topup_adapters::http_signature` module the service uses for inbound requests (any label, any
 parameter order, optional `alg="ed25519"`), stores the exact payload bytes it received, applies
 the cumulative per-period cap and the credit in one critical section (one transaction with a row
-lock in PostgreSQL), verifies every cited log against its own RPC, and exposes the ledger hook.
+lock in PostgreSQL), verifies every cited log against its own RPC (answering `503` and storing
+nothing when the chain read is transient), and exposes the ledger hook.
 
 ```sh
 cargo run --locked -p topup-conformance --all-features --bin topup-conformance-reference -- \
@@ -214,7 +232,8 @@ assert that each variant fails exactly the listed cases and passes every other c
 
 The integration tests in `crates/conformance/tests/reference.rs` start their own Anvil and are
 skipped with a message when `anvil` or `forge` is missing; the PostgreSQL case additionally needs
-`MIGRATE_DATABASE_URL`. In-process tests model a restart by stopping the server and serving the
+`MIGRATE_DATABASE_URL`. With `CONFORMANCE_REQUIRE_TOOLS=1`, as in CI, a missing tool or database
+fails the test instead. In-process tests model a restart by stopping the server and serving the
 same storage again; the PostgreSQL case reconnects with a fresh pool.
 
 The production `Dockerfile` excludes both conformance binaries. They are integration and CI tools;

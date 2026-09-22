@@ -82,6 +82,7 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       MIGRATE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      CONFORMANCE_REQUIRE_TOOLS: "1"
     services:
       postgres:
         image: postgres:16
