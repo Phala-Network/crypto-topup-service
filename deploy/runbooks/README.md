@@ -83,9 +83,6 @@ Until it merges, route the metric or symptom to the same runbook.
   path to derive or select `operator/v2`, so a replacement operator cannot be brought into service.
   Until then, stopping the service halts crediting on every route, so the compromise runbook pauses
   `flush` and stops the service only for a suspected CVM compromise.
-- `topup restore-check` is listed by `topup --help` but exits `restore-check is not implemented`;
-  encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58. The restore
-  runbook reads `_sqlx_migrations` with the application role instead.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
 - [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`
@@ -107,7 +104,7 @@ for any runbook until #56 merges.
 | Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
 | Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |
 | 422 payload mismatch | Complete: 422, no resend, GET-first adoption with the mock product | [x] |
-| Restore | Partial: post-restore gate; blocked on #58 | [ ] |
+| Restore | Partial: local `deploy/local/restore-drill.sh` controlled and crash drills pass; staging drill pending | [ ] |
 | Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
 | Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
 | Refund execution | Complete: request, approve, record, finality-checked confirm | [x] |

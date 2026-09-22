@@ -29,9 +29,8 @@ number of `*.up.sql` files in `crates/topup/migrations` at the release's source 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1; SELECT count(*) AS applied,count(*) FILTER (WHERE NOT success) AS failed FROM _sqlx_migrations; COMMIT;"
 ```
 
-Never place owner or migration credentials in the service container. **Gap:** `topup
-restore-check` is listed by the CLI but exits `restore-check is not implemented` until D3 (PR #58)
-lands; use the query above until then.
+Never place owner or migration credentials in the service container. `topup restore-check` runs in
+its dedicated tools service with owner credentials and checks the same migration state in full.
 
 ## Decision tree
 
@@ -41,15 +40,22 @@ lands; use the query above until then.
 
 ## Remediation
 
-**HUMAN-ONLY:** execute D3's reviewed `deploy/RESTORE.md` once #58 merges. This runbook delegates
-restore execution to that procedure. Current `main` does not contain the encrypted key fallback,
-WAL fetch, throwaway-CVM drill, or implemented restore check, so it intentionally stops rather than
-inventing commands or using database-owner credentials in the service container.
+**HUMAN-ONLY:** execute `deploy/RESTORE.md`: authorize the replacement CVM for the original app id,
+derive the retained backup keys, fetch the base backup, and replay encrypted WAL. This runbook
+delegates restore execution to that procedure.
 
-With PostgreSQL restored and the service still stopped, run the architecture section 13 restore
-gate from C8. It `GET`s the product for every deposit at or beyond `cleared`, adopts the product's
-answer, and exits non-zero while any settlement is incomplete. Repeat until it exits `0`; never
-resume traffic on a failing gate:
+With PostgreSQL restored and `topup`, `heartbeat`, and `backup` still stopped, run the restore
+check. It verifies migrations, WAL position, externally anchored RPO, and table counts, then runs
+the architecture section 13 restore gate from C8: it `GET`s the product for every deposit at or
+beyond `cleared`, adopts the product's answer, and exits non-zero while any settlement is
+incomplete:
+
+```sh
+docker compose -f deploy/docker-compose.staging.yml run --rm --no-deps restore-check topup restore-check --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" --expected-lsn "$EXPECTED_LSN" --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+```
+
+To repeat only the gate after an incident repair, still with the service stopped, run it until it
+exits `0`; never resume traffic on a failing gate:
 
 ```sh
 docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconcile --once --post-restore --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
@@ -63,8 +69,8 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT
 
 ## Verification
 
-Require `topup reconcile --once --post-restore` to exit `0`, no open `post_restore_settlement`
-finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
+Require `topup restore-check` to report `"status":"ok"` (or a repeated
+`topup reconcile --once --post-restore` to exit `0`), no open `post_restore_settlement` finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
 evidence, attestation verification, and a human review before traffic resumes.
 
 ## Rollback
