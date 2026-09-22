@@ -66,18 +66,24 @@ fn core_runtime_dependencies_are_pure_and_reviewed() -> Result<(), Box<dyn Error
         .find(|package| package.name == "topup-core")
         .ok_or("topup-core was not present in cargo metadata")?;
 
-    let mut runtime_dependencies: Vec<&str> = core
+    let allowed_runtime_dependencies = [
+        "alloy-primitives", // Pure fixed-width Ethereum values and keccak256.
+        "alloy-sol-types",  // Pure Solidity ABI encoding for deterministic salts.
+        "secrecy",          // Zeroizing storage for signer key material.
+        "serde",            // Pure schema serialization and deserialization.
+        "uuid",             // Pure UUIDv5 derivation.
+    ];
+    let unexpected: Vec<&str> = core
         .dependencies
         .iter()
-        .filter(|dependency| dependency.kind.is_none())
+        .filter(|dependency| dependency.kind.as_deref() != Some("dev"))
+        .filter(|dependency| !allowed_runtime_dependencies.contains(&dependency.name.as_str()))
         .map(|dependency| dependency.name.as_str())
         .collect();
-    runtime_dependencies.sort_unstable();
 
-    assert_eq!(
-        runtime_dependencies,
-        ["secrecy", "serde"],
-        "topup-core runtime dependencies must be explicitly reviewed as pure and I/O-free"
+    assert!(
+        unexpected.is_empty(),
+        "topup-core runtime dependencies must be explicitly reviewed as pure and I/O-free: {unexpected:?}"
     );
 
     Ok(())
