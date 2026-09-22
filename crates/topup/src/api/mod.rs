@@ -5,10 +5,12 @@ mod auth;
 mod error;
 mod handlers;
 pub mod models;
+mod rate_locks;
 mod repository;
 
 use std::sync::Arc;
 
+use crate::locks::QuoteProvider;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::middleware;
@@ -35,10 +37,12 @@ pub struct AppState {
     pub admin_key: VerificationKey,
     /// Current attestation provider.
     pub attestor: Arc<dyn Attestor>,
+    /// Validated current-price provider for rate-lock creation.
+    pub rate_lock_quotes: Arc<dyn QuoteProvider>,
 }
 
 impl AppState {
-    fn route_for_product<'a>(
+    pub(crate) fn route_for_product<'a>(
         &'a self,
         product: &crate::db::Product,
     ) -> Result<&'a RouteFile, error::ApiError> {
@@ -71,8 +75,11 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             handlers::create_deposit_address
         ))
         .routes(routes!(handlers::rotate_deposit_address))
-        .routes(routes!(handlers::create_rate_lock))
-        .routes(routes!(handlers::get_rate_lock, handlers::cancel_rate_lock))
+        .routes(routes!(rate_locks::create_rate_lock))
+        .routes(routes!(
+            rate_locks::get_rate_lock,
+            rate_locks::cancel_rate_lock
+        ))
         .routes(routes!(handlers::list_deposits))
         .routes(routes!(handlers::get_deposit))
         .routes(routes!(handlers::lookup_deposits))
@@ -176,6 +183,7 @@ mod tests {
             )
             .expect("admin key is valid"),
             attestor: Arc::new(UnavailableAttestor),
+            rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
         };
         let product = Product {
             id: Uuid::nil(),

@@ -242,7 +242,13 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   product receives exactly the `credit_minor` it showed the user.
 - Any other deposit to a lock address (late, wrong amount, second payment) is valued at spot
   and still credited; the product shows this rule before payment. `rate_lock.expired` is
-  emitted when a lock passes `expires_at` unconsumed.
+  emitted when a lock passes `expires_at` unconsumed. Eligibility uses `block_time`, so a
+  payment mined before `expires_at` but finalized after the expiry worker ran is still valued
+  at the lock price even though `rate_lock.expired` was already emitted and its exposure
+  released. A lock whose address has received any deposit, even a rejected one, can no longer
+  be cancelled (`409 pending_payment`).
+- Exposure counters sum `credit_minor` across routes, so every rate-lock route must use the
+  same `destination.unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to the persistent address" variant is deliberately not offered: matching
   a lock by amount alone is ambiguous, and the single-use address is the processor-standard
   answer.

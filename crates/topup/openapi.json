@@ -942,7 +942,57 @@
               }
             }
           },
-          "501": {
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
             "description": "",
             "content": {
               "application/json": {
@@ -1003,7 +1053,7 @@
               }
             }
           },
-          "501": {
+          "404": {
             "description": "",
             "content": {
               "application/json": {
@@ -1062,7 +1112,17 @@
               }
             }
           },
-          "501": {
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
             "description": "",
             "content": {
               "application/json": {
@@ -1847,7 +1907,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Remaining account exposure; `null` until C10 owns reservations.",
+            "description": "Remaining account exposure.",
             "minimum": 0
           },
           "reset_at": {
@@ -1856,7 +1916,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "Exposure reset time; `null` until C10 defines reservation windows."
+            "description": "Earliest open-lock expiry, when any exposure is reserved."
           },
           "route": {
             "type": "string",
@@ -1950,6 +2010,8 @@
           "price_scaled",
           "credit_minor",
           "expires_at",
+          "status",
+          "remaining_seconds",
           "eip681_uri",
           "salt_inputs"
         ],
@@ -1979,9 +2041,19 @@
             "type": "string",
             "description": "Locked eight-decimal scaled price."
           },
+          "remaining_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Whole seconds remaining while the lock is open.",
+            "minimum": 0
+          },
           "salt_inputs": {
             "$ref": "#/components/schemas/RateLockSaltInputs",
             "description": "Inputs encoded into the rate-lock salt."
+          },
+          "status": {
+            "type": "string",
+            "description": "Stable lifecycle status."
           }
         }
       },
