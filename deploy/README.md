@@ -278,9 +278,12 @@ SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 
 `infra-smoke.sh` tests migrations, route-template validation, simulator attestation, the running
 backup service, WAL-G dry-run commands, and PostgreSQL archive settings, then removes its containers
-and volumes. `service-smoke.sh` is opt-in and fails unless `topup run --help` exposes the unified
-`--bind` and `--route` options; when available it checks the TCP listener and `GET /openapi.json`.
-A skipped service smoke is not a successful service check.
+and volumes. `service-smoke.sh` is opt-in and requires `topup run --help` to expose the unified
+`--bind` and `--route` options. It starts the service with the application database role, local
+administrative verification key, mounted route, and scanner provider URL; then it checks the TCP
+listener, `GET /healthz` for HTTP 200, `GET /openapi.json`, and the running backup service. The local
+provider URL is deliberately unreachable, exercising scanner retry behavior without contacting a
+real chain. A skipped service smoke is not a successful service check.
 
 ## Pinned upstream references
 

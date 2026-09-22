@@ -49,9 +49,9 @@ services:
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
-      RPC_PROVIDER_A_URL: ${RPC_PROVIDER_A_URL:-}
+      TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
       RPC_PROVIDER_A_API_KEY: ${RPC_PROVIDER_A_API_KEY:-}
-      RPC_PROVIDER_B_URL: ${RPC_PROVIDER_B_URL:-}
+      TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
       RPC_PROVIDER_B_API_KEY: ${RPC_PROVIDER_B_API_KEY:-}
       COINMETRICS_API_KEY: ${COINMETRICS_API_KEY:-}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
@@ -170,6 +170,7 @@ configs:
         rpc_providers: [provider-a, provider-b]
         contracts:
           forwarder_factory: "0x0000000000000000000000000000000000000000"
+          implementation: "0x0000000000000000000000000000000000000000"
           treasury: "0x0000000000000000000000000000000000000000"
         flush:
           schedule: "0 */6 * * *"

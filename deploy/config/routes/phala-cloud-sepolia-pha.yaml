@@ -6,6 +6,7 @@ chain:
   rpc_providers: [provider-a, provider-b]
   contracts:
     forwarder_factory: "0x0000000000000000000000000000000000000000"
+    implementation: "0x0000000000000000000000000000000000000000"
     treasury: "0x0000000000000000000000000000000000000000"
   flush:
     schedule: "0 */6 * * *"

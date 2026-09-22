@@ -22,6 +22,24 @@ if jq -e '.services.topup.environment | has("MIGRATE_DATABASE_URL")' "$rendered"
     exit 1
 fi
 
+jq -e '
+    .services.topup.command == [
+        "topup",
+        "run",
+        "--bind",
+        "0.0.0.0:8080",
+        "--route",
+        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
+    ]
+    and (.services.topup.environment | has("DATABASE_URL"))
+    and (.services.topup.environment | has("TOPUP_ADMIN_KID"))
+    and (.services.topup.environment | has("TOPUP_ADMIN_PUBLIC_KEY"))
+    and (.services.topup.environment | has("TOPUP_RPC_PROVIDER_A_URL"))
+' "$rendered" >/dev/null || {
+    echo "topup command or required runtime environment is misconfigured" >&2
+    exit 1
+}
+
 compare_config() {
     name=$1
     path=$2
