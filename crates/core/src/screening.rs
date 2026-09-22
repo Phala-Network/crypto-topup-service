@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use crate::money::AtomicAmount;
 use crate::route::ScreeningConfig;
 
@@ -146,6 +147,64 @@ impl Display for ParsePauseScopeError {
 
 impl Error for ParsePauseScopeError {}
 
+/// Screens a confirmed deposit for direct sanctions, amount bounds, and settlement pauses.
+///
+/// Checks are deliberately ordered as sanctions, bounds, then pause. A sanctions hit therefore
+/// rejects even when the amount is out of bounds or settlement is paused, and an out-of-bounds
+/// deposit rejects instead of waiting behind a pause. Only the `settlement` pause scope gates this
+/// step because it holds a deposit before product crediting; the other scopes govern their own
+/// operations.
+///
+/// The sanctions truth table is:
+///
+/// | Provider A | Provider B | Decision |
+/// | --- | --- | --- |
+/// | `Sanctioned` | `Sanctioned` | reject |
+/// | `Sanctioned` | `Clear` | reject |
+/// | `Sanctioned` | `Unavailable` | reject |
+/// | `Clear` | `Sanctioned` | reject |
+/// | `Clear` | `Clear` | continue |
+/// | `Clear` | `Unavailable` | retry |
+/// | `Unavailable` | `Sanctioned` | reject |
+/// | `Unavailable` | `Clear` | retry |
+/// | `Unavailable` | `Unavailable` | retry |
+#[must_use]
+pub fn screen(
+    amount: AtomicAmount,
+    sanctions: &SanctionsResult,
+    bounds: &Bounds,
+    account_scopes: &PauseScopes,
+    product_scopes: &PauseScopes,
+) -> StepOutcome {
+    if matches!(sanctions.provider_a, SanctionsAnswer::Sanctioned)
+        || matches!(sanctions.provider_b, SanctionsAnswer::Sanctioned)
+    {
+        return StepOutcome::Reject(RejectReason::Sanctioned);
+    }
+
+    if matches!(sanctions.provider_a, SanctionsAnswer::Unavailable)
+        || matches!(sanctions.provider_b, SanctionsAnswer::Unavailable)
+    {
+        return StepOutcome::Retry {
+            error: RetryError::SanctionsInconclusive,
+        };
+    }
+
+    if amount < bounds.min_atomic || amount > bounds.max_atomic {
+        return StepOutcome::Reject(RejectReason::OutOfBounds);
+    }
+
+    if account_scopes.contains(PauseScope::Settlement)
+        || product_scopes.contains(PauseScope::Settlement)
+    {
+        return StepOutcome::Wait {
+            reason: WaitReason::Paused,
+        };
+    }
+
+    StepOutcome::Advance
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, U256};
@@ -154,6 +213,25 @@ mod tests {
 
     fn amount(value: u32) -> AtomicAmount {
         AtomicAmount::new(U256::from(value))
+    }
+
+    fn sanctions(provider_a: SanctionsAnswer, provider_b: SanctionsAnswer) -> SanctionsResult {
+        SanctionsResult {
+            provider_a,
+            provider_b,
+            block_number: 21_000_000,
+        }
+    }
+
+    fn bounds() -> Bounds {
+        Bounds {
+            min_atomic: amount(10),
+            max_atomic: amount(20),
+        }
+    }
+
+    fn scopes(codes: &[&str]) -> PauseScopes {
+        PauseScopes::from_codes(codes.iter().copied()).expect("test scope codes must parse")
     }
 
     #[test]
@@ -225,5 +303,150 @@ mod tests {
             .expect_err("unknown scope must fail deserialization");
 
         assert!(error.to_string().contains("unknown variant `payments`"));
+    }
+
+    #[test]
+    fn sanctions_pair_truth_table_is_complete() {
+        use SanctionsAnswer::{Clear, Sanctioned, Unavailable};
+
+        let reject = StepOutcome::Reject(RejectReason::Sanctioned);
+        let retry = StepOutcome::Retry {
+            error: RetryError::SanctionsInconclusive,
+        };
+        let cases = [
+            (Sanctioned, Sanctioned, reject),
+            (Sanctioned, Clear, reject),
+            (Sanctioned, Unavailable, reject),
+            (Clear, Sanctioned, reject),
+            (Clear, Clear, StepOutcome::Advance),
+            (Clear, Unavailable, retry),
+            (Unavailable, Sanctioned, reject),
+            (Unavailable, Clear, retry),
+            (Unavailable, Unavailable, retry),
+        ];
+
+        for (provider_a, provider_b, expected) in cases {
+            assert_eq!(
+                screen(
+                    amount(15),
+                    &sanctions(provider_a, provider_b),
+                    &bounds(),
+                    &PauseScopes::default(),
+                    &PauseScopes::default(),
+                ),
+                expected,
+                "unexpected decision for {provider_a:?}/{provider_b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deposit_bounds_are_inclusive() {
+        let sanctions = sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Clear);
+        let bounds = bounds();
+        let no_pauses = PauseScopes::default();
+        let cases = [
+            (amount(10), StepOutcome::Advance),
+            (amount(20), StepOutcome::Advance),
+            (amount(9), StepOutcome::Reject(RejectReason::OutOfBounds)),
+            (amount(21), StepOutcome::Reject(RejectReason::OutOfBounds)),
+        ];
+
+        for (amount, expected) in cases {
+            assert_eq!(
+                screen(amount, &sanctions, &bounds, &no_pauses, &no_pauses),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_pause_on_account_or_product_waits() {
+        let sanctions = sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Clear);
+        let bounds = bounds();
+        let active = PauseScopes::default();
+        let paused = scopes(&["settlement"]);
+        let wait = StepOutcome::Wait {
+            reason: WaitReason::Paused,
+        };
+        let cases = [
+            (&active, &active, StepOutcome::Advance),
+            (&paused, &active, wait),
+            (&active, &paused, wait),
+            (&paused, &paused, wait),
+        ];
+
+        for (account_scopes, product_scopes, expected) in cases {
+            assert_eq!(
+                screen(
+                    amount(15),
+                    &sanctions,
+                    &bounds,
+                    account_scopes,
+                    product_scopes,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn non_settlement_pause_scopes_do_not_gate_screening() {
+        let non_settlement = scopes(&["quotes", "addresses", "flush", "refunds"]);
+
+        assert_eq!(
+            screen(
+                amount(15),
+                &sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Clear),
+                &bounds(),
+                &non_settlement,
+                &non_settlement,
+            ),
+            StepOutcome::Advance
+        );
+    }
+
+    #[test]
+    fn sanctions_are_evaluated_before_bounds_and_pause() {
+        assert_eq!(
+            screen(
+                amount(9),
+                &sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Sanctioned),
+                &bounds(),
+                &scopes(&["settlement"]),
+                &scopes(&["settlement"]),
+            ),
+            StepOutcome::Reject(RejectReason::Sanctioned)
+        );
+    }
+
+    #[test]
+    fn inconclusive_sanctions_are_evaluated_before_bounds_and_pause() {
+        assert_eq!(
+            screen(
+                amount(9),
+                &sanctions(SanctionsAnswer::Unavailable, SanctionsAnswer::Clear),
+                &bounds(),
+                &scopes(&["settlement"]),
+                &scopes(&["settlement"]),
+            ),
+            StepOutcome::Retry {
+                error: RetryError::SanctionsInconclusive,
+            }
+        );
+    }
+
+    #[test]
+    fn bounds_are_evaluated_before_pause() {
+        assert_eq!(
+            screen(
+                amount(21),
+                &sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Clear),
+                &bounds(),
+                &scopes(&["settlement"]),
+                &scopes(&["settlement"]),
+            ),
+            StepOutcome::Reject(RejectReason::OutOfBounds)
+        );
     }
 }
