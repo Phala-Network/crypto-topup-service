@@ -5007,9 +5007,9 @@ dependencies = [
  "sha2",
  "tokio",
  "topup-core",
- "uuid",
  "tracing",
  "url",
+ "uuid",
  "zeroize",
 ]
 
