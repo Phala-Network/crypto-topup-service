@@ -13,3 +13,4 @@
 )]
 
 pub mod db;
+pub mod outbox;

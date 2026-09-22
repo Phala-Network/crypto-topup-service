@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
@@ -17,6 +18,7 @@ use topup_adapters::signer::DevSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
 #[cfg(feature = "dev-signer")]
 use topup_core::{SecretKey32, Signer as _};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "topup", version, about = "Crypto top-up service")]
@@ -33,6 +35,10 @@ enum TopupCommand {
         #[command(subcommand)]
         command: RouteCommand,
     },
+    Outbox {
+        #[command(subcommand)]
+        command: OutboxCommand,
+    },
     Attest(AttestArgs),
     RestoreCheck,
 }
@@ -44,6 +50,21 @@ struct AttestArgs {
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
+}
+
+#[derive(Subcommand)]
+enum OutboxCommand {
+    Replay {
+        /// Replay one event by its stable webhook identifier.
+        #[arg(long, conflicts_with = "since", required_unless_present = "since")]
+        id: Option<Uuid>,
+        /// Replay events created at or after this RFC 3339 timestamp.
+        #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+        since: Option<String>,
+        /// Redeliver events that were already marked delivered.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -75,6 +96,9 @@ async fn main() -> ExitCode {
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
+        TopupCommand::Outbox {
+            command: OutboxCommand::Replay { id, since, force },
+        } => return replay_outbox(id, since.as_deref(), force).await,
         TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::RestoreCheck => Err("restore-check is not implemented"),
     };
@@ -136,6 +160,56 @@ fn print_attestation(
     let encoded = serde_json::to_string(&output).map_err(|_| "failed to encode attestation")?;
     println!("{encoded}");
     Ok(())
+}
+
+async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> ExitCode {
+    let selector = match (id, since) {
+        (Some(id), None) => topup::outbox::ReplaySelector::Id(id),
+        (None, Some(since)) => match DateTime::parse_from_rfc3339(since) {
+            Ok(value) => topup::outbox::ReplaySelector::Since(value.with_timezone(&Utc)),
+            Err(_) => {
+                tracing::error!("--since must be an RFC 3339 timestamp");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => {
+            tracing::error!("exactly one of --id or --since is required");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("DATABASE_URL is required for outbox replay");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reason = if force {
+        "manual CLI replay with delivered state reset"
+    } else {
+        "manual CLI replay of pending events"
+    };
+    match topup::outbox::replay(&pool, selector, force, "cli", reason).await {
+        Ok(count) => {
+            tracing::info!(count, force, "outbox replay scheduled");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to schedule outbox replay");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn migrate() -> ExitCode {
