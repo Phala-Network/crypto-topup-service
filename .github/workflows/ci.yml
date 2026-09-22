@@ -40,7 +40,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo clippy --workspace --all-targets --features dev-signer --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -55,7 +55,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --all-features
 
   conformance:
     runs-on: ubuntu-latest
@@ -116,10 +116,10 @@ jobs:
       - name: Check SQLx offline metadata
         env:
           SQLX_OFFLINE: false
-        run: cargo sqlx prepare --workspace --check -- --all-targets
+        run: cargo sqlx prepare --workspace --check -- --all-targets --all-features
       - name: Run PostgreSQL integration tests
         run: >-
-          cargo test --locked -p topup --features dev-signer
+          cargo test --locked -p topup --all-features
           --tests -- --nocapture
 
   deny:

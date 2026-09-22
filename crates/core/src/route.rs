@@ -246,6 +246,8 @@ pub struct AssetConfig {
     pub decimals: u8,
     /// Minimum on-chain balance considered for flushing.
     pub min_flush_atomic: AtomicAmount,
+    /// Minimum deposit amount eligible for a treasury refund.
+    pub min_refund_atomic: AtomicAmount,
 }
 
 /// Product ledger destination configuration.

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO accounts (id, product_id, external_id, paused_scopes)\n        VALUES ($1, $2, $3, $4)\n        RETURNING id, product_id, external_id, paused_scopes\n        ",
+  "query": "SELECT id, product_id, external_id, status, paused_scopes FROM accounts WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -20,24 +20,27 @@
       },
       {
         "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
         "name": "paused_scopes",
         "type_info": "TextArray"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Uuid",
-        "Text",
-        "TextArray"
+        "Uuid"
       ]
     },
     "nullable": [
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "67e8ad56a9dfe909ad97d7ca5644f15d608479dbb806504f0730bcb97a83fa42"
+  "hash": "c8c53e880a3ec07423d21ee972f015d0bb2fa5f57d67d04569999ab5d3c56133"
 }
