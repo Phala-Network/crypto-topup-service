@@ -19,7 +19,7 @@ use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
 use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
 use topup::scanner::{load_route_files, scan_once};
-use topup::steps::confirm::{ConfirmStep, NoStoredProductAnswers};
+use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{StepOutcome, WaitReason};
@@ -32,6 +32,15 @@ use uuid::Uuid;
 const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const CHAIN_ID: u64 = 31_337;
+
+struct MissingProductAnswer;
+
+#[async_trait]
+impl ProductLookup for MissingProductAnswer {
+    async fn get_by_key(&self, _key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
+        Ok(None)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordedRequest {
@@ -702,7 +711,7 @@ async fn run_confirm_scenario(
         Arc::clone(&primary_price),
         Some(Arc::clone(&check_price)),
         Some(Arc::clone(&fx_price)),
-        Arc::new(NoStoredProductAnswers),
+        Arc::new(MissingProductAnswer),
     );
     let pump = Pump::new(
         database.app_pool.clone(),
@@ -763,7 +772,7 @@ async fn run_confirm_scenario(
         primary_price,
         Some(check_price),
         Some(fx_price),
-        Arc::new(NoStoredProductAnswers),
+        Arc::new(MissingProductAnswer),
     );
     let result = lagging_confirm.run(&lagging_deposit).await;
     ensure!(

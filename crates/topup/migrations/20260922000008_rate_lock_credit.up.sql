@@ -5,7 +5,7 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM rate_locks WHERE consumed_by IS NULL) THEN
         RAISE EXCEPTION
-            'migration 20260922000007 requires every pre-existing rate lock to be consumed or removed';
+            'migration 20260922000008 requires every pre-existing rate lock to be consumed or removed';
     END IF;
 END;
 $$;

@@ -18,7 +18,7 @@ insertion APIs default `created_block` to zero, which is conservative: the first
 the full available chain history once before setting `backfilled` in the same transaction as the
 observed deposits.
 
-Migration `20260922000007_rate_lock_credit` refuses to run while a pre-existing rate lock remains
+Migration `20260922000008_rate_lock_credit` refuses to run while a pre-existing rate lock remains
 unconsumed because the frozen product credit cannot be reconstructed from the lock row without its
 route decimal configuration. Before upgrading, stop quote issuance, let open locks expire or cancel
 them in the product, reconcile that none received a payment, and remove those unconsumed rows. The

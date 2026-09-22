@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
@@ -16,6 +17,8 @@ use topup_adapters::pricing::binance::Binance;
 use topup_adapters::pricing::coinmetrics::CoinMetrics;
 use topup_adapters::pricing::kraken::Kraken;
 use topup_adapters::pricing::{Observation, PriceSource};
+use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, SettlementClient};
+use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::{PricingMode, RouteFile};
@@ -43,7 +46,7 @@ pub struct ProductAnswer {
     pub payload: Value,
 }
 
-/// Product lookup failure. C6 will adapt `SettlementClient::get_by_key` to this boundary.
+/// Product lookup failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductLookupError;
 
@@ -55,23 +58,83 @@ impl Display for ProductLookupError {
 
 impl Error for ProductLookupError {}
 
-/// Minimal GET-by-idempotency-key boundary shared with the future C6 settlement client.
+/// Minimal GET-by-idempotency-key boundary shared with the settlement client.
 #[async_trait]
 pub trait ProductLookup: Send + Sync {
     /// Returns the product's stored answer, when the key is known.
     async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError>;
 }
 
-/// Temporary runtime lookup used until C6 provides the signed settlement-client adapter.
-///
-/// Unit and integration tests inject a real mock. This implementation performs the required
-/// lookup call but has no external product client to query yet.
-pub struct NoStoredProductAnswers;
+/// Signed product lookup resolved from the deposit's owning product.
+pub struct SettlementProductLookup {
+    pool: PgPool,
+    signer: SignerHandle,
+    request_timeout: Duration,
+}
+
+impl SettlementProductLookup {
+    /// Creates a lookup using each product's configured settlement endpoint.
+    #[must_use]
+    pub const fn new(pool: PgPool, signer: SignerHandle, request_timeout: Duration) -> Self {
+        Self {
+            pool,
+            signer,
+            request_timeout,
+        }
+    }
+}
 
 #[async_trait]
-impl ProductLookup for NoStoredProductAnswers {
-    async fn get_by_key(&self, _key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
-        Ok(None)
+impl ProductLookup for SettlementProductLookup {
+    async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
+        let deposit_id = key
+            .strip_prefix("deposit:")
+            .ok_or(ProductLookupError)?
+            .parse::<Uuid>()
+            .map_err(|_| ProductLookupError)?;
+        let settlement_url = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT products.settlement_url
+            FROM deposits
+            JOIN accounts ON accounts.id = deposits.account_id
+            JOIN products ON products.id = accounts.product_id
+            WHERE deposits.id = $1
+            "#,
+        )
+        .bind(deposit_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| ProductLookupError)?
+        .ok_or(ProductLookupError)?;
+        let client =
+            SettlementClient::new(&settlement_url, self.signer.clone(), self.request_timeout)
+                .map_err(|_| ProductLookupError)?;
+        match client
+            .get_by_key(key)
+            .await
+            .map_err(|_| ProductLookupError)?
+        {
+            None => Ok(None),
+            Some(SettlementAnswer::Accepted {
+                destination_tx_id,
+                payload,
+            }) => Ok(Some(ProductAnswer {
+                accepted: true,
+                destination_tx_id: Some(destination_tx_id),
+                payload,
+            })),
+            Some(SettlementAnswer::Rejected { payload, .. }) => Ok(Some(ProductAnswer {
+                accepted: false,
+                destination_tx_id: None,
+                payload,
+            })),
+            Some(
+                SettlementAnswer::Processing { .. }
+                | SettlementAnswer::Conflict409
+                | SettlementAnswer::PayloadMismatch422
+                | SettlementAnswer::Unknown { .. },
+            ) => Err(ProductLookupError),
+        }
     }
 }
 

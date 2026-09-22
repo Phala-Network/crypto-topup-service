@@ -108,6 +108,13 @@ impl StepSet {
         self
     }
 
+    /// Replaces the step registered for `cleared` deposits.
+    #[must_use]
+    pub fn with_cleared(mut self, cleared: Box<dyn Step>) -> Self {
+        self.cleared = cleared;
+        self
+    }
+
     fn get(&self, state: DepositState) -> Option<&dyn Step> {
         match state {
             DepositState::Detected => Some(self.detected.as_ref()),
