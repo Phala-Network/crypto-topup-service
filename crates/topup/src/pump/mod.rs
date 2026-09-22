@@ -86,6 +86,13 @@ impl StepSet {
         }
     }
 
+    /// Replaces the step registered for `confirmed` deposits.
+    #[must_use]
+    pub fn with_confirmed(mut self, confirmed: Box<dyn Step>) -> Self {
+        self.confirmed = confirmed;
+        self
+    }
+
     /// Replaces the step registered for `cleared` deposits.
     #[must_use]
     pub fn with_cleared(mut self, cleared: Box<dyn Step>) -> Self {
@@ -120,7 +127,8 @@ impl NoopStepSet {
     }
 }
 
-struct NoopStep;
+/// Placeholder step that leaves a deposit waiting without external effects.
+pub struct NoopStep;
 
 #[async_trait]
 impl Step for NoopStep {

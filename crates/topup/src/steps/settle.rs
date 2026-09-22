@@ -225,6 +225,9 @@ impl SettleStep {
                             "destination_tx_id": receipt["destination_tx_id"],
                             "amount_minor": payload.amount_minor,
                             "unit": payload.unit,
+                            "price_scaled": payload.evidence.price_scaled,
+                            "price_scale": payload.evidence.price_scale,
+                            "valuation_at": payload.evidence.valuation_at,
                         }),
                     )],
                 })
@@ -285,6 +288,12 @@ impl SettleStep {
                 })
             }
             SettlementAnswer::PayloadMismatch422 => {
+                db::mark_sent_with_receipt(
+                    &self.pool,
+                    deposit.id,
+                    &json!({"status": "payload_mismatch"}),
+                )
+                .await?;
                 Ok(invariant_result("settlement_payload_mismatch"))
             }
             SettlementAnswer::Unknown { status, body } => {

@@ -527,6 +527,16 @@ async fn sent_row_gets_authoritative_answer_and_adopts_product_pricing() -> Resu
             .fetch_one(&context.app_pool)
             .await?;
             ensure!(event["amount_minor"] == "999");
+            ensure!(event["price_scaled"] == "33300000");
+            ensure!(event["price_scale"] == topup_core::money::PRICE_SCALE);
+            ensure!(
+                event["valuation_at"]
+                    .as_str()
+                    .context("event valuation timestamp")?
+                    .parse::<chrono::DateTime<Utc>>()?
+                    .timestamp_micros()
+                    == product_valuation.timestamp_micros()
+            );
             Ok(())
         })
     })
