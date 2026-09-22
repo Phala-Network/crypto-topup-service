@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Method, Request, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,6 +16,8 @@ use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, SignerError};
 use crate::signer::actor::SignerHandle;
 
 const SIGNATURE_LABEL: &str = "sig1";
+const RESPONSE_BODY_LIMIT: usize = 64 * 1024;
+const EVIDENCE_BODY_LIMIT: usize = 4 * 1024;
 const SIGNATURE_COMPONENTS: [&str; 4] = [
     "@method",
     "@target-uri",
@@ -39,13 +41,20 @@ pub enum SettlementAnswer {
     Accepted {
         /// Product-owned transaction identifier.
         destination_tx_id: String,
+        /// Product's immutable original settlement payload.
+        payload: Value,
     },
     /// The product has retained the request and is still processing it.
-    Processing,
+    Processing {
+        /// Product's immutable original settlement payload.
+        payload: Value,
+    },
     /// The product durably refused the credit.
     Rejected {
         /// Product-provided refusal reason.
         reason: String,
+        /// Product's immutable original settlement payload.
+        payload: Value,
     },
     /// Another request with this key is currently processing.
     Conflict409,
@@ -158,14 +167,14 @@ impl SettlementClient {
         })
     }
 
-    async fn send(
+    async fn signed_request(
         &self,
         method: Method,
         url: Url,
         key: &str,
         body: Vec<u8>,
         include_content_type: bool,
-    ) -> Result<reqwest::Response, SettlementClientError> {
+    ) -> Result<Request, SettlementClientError> {
         let created = unix_timestamp()?;
         let idempotency_key = structured_field_string(key)?;
         let content_digest = content_digest(&body);
@@ -196,10 +205,26 @@ impl SettlementClient {
         if include_content_type {
             request = request.header("content-type", "application/json");
         }
-        request
-            .send()
-            .await
-            .map_err(SettlementClientError::Transport)
+        request.build().map_err(SettlementClientError::Transport)
+    }
+
+    /// Builds a fully signed POST request without sending it.
+    ///
+    /// This keeps RFC 9421 interoperability tests independent of a network server.
+    pub async fn signed_post_request(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<Request, SettlementClientError> {
+        let body =
+            serde_json::to_vec(&request.payload).map_err(|_| SettlementClientError::Encode)?;
+        self.signed_request(
+            Method::POST,
+            self.endpoint.clone(),
+            &request.idempotency_key,
+            body,
+            true,
+        )
+        .await
     }
 }
 
@@ -209,18 +234,13 @@ impl SettlementApi for SettlementClient {
         &self,
         request: &SettlementRequest,
     ) -> Result<SettlementAnswer, SettlementClientError> {
-        let body =
-            serde_json::to_vec(&request.payload).map_err(|_| SettlementClientError::Encode)?;
+        let signed = self.signed_post_request(request).await?;
         let response = self
-            .send(
-                Method::POST,
-                self.endpoint.clone(),
-                &request.idempotency_key,
-                body,
-                true,
-            )
-            .await?;
-        parse_response(response).await
+            .client
+            .execute(signed)
+            .await
+            .map_err(SettlementClientError::Transport)?;
+        parse_response(response, Some(&request.payload), false).await
     }
 
     async fn get_by_key(
@@ -232,11 +252,18 @@ impl SettlementApi for SettlementClient {
             .map_err(|()| SettlementClientError::InvalidEndpoint)?
             .pop_if_empty()
             .push(key);
-        let response = self.send(Method::GET, url, key, Vec::new(), false).await?;
+        let signed = self
+            .signed_request(Method::GET, url, key, Vec::new(), false)
+            .await?;
+        let response = self
+            .client
+            .execute(signed)
+            .await
+            .map_err(SettlementClientError::Transport)?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        parse_response(response).await.map(Some)
+        parse_response(response, None, true).await.map(Some)
     }
 }
 
@@ -245,16 +272,19 @@ struct ProductAnswer {
     status: String,
     destination_tx_id: Option<String>,
     reason: Option<String>,
+    payload: Option<Value>,
 }
 
 async fn parse_response(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
+    fallback_payload: Option<&Value>,
+    payload_required: bool,
 ) -> Result<SettlementAnswer, SettlementClientError> {
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(SettlementClientError::Transport)?;
+    let (body, over_limit) = read_response_body(&mut response).await?;
+    if over_limit {
+        return Ok(unknown(status, &body, true));
+    }
     if status == StatusCode::CONFLICT {
         return Ok(SettlementAnswer::Conflict409);
     }
@@ -264,29 +294,69 @@ async fn parse_response(
     if status == StatusCode::OK
         && let Ok(answer) = serde_json::from_slice::<ProductAnswer>(&body)
     {
-        return match answer.status.as_str() {
-            "accepted" => Ok(answer
+        let payload = match answer.payload {
+            Some(payload) => Some(payload),
+            None if !payload_required => fallback_payload.cloned(),
+            None => None,
+        };
+        return match (answer.status.as_str(), payload) {
+            ("accepted", Some(payload)) => Ok(answer
                 .destination_tx_id
                 .filter(|value| !value.is_empty())
                 .map_or_else(
-                    || unknown(status, &body),
-                    |destination_tx_id| SettlementAnswer::Accepted { destination_tx_id },
+                    || unknown(status, &body, false),
+                    |destination_tx_id| SettlementAnswer::Accepted {
+                        destination_tx_id,
+                        payload,
+                    },
                 )),
-            "processing" => Ok(SettlementAnswer::Processing),
-            "rejected" => Ok(answer.reason.filter(|value| !value.is_empty()).map_or_else(
-                || unknown(status, &body),
-                |reason| SettlementAnswer::Rejected { reason },
-            )),
-            _ => Ok(unknown(status, &body)),
+            ("processing", Some(payload)) => Ok(SettlementAnswer::Processing { payload }),
+            ("rejected", Some(payload)) => {
+                Ok(answer.reason.filter(|value| !value.is_empty()).map_or_else(
+                    || unknown(status, &body, false),
+                    |reason| SettlementAnswer::Rejected { reason, payload },
+                ))
+            }
+            _ => Ok(unknown(status, &body, false)),
         };
     }
-    Ok(unknown(status, &body))
+    Ok(unknown(status, &body, false))
 }
 
-fn unknown(status: StatusCode, body: &[u8]) -> SettlementAnswer {
+async fn read_response_body(
+    response: &mut reqwest::Response,
+) -> Result<(Vec<u8>, bool), SettlementClientError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(SettlementClientError::Transport)?
+    {
+        let remaining = RESPONSE_BODY_LIMIT.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            let retained = chunk.get(..remaining).unwrap_or_default();
+            body.extend_from_slice(retained);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
+}
+
+fn unknown(status: StatusCode, body: &[u8], over_limit: bool) -> SettlementAnswer {
+    let original_len = body.len();
+    let retained = body
+        .get(..original_len.min(EVIDENCE_BODY_LIMIT))
+        .unwrap_or(body);
+    let mut body = String::from_utf8_lossy(retained).into_owned();
+    if over_limit {
+        body.push_str(" [response body exceeded 65536 bytes]");
+    } else if retained.len() < original_len {
+        body.push_str(" [response body truncated]");
+    }
     SettlementAnswer::Unknown {
         status: status.as_u16(),
-        body: String::from_utf8_lossy(body).into_owned(),
+        body,
     }
 }
 

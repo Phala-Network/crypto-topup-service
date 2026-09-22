@@ -227,6 +227,7 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
             },
             SettlementAnswer::Accepted {
                 destination_tx_id: "credit-1".to_owned(),
+                payload: request().payload,
             },
         ),
         (
@@ -234,7 +235,9 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
                 status: StatusCode::OK,
                 body: r#"{"status":"processing"}"#,
             },
-            SettlementAnswer::Processing,
+            SettlementAnswer::Processing {
+                payload: request().payload,
+            },
         ),
         (
             Plan {
@@ -243,6 +246,7 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
             },
             SettlementAnswer::Rejected {
                 reason: "cap".to_owned(),
+                payload: request().payload,
             },
         ),
         (
@@ -296,6 +300,25 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
     assert!(received[0].body.is_empty());
     assert!(received[0].headers.get("content-type").is_none());
     server.stop().await;
+
+    let (server, signer) = ProductServer::start(vec![Plan {
+        status: StatusCode::OK,
+        body: r#"{"status":"accepted","destination_tx_id":"credit-get","payload":{"version":1,"idempotency_key":"deposit:test","amount_minor":"999"}}"#,
+    }])
+    .await?;
+    let client = SettlementClient::new(&server.url, signer, Duration::from_secs(1))?;
+    assert_eq!(
+        client.get_by_key("deposit:test").await?,
+        Some(SettlementAnswer::Accepted {
+            destination_tx_id: "credit-get".to_owned(),
+            payload: json!({
+                "version": 1,
+                "idempotency_key": "deposit:test",
+                "amount_minor": "999",
+            }),
+        })
+    );
+    server.stop().await;
     Ok(())
 }
 
@@ -326,6 +349,25 @@ async fn retries_keep_body_identical_and_refresh_created() -> anyhow::Result<()>
     assert_eq!(received.len(), 2);
     assert_eq!(received[0].body, received[1].body);
     assert_ne!(received[0].created(), received[1].created());
+    server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn caps_unknown_response_bodies() -> anyhow::Result<()> {
+    let oversized = Box::leak("x".repeat(70 * 1024).into_boxed_str());
+    let (server, signer) = ProductServer::start(vec![Plan {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        body: oversized,
+    }])
+    .await?;
+    let client = SettlementClient::new(&server.url, signer, Duration::from_secs(1))?;
+    let SettlementAnswer::Unknown { status, body } = client.post(&request()).await? else {
+        anyhow::bail!("oversized response must be unknown");
+    };
+    assert_eq!(status, 500);
+    assert!(body.len() < 5 * 1024);
+    assert!(body.ends_with("[response body exceeded 65536 bytes]"));
     server.stop().await;
     Ok(())
 }
