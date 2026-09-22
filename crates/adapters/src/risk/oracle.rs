@@ -74,8 +74,14 @@ impl SanctionsOracle {
         }
         let provider_a_url = Url::parse(provider_a_url)
             .map_err(|_| SanctionsOracleConfigError::InvalidProviderAUrl)?;
+        if !matches!(provider_a_url.scheme(), "http" | "https") {
+            return Err(SanctionsOracleConfigError::InvalidProviderAUrl);
+        }
         let provider_b_url = Url::parse(provider_b_url)
             .map_err(|_| SanctionsOracleConfigError::InvalidProviderBUrl)?;
+        if !matches!(provider_b_url.scheme(), "http" | "https") {
+            return Err(SanctionsOracleConfigError::InvalidProviderBUrl);
+        }
         Ok(Self {
             provider_a: RootProvider::new_http(provider_a_url),
             provider_b: RootProvider::new_http(provider_b_url),
@@ -153,5 +159,17 @@ mod tests {
         )
         .expect_err("zero timeout must fail");
         assert_eq!(error, SanctionsOracleConfigError::ZeroTimeout);
+    }
+
+    #[test]
+    fn configuration_rejects_non_http_urls() {
+        let error = SanctionsOracle::new(
+            "file:///tmp/provider",
+            "http://127.0.0.1:8546",
+            Address::ZERO,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .expect_err("non-HTTP URL must fail");
+        assert_eq!(error, SanctionsOracleConfigError::InvalidProviderAUrl);
     }
 }

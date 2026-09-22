@@ -104,6 +104,15 @@ pub enum ScreenStepConfigError {
         /// Immutable route version.
         version: u64,
     },
+    /// A provider id did not have its required RPC URL environment variable.
+    MissingProviderUrl {
+        /// Stable route name.
+        route: String,
+        /// Immutable route version.
+        version: u64,
+        /// Non-secret environment variable that must contain the URL.
+        environment: String,
+    },
     /// A route's sanctions-oracle client could not be configured.
     InvalidOracle {
         /// Stable route name.
@@ -128,9 +137,17 @@ impl Display for ScreenStepConfigError {
             Self::MissingRpcProviders { route, version } => {
                 write!(
                     formatter,
-                    "route `{route}` version {version} requires two RPC URLs"
+                    "route `{route}` version {version} requires two RPC provider entries"
                 )
             }
+            Self::MissingProviderUrl {
+                route,
+                version,
+                environment,
+            } => write!(
+                formatter,
+                "route `{route}` version {version} requires {environment}"
+            ),
             Self::InvalidOracle {
                 route,
                 version,
@@ -150,7 +167,9 @@ impl Error for ScreenStepConfigError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidOracle { source, .. } => Some(source),
-            Self::MissingRpcProviders { .. } | Self::DuplicateRoute { .. } => None,
+            Self::MissingRpcProviders { .. }
+            | Self::MissingProviderUrl { .. }
+            | Self::DuplicateRoute { .. } => None,
         }
     }
 }
@@ -183,7 +202,10 @@ impl ScreenStep {
         })
     }
 
-    /// Creates route-specific Alloy oracle clients from the first two configured RPC URLs.
+    /// Creates route-specific Alloy clients from the first two provider entries.
+    ///
+    /// HTTP URLs are accepted directly. Provider ids resolve through the same
+    /// `TOPUP_RPC_<ID>_URL` convention used by the scanner.
     pub fn from_routes(
         pool: PgPool,
         routes: &[RouteFile],
@@ -203,9 +225,23 @@ impl ScreenStep {
                     version: route.version,
                 });
             };
+            let provider_a = configured_provider_url(provider_a).map_err(|environment| {
+                ScreenStepConfigError::MissingProviderUrl {
+                    route: route.route.clone(),
+                    version: route.version,
+                    environment,
+                }
+            })?;
+            let provider_b = configured_provider_url(provider_b).map_err(|environment| {
+                ScreenStepConfigError::MissingProviderUrl {
+                    route: route.route.clone(),
+                    version: route.version,
+                    environment,
+                }
+            })?;
             let oracle = SanctionsOracle::new(
-                provider_a,
-                provider_b,
+                &provider_a,
+                &provider_b,
                 route.screening.sanctions_oracle,
                 request_timeout,
             )
@@ -255,6 +291,31 @@ impl ScreenStep {
             .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?;
         Ok(Some((product_id, account_scopes, product_scopes)))
     }
+}
+
+fn configured_provider_url(provider: &str) -> Result<String, String> {
+    if provider.contains("://") {
+        return Ok(provider.to_owned());
+    }
+    let environment = provider_environment_name(provider);
+    std::env::var(&environment)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or(environment)
+}
+
+fn provider_environment_name(provider_id: &str) -> String {
+    let normalized = provider_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 #[async_trait]
@@ -366,6 +427,18 @@ mod tests {
 
     fn amount(value: u64) -> AtomicAmount {
         AtomicAmount::new(U256::from(value))
+    }
+
+    #[test]
+    fn provider_ids_use_the_scanner_environment_convention() {
+        assert_eq!(
+            provider_environment_name("quick-node.eu"),
+            "TOPUP_RPC_QUICK_NODE_EU_URL"
+        );
+        assert_eq!(
+            configured_provider_url("http://127.0.0.1:8545"),
+            Ok("http://127.0.0.1:8545".to_owned())
+        );
     }
 
     fn deposit(amount_atomic: AtomicAmount) -> Deposit {
