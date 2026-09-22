@@ -262,8 +262,10 @@ pub trait Signer {
 }
 ```
 
-`signer::dstack` derives `operator/v1` (secp256k1) and `settlement/v1` (ed25519) on demand
-and zeroizes them.
+`signer::dstack` derives `operator/v{n}` (secp256k1) and `settlement/v1` (ed25519) on demand
+and zeroizes them; `n` is the chain file's attested `operator_key_version` (≥ 1, initially 1),
+and a chain's flusher plans and sends only while that operator holds `OPERATOR_ROLE` on the
+factory.
 
 **Flusher** on a schedule *(policy)*, per (chain, token): select addresses whose on-chain
 balance ≥ `min_flush_atomic` and whose share of batch gas ≤ `max_gas_ratio` of value
@@ -408,10 +410,11 @@ checklist:
 One chain file and one route file per pair, in the compose, hence attested: chain and its
 finality rule, RPC provider ids, factory and implementation addresses, treasury, token, unit,
 settlement URL, product key id, and every threshold and spread. Changing a value is a new
-version and compose hash; deposits keep the version that created them. Pause flags are the only
-runtime-mutable state. Secrets arrive as dstack encrypted environment variables. Startup
-refuses to run without the dstack socket, two RPC providers, or the on-chain contract checks
-of §4.
+version and compose hash; deposits keep the version that created them. Bumping
+`operator_key_version` is such a new version; bump it only after the admin Safe has granted the
+new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Secrets
+arrive as dstack encrypted environment variables. Startup refuses to run without the dstack
+socket, two RPC providers, or the on-chain contract checks of §4.
 
 All enabled versions are loaded at startup. The highest enabled version of a route is current for
 new API operations, while older versions remain available for historical deposits.

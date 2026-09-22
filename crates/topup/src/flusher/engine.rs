@@ -51,6 +51,15 @@ pub enum RunResult {
     },
 }
 
+/// The flusher's operator and whether it may call `ForwarderFactory.flush`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperatorRole {
+    /// Address of the configured operator key.
+    pub operator: Address,
+    /// Whether the operator holds `OPERATOR_ROLE` on the route's factory.
+    pub granted: bool,
+}
+
 /// Flush transaction lifecycle coordinator.
 pub struct Flusher {
     pool: PgPool,
@@ -77,6 +86,17 @@ impl Flusher {
             alerts,
             policy,
         }
+    }
+
+    /// Reads whether the configured operator holds `OPERATOR_ROLE` on the route's factory.
+    pub async fn operator_role(&self, route: &RouteFile) -> Result<OperatorRole, FlusherError> {
+        let operator = self.signer.operator_address().await.map_err(map_signer)?;
+        let granted = self
+            .chain
+            .has_operator_role(route.chain.contracts.forwarder_factory, operator)
+            .await
+            .map_err(map_chain)?;
+        Ok(OperatorRole { operator, granted })
     }
 
     /// Maintains existing sent rows first, then sends one queued plan for the current operator.

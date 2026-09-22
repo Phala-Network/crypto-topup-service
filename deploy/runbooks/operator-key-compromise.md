@@ -48,11 +48,14 @@ test ! -s /tmp/new-sent-after-pause
 The pause only stops this service; the Safe revocation is what stops anyone else holding the key.
 Deposits keep being detected, settled, and credited while flushing is paused.
 
+After the revocation, the chain's running flusher logs `flusher paused: the configured operator does
+not hold OPERATOR_ROLE` and raises the `OperatorRoleMissing` flusher alert at every maintenance
+interval (`chain.flush.maintenance_interval_s`) until the replacement version is deployed. This is
+expected: it plans and sends nothing and keeps maintaining already sent flushes.
+
 Stop the service container only if the CVM itself is suspected of leaking the key. That halts
-detection, settlement, and crediting on **every route** until a release that derives a replacement
-operator is running, which is blocked on
-[#60](https://github.com/Phala-Network/crypto-topup-service/issues/60) and
-[PR #74](https://github.com/Phala-Network/crypto-topup-service/pull/74):
+detection, settlement, and crediting on **every route** until a replacement is running, and every
+`operator/v{n}` of the same application is equally exposed (see Remediation):
 
 ```sh
 docker compose -f deploy/docker-compose.staging.yml stop topup
@@ -73,10 +76,23 @@ cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 
 ### Remediation
 
-**HUMAN-ONLY:** provision a new, attested operator and grant its role through the Safe. Current
-`main` cannot derive/select `operator/v2`; [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60)
-must land before the service can use the replacement key. Never grant an arbitrary EOA as a
-workaround.
+**HUMAN-ONLY:** bring the next operator key version, `operator/v{n+1}`, into service. The attested
+service derives it; never grant an arbitrary EOA as a workaround. Every version derives from the
+same dstack application key, so if the CVM or application key itself is suspected, a new version is
+equally exposed: escalate to Security for a new application identity instead.
+
+1. Read the new operator address from the running deployment (dstack derives keys from the
+   application identity, not the compose hash) and export the printed address as
+   `NEW_OPERATOR_ADDRESS`:
+
+```sh
+export NEW_OPERATOR_KEY_VERSION=2
+export NONCE="$(openssl rand -hex 32)"
+docker compose -f deploy/docker-compose.staging.yml exec -T topup topup attest --nonce "$NONCE" --operator-key-version "$NEW_OPERATOR_KEY_VERSION" | jq -r .operator_address
+```
+
+2. **HUMAN-ONLY, Finance Safe:** grant the new operator on every affected factory and verify the
+   finalized result through both providers:
 
 ```sh
 cast calldata 'grantRole(bytes32,address)' "$OPERATOR_ROLE" "$NEW_OPERATOR_ADDRESS"
@@ -84,8 +100,33 @@ cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$NEW_OPE
 cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$NEW_OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_B_URL"
 ```
 
-After a release supporting the new key is attested and started, C7 automatically re-binds stale
-`planned` rows to the new operator and its nonce sequence. Verify the rows and append-only audit:
+3. Fund the new operator with native gas on every affected chain through [Gas refill](gas-refill.md):
+
+```sh
+cast balance "$NEW_OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
+```
+
+4. Set `operator_key_version: $NEW_OPERATOR_KEY_VERSION` in the attested chain file and in a new
+   `version` of every current route file on the chain (current routes on one chain must share it),
+   validate, then upgrade through the attested path in [deploy/README.md](../README.md): new
+   compose hash, allow-list, deploy.
+
+```sh
+topup route validate "$ROUTE_FILE"
+deploy/validate-compose.sh
+```
+
+5. Confirm one `flusher operator holds OPERATOR_ROLE` log line per chain/token route with the new
+   `operator_key_version` and `operator`. Until the grant is visible, the new flusher keeps
+   raising `OperatorRoleMissing` and sends nothing.
+
+```sh
+docker compose -f deploy/docker-compose.staging.yml logs topup | grep 'flusher operator holds OPERATOR_ROLE'
+```
+
+C7 re-binds stale `planned` rows to the new operator and its own nonce sequence, which starts at 0,
+at the next scheduled planning run (`chain.flush.schedule`), including while `flush` is paused.
+Verify the rows and append-only audit:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=new_operator="$NEW_OPERATOR_ADDRESS" <<'SQL'
@@ -112,10 +153,16 @@ row after the pause, no stale old-operator plans, and expected rebound audits.
 
 For a scheduled rotation with no compromise, use the architecture's short overlap procedure:
 
-1. **HUMAN-ONLY:** grant the attested new operator through the Finance Safe.
-2. Deploy the attested service version that derives the new operator; this depends on #60.
-3. Verify both roles, the new operator nonce, one successful flush, and any C7 plan-rebind audits.
-4. **HUMAN-ONLY:** revoke the old role through the Finance Safe after the new service is healthy.
+1. Read the next operator address with `topup attest --operator-key-version <n+1>` (Remediation
+   step 1).
+2. **HUMAN-ONLY:** grant it `OPERATOR_ROLE` through the Finance Safe.
+3. Fund it with native gas on every chain.
+4. Bump `operator_key_version` in the chain file and every current route file, then deploy the new
+   compose hash (Remediation step 4).
+5. Verify the `flusher operator holds OPERATOR_ROLE` log line, both roles, the new operator nonce,
+   one successful flush, and any C7 plan-rebind audits.
+6. **HUMAN-ONLY:** revoke the old role through the Finance Safe once the new service is healthy and
+   no flush of the old operator is `sent`.
 
 ```sh
 cast calldata 'grantRole(bytes32,address)' "$OPERATOR_ROLE" "$NEW_OPERATOR_ADDRESS"
@@ -139,8 +186,8 @@ the old role.
 
 ## Rollback
 
-Keep `flush` paused (or the service stopped, which halts crediting on every route until #60 /
-PR #74 lands) and deploy a corrected new version/key. A compromised key is never
+Keep `flush` paused (or the service stopped, which halts crediting on every route) and deploy a
+corrected new version/key. A compromised key is never
 re-granted. During routine rotation only, a non-compromised old key may be retained briefly until
 the new operator has completed verification; any re-grant still requires explicit Security and
 Finance approval through the Safe.

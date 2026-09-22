@@ -1,12 +1,13 @@
 //! ABI boundary for forwarder-factory flush operations.
 
-use alloy_primitives::{Address, B256, Bytes, LogData, U256};
+use alloy_primitives::{Address, B256, Bytes, LogData, U256, keccak256};
 use alloy_sol_types::{SolCall, SolEvent, sol};
 
 sol! {
     function balanceOf(address account) external view returns (uint256);
     function addressOf(bytes32 salt) external view returns (address);
     function flush(bytes32[] salts, address token) external;
+    function hasRole(bytes32 role, address account) external view returns (bool);
     event Flushed(
         bytes32 indexed salt,
         address indexed forwarder,
@@ -54,6 +55,23 @@ pub fn decode_address_of(output: &[u8]) -> Result<Address, alloy_sol_types::Erro
 #[must_use]
 pub fn encode_flush(salts: Vec<B256>, token: Address) -> Bytes {
     flushCall { salts, token }.abi_encode().into()
+}
+
+/// Returns `ForwarderFactory.OPERATOR_ROLE`, the role required to call `flush`.
+#[must_use]
+pub fn operator_role() -> B256 {
+    keccak256("OPERATOR_ROLE")
+}
+
+/// Encodes `ForwarderFactory.hasRole(role, account)`.
+#[must_use]
+pub fn encode_has_role(role: B256, account: Address) -> Bytes {
+    hasRoleCall { role, account }.abi_encode().into()
+}
+
+/// Decodes a `ForwarderFactory.hasRole(role, account)` result.
+pub fn decode_has_role(output: &[u8]) -> Result<bool, alloy_sol_types::Error> {
+    hasRoleCall::abi_decode_returns(output)
 }
 
 /// Decodes a `ForwarderFactory.Flushed` log.
