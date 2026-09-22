@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use topup_adapters::settlement::http::{
-    SettlementAnswer, SettlementClientError, SettlementHttpClient, SettlementRequest,
+    SettlementAnswer, SettlementClient, SettlementClientError, SettlementRequest,
 };
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::PRICE_SCALE;
@@ -69,7 +69,7 @@ impl SettleStep {
             match &self.client_override {
                 Some(client) => std::sync::Arc::clone(client),
                 None => std::sync::Arc::new(
-                    SettlementHttpClient::new(
+                    SettlementClient::new(
                         &product.settlement_url,
                         self.signer.clone(),
                         self.client_timeout,

@@ -123,13 +123,13 @@ pub trait SettlementApi: Send + Sync {
 
 /// Rustls-backed RFC 9421 settlement client for one product endpoint.
 #[derive(Clone)]
-pub struct SettlementHttpClient {
+pub struct SettlementClient {
     endpoint: Url,
     client: reqwest::Client,
     signer: SignerHandle,
 }
 
-impl SettlementHttpClient {
+impl SettlementClient {
     /// Creates a no-redirect client with a total request timeout.
     pub fn new(
         endpoint: &str,
@@ -204,7 +204,7 @@ impl SettlementHttpClient {
 }
 
 #[async_trait]
-impl SettlementApi for SettlementHttpClient {
+impl SettlementApi for SettlementClient {
     async fn post(
         &self,
         request: &SettlementRequest,

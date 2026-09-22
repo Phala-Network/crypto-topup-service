@@ -17,7 +17,7 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, Verifying
 use serde_json::json;
 use tokio::sync::Mutex;
 use topup_adapters::settlement::http::{
-    SettlementAnswer, SettlementApi as _, SettlementHttpClient, SettlementRequest,
+    SettlementAnswer, SettlementApi as _, SettlementClient, SettlementRequest,
 };
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::{
@@ -273,7 +273,7 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
 
     for (plan, expected) in cases {
         let (server, signer) = ProductServer::start(vec![plan]).await?;
-        let client = SettlementHttpClient::new(&server.url, signer, Duration::from_secs(1))?;
+        let client = SettlementClient::new(&server.url, signer, Duration::from_secs(1))?;
         assert_eq!(client.post(&request()).await?, expected);
         let received = server.received().await;
         assert_eq!(received.len(), 1);
@@ -288,7 +288,7 @@ async fn maps_every_contract_response_and_signs_post_and_get() -> anyhow::Result
         body: "",
     }])
     .await?;
-    let client = SettlementHttpClient::new(&server.url, signer, Duration::from_secs(1))?;
+    let client = SettlementClient::new(&server.url, signer, Duration::from_secs(1))?;
     assert_eq!(client.get_by_key("deposit:test").await?, None);
     let received = server.received().await;
     assert_eq!(received[0].method, "GET");
@@ -312,7 +312,7 @@ async fn retries_keep_body_identical_and_refresh_created() -> anyhow::Result<()>
         },
     ])
     .await?;
-    let client = SettlementHttpClient::new(&server.url, signer, Duration::from_secs(1))?;
+    let client = SettlementClient::new(&server.url, signer, Duration::from_secs(1))?;
     assert!(matches!(
         client.post(&request()).await?,
         SettlementAnswer::Unknown { status: 500, .. }
