@@ -72,6 +72,13 @@ mod tests {
                 ),
                 "chain.rpc_providers",
             ),
+            (
+                VALID.replace(
+                    "implementation:    \"0xfeb1871c9897251C74b39DFC74e577888290faE6\"",
+                    "implementation:    \"0x0000000000000000000000000000000000000000\"",
+                ),
+                "chain.contracts.implementation",
+            ),
         ] {
             assert!(
                 parse_and_validate(&yaml, false)
