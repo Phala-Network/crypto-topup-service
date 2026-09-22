@@ -275,242 +275,90 @@ mod tests {
     };
     const ADOPT_CREDITED: StepOutcome = StepOutcome::AdoptProductAnswer { credited: true };
 
-    fn transition(
-        from: DepositState,
-        to: DepositState,
-        kind: TransitionKind,
-    ) -> Result<Transition, InvalidTransition> {
-        Ok(Transition { from, to, kind })
-    }
-
-    fn invalid(
-        state: DepositState,
-        outcome: StepOutcomeKind,
-    ) -> Result<Transition, InvalidTransition> {
-        Err(InvalidTransition { state, outcome })
+    #[derive(Clone, Copy)]
+    enum Expected {
+        Valid(DepositState, TransitionKind),
+        Invalid(StepOutcomeKind),
     }
 
     #[test]
     fn transition_table_covers_every_state_and_outcome_kind() {
+        use DepositState::{Cleared, Confirmed, Credited, Detected, Rejected, Swept};
+        use Expected::{Invalid, Valid};
+        use StepOutcomeKind as Outcome;
+        use TransitionKind as Kind;
+
         let cases = [
+            (Detected, &ADVANCE, Valid(Confirmed, Kind::Advanced)),
+            (Detected, &REJECT, Valid(Rejected, Kind::Rejected)),
+            (Detected, &RETRY, Valid(Detected, Kind::Retry)),
+            (Detected, &WAIT, Valid(Detected, Kind::Wait)),
+            (Detected, &ADOPT_CREDITED, Valid(Credited, Kind::Advanced)),
+            (Confirmed, &ADVANCE, Valid(Cleared, Kind::Advanced)),
+            (Confirmed, &REJECT, Valid(Rejected, Kind::Rejected)),
+            (Confirmed, &RETRY, Valid(Confirmed, Kind::Retry)),
+            (Confirmed, &WAIT, Valid(Confirmed, Kind::Wait)),
             (
-                DepositState::Detected,
-                &ADVANCE,
-                transition(
-                    DepositState::Detected,
-                    DepositState::Confirmed,
-                    TransitionKind::Advanced,
-                ),
-            ),
-            (
-                DepositState::Detected,
-                &REJECT,
-                transition(
-                    DepositState::Detected,
-                    DepositState::Rejected,
-                    TransitionKind::Rejected,
-                ),
-            ),
-            (
-                DepositState::Detected,
-                &RETRY,
-                transition(
-                    DepositState::Detected,
-                    DepositState::Detected,
-                    TransitionKind::Retry,
-                ),
-            ),
-            (
-                DepositState::Detected,
-                &WAIT,
-                transition(
-                    DepositState::Detected,
-                    DepositState::Detected,
-                    TransitionKind::Wait,
-                ),
-            ),
-            (
-                DepositState::Detected,
+                Confirmed,
                 &ADOPT_CREDITED,
-                transition(
-                    DepositState::Detected,
-                    DepositState::Credited,
-                    TransitionKind::Advanced,
-                ),
+                Invalid(Outcome::AdoptProductAnswer),
             ),
+            (Cleared, &ADVANCE, Valid(Credited, Kind::Advanced)),
+            (Cleared, &REJECT, Valid(Rejected, Kind::Rejected)),
+            (Cleared, &RETRY, Valid(Cleared, Kind::Retry)),
+            (Cleared, &WAIT, Valid(Cleared, Kind::Wait)),
             (
-                DepositState::Confirmed,
-                &ADVANCE,
-                transition(
-                    DepositState::Confirmed,
-                    DepositState::Cleared,
-                    TransitionKind::Advanced,
-                ),
-            ),
-            (
-                DepositState::Confirmed,
-                &REJECT,
-                transition(
-                    DepositState::Confirmed,
-                    DepositState::Rejected,
-                    TransitionKind::Rejected,
-                ),
-            ),
-            (
-                DepositState::Confirmed,
-                &RETRY,
-                transition(
-                    DepositState::Confirmed,
-                    DepositState::Confirmed,
-                    TransitionKind::Retry,
-                ),
-            ),
-            (
-                DepositState::Confirmed,
-                &WAIT,
-                transition(
-                    DepositState::Confirmed,
-                    DepositState::Confirmed,
-                    TransitionKind::Wait,
-                ),
-            ),
-            (
-                DepositState::Confirmed,
+                Cleared,
                 &ADOPT_CREDITED,
-                invalid(DepositState::Confirmed, StepOutcomeKind::AdoptProductAnswer),
+                Invalid(Outcome::AdoptProductAnswer),
             ),
+            (Credited, &ADVANCE, Valid(Swept, Kind::Advanced)),
+            (Credited, &REJECT, Invalid(Outcome::Reject)),
+            (Credited, &RETRY, Valid(Credited, Kind::Retry)),
+            (Credited, &WAIT, Valid(Credited, Kind::Wait)),
             (
-                DepositState::Cleared,
-                &ADVANCE,
-                transition(
-                    DepositState::Cleared,
-                    DepositState::Credited,
-                    TransitionKind::Advanced,
-                ),
-            ),
-            (
-                DepositState::Cleared,
-                &REJECT,
-                transition(
-                    DepositState::Cleared,
-                    DepositState::Rejected,
-                    TransitionKind::Rejected,
-                ),
-            ),
-            (
-                DepositState::Cleared,
-                &RETRY,
-                transition(
-                    DepositState::Cleared,
-                    DepositState::Cleared,
-                    TransitionKind::Retry,
-                ),
-            ),
-            (
-                DepositState::Cleared,
-                &WAIT,
-                transition(
-                    DepositState::Cleared,
-                    DepositState::Cleared,
-                    TransitionKind::Wait,
-                ),
-            ),
-            (
-                DepositState::Cleared,
+                Credited,
                 &ADOPT_CREDITED,
-                invalid(DepositState::Cleared, StepOutcomeKind::AdoptProductAnswer),
+                Invalid(Outcome::AdoptProductAnswer),
             ),
+            (Swept, &ADVANCE, Invalid(Outcome::Advance)),
+            (Swept, &REJECT, Invalid(Outcome::Reject)),
+            (Swept, &RETRY, Invalid(Outcome::Retry)),
+            (Swept, &WAIT, Invalid(Outcome::Wait)),
+            (Swept, &ADOPT_CREDITED, Invalid(Outcome::AdoptProductAnswer)),
+            (Rejected, &ADVANCE, Invalid(Outcome::Advance)),
+            (Rejected, &REJECT, Invalid(Outcome::Reject)),
+            (Rejected, &RETRY, Invalid(Outcome::Retry)),
+            (Rejected, &WAIT, Invalid(Outcome::Wait)),
             (
-                DepositState::Credited,
-                &ADVANCE,
-                transition(
-                    DepositState::Credited,
-                    DepositState::Swept,
-                    TransitionKind::Advanced,
-                ),
-            ),
-            (
-                DepositState::Credited,
-                &REJECT,
-                invalid(DepositState::Credited, StepOutcomeKind::Reject),
-            ),
-            (
-                DepositState::Credited,
-                &RETRY,
-                transition(
-                    DepositState::Credited,
-                    DepositState::Credited,
-                    TransitionKind::Retry,
-                ),
-            ),
-            (
-                DepositState::Credited,
-                &WAIT,
-                transition(
-                    DepositState::Credited,
-                    DepositState::Credited,
-                    TransitionKind::Wait,
-                ),
-            ),
-            (
-                DepositState::Credited,
+                Rejected,
                 &ADOPT_CREDITED,
-                invalid(DepositState::Credited, StepOutcomeKind::AdoptProductAnswer),
-            ),
-            (
-                DepositState::Swept,
-                &ADVANCE,
-                invalid(DepositState::Swept, StepOutcomeKind::Advance),
-            ),
-            (
-                DepositState::Swept,
-                &REJECT,
-                invalid(DepositState::Swept, StepOutcomeKind::Reject),
-            ),
-            (
-                DepositState::Swept,
-                &RETRY,
-                invalid(DepositState::Swept, StepOutcomeKind::Retry),
-            ),
-            (
-                DepositState::Swept,
-                &WAIT,
-                invalid(DepositState::Swept, StepOutcomeKind::Wait),
-            ),
-            (
-                DepositState::Swept,
-                &ADOPT_CREDITED,
-                invalid(DepositState::Swept, StepOutcomeKind::AdoptProductAnswer),
-            ),
-            (
-                DepositState::Rejected,
-                &ADVANCE,
-                invalid(DepositState::Rejected, StepOutcomeKind::Advance),
-            ),
-            (
-                DepositState::Rejected,
-                &REJECT,
-                invalid(DepositState::Rejected, StepOutcomeKind::Reject),
-            ),
-            (
-                DepositState::Rejected,
-                &RETRY,
-                invalid(DepositState::Rejected, StepOutcomeKind::Retry),
-            ),
-            (
-                DepositState::Rejected,
-                &WAIT,
-                invalid(DepositState::Rejected, StepOutcomeKind::Wait),
-            ),
-            (
-                DepositState::Rejected,
-                &ADOPT_CREDITED,
-                invalid(DepositState::Rejected, StepOutcomeKind::AdoptProductAnswer),
+                Invalid(Outcome::AdoptProductAnswer),
             ),
         ];
 
         for (state, outcome, expected) in cases {
-            assert_eq!(next(state, outcome), expected);
+            match expected {
+                Valid(to, kind) => {
+                    assert_eq!(
+                        next(state, outcome),
+                        Ok(Transition {
+                            from: state,
+                            to,
+                            kind
+                        })
+                    );
+                }
+                Invalid(expected_outcome) => {
+                    assert_eq!(
+                        next(state, outcome),
+                        Err(InvalidTransition {
+                            state,
+                            outcome: expected_outcome,
+                        })
+                    );
+                }
+            }
         }
     }
 
@@ -521,11 +369,11 @@ mod tests {
                 DepositState::Detected,
                 &StepOutcome::AdoptProductAnswer { credited: false }
             ),
-            transition(
-                DepositState::Detected,
-                DepositState::Rejected,
-                TransitionKind::Rejected,
-            )
+            Ok(Transition {
+                from: DepositState::Detected,
+                to: DepositState::Rejected,
+                kind: TransitionKind::Rejected,
+            })
         );
     }
 
