@@ -510,16 +510,33 @@ class SettlementService:
         if amount is None:
             return "invalid_chain_evidence"
 
-        receipt = self.rpc.call("eth_getTransactionReceipt", [evidence.get("tx_hash")])
-        if receipt is None or receipt.get("status") != "0x1":
-            return "transaction_not_found"
+        try:
+            return self._finalized_log_problem(evidence, to, amount)
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            # A malformed receipt, block, or log says nothing durable about the deposit.
+            raise TransientError("malformed chain data from the product node") from error
+
+    def _finalized_log_problem(self, evidence: dict[str, Any], to: str, amount: int) -> str | None:
+        """Checks the cited log against the product's own node.
+
+        Only facts that cannot change once the block is final are stored as refusals: a reverted
+        transaction, or a finalized log that is missing, emitted by another contract, or names
+        another recipient or amount. The service settles only after two providers saw finality,
+        so a missing receipt, an unfinalized or non-canonical block on our node, or malformed
+        data is node lag, a pruned index, or a mixed backend: answer 503 and store nothing
+        (architecture section 11, obligation 5).
+        """
+        receipt = self.rpc.call("eth_getTransactionReceipt", [evidence["tx_hash"]])
+        if receipt is None:
+            raise TransientError("receipt not available on the product node")
         block_number = int(receipt["blockNumber"], 16)
         if self.rpc.finalized_block_number() < block_number:
-            # The service only settles finalized deposits; our node may lag, so retry later.
             raise TransientError("block not finalized on the product node yet")
         canonical = self.rpc.call("eth_getBlockByNumber", [receipt["blockNumber"], False])
         if canonical is None or canonical["hash"] != receipt["blockHash"]:
-            return "transaction_not_canonical"
+            raise TransientError("receipt block is not canonical on the product node")
+        if receipt["status"] != "0x1":
+            return "transaction_reverted"
         log = next(
             (
                 entry
@@ -528,7 +545,9 @@ class SettlementService:
             ),
             None,
         )
-        if log is None or not same_address(log["address"], self.config.token):
+        if log is None:
+            return "log_not_found"
+        if not same_address(log["address"], self.config.token):
             return "log_not_emitted_by_asset"
         topics = log["topics"]
         if len(topics) != 3 or topics[0] != TRANSFER_TOPIC:
@@ -560,6 +579,10 @@ class SettlementService:
         team_id = None if refusal == "unknown_account" else str(payload["account_id"])
         now = time.time()
         # Obligation 3: find-or-create, credit, and complete in one transaction, then answer.
+        # SQLite's BEGIN IMMEDIATE serializes every writer. On PostgreSQL, lock the team row
+        # (SELECT ... FOR UPDATE) before the per-period cap sum so concurrent deposits cannot
+        # both pass it, and also make provider_order_id unique across teams for this flow:
+        # the per-team partial index does not cover refusals stored with team_id NULL.
         with self.ledger.transaction() as db:
             existing = ProductLedger._find_order(db, key)
             if existing is not None:
