@@ -1,10 +1,11 @@
-//! External price-source adapters.
+//! Reference-rate pricing adapters.
 
 mod decimal;
 
 pub mod binance;
 pub mod coinmetrics;
 pub mod kraken;
+pub mod native;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -66,6 +67,12 @@ impl Display for PriceError {
 }
 
 impl Error for PriceError {}
+
+impl From<decimal::DecimalPriceError> for PriceError {
+    fn from(_: decimal::DecimalPriceError) -> Self {
+        Self::InvalidPrice
+    }
+}
 
 fn http_client() -> Result<reqwest::Client, PriceError> {
     reqwest::Client::builder()

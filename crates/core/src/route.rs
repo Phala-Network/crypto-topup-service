@@ -72,6 +72,52 @@ impl RouteFile {
             "chain.flush.max_gas_ratio_bps",
             self.chain.flush.max_gas_ratio_bps,
         )?;
+        validate_positive(
+            "chain.flush.max_fee_per_gas_wei",
+            self.chain.flush.max_fee_per_gas_wei,
+        )?;
+        if self.chain.flush.replacement_bps <= 10_000 {
+            return Err(RouteError::validation(
+                "chain.flush.replacement_bps",
+                "must be greater than 10000",
+            ));
+        }
+        validate_positive(
+            "chain.flush.replacement_after_blocks",
+            self.chain.flush.replacement_after_blocks,
+        )?;
+        if self.chain.flush.gas_limit_bps < 10_000 {
+            return Err(RouteError::validation(
+                "chain.flush.gas_limit_bps",
+                "must be at least 10000",
+            ));
+        }
+        validate_positive(
+            "chain.flush.rpc_timeout_ms",
+            self.chain.flush.rpc_timeout_ms,
+        )?;
+        validate_positive(
+            "chain.flush.balance_batch_size",
+            self.chain.flush.balance_batch_size,
+        )?;
+        validate_positive(
+            "chain.flush.recovery_scan_blocks",
+            self.chain.flush.recovery_scan_blocks,
+        )?;
+        validate_positive(
+            "chain.flush.estimation_retry_after_s",
+            self.chain.flush.estimation_retry_after_s,
+        )?;
+        validate_positive(
+            "chain.flush.maintenance_interval_s",
+            self.chain.flush.maintenance_interval_s,
+        )?;
+        if self.chain.flush.native_price_asset.trim().is_empty() {
+            return Err(RouteError::validation(
+                "chain.flush.native_price_asset",
+                "must not be empty",
+            ));
+        }
         validate_bps("pricing.max_deviation_bps", self.pricing.max_deviation_bps)?;
         if self.pricing.mode == PricingMode::Spot {
             if self.pricing.check.is_none() {
@@ -166,6 +212,26 @@ pub struct FlushConfig {
     pub schedule: String,
     /// Maximum gas-to-value ratio in basis points.
     pub max_gas_ratio_bps: Bps,
+    /// Provider asset identifier for the chain's native gas token.
+    pub native_price_asset: String,
+    /// Hard maximum EIP-1559 fee per gas in wei.
+    pub max_fee_per_gas_wei: u64,
+    /// Required fee replacement multiplier in basis points.
+    pub replacement_bps: u16,
+    /// Blocks an unmined transaction waits before replacement.
+    pub replacement_after_blocks: u64,
+    /// Gas-limit multiplier over the estimate in basis points.
+    pub gas_limit_bps: u16,
+    /// Timeout for each flusher RPC request.
+    pub rpc_timeout_ms: u64,
+    /// Maximum addresses in one balance JSON-RPC batch.
+    pub balance_batch_size: u64,
+    /// Maximum blocks inspected in one nonce-recovery iteration.
+    pub recovery_scan_blocks: u64,
+    /// Delay before retrying a planning-time singleton exclusion.
+    pub estimation_retry_after_s: u64,
+    /// Interval between confirmation and replacement maintenance iterations.
+    pub maintenance_interval_s: u64,
 }
 
 /// Deposited asset configuration.
