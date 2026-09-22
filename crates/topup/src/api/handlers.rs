@@ -2,10 +2,12 @@
 
 use std::str::FromStr;
 
+use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
@@ -21,7 +23,7 @@ use super::models::{
     DepositListQuery, DepositLookupQuery, DepositResponse, DepositsResponse, LimitsResponse,
     NudgeResponse, PauseRequest, PauseResponse, PersistentSaltInputs, RateLockResponse,
     RecordRefundRequest, RefundRequest, RefundResponse, RegisterAccountRequest,
-    RotateDepositAddressRequest, RoutePauseResponse,
+    RotateDepositAddressRequest, RoutePauseResponse, SupportDepositsResponse,
 };
 use super::repository;
 
@@ -236,7 +238,7 @@ pub(crate) async fn get_deposit(
     path = "/v1/products/{p}/deposits",
     params(("p" = String, Path), DepositLookupQuery),
     responses(
-        (status = 200, body = DepositsResponse),
+        (status = 200, body = SupportDepositsResponse),
         (status = 400, body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
@@ -247,7 +249,7 @@ pub(crate) async fn lookup_deposits(
     Extension(product): Extension<Product>,
     Path(_product_slug): Path<String>,
     Query(filters): Query<DepositLookupQuery>,
-) -> ApiResult<Json<DepositsResponse>> {
+) -> ApiResult<Json<SupportDepositsResponse>> {
     Ok(Json(
         repository::lookup_product_deposits(&state.pool, product.id, &filters).await?,
     ))
@@ -325,7 +327,9 @@ pub(crate) async fn resume_account(
     request_body = RefundRequest,
     responses(
         (status = 200, body = RefundResponse),
-        (status = 501, body = ErrorResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 423, body = ErrorResponse),
         (status = 404, body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
@@ -335,12 +339,31 @@ pub(crate) async fn request_refund(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,
     Path((_product_slug, deposit_id)): Path<(String, Uuid)>,
-    Json(_request): Json<RefundRequest>,
-) -> ApiResult<impl IntoResponse> {
-    repository::get_product_deposit(&state.pool, product.id, deposit_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    Err::<StatusCode, _>(ApiError::not_implemented("C12"))
+    Json(request): Json<RefundRequest>,
+) -> ApiResult<Json<RefundResponse>> {
+    let to_address = EvmAddress::from_str(&request.to_address)
+        .map_err(|_| ApiError::bad_request("to_address must be a 20-byte hexadecimal address"))?;
+    if to_address.is_zero() {
+        return Err(ApiError::bad_request(
+            "to_address must not be the zero address",
+        ));
+    }
+    let amount = U256::from_str(&request.amount)
+        .map(AtomicAmount::new)
+        .map_err(|_| ApiError::bad_request("amount must be an unsigned atomic integer"))?;
+    let fallback_route = state.route_for_product(&product)?.route.clone();
+    Ok(Json(
+        repository::request_refund(
+            &state.pool,
+            product.id,
+            deposit_id,
+            &fallback_route,
+            to_address,
+            amount,
+            &format!("product:{}", product.id),
+        )
+        .await?,
+    ))
 }
 
 #[utoipa::path(
@@ -407,24 +430,34 @@ pub(crate) async fn resume_route(
     post,
     path = "/v1/admin/deposits/{id}/nudge",
     params(("id" = Uuid, Path)),
-    responses((status = 200, body = NudgeResponse), (status = 501, body = ErrorResponse)),
+    responses((status = 200, body = NudgeResponse), (status = 404, body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn nudge_deposit(Path(_deposit_id): Path<Uuid>) -> ApiResult<impl IntoResponse> {
-    Err::<StatusCode, _>(ApiError::not_implemented("C12"))
+pub(crate) async fn nudge_deposit(
+    State(state): State<AppState>,
+    Path(deposit_id): Path<Uuid>,
+) -> ApiResult<Json<NudgeResponse>> {
+    Ok(Json(
+        repository::nudge_deposit(&state.pool, deposit_id, &admin_actor(&state)).await?,
+    ))
 }
 
 #[utoipa::path(
     post,
     path = "/v1/admin/refunds/{id}/approve",
     params(("id" = Uuid, Path)),
-    responses((status = 200, body = AdminRefundResponse), (status = 501, body = ErrorResponse)),
+    responses((status = 200, body = AdminRefundResponse), (status = 404, body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn approve_refund(Path(_refund_id): Path<Uuid>) -> ApiResult<impl IntoResponse> {
-    Err::<StatusCode, _>(ApiError::not_implemented("C12"))
+pub(crate) async fn approve_refund(
+    State(state): State<AppState>,
+    Path(refund_id): Path<Uuid>,
+) -> ApiResult<Json<AdminRefundResponse>> {
+    Ok(Json(
+        repository::approve_refund(&state.pool, refund_id, &admin_actor(&state)).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -432,26 +465,40 @@ pub(crate) async fn approve_refund(Path(_refund_id): Path<Uuid>) -> ApiResult<im
     path = "/v1/admin/refunds/{id}/record",
     params(("id" = Uuid, Path)),
     request_body = RecordRefundRequest,
-    responses((status = 200, body = AdminRefundResponse), (status = 501, body = ErrorResponse)),
+    responses(
+        (status = 200, body = AdminRefundResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse)
+    ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
 pub(crate) async fn record_refund(
-    Path(_refund_id): Path<Uuid>,
-    Json(_request): Json<RecordRefundRequest>,
-) -> ApiResult<impl IntoResponse> {
-    Err::<StatusCode, _>(ApiError::not_implemented("C12"))
+    State(state): State<AppState>,
+    Path(refund_id): Path<Uuid>,
+    Json(request): Json<RecordRefundRequest>,
+) -> ApiResult<Json<AdminRefundResponse>> {
+    let tx_hash = B256::from_str(&request.tx_hash)
+        .map_err(|_| ApiError::bad_request("tx_hash must be a 32-byte hexadecimal value"))?;
+    Ok(Json(
+        repository::record_refund(&state.pool, refund_id, tx_hash, &admin_actor(&state)).await?,
+    ))
 }
 
 #[utoipa::path(
     get,
     path = "/v1/admin/report/daily",
-    responses((status = 200, body = DailyReportResponse), (status = 501, body = ErrorResponse)),
+    responses((status = 200, body = DailyReportResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn daily_report() -> ApiResult<impl IntoResponse> {
-    Err::<StatusCode, _>(ApiError::not_implemented("C12"))
+pub(crate) async fn daily_report(
+    State(state): State<AppState>,
+) -> ApiResult<Json<DailyReportResponse>> {
+    Ok(Json(
+        repository::daily_report(&state.pool, &state.routes, chrono::Utc::now()).await?,
+    ))
 }
 
 async fn deposit_address(
@@ -633,4 +680,8 @@ fn account_response(account: Account) -> AccountResponse {
         external_id: account.external_id,
         paused_scopes: account.paused_scopes,
     }
+}
+
+fn admin_actor(state: &AppState) -> String {
+    format!("admin:{}", state.admin_key.kid)
 }
