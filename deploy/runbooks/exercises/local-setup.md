@@ -75,11 +75,11 @@ export TOPUP_RPC_PROVIDER_B_URL=http://localhost:8547
 ## Runbook SQL
 
 Every `psql "$DATABASE_URL" ...` statement in the runbooks (heredoc bodies and one-line `-c` or
-`<<<` forms, 28 in total) was executed as `wp_d5_app` against the migrated `wp_d5_recon2` database
-with `-v ON_ERROR_STOP=1` and test values for each `--set` variable. All 28 succeeded, which checks
-their syntax, column names, and application-role grants. The same pass found that psql does not
-interpolate `--set` variables inside `-c` strings; those runbook commands now feed the statement on
-stdin with `<<<`.
+`<<<` forms, 30 in total) was executed as `wp_d5_app` against `wp_d5_recon2`, migrated again after
+merging C7b, with `-v ON_ERROR_STOP=1` and test values for each `--set` variable. All 30 succeeded,
+which checks their syntax, column names, and application-role grants. The same pass found that psql
+does not interpolate `--set` variables inside `-c` strings; those runbook commands now feed the
+statement on stdin with `<<<`.
 
 Teardown:
 

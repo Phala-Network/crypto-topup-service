@@ -18,14 +18,20 @@ curl --fail-with-body -sS "$BASE_URL/healthz"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
 docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=200 postgres backup topup
 docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-list
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 ```
 
-**Gap:** `topup restore-check` is the supported read-only entry point for the restored schema and
-migration state, but on `main` it exits `restore-check is not implemented` (D3, PR #58). Do not
-substitute a `_sqlx_migrations` query: the application role has no grant on it until
-[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) lands, and owner or migration
-credentials must never be placed in the service container to work around that.
+Check the restored schema version with the application role, which can read `_sqlx_migrations`
+since C7b (#70). Require the newest version shipped by the attested release, `applied` equal to the
+number of `*.up.sql` files in `crates/topup/migrations` at the release's source commit, and
+`failed=0`:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1; SELECT count(*) AS applied,count(*) FILTER (WHERE NOT success) AS failed FROM _sqlx_migrations; COMMIT;"
+```
+
+Never place owner or migration credentials in the service container. **Gap:** `topup
+restore-check` is listed by the CLI but exits `restore-check is not implemented` until D3 (PR #58)
+lands; use the query above until then.
 
 ## Decision tree
 
@@ -58,7 +64,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "BEGIN TRANSACTION READ ONLY; SELECT 
 ## Verification
 
 Require `topup reconcile --once --post-restore` to exit `0`, no open `post_restore_settlement`
-finding, an implemented `topup restore-check` once D3 lands, no duplicate credit, RPO and RTO
+finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
 evidence, attestation verification, and a human review before traffic resumes.
 
 ## Rollback

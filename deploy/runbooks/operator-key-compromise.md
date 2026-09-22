@@ -42,8 +42,8 @@ comm -13 /tmp/sent-before-stop /tmp/sent-after-stop > /tmp/new-sent-after-stop
 test ! -s /tmp/new-sent-after-stop
 ```
 
-The `flush` pause scope is currently bookkeeping only: the flusher does not honor it. Track this
-behavior gap in [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61).
+Since C7b (#70) a `flush` pause also stops the service from sending, but it cannot stop anyone else
+holding the key; the Safe revocation is the control for a compromise.
 
 Preserve evidence and assess the affected nonces:
 

@@ -24,10 +24,9 @@ cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.dat
 - Expected below-minimum/unsupported/rejected funds and matching flush: custody is correct; classify
   refund eligibility.
 - Deposit has no matching flush: follow flush/reconciliation investigation.
-- Treasury event differs from stored `Flushed`: critical reconciliation incident; use the service
-  stop and optional Safe role revocation procedure in
-  [Flush reverted or bisected](flush-reverted-or-bisected.md). The `flush` pause scope alone is not
-  effective until #61 lands.
+- Treasury event differs from stored `Flushed`: critical reconciliation incident; use the `flush`
+  pause and optional Safe role revocation procedure in
+  [Flush reverted or bisected](flush-reverted-or-bisected.md), including its #71 caveat.
 - Sanctioned funds: Compliance owns disposition; do not refund automatically.
 
 ## Remediation
@@ -49,5 +48,5 @@ reason, and refund disposition agree. Finance signs off the case list.
 
 ## Rollback
 
-There is no rollback for finalized treasury inflow. Stop the service and revoke the operator role if
+There is no rollback for finalized treasury inflow. Pause `flush` and revoke the operator role if
 reconciliation regresses; use forward accounting/refund actions only.

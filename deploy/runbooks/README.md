@@ -1,7 +1,8 @@
 # Operations runbooks
 
 These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
-operations), C8 (reconciliation), C10 (rate locks), and A2 (deterministic deployment) are on `main`.
+operations), C8 (reconciliation), C10 (rate locks), C7b (flush pause), and A2 (deterministic
+deployment) are on `main`.
 PRs #56 (alerts) and #58 (D3 backup/restore) were still open when these commands were re-exercised
 on 2026-09-22.
 
@@ -72,14 +73,16 @@ Until it merges, route the metric or symptom to the same runbook.
 
 ## Known gaps on main
 
-- [#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) (C7b): the flusher does not
-  honor the `flush` pause scope, so the API pause is not a stop. Runbooks stop the service and/or
-  have the Finance Safe revoke `OPERATOR_ROLE`, then check that no new flush row becomes `sent`.
-  The same issue tracks the application-role grant on `_sqlx_migrations`.
+- [#71](https://github.com/Phala-Network/crypto-topup-service/issues/71): since C7b (#70, closing
+  #61) the `flush` pause stops new sends, but a paused plan at the lowest nonce stalls every later
+  flush on its chain until the pause is lifted, and no supported command voids that plan. Runbooks
+  pause before a plan exists for targeted stops and keep the Finance Safe `OPERATOR_ROLE` revocation
+  as the hard chain-wide stop.
 - [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60): there is no CLI/config
   path to derive or select `operator/v2`, so a replacement operator cannot be brought into service.
 - `topup restore-check` is listed by `topup --help` but exits `restore-check is not implemented`;
-  encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58.
+  encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58. The restore
+  runbook reads `_sqlx_migrations` with the application role instead.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
 - `deploy/config/routes/phala-cloud-sepolia-pha.yaml` fails `topup route validate --template` on

@@ -16,6 +16,24 @@ restore-check is not implemented
 exit=1
 ```
 
+The migration-state query ran as the application role against a database freshly migrated from
+this branch (15 `*.up.sql` files):
+
+```text
+BEGIN
+    version
+----------------
+ 20260922000018
+(1 row)
+
+ applied | failed
+---------+--------
+      15 |      0
+(1 row)
+
+COMMIT
+```
+
 The post-restore gate ran with the application role against the reconciliation exercise database
 from [local setup](local-setup.md), where no deposit was at or beyond `cleared`:
 

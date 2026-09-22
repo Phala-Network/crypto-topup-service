@@ -25,11 +25,13 @@ COMMIT;
 SQL
 ```
 
-If the balance cannot fund the next bounded attempt, stop the `topup` service container to prevent
-fee-estimation/send churn. **Gap:** the signed admin body `{"scopes":["flush"]}` records operator
-intent but is not a flusher stop until
-[#61](https://github.com/Phala-Network/crypto-topup-service/issues/61) (C7b) lands. Revoke
-`OPERATOR_ROLE` through the Finance Safe if a chain-level stop is required.
+If the balance cannot fund the next bounded attempt, pause the `flush` scope on every route of the
+chain with the signed request in [Flush reverted or bisected](flush-reverted-or-bisected.md) to
+prevent fee-estimation/send churn, and run its no-new-`sent` check. A paused plan at the lowest
+nonce holds every later flush on the chain
+([#71](https://github.com/Phala-Network/crypto-topup-service/issues/71)), which is acceptable here
+because the operator cannot pay for any of them. Revoke `OPERATOR_ROLE` through the Finance Safe
+only if unexpected spend points to a compromise.
 
 ## Decision tree
 
@@ -49,12 +51,12 @@ cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 
 ## Verification
 
-Both providers show the finalized balance and the pending nonce is expected. Start the service, then
-require flush maintenance to confirm or replace the existing row. The API `flush` scope may be
-resumed as bookkeeping, but does not control the flusher until #61 lands.
+Both providers show the finalized balance and the pending nonce is expected. Resume the `flush`
+scope, then require flush maintenance to confirm or replace the existing row and send any plan that
+logged `flush.send_paused`.
 
 ## Rollback
 
-A finalized refill cannot be rolled back. If sent to the wrong address, stop the service, revoke the
+A finalized refill cannot be rolled back. If sent to the wrong address, pause `flush`, revoke the
 operator role if required, open a Finance incident, and rotate the operator if key ownership is
 uncertain.
