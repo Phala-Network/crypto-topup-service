@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at FROM addresses WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "chain_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "lock_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "salt",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "retired_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c0058c8dfb24648e58135afebd6610e1ddc606ead60fe5040a816fe513f4e6d1"
+}

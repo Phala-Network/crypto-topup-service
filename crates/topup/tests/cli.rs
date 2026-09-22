@@ -19,7 +19,7 @@ fn help_and_version_succeed() {
 
 #[test]
 fn placeholder_commands_fail_with_a_clear_message() {
-    let commands: &[&[&str]] = &[&["run"], &["migrate"], &["restore-check"]];
+    let commands: &[&[&str]] = &[&["run"], &["restore-check"]];
 
     for args in commands {
         let output = topup(args);
@@ -76,6 +76,23 @@ fn dev_attestation_prints_the_required_json_shape() {
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
+}
+
+#[test]
+fn migrate_requires_a_database_url() {
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .arg("migrate")
+        .env_remove("MIGRATE_DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("MIGRATE_DATABASE_URL is required for migrate")
+            || stderr.contains("MIGRATE_DATABASE_URL is required for migrate")
+    );
 }
 
 #[test]

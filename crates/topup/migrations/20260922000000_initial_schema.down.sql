@@ -1,0 +1,14 @@
+DROP TABLE audit;
+DROP TABLE outbox;
+DROP TABLE refunds;
+DROP TABLE flushed;
+DROP TABLE settlements;
+DROP TABLE transitions;
+DROP TABLE rate_locks;
+DROP TABLE deposits;
+DROP TABLE flushes;
+DROP TABLE cursors;
+DROP TABLE addresses;
+DROP TABLE accounts;
+DROP TABLE products;
+DROP FUNCTION reject_append_only_mutation();

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE deposits\n        SET state = $4,\n            reason = $5,\n            attempt = $6,\n            next_attempt_at = $7,\n            lease_token = NULL,\n            lease_until = NULL,\n            updated_at = now()\n        WHERE id = $1 AND state = $2 AND lease_token = $3\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fbe01cdb8d5ffcb5fcb3a111c781a1a16bc61d7d4c4f7848527db1f89e4240a5"
+}

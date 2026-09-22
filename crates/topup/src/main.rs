@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
@@ -55,7 +56,7 @@ enum RouteCommand {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> ExitCode {
     if let Err(error) = tracing_subscriber::fmt()
         .json()
@@ -70,7 +71,7 @@ async fn main() -> ExitCode {
 
     let result = match cli.command {
         TopupCommand::Run => Err("run is not implemented"),
-        TopupCommand::Migrate => Err("migrate is not implemented"),
+        TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
@@ -135,6 +136,33 @@ fn print_attestation(
     let encoded = serde_json::to_string(&output).map_err(|_| "failed to encode attestation")?;
     println!("{encoded}");
     Ok(())
+}
+
+async fn migrate() -> ExitCode {
+    let database_url = match std::env::var("MIGRATE_DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("MIGRATE_DATABASE_URL is required for migrate");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = topup::db::migrate(&pool).await {
+        tracing::error!(%error, "failed to apply database migrations");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!("database migrations applied");
+    ExitCode::SUCCESS
 }
 
 fn validate_route(file: &Path, template: bool) -> ExitCode {

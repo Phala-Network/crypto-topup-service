@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO flushed (flush_id, address_id, amount_atomic, block_number, log_index)\n        VALUES ($1, $2, $3::text::numeric, $4, $5)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "826283bc6fc58b17ee6e2a95834f636cda1f530d20721532ca8332eb7ac69f57"
+}
