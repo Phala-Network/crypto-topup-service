@@ -352,6 +352,9 @@ POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
 GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, exposure, PnL vs valuation
 ```
 
+Signatures are single-use within the acceptance window. `rotate` is idempotent on
+`from_version`.
+
 Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
 `deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`. Events never
 change balances. OpenAPI from `utoipa`; SDKs generated from it, shipped with a runnable
@@ -399,6 +402,9 @@ version and compose hash; deposits keep the version that created them. Pause fla
 runtime-mutable state. Secrets arrive as dstack encrypted environment variables. Startup
 refuses to run without the dstack socket, two RPC providers, or the on-chain contract checks
 of §4.
+
+All enabled versions are loaded at startup. The highest enabled version of a route is current for
+new API operations, while older versions remain available for historical deposits.
 
 ```yaml
 services:
