@@ -45,9 +45,9 @@ Observed: token `0x5FbDB2315678afecb367f032d93F642f64180aa3`, factory
 `0xCafac3dD18aC6c6e92c921884f9E4176737C052c`.
 
 The route file is the committed Sepolia template with chain id `31337`, the deployed
-factory/implementation/treasury/token, an unreachable settlement URL, route name
-`local-anvil-pha-usd`, and the `rate_lock.max_creations_per_minute: 10` field that the template is
-missing on `main`:
+factory/implementation/treasury/token, an unreachable settlement URL, and route name
+`local-anvil-pha-usd`. The first run added `rate_lock.max_creations_per_minute: 10` by hand; since
+#72 the template carries it:
 
 ```sh
 topup route validate /tmp/wp-d5-ex/route.yaml
@@ -74,12 +74,13 @@ export TOPUP_RPC_PROVIDER_B_URL=http://localhost:8547
 
 ## Runbook SQL
 
-Every `psql "$DATABASE_URL" ...` statement in the runbooks (heredoc bodies and one-line `-c` or
-`<<<` forms, 30 in total) was executed as `wp_d5_app` against `wp_d5_recon2`, migrated again after
-merging C7b, with `-v ON_ERROR_STOP=1` and test values for each `--set` variable. All 30 succeeded,
-which checks their syntax, column names, and application-role grants. The same pass found that psql
-does not interpolate `--set` variables inside `-c` strings; those runbook commands now feed the
-statement on stdin with `<<<`.
+Every `psql` statement in the runbooks (heredoc bodies and `<<<` forms, 31 in total) was executed
+against `wp_d5_recon2`, re-created after merging #70 and #72, with `-v ON_ERROR_STOP=1` and test
+values for each `--set` variable: the 30 `$DATABASE_URL` statements as `wp_d5_app`, and the owner
+`lock_exposure` repair as the owner with its `COMMIT` replaced by `ROLLBACK`. All 31 succeeded,
+which checks their syntax, column names, and grants. The first pass also found that psql does not
+interpolate `--set` variables inside `-c` strings, and psql before 15 prints only the last result of
+a multi-statement `-c`; the runbooks therefore feed statements on stdin with `<<<`.
 
 Teardown:
 

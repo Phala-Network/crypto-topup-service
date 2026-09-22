@@ -30,7 +30,7 @@ hasRole A after revoke: false
 hasRole B after revoke: false
 ```
 
-The runbook's `sent`-flush stop check ran as `wp_d5_app` and produced an empty difference. Stale-plan
-re-binding to a new operator and its `flush.plan_operator_rebound` audit row are covered by the
-[flush exercise](flush-reverted-or-bisected.md) integration test. Starting the service with a
+The runbook's no-new-`sent` flush check ran as `wp_d5_app` and produced an empty difference.
+Stale-plan re-binding to a new operator and its `flush.plan_operator_rebound` audit row are covered
+by the [flush exercise](flush-reverted-or-bisected.md) integration test. Starting the service with a
 replacement operator key is impossible until #60 lands, so the provisioning half is blocked.

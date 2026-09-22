@@ -3,10 +3,10 @@
 Date: 2026-09-22.
 
 Status: complete local scenario with a running `topup run` service, the dstack simulator, Anvil,
-and PostgreSQL 16 (see [local setup](local-setup.md)). It continues from the
-[lock exposure exercise](lock-exposure-near-cap.md) database `wp_d5_locks`, where the owner had
-drifted `product:10000000-0000-0000-0000-000000000002` to 390000 while its reservations total
-400000.
+and PostgreSQL 16 (see [local setup](local-setup.md)). It uses the seeded locks database from the
+[lock exposure exercise](lock-exposure-near-cap.md), re-created after merging #70 and #72, with the
+owner drifting `product:10000000-0000-0000-0000-000000000002` to 390000 while its reservations
+total 400000. The owner repair ran while the service was running.
 
 G2 exercised once: [x]
 
@@ -26,14 +26,22 @@ target/debug/topup run --bind 127.0.0.1:18089 --route /tmp/wp-d5-ex/route.yaml \
 
 ## Healthy worker
 
-Within one tick the worker expired the seeded overdue lock. The runbook's first-5-minutes query:
+Within one tick the worker expired the seeded overdue lock; the runbook's detection query returned:
 
 ```text
-overdue_locks=0 held_minor=0 expired_events_1h=1
-```
+BEGIN
+ overdue_locks | oldest_expiry | held_minor
+---------------+---------------+------------
+             0 |               | 0
+(1 row)
 
-`account:...0002` dropped from 150000 to 100000, `product:...0001` from 600000 to 550000, and
-`global` from 1000000 to 950000, each equal to the recomputation.
+      last_expired_event       | expired_events_1h
+-------------------------------+-------------------
+ 2026-09-22 21:01:36.728975+00 |                 1
+(1 row)
+
+COMMIT
+```
 
 ## Fault
 
@@ -59,12 +67,12 @@ The runbook's detection query and the exposure query from
 BEGIN
  overdue_locks |         oldest_expiry         | held_minor
 ---------------+-------------------------------+------------
-             1 | 2026-09-22 20:30:23.776433+00 | 400000
+             1 | 2026-09-22 20:59:52.149958+00 | 400000
 (1 row)
 
       last_expired_event       | expired_events_1h
 -------------------------------+-------------------
- 2026-09-22 20:32:00.814002+00 |                 1
+ 2026-09-22 21:01:36.728975+00 |                 1
 (1 row)
 
 COMMIT
@@ -83,20 +91,35 @@ COMMIT
 ```
 
 The overdue lock stays `open`, its 400000 stays reserved in all three scopes, and the drifted
-product counter is visible as `ledger_open_minor` 390000 against `open_reserved_minor` 400000.
+product counter shows as `ledger_open_minor` 390000 against `open_reserved_minor` 400000.
 
-## Owner repair and verification
+## Owner repair with the service running
 
-Following the runbook, the owner set the drifted counter to its `open_reserved_minor` value:
-
-```sh
-docker exec -i wp-d5-exercise-pg psql -U postgres -d wp_d5_locks \
-  -c "UPDATE lock_exposure SET open_minor=400000 WHERE scope_key='product:10000000-0000-0000-0000-000000000002';"
-```
+The runbook's owner SQL, unchanged, as the database owner with
+`--set=scope_key='product:10000000-0000-0000-0000-000000000002'`:
 
 ```text
+BEGIN
+                  scope_key                   | before_minor
+----------------------------------------------+--------------
+ product:10000000-0000-0000-0000-000000000002 | 390000
+(1 row)
+
+recomputed_minor=400000
+                  scope_key                   | after_minor
+----------------------------------------------+-------------
+ product:10000000-0000-0000-0000-000000000002 | 400000
+(1 row)
+
 UPDATE 1
-failed-scan lines: 5 at the repair, 5 twelve seconds later
+COMMIT
+psql exit=0
+failed-scan lines: 4 at the repair, 4 twelve seconds later
+```
+
+Verification with the runbook's queries:
+
+```text
 BEGIN
  overdue_locks | oldest_expiry | held_minor
 ---------------+---------------+------------
@@ -105,33 +128,33 @@ BEGIN
 
       last_expired_event       | expired_events_1h
 -------------------------------+-------------------
- 2026-09-22 20:32:50.657207+00 |                 3
+ 2026-09-22 21:02:16.649858+00 |                 2
 (1 row)
 
 COMMIT
 BEGIN
                   scope_key                   | ledger_open_minor | open_reserved_minor | unexpired_minor | overdue_locks | cap_minor | ledger_bps_of_cap
 ----------------------------------------------+-------------------+---------------------+-----------------+---------------+-----------+-------------------
- account:20000000-0000-0000-0000-000000000001 | 120000            | 120000              | 120000          |             0 | 500000    |              2400
+ account:20000000-0000-0000-0000-000000000001 | 450000            | 450000              | 450000          |             0 | 500000    |              9000
  account:20000000-0000-0000-0000-000000000002 | 100000            | 100000              | 100000          |             0 | 500000    |              2000
- product:10000000-0000-0000-0000-000000000001 | 220000            | 220000              | 220000          |             0 | 5000000   |               440
- global                                       | 220000            | 220000              | 220000          |             0 | 10000000  |               220
+ product:10000000-0000-0000-0000-000000000001 | 550000            | 550000              | 550000          |             0 | 5000000   |              1100
+ global                                       | 550000            | 550000              | 550000          |             0 | 10000000  |               550
 (4 rows)
 
 COMMIT
 ```
 
-The held lock expired on the next tick. The third `rate_lock.expired` event is `lock-a2`, which
-reached its own `expires_at` at the same time. Every counter equals the recomputation and no further
-scan failures appeared. The service then stopped cleanly on
-`SIGTERM`:
+The held lock expired on the next tick, every counter equals the recomputation, and no further scan
+failures appeared. The service then stopped cleanly on `SIGTERM`:
 
 ```text
-{"message":"topup service stopped","stuck_deposit_alerts":0,"reconciliation_heartbeat":1790109123,"rate_lock_expiry_heartbeats":14,"rate_locks_expired":3}
+{"message":"topup service stopped","stuck_deposit_alerts":0,"reconciliation_heartbeat":1790110896,"rate_lock_expiry_heartbeats":12,"rate_locks_expired":2}
 ```
 
 ```sh
 docker stop wp-d5-exercise-dstack
 ```
 
-A heartbeat metric and alert for this loop remain a gap (not in PR #56).
+The stop-repair-start alternative uses the same SQL without concurrent writers and was not run
+separately. An in-service repair path and a heartbeat/drift alert for this loop remain follow-up
+work in [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75).
