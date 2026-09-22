@@ -22,8 +22,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::flusher::{
-    AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, Planner, PriceError,
-    PriceSource, RunResult,
+    AlertSink, AlloyChainClient, ChainClient, ChainError, ChainReceipt, FeeQuote, FlushAlert,
+    Flusher, FlusherPolicy, NonceReceiptSearch, Planner, PriceError, PriceSource, RunResult,
 };
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -149,6 +149,163 @@ impl AlertSink for Alerts {
     fn emit(&self, alert: FlushAlert) {
         self.0.lock().expect("alert mutex is available").push(alert);
     }
+}
+
+/// Planner-only chain double that records which addresses were read.
+#[derive(Default)]
+struct PlannerChain {
+    calls: Mutex<usize>,
+    balance_reads: Mutex<Vec<Address>>,
+}
+
+impl PlannerChain {
+    fn record_call(&self) {
+        *self.calls.lock().expect("call mutex is available") += 1;
+    }
+}
+
+#[async_trait]
+impl ChainClient for PlannerChain {
+    async fn token_balances(
+        &self,
+        _token: Address,
+        addresses: &[Address],
+    ) -> Result<Vec<U256>, ChainError> {
+        self.record_call();
+        self.balance_reads
+            .lock()
+            .expect("read mutex is available")
+            .extend_from_slice(addresses);
+        Ok(vec![
+            U256::from(10_u64).pow(U256::from(20_u8));
+            addresses.len()
+        ])
+    }
+
+    async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
+        self.record_call();
+        Ok(vec![U256::ZERO; addresses.len()])
+    }
+
+    async fn estimate_flush_gas(
+        &self,
+        _factory: Address,
+        _operator: Address,
+        _salts: &[B256],
+        _token: Address,
+    ) -> Result<u64, ChainError> {
+        self.record_call();
+        Ok(100_000)
+    }
+
+    async fn pending_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
+        self.record_call();
+        Ok(0)
+    }
+
+    async fn confirmed_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+
+    async fn latest_block(&self) -> Result<u64, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+
+    async fn finalized_block(&self) -> Result<u64, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+
+    async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
+        self.record_call();
+        Ok(FeeQuote {
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+        })
+    }
+
+    async fn send_raw_transaction(&self, _raw: &[u8]) -> Result<B256, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+
+    async fn receipt(&self, _hash: B256) -> Result<Option<ChainReceipt>, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+
+    async fn receipt_by_sender_nonce(
+        &self,
+        _operator: Address,
+        _nonce: u64,
+        _from_block: u64,
+        _max_blocks: u64,
+    ) -> Result<NonceReceiptSearch, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
+    }
+}
+
+#[tokio::test]
+async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x51; 20]);
+            let route = test_route(factory, Address::from([0x52; 20]))?;
+            let seeded = seed_addresses(&database.pool, factory, Address::from([0x53; 20])).await?;
+            let chain = Arc::new(PlannerChain::default());
+            let planner = Planner::new(
+                database.pool.clone(),
+                chain.clone(),
+                signer_handle(OPERATOR_KEY)?,
+                Arc::new(FixedPrice),
+                Arc::new(Alerts::default()),
+            );
+
+            sqlx::query(
+                r#"
+                INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
+                VALUES ('chain:31337', 'chain', 31337, 'address_derivation', 'test freeze')
+                "#,
+            )
+            .execute(&database.pool)
+            .await?;
+            ensure!(planner.plan(&route).await?.is_none());
+            ensure!(*chain.calls.lock().expect("call mutex is available") == 0);
+            let flushes: i64 = sqlx::query_scalar("SELECT count(*) FROM flushes")
+                .fetch_one(&database.pool)
+                .await?;
+            ensure!(flushes == 0);
+
+            // Unfreezing is the owner deleting the block row; planning resumes without restart.
+            sqlx::query("DELETE FROM reconciliation_blocks WHERE block_key = 'chain:31337'")
+                .execute(&database.pool)
+                .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO reconciliation_blocks
+                    (block_key, scope, chain_id, address_id, check_name, reason)
+                VALUES ($1, 'address', 31337, $2, 'credit_recomputation', 'test block')
+                "#,
+            )
+            .bind(format!("address:{}", seeded[0].id))
+            .bind(seeded[0].id)
+            .execute(&database.pool)
+            .await?;
+            let flush_id = planner.plan(&route).await?.context("plan unblocked address")?;
+            let reads = chain
+                .balance_reads
+                .lock()
+                .expect("read mutex is available")
+                .clone();
+            ensure!(reads == [seeded[1].physical]);
+            let planned: Vec<String> = sqlx::query_scalar(
+                "SELECT item->>'address_id' FROM flushes, jsonb_array_elements(receipt->'plan') AS item WHERE id = $1",
+            )
+            .bind(flush_id)
+            .fetch_all(&database.pool)
+            .await?;
+            ensure!(planned == [seeded[1].id.to_string()]);
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[tokio::test]
