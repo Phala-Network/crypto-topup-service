@@ -82,11 +82,21 @@ are intentionally not part of the bounded deployment CI job.
    It exits non-zero unless the restored schema matches the newest embedded migration, recovery
    has promoted, a latest applied WAL LSN exists, the newest heartbeat is no older than its
    recorded 60-second RPO, and durable table counts are readable and sane.
-7. Before resuming, reconcile every deposit in `cleared`, `credited`, or `swept` and every
-   settlement not in `accepted`/`rejected` by calling the product `GET` endpoint with the stored
-   idempotency key. The product answer is authoritative. C6/C8 are not on the current main branch,
-   so this D3 command reports `hook_pending_c6_c8` and the exact pending counts; an operator must
-   not treat that marker as completed reconciliation.
+7. `restore-check` calls the product `GET` endpoint for every settlement not in
+   `accepted`/`rejected`, using its stored idempotency key. It adopts authoritative accepted,
+   rejected, and processing answers and reports `status: "complete"` with outcome counts. A
+   missing key is safe for the normal GET-first retry path after resume. Any transport failure,
+   payload mismatch, `409`, `422`, or unknown response fails the check. C8 must extend this to
+   deposits at or beyond `cleared` that do not yet have a settlement row. Until C8 lands, this
+   query must return no rows before resuming; otherwise keep settlement processing paused and GET
+   each listed `deposit:<id>` key using the product for that deposit:
+
+   ```sql
+   SELECT d.id
+   FROM deposits d
+   LEFT JOIN settlements s ON s.deposit_id = d.id
+   WHERE d.state IN ('cleared', 'credited', 'swept') AND s.deposit_id IS NULL;
+   ```
 8. Compare expected row counts and incident markers, enable the backup and heartbeat services,
    confirm a new WAL archive reaches object storage, then enable the application and ingress.
    Addresses require no separate restore because their salts are deterministic from product data.

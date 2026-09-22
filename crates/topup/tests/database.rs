@@ -1,22 +1,29 @@
 //! PostgreSQL integration tests for the C1 database boundary.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
+use tokio::sync::Mutex;
 use topup::db::{
     self, AddressKind, ApplyTransitionResult, FlushedEvent, NewAccount, NewAddress, NewDeposit,
     NewFlush, NewProduct, OutboxEvent, SettlementIntent, TransitionUpdate,
 };
 use topup::{heartbeat, restore};
+use topup_adapters::settlement::http::{
+    SettlementAnswer, SettlementApi, SettlementClientError, SettlementRequest,
+};
 use topup_core::deposit::{DepositState, StepOutcome, WaitReason, next};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -178,13 +185,176 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
             let heartbeat = heartbeat::record(&context.app_pool).await?;
             ensure!(heartbeat.rpo_seconds == 60);
 
-            let report = restore::check(&context.owner_pool)
+            let client_factory = |_endpoint: &str| {
+                Err("restore reconciliation unexpectedly requested a client".to_owned())
+            };
+            let report = restore::check(&context.owner_pool, &client_factory)
                 .await
                 .map_err(anyhow::Error::msg)?;
             ensure!(report.latest_migration == restore::LATEST_MIGRATION_VERSION);
             ensure!(report.heartbeat_age_seconds <= i64::from(report.rpo_seconds));
             ensure!(report.row_counts.get("heartbeat") == Some(&1));
-            ensure!(report.post_restore_reconciliation.status == "hook_pending_c6_c8");
+            ensure!(report.post_restore_reconciliation.status == "complete");
+            ensure!(report.post_restore_reconciliation.non_terminal_settlements == 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[derive(Clone)]
+enum RestoreOutcome {
+    Answer(Option<SettlementAnswer>),
+    Failure,
+}
+
+#[derive(Clone)]
+struct MockRestoreApi {
+    outcomes: Arc<Mutex<BTreeMap<String, RestoreOutcome>>>,
+    requested_keys: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockRestoreApi {
+    fn new(outcomes: BTreeMap<String, RestoreOutcome>) -> Self {
+        Self {
+            outcomes: Arc::new(Mutex::new(outcomes)),
+            requested_keys: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl SettlementApi for MockRestoreApi {
+    async fn post(
+        &self,
+        _request: &SettlementRequest,
+    ) -> Result<SettlementAnswer, SettlementClientError> {
+        Err(SettlementClientError::InvalidEndpoint)
+    }
+
+    async fn get_by_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<SettlementAnswer>, SettlementClientError> {
+        self.requested_keys.lock().await.push(key.to_owned());
+        match self.outcomes.lock().await.remove(key) {
+            Some(RestoreOutcome::Answer(answer)) => Ok(answer),
+            Some(RestoreOutcome::Failure) | None => Err(SettlementClientError::InvalidEndpoint),
+        }
+    }
+}
+
+#[tokio::test]
+async fn restore_check_reconciles_every_non_terminal_settlement() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            heartbeat::record(&context.app_pool).await?;
+            let seed = seed_account(&context.app_pool, 3).await?;
+            let accepted = insert_restore_settlement(&context.app_pool, &seed, 3).await?;
+            let rejected = insert_restore_settlement(&context.app_pool, &seed, 4).await?;
+            let processing = insert_restore_settlement(&context.app_pool, &seed, 5).await?;
+            let missing = insert_restore_settlement(&context.app_pool, &seed, 6).await?;
+            let api = Arc::new(MockRestoreApi::new(BTreeMap::from([
+                (
+                    accepted.1.clone(),
+                    RestoreOutcome::Answer(Some(SettlementAnswer::Accepted {
+                        destination_tx_id: "restored-credit".to_owned(),
+                        payload: accepted.2.clone(),
+                    })),
+                ),
+                (
+                    rejected.1.clone(),
+                    RestoreOutcome::Answer(Some(SettlementAnswer::Rejected {
+                        reason: "restored-refusal".to_owned(),
+                        payload: rejected.2.clone(),
+                    })),
+                ),
+                (
+                    processing.1.clone(),
+                    RestoreOutcome::Answer(Some(SettlementAnswer::Processing {
+                        payload: processing.2.clone(),
+                    })),
+                ),
+                (missing.1.clone(), RestoreOutcome::Answer(None)),
+            ])));
+            let client_factory = |_endpoint: &str| Ok(Arc::clone(&api) as Arc<dyn SettlementApi>);
+
+            let report = restore::check(&context.owner_pool, &client_factory)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let reconciliation = report.post_restore_reconciliation;
+            ensure!(reconciliation.status == "complete");
+            ensure!(reconciliation.deposits_at_or_beyond_cleared == 4);
+            ensure!(reconciliation.non_terminal_settlements == 4);
+            ensure!(reconciliation.accepted == 1);
+            ensure!(reconciliation.rejected == 1);
+            ensure!(reconciliation.processing == 1);
+            ensure!(reconciliation.not_found == 1);
+            ensure!(api.requested_keys.lock().await.len() == 4);
+
+            let accepted_row = db::get_settlement(&context.app_pool, accepted.0)
+                .await?
+                .context("accepted settlement")?;
+            ensure!(accepted_row.status == db::SettlementStatus::Accepted);
+            ensure!(accepted_row.destination_tx_id.as_deref() == Some("restored-credit"));
+            let rejected_row = db::get_settlement(&context.app_pool, rejected.0)
+                .await?
+                .context("rejected settlement")?;
+            ensure!(rejected_row.status == db::SettlementStatus::Rejected);
+            let processing_row = db::get_settlement(&context.app_pool, processing.0)
+                .await?
+                .context("processing settlement")?;
+            ensure!(processing_row.status == db::SettlementStatus::Sent);
+            ensure!(
+                processing_row.receipt.context("processing receipt")?["status"] == "processing"
+            );
+            let missing_row = db::get_settlement(&context.app_pool, missing.0)
+                .await?
+                .context("missing settlement")?;
+            ensure!(missing_row.status == db::SettlementStatus::Intent);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restore_check_fails_on_product_protocol_and_transport_errors() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            heartbeat::record(&context.app_pool).await?;
+            let seed = seed_account(&context.app_pool, 7).await?;
+            let settlement = insert_restore_settlement(&context.app_pool, &seed, 7).await?;
+            let api = Arc::new(MockRestoreApi::new(BTreeMap::from([(
+                settlement.1.clone(),
+                RestoreOutcome::Answer(Some(SettlementAnswer::Unknown {
+                    status: 500,
+                    body: "product failure".to_owned(),
+                })),
+            )])));
+            let client_factory = |_endpoint: &str| Ok(Arc::clone(&api) as Arc<dyn SettlementApi>);
+
+            let error = restore::check(&context.owner_pool, &client_factory)
+                .await
+                .expect_err("unknown product answer must fail restore-check");
+            ensure!(error.contains("unexpected product answer"));
+
+            db::mark_rejected(
+                &context.app_pool,
+                settlement.0,
+                &json!({"status": "rejected", "reason": "test cleanup"}),
+            )
+            .await?;
+            let transport = insert_restore_settlement(&context.app_pool, &seed, 8).await?;
+            let api = Arc::new(MockRestoreApi::new(BTreeMap::from([(
+                transport.1,
+                RestoreOutcome::Failure,
+            )])));
+            let client_factory = |_endpoint: &str| Ok(Arc::clone(&api) as Arc<dyn SettlementApi>);
+            let error = restore::check(&context.owner_pool, &client_factory)
+                .await
+                .expect_err("transport failure must fail restore-check");
+            ensure!(error.contains("product lookup failed"));
             Ok(())
         })
     })
@@ -865,6 +1035,30 @@ async fn insert_numbered_deposit(pool: &PgPool, seed: &Seed, number: u8) -> Resu
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     ensure!(db::insert_deposit(pool, &deposit).await?);
     Ok(id)
+}
+
+async fn insert_restore_settlement(
+    pool: &PgPool,
+    seed: &Seed,
+    number: u8,
+) -> Result<(Uuid, String, serde_json::Value)> {
+    let mut deposit = new_deposit(seed.address_id, seed.account_id, 1, number, 0);
+    deposit.state = DepositState::Cleared;
+    let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    ensure!(db::insert_deposit(pool, &deposit).await?);
+    let key = format!("deposit:{deposit_id}");
+    let payload = json!({"idempotency_key": key, "marker": number});
+    db::upsert_intent(
+        pool,
+        &SettlementIntent {
+            deposit_id,
+            product_id: seed.product_id,
+            key: key.clone(),
+            payload: payload.clone(),
+        },
+    )
+    .await?;
+    Ok((deposit_id, key, payload))
 }
 
 async fn insert_lock_address(pool: &PgPool, account_id: Uuid, number: u8) -> Result<Uuid> {

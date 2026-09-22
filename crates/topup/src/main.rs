@@ -23,12 +23,10 @@ use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
 use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
+use topup_adapters::settlement::http::{SettlementApi, SettlementClient};
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
-<<<<<<< HEAD
-=======
 use topup_adapters::signer::actor::SignerHandle;
->>>>>>> origin/main
 use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
 use topup_core::route::RouteFile;
@@ -313,7 +311,23 @@ async fn restore_check() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let report = match topup::restore::check(&pool).await {
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        Duration::from_secs(10),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start restore-check signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client_factory = |endpoint: &str| -> Result<Arc<dyn SettlementApi>, String> {
+        SettlementClient::new(endpoint, signer.clone(), Duration::from_secs(30))
+            .map(|client| Arc::new(client) as Arc<dyn SettlementApi>)
+            .map_err(|_| "invalid product settlement endpoint during restore-check".to_owned())
+    };
+    let report = match topup::restore::check(&pool, &client_factory).await {
         Ok(report) => report,
         Err(message) => {
             tracing::error!(%message, "restore check failed");

@@ -1,12 +1,16 @@
 //! Post-restore database validation.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row as _};
+use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi};
+use uuid::Uuid;
 
-use crate::db::MIGRATOR;
+use crate::db::{self, MIGRATOR};
 
 /// Version of the newest migration embedded in this binary.
 pub const LATEST_MIGRATION_VERSION: i64 = 20_260_922_000_011;
@@ -31,25 +35,38 @@ pub struct RestoreReport {
     /// Exact counts for durable service tables.
     pub row_counts: BTreeMap<&'static str, i64>,
     /// Restore-specific product reconciliation status.
-    pub post_restore_reconciliation: ReconciliationHook,
+    pub post_restore_reconciliation: ReconciliationReport,
 }
 
-/// Pending restore reconciliation until C6/C8 provide the product GET implementation.
+/// Product reconciliation completed before the restored service resumes.
 #[derive(Debug, Serialize)]
-pub struct ReconciliationHook {
-    /// Indicates that this branch does not yet contain the reconciler.
+pub struct ReconciliationReport {
+    /// Indicates that every non-terminal settlement was queried successfully.
     pub status: &'static str,
     /// Deposits for which §13 requires a product GET before resume.
     pub deposits_at_or_beyond_cleared: i64,
-    /// Non-terminal settlement records that would be queried by idempotency key.
+    /// Non-terminal settlement records queried by idempotency key.
     pub non_terminal_settlements: i64,
-    /// Operator-facing description of the deferred action.
-    pub action: &'static str,
+    /// Product answers that made settlements terminally accepted.
+    pub accepted: i64,
+    /// Product answers that made settlements terminally rejected.
+    pub rejected: i64,
+    /// Product answers that remain in processing.
+    pub processing: i64,
+    /// Keys not yet known by the product and safe for the normal GET-first retry path.
+    pub not_found: i64,
 }
 
+/// Creates a product settlement API for one configured endpoint.
+pub type SettlementApiFactory<'a> =
+    dyn Fn(&str) -> Result<Arc<dyn SettlementApi>, String> + Send + Sync + 'a;
+
 /// Validates migration state, WAL application, heartbeat freshness, table counts, and the
-/// post-restore reconciliation scope.
-pub async fn check(pool: &PgPool) -> Result<RestoreReport, String> {
+/// post-restore reconciliation scope. The service must remain stopped while this runs.
+pub async fn check(
+    pool: &PgPool,
+    client_factory: &SettlementApiFactory<'_>,
+) -> Result<RestoreReport, String> {
     let applied =
         sqlx::query("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool)
@@ -150,15 +167,7 @@ pub async fn check(pool: &PgPool) -> Result<RestoreReport, String> {
         return Err("row-count sanity failed: settlements exceed deposits".to_owned());
     }
 
-    let reconciliation = sqlx::query(
-        "SELECT \
-         count(*) FILTER (WHERE state IN ('cleared', 'credited', 'swept'))::bigint AS deposits, \
-         (SELECT count(*)::bigint FROM settlements WHERE status NOT IN ('accepted', 'rejected')) AS settlements \
-         FROM deposits",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| "failed to determine post-restore reconciliation scope".to_owned())?;
+    let post_restore_reconciliation = reconcile_settlements(pool, client_factory).await?;
 
     Ok(RestoreReport {
         status: "ok",
@@ -169,17 +178,151 @@ pub async fn check(pool: &PgPool) -> Result<RestoreReport, String> {
         heartbeat_age_seconds,
         rpo_seconds,
         row_counts,
-        post_restore_reconciliation: ReconciliationHook {
-            status: "hook_pending_c6_c8",
-            deposits_at_or_beyond_cleared: reconciliation
-                .try_get("deposits")
-                .map_err(|_| "restore deposit reconciliation count is invalid".to_owned())?,
-            non_terminal_settlements: reconciliation
-                .try_get("settlements")
-                .map_err(|_| "restore settlement reconciliation count is invalid".to_owned())?,
-            action: "before resume, GET every listed product idempotency key; product answer wins",
-        },
+        post_restore_reconciliation,
     })
+}
+
+#[derive(Debug)]
+struct ReconciliationCandidate {
+    deposit_id: Uuid,
+    key: String,
+    payload: Value,
+    settlement_url: String,
+}
+
+async fn reconcile_settlements(
+    pool: &PgPool,
+    client_factory: &SettlementApiFactory<'_>,
+) -> Result<ReconciliationReport, String> {
+    let deposits_at_or_beyond_cleared: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM deposits WHERE state IN ('cleared', 'credited', 'swept')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| "failed to count deposits requiring restore reconciliation".to_owned())?;
+    let rows = sqlx::query(
+        "SELECT s.deposit_id, s.key, s.payload, p.settlement_url \
+         FROM settlements s \
+         JOIN products p ON p.id = s.product_id \
+         WHERE s.status NOT IN ('accepted', 'rejected') \
+         ORDER BY s.deposit_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| "failed to load settlements requiring restore reconciliation".to_owned())?;
+    let non_terminal_settlements = i64::try_from(rows.len())
+        .map_err(|_| "restore settlement reconciliation count overflowed".to_owned())?;
+    let candidates = rows
+        .into_iter()
+        .map(|row| {
+            Ok(ReconciliationCandidate {
+                deposit_id: row
+                    .try_get("deposit_id")
+                    .map_err(|_| "restore settlement deposit identifier is invalid".to_owned())?,
+                key: row
+                    .try_get("key")
+                    .map_err(|_| "restore settlement key is invalid".to_owned())?,
+                payload: row
+                    .try_get("payload")
+                    .map_err(|_| "restore settlement payload is invalid".to_owned())?,
+                settlement_url: row
+                    .try_get("settlement_url")
+                    .map_err(|_| "restore settlement product endpoint is invalid".to_owned())?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut clients = BTreeMap::<String, Arc<dyn SettlementApi>>::new();
+    let mut report = ReconciliationReport {
+        status: "complete",
+        deposits_at_or_beyond_cleared,
+        non_terminal_settlements,
+        accepted: 0,
+        rejected: 0,
+        processing: 0,
+        not_found: 0,
+    };
+    for candidate in candidates {
+        let client = match clients.get(&candidate.settlement_url) {
+            Some(client) => Arc::clone(client),
+            None => {
+                let client = client_factory(&candidate.settlement_url)?;
+                clients.insert(candidate.settlement_url.clone(), Arc::clone(&client));
+                client
+            }
+        };
+        let answer = client.get_by_key(&candidate.key).await.map_err(|_| {
+            format!(
+                "product lookup failed during restore reconciliation for deposit {}",
+                candidate.deposit_id
+            )
+        })?;
+        match answer {
+            Some(SettlementAnswer::Accepted {
+                destination_tx_id,
+                payload,
+            }) => {
+                require_original_payload(&candidate, &payload)?;
+                let receipt = json!({
+                    "status": "accepted",
+                    "destination_tx_id": &destination_tx_id,
+                    "payload": payload,
+                });
+                db::mark_accepted(pool, candidate.deposit_id, &destination_tx_id, &receipt)
+                    .await
+                    .map_err(|_| "failed to persist accepted restore reconciliation".to_owned())?;
+                report.accepted += 1;
+            }
+            Some(SettlementAnswer::Rejected { reason, payload }) => {
+                require_original_payload(&candidate, &payload)?;
+                let receipt = json!({
+                    "status": "rejected",
+                    "reason": reason,
+                    "payload": payload,
+                });
+                db::mark_rejected(pool, candidate.deposit_id, &receipt)
+                    .await
+                    .map_err(|_| "failed to persist rejected restore reconciliation".to_owned())?;
+                report.rejected += 1;
+            }
+            Some(SettlementAnswer::Processing { payload }) => {
+                require_original_payload(&candidate, &payload)?;
+                let receipt = json!({"status": "processing", "payload": payload});
+                db::mark_sent_with_receipt(pool, candidate.deposit_id, &receipt)
+                    .await
+                    .map_err(|_| {
+                        "failed to persist processing restore reconciliation".to_owned()
+                    })?;
+                report.processing += 1;
+            }
+            None => report.not_found += 1,
+            Some(
+                SettlementAnswer::Conflict409
+                | SettlementAnswer::PayloadMismatch422
+                | SettlementAnswer::Unknown { .. },
+            ) => {
+                return Err(format!(
+                    "unexpected product answer during restore reconciliation for deposit {}",
+                    candidate.deposit_id
+                ));
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn require_original_payload(
+    candidate: &ReconciliationCandidate,
+    product_payload: &Value,
+) -> Result<(), String> {
+    if product_payload == &candidate.payload {
+        Ok(())
+    } else {
+        Err(format!(
+            "product payload mismatch during restore reconciliation for deposit {}",
+            candidate.deposit_id
+        ))
+    }
 }
 
 async fn row_counts(pool: &PgPool) -> Result<BTreeMap<&'static str, i64>, String> {
