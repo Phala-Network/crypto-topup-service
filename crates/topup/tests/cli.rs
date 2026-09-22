@@ -42,6 +42,15 @@ fn attest_requires_a_hex_nonce() {
     let invalid = topup(&["attest", "--nonce", "not-hex"]);
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("valid hexadecimal"));
+
+    let empty = topup(&["attest", "--nonce", ""]);
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("non-empty hexadecimal"));
+
+    let oversized = "ab".repeat(33);
+    let oversized = topup(&["attest", "--nonce", &oversized]);
+    assert!(!oversized.status.success());
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("at most 32 bytes"));
 }
 
 #[cfg(not(feature = "dev-signer"))]
@@ -55,7 +64,8 @@ fn dev_attestation_is_not_available_without_the_feature() {
 #[cfg(feature = "dev-signer")]
 #[test]
 fn dev_attestation_prints_the_required_json_shape() {
-    let output = topup(&["attest", "--nonce", "00", "--dev"]);
+    let nonce = "ab".repeat(32);
+    let output = topup(&["attest", "--nonce", &nonce, "--dev"]);
     assert!(output.status.success());
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
