@@ -434,6 +434,12 @@ async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<
             pump(&context.app_pool, accepted_api, StdDuration::from_secs(1))?
                 .run_once()
                 .await?;
+            sqlx::query(
+                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
+            )
+            .bind(accepted_id)
+            .execute(&context.app_pool)
+            .await?;
 
             let rejected_id = seed_cleared(&context.app_pool, 13).await?;
             set_product_webhook(&context.app_pool, rejected_id, &receiver.url).await?;
@@ -445,6 +451,20 @@ async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<
             pump(&context.app_pool, rejected_api, StdDuration::from_secs(1))?
                 .run_once()
                 .await?;
+            ensure!(
+                db::get_deposit(&context.app_pool, accepted_id)
+                    .await?
+                    .context("accepted deposit must exist")?
+                    .state
+                    == DepositState::Credited
+            );
+            ensure!(
+                db::get_deposit(&context.app_pool, rejected_id)
+                    .await?
+                    .context("rejected deposit must exist")?
+                    .state
+                    == DepositState::Rejected
+            );
 
             let delivery = DeliveryWorker::new(
                 context.app_pool.clone(),
