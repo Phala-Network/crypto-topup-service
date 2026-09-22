@@ -35,7 +35,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
-axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"] }
+axum.workspace = true
 hex.workspace = true
 uuid.workspace = true
 

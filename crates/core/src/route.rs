@@ -55,6 +55,10 @@ impl RouteFile {
                 "chain.contracts.forwarder_factory",
                 self.chain.contracts.forwarder_factory,
             )?;
+            validate_address(
+                "chain.contracts.implementation",
+                self.chain.contracts.implementation,
+            )?;
             validate_address("chain.contracts.treasury", self.chain.contracts.treasury)?;
         }
         validate_address("asset.contract", self.asset.contract)?;
@@ -137,6 +141,8 @@ pub struct ChainConfig {
 pub struct ChainContracts {
     /// Forwarder factory address.
     pub forwarder_factory: Address,
+    /// Immutable EIP-1167 forwarder implementation address.
+    pub implementation: Address,
     /// Immutable treasury address.
     pub treasury: Address,
 }

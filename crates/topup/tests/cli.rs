@@ -42,6 +42,8 @@ fn run_requires_a_database_url() {
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .args(["run", "--route", &route])
         .env_remove("DATABASE_URL")
+        .env_remove("TOPUP_ADMIN_KID")
+        .env_remove("TOPUP_ADMIN_PUBLIC_KEY")
         .output()
         .expect("topup process should start");
 
