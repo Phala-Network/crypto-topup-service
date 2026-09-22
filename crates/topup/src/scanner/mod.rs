@@ -388,7 +388,8 @@ pub async fn run(
         })?;
         let rpc_url = crate::observability::Redacted::parse(&rpc_url).map_err(|_| {
             ScannerError::Configuration(format!(
-                "provider `{provider_id}` does not contain a valid URL"
+                "provider `{}` does not contain a valid URL",
+                provider_label(provider_id, 0)
             ))
         })?;
         let reader =

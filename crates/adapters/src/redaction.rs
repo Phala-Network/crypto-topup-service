@@ -8,6 +8,11 @@ use url::Url;
 
 /// Maximum characters of a node-supplied JSON-RPC error message kept in an error.
 const MAX_NODE_MESSAGE_CHARS: usize = 200;
+/// Shortest credential or query value scrubbed from node messages; shorter values would
+/// shred ordinary words without protecting a secret.
+const MIN_SCRUBBED_VALUE_CHARS: usize = 4;
+/// Shortest URL path segment treated as a possible embedded key (for example a project id).
+const MIN_SCRUBBED_PATH_SEGMENT_CHARS: usize = 8;
 
 /// A parsed provider URL whose formatting never reveals credentials, host, or path.
 ///
@@ -54,7 +59,7 @@ impl Redacted {
         let failure = match error {
             RpcError::ErrorResp(payload) => Failure::JsonRpc {
                 code: payload.code,
-                message: node_message(&payload.message),
+                message: node_message(&self.scrub(&payload.message)),
             },
             RpcError::Transport(TransportErrorKind::HttpError(http)) => {
                 Failure::HttpStatus(http.status)
@@ -62,6 +67,35 @@ impl Redacted {
             _ => Failure::Transport("transport"),
         };
         RedactedTransportError::new(operation, self, failure)
+    }
+
+    /// Replaces this URL's credentials, query values, and long path segments in a
+    /// provider-supplied message, in case a node or proxy echoes the request back.
+    fn scrub(&self, message: &str) -> String {
+        let url = &self.url;
+        let mut secrets = vec![url.username().to_owned()];
+        secrets.extend(url.password().map(str::to_owned));
+        secrets.extend(url.query_pairs().map(|(_, value)| value.into_owned()));
+        secrets.extend(
+            url.query()
+                .into_iter()
+                .flat_map(|query| query.split('&'))
+                .filter_map(|pair| pair.split_once('=').map(|(_, value)| value.to_owned())),
+        );
+        secrets.retain(|secret| secret.chars().count() >= MIN_SCRUBBED_VALUE_CHARS);
+        secrets.extend(
+            url.path_segments()
+                .into_iter()
+                .flatten()
+                .filter(|segment| segment.chars().count() >= MIN_SCRUBBED_PATH_SEGMENT_CHARS)
+                .map(str::to_owned),
+        );
+        // Longest first, so a value containing a shorter one is replaced whole.
+        secrets.sort_unstable_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
+        secrets.dedup();
+        secrets.iter().fold(message.to_owned(), |message, secret| {
+            message.replace(secret.as_str(), "[REDACTED]")
+        })
     }
 
     /// Maps a reqwest failure without retaining or formatting its request URL.
@@ -199,12 +233,12 @@ mod tests {
     use alloy::providers::{Provider, RootProvider};
     use axum::Router;
     use axum::http::{StatusCode, header};
-    use axum::routing::post;
     use tokio::net::TcpListener;
 
     use super::{MAX_NODE_MESSAGE_CHARS, Redacted, node_message};
 
     const SECRET: &str = "rpc-secret-token";
+    const PROJECT_ID: &str = "0123456789abcdef";
 
     /// Serves one fixed HTTP response to every JSON-RPC request on a local port.
     async fn mock_node(status: StatusCode, body: &'static str) -> String {
@@ -212,14 +246,11 @@ mod tests {
             .await
             .expect("local listener binds");
         let address = listener.local_addr().expect("listener address");
-        let node = Router::new().route(
-            "/rpc",
-            post(
-                move || async move { (status, [(header::CONTENT_TYPE, "application/json")], body) },
-            ),
-        );
+        let node = Router::new().fallback(move || async move {
+            (status, [(header::CONTENT_TYPE, "application/json")], body)
+        });
         tokio::spawn(async move { axum::serve(listener, node).await });
-        format!("http://user:{SECRET}@{address}/rpc?api_key={SECRET}")
+        format!("http://user:{SECRET}@{address}/rpc/{PROJECT_ID}?api_key={SECRET}")
     }
 
     async fn failed_block_number(url: &str, provider: &str) -> String {
@@ -239,6 +270,7 @@ mod tests {
             assert!(!rendered.contains("api_key"), "{rendered}");
             assert!(!rendered.contains("127.0.0.1"), "{rendered}");
             assert!(!rendered.contains("/rpc"), "{rendered}");
+            assert!(!rendered.contains(PROJECT_ID), "{rendered}");
         }
         display
     }
@@ -272,6 +304,23 @@ mod tests {
         assert_eq!(
             display,
             "block number fetch failed for provider `provider-a` (JSON-RPC error -32000: nonce too low)"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_message_echoing_the_request_url_is_scrubbed() {
+        let url = mock_node(
+            StatusCode::OK,
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32001,"message":"key rpc-secret-token is not enabled for project 0123456789abcdef"}}"#,
+        )
+        .await;
+
+        let display = failed_block_number(&url, "provider-a").await;
+
+        assert_eq!(
+            display,
+            "block number fetch failed for provider `provider-a` \
+             (JSON-RPC error -32001: key [REDACTED] is not enabled for project [REDACTED])"
         );
     }
 
