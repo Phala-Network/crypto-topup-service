@@ -264,10 +264,12 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let scanner_count = scanner_routes.len();
+    let route_count = routes.len();
     let connection_count = match u32::try_from(args.pumps.get())
         .ok()
         .zip(u32::try_from(scanner_count).ok())
-        .and_then(|(pumps, scanners)| pumps.checked_add(scanners))
+        .zip(u32::try_from(route_count).ok())
+        .and_then(|((pumps, scanners), routes)| pumps.checked_add(scanners)?.checked_add(routes))
         .and_then(|count| count.checked_add(3))
     {
         Some(count) => count,
@@ -287,6 +289,25 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
+        Duration::from_secs(15),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let flusher_tasks =
+        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, signer.clone()) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::error!(%error, "invalid flusher runtime configuration");
+                return ExitCode::FAILURE;
+            }
+        };
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -302,17 +323,6 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let signer = match SignerHandle::spawn(
-        DstackSigner::new(),
-        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
-        Duration::from_secs(10),
-    ) {
-        Ok(signer) => signer,
-        Err(error) => {
-            tracing::error!(%error, "failed to start signer actor");
-            return ExitCode::FAILURE;
-        }
-    };
     let steps = Arc::new(
         NoopStepSet::build()
             .with_confirmed(Box::new(screen_step))
@@ -320,9 +330,10 @@ async fn run(args: &RunArgs) -> ExitCode {
                 pool.clone(),
                 signer,
                 Duration::from_secs(30),
-            ))),
+            )))
+            .with_credited(Box::new(topup::flusher::SweepStep)),
     );
-    tracing::warn!("placeholder steps remain active in detected and credited states");
+    tracing::warn!("placeholder step remains active in detected state");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
@@ -400,6 +411,13 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
     });
+    let mut flusher_handles = Vec::with_capacity(flusher_tasks.len());
+    for task in flusher_tasks {
+        let flusher_cancellation = cancellation.child_token();
+        flusher_handles.push(tokio::spawn(async move {
+            task.run(flusher_cancellation).await;
+        }));
+    }
 
     tracing::info!(
         pumps = args.pumps.get(),
@@ -486,6 +504,12 @@ async fn run(args: &RunArgs) -> ExitCode {
     if let Err(error) = age_task.await {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
+    }
+    for task in flusher_handles {
+        if let Err(error) = task.await {
+            tracing::error!(%error, "flusher task failed during shutdown");
+            clean_shutdown = false;
+        }
     }
     pool.close().await;
     tracing::info!(

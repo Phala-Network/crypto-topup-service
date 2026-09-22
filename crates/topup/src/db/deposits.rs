@@ -259,6 +259,16 @@ impl TryFrom<DepositRecord> for Deposit {
 
 /// Inserts a deposit and returns `false` when the chain event already exists.
 pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let inserted = insert_deposit_in(&mut transaction, deposit).await?;
+    transaction.commit().await?;
+    Ok(inserted)
+}
+
+pub(crate) async fn insert_deposit_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    deposit: &NewDeposit,
+) -> Result<bool, sqlx::Error> {
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     let chain_id = to_i64(deposit.chain_id, "deposits.chain_id")?;
     let tx_hash = b256_hex(deposit.tx_hash);
@@ -305,9 +315,58 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
         reason,
         deposit.next_attempt_at
     )
-    .execute(pool)
+    .execute(&mut **transaction)
     .await?;
-    Ok(result.rows_affected() == 1)
+    let inserted = result.rows_affected() == 1;
+    if inserted {
+        link_inserted_deposit(transaction, id).await?;
+    }
+    Ok(inserted)
+}
+
+async fn link_inserted_deposit(
+    transaction: &mut Transaction<'_, Postgres>,
+    deposit_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let evidence = serde_json::json!({"outcome": "advance", "source": "confirmed_flush"});
+    sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT f.flush_id
+            FROM deposits d
+            JOIN flushed f ON f.address_id = d.address_id
+            JOIN flushes x ON x.id = f.flush_id
+            WHERE d.id = $1
+              AND x.status = 'confirmed'
+              AND d.asset_contract = x.token
+              AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
+            ORDER BY f.block_number, f.log_index, f.flush_id
+            LIMIT 1
+        ), previous AS (
+            SELECT id, state FROM deposits WHERE id = $1 FOR UPDATE
+        ), updated AS (
+            UPDATE deposits d
+            SET flush_id = candidate.flush_id,
+                state = CASE WHEN d.state = 'credited' THEN 'swept' ELSE d.state END,
+                attempt = CASE WHEN d.state = 'credited' THEN 0 ELSE d.attempt END,
+                lease_token = CASE WHEN d.state = 'credited' THEN NULL ELSE d.lease_token END,
+                lease_until = CASE WHEN d.state = 'credited' THEN NULL ELSE d.lease_until END,
+                updated_at = now()
+            FROM candidate, previous
+            WHERE d.id = previous.id AND d.flush_id IS NULL
+            RETURNING d.id, previous.state
+        )
+        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
+        SELECT gen_random_uuid(), id, 'credited', 'swept', 0, $2
+        FROM updated
+        WHERE state = 'credited'
+        "#,
+    )
+    .bind(deposit_id)
+    .bind(evidence)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 /// Fetches a deposit by its deterministic identifier.

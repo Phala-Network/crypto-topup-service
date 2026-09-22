@@ -86,6 +86,13 @@ impl StepSet {
         }
     }
 
+    /// Replaces the step registered for `detected` deposits.
+    #[must_use]
+    pub fn with_detected(mut self, detected: Box<dyn Step>) -> Self {
+        self.detected = detected;
+        self
+    }
+
     /// Replaces the step registered for `confirmed` deposits.
     #[must_use]
     pub fn with_confirmed(mut self, confirmed: Box<dyn Step>) -> Self {
@@ -97,6 +104,13 @@ impl StepSet {
     #[must_use]
     pub fn with_cleared(mut self, cleared: Box<dyn Step>) -> Self {
         self.cleared = cleared;
+        self
+    }
+
+    /// Replaces the step registered for `credited` deposits.
+    #[must_use]
+    pub fn with_credited(mut self, credited: Box<dyn Step>) -> Self {
+        self.credited = credited;
         self
     }
 
