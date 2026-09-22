@@ -100,7 +100,7 @@ jobs:
       - name: Run PostgreSQL integration tests
         run: >-
           cargo test --locked -p topup --features dev-signer
-          --test database --test api -- --nocapture
+          --tests -- --nocapture
 
   deny:
     runs-on: ubuntu-latest

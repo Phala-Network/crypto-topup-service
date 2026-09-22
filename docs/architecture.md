@@ -195,7 +195,7 @@ handled there by finance.
 Transitions are applied with `UPDATE … WHERE id = $1 AND state = $expected AND lease_token =
 $token`, writing transition and outbox rows in the same transaction. `N` pumps claim with
 `FOR UPDATE SKIP LOCKED`, hold a 5-minute lease, run one step with shorter timeouts, persist
-once.
+once. A step panic aborts the process; the lease expires and another pump re-claims the deposit.
 
 | Step | Does |
 |---|---|
@@ -399,6 +399,9 @@ version and compose hash; deposits keep the version that created them. Pause fla
 runtime-mutable state. Secrets arrive as dstack encrypted environment variables. Startup
 refuses to run without the dstack socket, two RPC providers, or the on-chain contract checks
 of §4.
+
+All enabled versions are loaded at startup. The highest enabled version of a route is current for
+new API operations, while older versions remain available for historical deposits.
 
 ```yaml
 services:

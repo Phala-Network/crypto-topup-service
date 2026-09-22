@@ -470,6 +470,15 @@ async fn route_pause_controls_address_routes() -> Result<()> {
         .await?;
 
         let app = test_router(&database.app_pool, &admin_key);
+        let health = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure!(health.status() == StatusCode::OK);
         let now = Utc::now().timestamp();
         let address_path = "/v1/products/phala-cloud/accounts/route-pause-account/deposit-address";
         let response = app

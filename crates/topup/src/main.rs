@@ -2,22 +2,31 @@
 
 mod route;
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
+use tokio_util::sync::CancellationToken;
+use topup::pump::{
+    AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
+};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
+use topup_core::route::RouteFile;
 #[cfg(feature = "dev-signer")]
 use topup_core::{SecretKey32, Signer as _};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "topup", version, about = "Crypto top-up service")]
@@ -34,18 +43,37 @@ enum TopupCommand {
         #[command(subcommand)]
         command: RouteCommand,
     },
+    Outbox {
+        #[command(subcommand)]
+        command: OutboxCommand,
+    },
     Attest(AttestArgs),
     RestoreCheck,
 }
 
 #[derive(Args)]
 struct RunArgs {
-    /// Socket address on which the API listens.
-    #[arg(long, default_value = "127.0.0.1:3000")]
+    /// API socket address; defaults to the deployment port on all interfaces.
+    #[arg(long, default_value = "0.0.0.0:8080")]
     bind: std::net::SocketAddr,
-    /// Attested route file. Repeat for each enabled route.
-    #[arg(long = "route", required = true)]
+    /// Validated route file; repeat for every enabled route version.
+    #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
+    /// Number of concurrent deposit pumps in this process.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    pumps: NonZeroUsize,
+    /// Maximum duration of one step; must be shorter than five minutes.
+    #[arg(long, default_value_t = 240)]
+    step_timeout_s: u64,
+    /// Delay before retrying an expected wait outcome.
+    #[arg(long, default_value_t = 60)]
+    wait_interval_s: u64,
+    /// Interval between deposit state-age scans.
+    #[arg(long, default_value_t = 60)]
+    age_alert_interval_s: u64,
+    /// Minimum interval between repeated alerts for the same deposit state.
+    #[arg(long, default_value_t = 60 * 60)]
+    age_alert_reminder_s: u64,
 }
 
 #[derive(Args)]
@@ -55,6 +83,21 @@ struct AttestArgs {
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
+}
+
+#[derive(Subcommand)]
+enum OutboxCommand {
+    Replay {
+        /// Replay one event by its stable webhook identifier.
+        #[arg(long, conflicts_with = "since", required_unless_present = "since")]
+        id: Option<Uuid>,
+        /// Replay events created at or after this RFC 3339 timestamp.
+        #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+        since: Option<String>,
+        /// Redeliver events that were already marked delivered.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +129,9 @@ async fn main() -> ExitCode {
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
+        TopupCommand::Outbox {
+            command: OutboxCommand::Replay { id, since, force },
+        } => return replay_outbox(id, since.as_deref(), force).await,
         TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::RestoreCheck => Err("restore-check is not implemented"),
     };
@@ -150,43 +196,73 @@ fn print_attestation(
 }
 
 async fn run(args: &RunArgs) -> ExitCode {
+    if args.age_alert_interval_s == 0 {
+        tracing::error!("age alert interval must be positive");
+        return ExitCode::FAILURE;
+    }
+    if args.age_alert_reminder_s == 0 {
+        tracing::error!("age alert reminder interval must be positive");
+        return ExitCode::FAILURE;
+    }
+    let routes = match load_routes(&args.routes) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::error!(%error, "failed to load route configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let age_config = match AgeAlertConfig::from_routes(&routes) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(%error, "invalid age alert configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pump_config = PumpConfig {
+        step_timeout: Duration::from_secs(args.step_timeout_s),
+        wait_interval: Duration::from_secs(args.wait_interval_s),
+        ..PumpConfig::default()
+    };
     let database_url = match required_env("DATABASE_URL") {
         Ok(value) => value,
-        Err(message) => {
-            tracing::error!(%message);
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
             return ExitCode::FAILURE;
         }
     };
     let admin_kid = match required_env("TOPUP_ADMIN_KID") {
         Ok(value) => value,
-        Err(message) => {
-            tracing::error!(%message);
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
             return ExitCode::FAILURE;
         }
     };
     let admin_public_key = match required_env("TOPUP_ADMIN_PUBLIC_KEY") {
         Ok(value) => value,
-        Err(message) => {
-            tracing::error!(%message);
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
             return ExitCode::FAILURE;
         }
     };
     let admin_key = match topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key) {
         Ok(key) => key,
-        Err(message) => {
-            tracing::error!(%message, "invalid administrative verification key");
+        Err(error) => {
+            tracing::error!(%error, "invalid administrative verification key");
             return ExitCode::FAILURE;
         }
     };
-    let routes = match load_routes(&args.routes) {
-        Ok(routes) => routes,
-        Err(message) => {
-            tracing::error!(%message);
+    let connection_count = match u32::try_from(args.pumps.get())
+        .ok()
+        .and_then(|count| count.checked_add(3))
+    {
+        Some(count) => count,
+        None => {
+            tracing::error!("pump count is too large");
             return ExitCode::FAILURE;
         }
     };
     let pool = match PgPoolOptions::new()
-        .max_connections(16)
+        .max_connections(connection_count)
         .connect(&database_url)
         .await
     {
@@ -196,13 +272,6 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let state = topup::api::AppState {
-        pool,
-        routes: Arc::new(routes),
-        admin_key,
-        attestor: Arc::new(DstackAttestor::new()),
-    };
-    let (application, _) = topup::api::router(state);
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -210,37 +279,213 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let steps = Arc::new(NoopStepSet::build());
+    tracing::warn!("NoopStepSet is active; deposit steps perform no real work");
+    let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
+        Ok(pump) => pump,
+        Err(error) => {
+            tracing::error!(%error, "invalid pump configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cancellation = CancellationToken::new();
+    let state = topup::api::AppState {
+        pool: pool.clone(),
+        routes: Arc::new(routes),
+        admin_key,
+        attestor: Arc::new(DstackAttestor::new()),
+    };
+    let (application, _) = topup::api::router(state);
+    let api_cancellation = cancellation.child_token();
+    let mut api_task = tokio::spawn(async move {
+        axum::serve(listener, application)
+            .with_graceful_shutdown(api_cancellation.cancelled_owned())
+            .await
+    });
     tracing::info!(bind = %args.bind, "API listening");
-    if let Err(error) = axum::serve(listener, application).await {
-        tracing::error!(%error, "API server failed");
-        return ExitCode::FAILURE;
+
+    let mut pump_tasks = Vec::with_capacity(args.pumps.get());
+    for worker in 0..args.pumps.get() {
+        let worker_pump = pump.clone();
+        let worker_cancellation = cancellation.child_token();
+        pump_tasks.push(tokio::spawn(async move {
+            tracing::info!(worker, "deposit pump started");
+            worker_pump.run(worker_cancellation).await;
+        }));
     }
-    ExitCode::SUCCESS
+    let metrics = Arc::new(PumpMetrics::default());
+    let age_alerter = AgeAlerter::with_reminder_interval(
+        pool.clone(),
+        age_config,
+        Arc::clone(&metrics),
+        Duration::from_secs(args.age_alert_interval_s),
+        Duration::from_secs(args.age_alert_reminder_s),
+    );
+    let age_cancellation = cancellation.child_token();
+    let age_task = tokio::spawn(async move {
+        age_alerter.run(age_cancellation).await;
+    });
+
+    tracing::info!(pumps = args.pumps.get(), "topup service started");
+    let mut clean_shutdown = true;
+    let mut api_finished = false;
+    tokio::select! {
+        signal = wait_for_shutdown_signal() => {
+            if let Err(error) = signal {
+                tracing::error!(%error, "failed to listen for shutdown signal");
+                clean_shutdown = false;
+            }
+        }
+        result = &mut api_task => {
+            api_finished = true;
+            match result {
+                Ok(Ok(())) => tracing::error!("API server stopped before shutdown"),
+                Ok(Err(error)) => tracing::error!(%error, "API server failed"),
+                Err(error) => tracing::error!(%error, "API task failed"),
+            }
+            clean_shutdown = false;
+        }
+    }
+    tracing::info!("shutdown requested; finishing in-flight deposit steps");
+    cancellation.cancel();
+
+    if !api_finished {
+        match api_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "API server failed during shutdown");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::error!(%error, "API task failed during shutdown");
+                clean_shutdown = false;
+            }
+        }
+    }
+    for task in pump_tasks {
+        if let Err(error) = task.await {
+            tracing::error!(%error, "deposit pump task failed during shutdown");
+            clean_shutdown = false;
+        }
+    }
+    if let Err(error) = age_task.await {
+        tracing::error!(%error, "age alert task failed during shutdown");
+        clean_shutdown = false;
+    }
+    pool.close().await;
+    tracing::info!(
+        stuck_deposit_alerts = metrics.stuck_deposit_alerts(),
+        "topup service stopped"
+    );
+
+    if clean_shutdown {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
-fn load_routes(files: &[PathBuf]) -> Result<Vec<topup_core::route::RouteFile>, String> {
-    let mut routes = Vec::with_capacity(files.len());
-    for file in files {
-        let yaml = std::fs::read_to_string(file)
-            .map_err(|error| format!("failed to read route file `{}`: {error}", file.display()))?;
-        let parsed = route::parse_and_validate(&yaml, false)
-            .map_err(|error| format!("route file `{}` is invalid: {error}", file.display()))?;
-        if routes
-            .iter()
-            .any(|existing: &topup_core::route::RouteFile| existing.route == parsed.route)
-        {
-            return Err(format!("duplicate route `{}`", parsed.route));
-        }
-        routes.push(parsed);
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        received = terminate.recv() => received
+            .ok_or_else(|| Error::new(ErrorKind::BrokenPipe, "SIGTERM listener closed")),
     }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
+    let routes = paths
+        .iter()
+        .map(|path| {
+            let yaml = std::fs::read_to_string(path)
+                .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+            route::parse_and_validate(&yaml, false)
+                .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_route_versions(&routes)?;
     Ok(routes)
+}
+
+fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
+    let mut versions = std::collections::BTreeSet::new();
+    for route in routes {
+        if !versions.insert((route.route.as_str(), route.version)) {
+            return Err(format!(
+                "duplicate route `{}` version {}",
+                route.route, route.version
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn required_env(name: &'static str) -> Result<String, String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{name} is required"))
+        .ok_or_else(|| format!("{name} is required for run"))
+}
+
+async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> ExitCode {
+    let selector = match (id, since) {
+        (Some(id), None) => topup::outbox::ReplaySelector::Id(id),
+        (None, Some(since)) => match DateTime::parse_from_rfc3339(since) {
+            Ok(value) => topup::outbox::ReplaySelector::Since(value.with_timezone(&Utc)),
+            Err(_) => {
+                tracing::error!("--since must be an RFC 3339 timestamp");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => {
+            tracing::error!("exactly one of --id or --since is required");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("DATABASE_URL is required for outbox replay");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reason = if force {
+        "manual CLI replay with delivered state reset"
+    } else {
+        "manual CLI replay of pending events"
+    };
+    match topup::outbox::replay(&pool, selector, force, "cli", reason).await {
+        Ok(count) => {
+            tracing::info!(count, force, "outbox replay scheduled");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to schedule outbox replay");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn migrate() -> ExitCode {
@@ -300,7 +545,8 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_nonce;
+    use super::{parse_nonce, validate_route_versions};
+    use topup_core::route::RouteFile;
 
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
@@ -317,5 +563,20 @@ mod tests {
         );
         assert_eq!(parse_nonce("0"), Err("nonce must be valid hexadecimal"));
         assert_eq!(parse_nonce("zz"), Err("nonce must be valid hexadecimal"));
+    }
+
+    #[test]
+    fn route_loading_accepts_versions_and_rejects_exact_duplicates() {
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let mut newer = route.clone();
+        newer.version = route.version + 1;
+
+        assert_eq!(validate_route_versions(&[route.clone(), newer]), Ok(()));
+        assert_eq!(
+            validate_route_versions(&[route.clone(), route]),
+            Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
+        );
     }
 }

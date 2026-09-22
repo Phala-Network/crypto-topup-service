@@ -34,7 +34,7 @@ fn placeholder_commands_fail_with_a_clear_message() {
 }
 
 #[test]
-fn run_requires_runtime_configuration() {
+fn run_requires_a_database_url() {
     let route = format!(
         "{}/tests/fixtures/phala-cloud-pha.yaml",
         env!("CARGO_MANIFEST_DIR")
@@ -51,7 +51,8 @@ fn run_requires_runtime_configuration() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("DATABASE_URL is required") || stderr.contains("DATABASE_URL is required")
+        stdout.contains("DATABASE_URL is required for run")
+            || stderr.contains("DATABASE_URL is required for run")
     );
 }
 
@@ -159,4 +160,25 @@ fn route_validate_rejects_invalid_content_and_missing_files() {
     let missing_output = topup(&["route", "validate", "/definitely/missing/route.yaml"]);
     assert!(!missing_output.status.success());
     assert!(String::from_utf8_lossy(&missing_output.stderr).contains("failed to read"));
+}
+
+#[test]
+fn outbox_replay_validates_selector_and_timestamp_before_connecting() {
+    let help = topup(&["outbox", "replay", "--help"]);
+    assert!(help.status.success());
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("--id"));
+    assert!(help_text.contains("--since"));
+    assert!(help_text.contains("--force"));
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["outbox", "replay", "--since", "not-a-timestamp"])
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("RFC 3339")
+            || String::from_utf8_lossy(&invalid.stdout).contains("RFC 3339")
+    );
 }

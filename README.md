@@ -48,6 +48,8 @@ and append-only `transitions` and `audit` permit only `SELECT` and `INSERT`.
 `topup migrate` uses only `MIGRATE_DATABASE_URL`. It must identify the trusted database owner with
 permission to create roles and schema objects; the command never falls back to the application URL.
 
+`topup run` serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket address.
+
 ## Status
 
 Design v5 is under review. Implementation has not started. Production policy values are set by
