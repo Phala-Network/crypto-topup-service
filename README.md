@@ -1,75 +1,42 @@
 # Crypto Top-up Service
 
-A private service for turning finalized crypto deposits into idempotent account credits for Phala products.
+A private service, called by the Phala Cloud billing backend, that turns finalized ERC-20
+deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that
+can only pay the treasury; the service runs inside a dstack confidential VM and credits products
+through a signed HTTP settlement contract. Routes may offer rate-locked deposits.
 
-The service separates blockchain-specific deposit handling from product billing. Products register an account, request a deposit route, and receive a signed settlement event after the service has confirmed, screened, priced, and recorded a deposit.
+First route: Ethereum Mainnet PHA → Phala Cloud USD credit. Further assets, chains, and products
+are added through route configuration and adapters.
 
-## Core flow
+## Flow
 
 ```text
-account requests deposit route
-  → custody adapter provisions an address
-  → chain adapter detects a transfer
-  → finality policy confirms the canonical event
-  → risk policy evaluates the deposit
-  → pricing adapter locks an exchange rate
-  → settlement adapter credits the destination account
-  → custody adapter sweeps funds to treasury
-  → reconciliation verifies every boundary
+product registers an account and requests a deposit address
+  → service computes the account's CREATE2 forwarder address (no key, nothing deployed)
+  → scanner reads finalized blocks and records the transfer
+  → a second RPC provider confirms block hash and log; the quote is taken at that instant
+  → sanctions screening and per-deposit bounds
+  → signed, idempotent settlement call to the product, which verifies the log itself
+  → batched flush of forwarders to the treasury
+  → reconciliation of chain, service, and product ledger
 ```
 
-All recurring steps are automated. Transient failures enter persisted retry states. Deterministic denials remain uncredited and produce an auditable event.
+There is no operator step and no failure state: anything that cannot complete retries with
+backoff and raises an alert on age. Deterministic denials are recorded with evidence and never
+credited.
 
-## General model
+## Ownership
 
-A **route** defines:
-
-- source chain and asset
-- custody and treasury configuration
-- finality policy
-- risk policy
-- pricing pair and quote policy
-- destination product, account, and credit unit
-- settlement adapter
-- sweep policy
-
-The first deployment profile is Ethereum PHA → Phala Cloud USD credit. The service model also supports additional EVM assets, chains, products, and settlement units through adapters and configuration.
-
-## Service boundaries
-
-The service owns:
-
-- deposit-address lifecycle
-- chain ingestion and canonical-event evidence
-- finality, risk, and pricing decisions
-- deposit state and idempotency
-- settlement requests and receipts
-- gas funding, sweeping, retries, and reconciliation
-
-The destination product owns:
-
-- customer/workspace identity
-- spendable balance and ledger
-- debt repayment and entitlement restoration
-- customer-facing billing policy
-
-Private keys remain in the configured custody or MPC/HSM system.
+The service owns addresses, chain evidence, finality, screening, pricing, deposit state,
+settlement requests, sweeps, and reconciliation. The product owns customer identity, spendable
+balance, debt, entitlements, and billing policy.
 
 ## Documents
 
-- [Architecture](docs/architecture.md)
-- [Phala Cloud PHA profile](examples/phala-cloud-pha.yaml)
-
-## Initial delivery
-
-The initial implementation targets one complete route:
-
-```text
-Ethereum Mainnet PHA → Phala Cloud USD credit
-```
-
-The route exercises the generic adapter contracts and automated lifecycle before additional assets or products are enabled.
+- [Design](docs/architecture.md) — goal, trust model, schema, state machine, contracts, deployment, policies, acceptance
+- [First route profile](examples/phala-cloud-pha.yaml)
 
 ## Status
 
-Architecture and implementation planning are under review. Production policy thresholds remain runtime configuration owned by risk, finance, and operations.
+Design v5 is under review. Implementation has not started. Production policy values are set by
+finance, risk, and operations at pilot time.
