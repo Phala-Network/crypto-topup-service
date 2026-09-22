@@ -102,6 +102,9 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
   addresses; `keccak256(abi.encode(product_slug, external_id, "lock", product_lock_ref))` for
   rate locks. The product holds every input, so any address can be recomputed with no service
   state. The API returns the inputs with the address.
+- Each chain configuration records the deployed `forwarder_factory`, its immutable
+  `implementation`, and the `treasury`. Address derivation uses the configured factory and
+  implementation; startup verifies both against the factory contract before serving traffic.
 - Deployed with the deterministic deployment proxy using plain salts, identical init code and
   constructor args on every chain. The treasury is a Safe verified on each chain (deployed,
   same owners and threshold) before a route is enabled.
