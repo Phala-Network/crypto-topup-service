@@ -626,7 +626,8 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
         SELECT address.address, address.lock_ref, account.product_id, address.kind,
                rate_lock.route, rate_lock.amount_atomic::text AS amount_atomic,
                rate_lock.price_scaled::text AS price_scaled,
-               rate_lock.credit_minor, rate_lock.expires_at, rate_lock.consumed_by
+               rate_lock.credit_minor::text AS credit_minor,
+               rate_lock.expires_at, rate_lock.consumed_by
         FROM addresses AS address
         JOIN accounts AS account ON account.id = address.account_id
         LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
