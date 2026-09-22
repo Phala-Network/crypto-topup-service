@@ -15,8 +15,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - observability:/run/topup-observability
     configs:
       - source: postgres_init_topup_role
         target: /docker-entrypoint-initdb.d/10-topup-role.sh
@@ -64,10 +66,12 @@ services:
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TOPUP_ADMIN_KID: ${TOPUP_ADMIN_KID:-}
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       TOPUP_CHAINS_DIR: /etc/topup/chains
       TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - observability:/run/topup-observability:ro
     configs:
       - source: topup_chain_ethereum_sepolia
         target: /etc/topup/chains/ethereum-sepolia.yaml
@@ -98,8 +102,10 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD:-}
       WALG_RETENTION_FULL: "7"
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
+      - observability:/run/topup-observability
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
       interval: 60s
@@ -112,6 +118,7 @@ services:
 
 volumes:
   pgdata:
+  observability:
 
 configs:
   postgres_init_topup_role:

@@ -1,6 +1,22 @@
 #!/bin/sh
 set -eu
 
+write_marker() {
+    marker=${TOPUP_BACKUP_TIMESTAMP_FILE:-/run/topup-observability/last-backup-unix-seconds}
+    marker_dir=$(dirname "$marker")
+    mkdir -p "$marker_dir"
+    marker_tmp="$marker.tmp.$$"
+    umask 077
+    date -u +%s > "$marker_tmp"
+    mv "$marker_tmp" "$marker"
+}
+
+if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
+    wal-g wal-push "$2"
+    write_marker
+    exit 0
+fi
+
 if [ "${1:-}" != "backup-push" ] || [ "$#" -ne 2 ]; then
     echo 'usage: walg-cron backup-push "MINUTE HOUR * * *"' >&2
     exit 64
@@ -58,5 +74,6 @@ while :; do
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
     sleep "$delay"
     wal-g backup-push "${PGDATA:-/var/lib/postgresql/data}"
+    write_marker
     wal-g delete retain FULL "$retention" --use-sentinel-time --confirm
 done

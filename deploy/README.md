@@ -20,6 +20,19 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   compose and the compose hash reported for the CVM.
 - `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G. Its hooks prepare D3 but do not claim
   encrypted backups, a tested restore, or an achieved RPO/RTO.
+- `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
+  Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and must remain
+  reachable only through the service-bound monitoring path, not a separate public listener.
+
+## Backup age marker contract
+
+After a successful `wal-g wal-push` or `wal-g backup-push`, `walg-cron` atomically writes the
+current Unix timestamp as decimal ASCII plus a newline to `TOPUP_BACKUP_TIMESTAMP_FILE`. PostgreSQL
+uses `walg-cron wal-push %p` as its archive command, so the 60-second `archive_timeout` drives the
+two-minute alert. The measured compose shares
+`/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and `backup`, and
+read-only with `topup`. A missing or malformed marker is exported as infinite backup age so the
+alert fails closed.
 
 ## Build and publish images
 

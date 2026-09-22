@@ -1,0 +1,25 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {"id": 1, "title": "Scanner lag", "type": "timeseries", "targets": [{"expr": "topup_scanner_lag_blocks", "legendFormat": "{{chain}} blocks"}, {"expr": "topup_scanner_lag_seconds", "legendFormat": "{{chain}} seconds"}]},
+    {"id": 2, "title": "Deposits by state", "type": "timeseries", "targets": [{"expr": "topup_deposits", "legendFormat": "{{state}}"}]},
+    {"id": 3, "title": "Age in state", "type": "timeseries", "targets": [{"expr": "topup_deposit_state_age_seconds", "legendFormat": "{{route}} {{state}}"}, {"expr": "topup_deposit_state_age_policy_seconds", "legendFormat": "{{route}} {{state}} policy"}]},
+    {"id": 4, "title": "Provider and price checks", "type": "timeseries", "targets": [{"expr": "rate(topup_provider_disagreements_total[5m])", "legendFormat": "provider disagreements"}, {"expr": "topup_price_deviation_basis_points", "legendFormat": "price {{route}}"}, {"expr": "topup_fx_deviation_basis_points", "legendFormat": "FX {{route}}"}]},
+    {"id": 5, "title": "Settlement outcomes", "type": "timeseries", "targets": [{"expr": "rate(topup_settlement_outcomes_total[5m])", "legendFormat": "{{outcome}}"}]},
+    {"id": 6, "title": "Outbox", "type": "timeseries", "targets": [{"expr": "topup_outbox_backlog", "legendFormat": "backlog"}, {"expr": "topup_outbox_oldest_age_seconds", "legendFormat": "oldest seconds"}]},
+    {"id": 7, "title": "Unflushed balance", "type": "timeseries", "targets": [{"expr": "topup_unflushed_balance_atomic", "legendFormat": "{{route}}"}]},
+    {"id": 8, "title": "Operator gas", "type": "timeseries", "targets": [{"expr": "topup_operator_gas_balance_wei", "legendFormat": "{{chain}}"}]},
+    {"id": 9, "title": "Open lock exposure", "type": "timeseries", "targets": [{"expr": "topup_open_lock_exposure_minor", "legendFormat": "{{scope}} {{id}}"}, {"expr": "topup_open_lock_exposure_cap_minor", "legendFormat": "{{scope}} {{id}} cap"}]},
+    {"id": 10, "title": "Backup age", "type": "timeseries", "targets": [{"expr": "topup_backup_age_seconds", "legendFormat": "seconds"}]},
+    {"id": 11, "title": "Reconciliation mismatches", "type": "timeseries", "targets": [{"expr": "rate(topup_reconciliation_mismatches_total[5m])", "legendFormat": "{{check}}"}]},
+    {"id": 12, "title": "Loop heartbeats", "type": "timeseries", "targets": [{"expr": "time() - topup_loop_heartbeat_unixtime_seconds", "legendFormat": "{{loop}} age"}]}
+  ],
+  "schemaVersion": 39,
+  "tags": ["crypto-topup-service"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Crypto Top-up Service",
+  "uid": "crypto-topup-service",
+  "version": 1
+}
