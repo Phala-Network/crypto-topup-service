@@ -14,5 +14,51 @@
     "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
     "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
     "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745"
+  ],
+  "persistent": [
+    {
+      "external_id": "account-001",
+      "predicted_address": "0x382CA64bfc7332EEf90547E1A345779Fa26590C2",
+      "product_slug": "phala-cloud",
+      "salt": "0x9e0994ca3e3bbf50b14eebb6bbe8c3665b80ccbeb1df2577fa25cfc18e69222d",
+      "version": 1
+    },
+    {
+      "external_id": "客户-東京-42",
+      "predicted_address": "0xe7515B503eEAf9F4aA33Ba23A87292F3F4c6920b",
+      "product_slug": "builder",
+      "salt": "0x3ccda8a2f312a7b22f9705497cffe92626339168242ea14186fca886205e1ca9",
+      "version": 2
+    },
+    {
+      "external_id": "customer/with:delimiters",
+      "predicted_address": "0xEBcA9463a52a03D9489ad7B16c6dEE3A73bA8078",
+      "product_slug": "enterprise",
+      "salt": "0x449bf404aedd34b67f410365b6d9d95dff7f6e94ebbe06371c67267282cae184",
+      "version": 42
+    }
+  ],
+  "lock": [
+    {
+      "external_id": "invoice-2026-0001",
+      "lock_ref": "checkout-0001",
+      "predicted_address": "0x9b53A0eE87Bac5c58b792fD073c4547499524b9F",
+      "product_slug": "phala-cloud",
+      "salt": "0x92cbd012f7a5433131d039c37a2988b1d7cd0ddabe0c1703f41074e91d0fffc3"
+    },
+    {
+      "external_id": "quote-0042",
+      "lock_ref": "rate-lock:builder:0042",
+      "predicted_address": "0xC8dEBF44CCc8AFd78160fD5d8E2677a93a121Db6",
+      "product_slug": "builder",
+      "salt": "0xddb1b76da592b1dca18edacc2398ed44b6971cb4a7817819616e8a07cc2518d7"
+    },
+    {
+      "external_id": "invoice-long-reference",
+      "lock_ref": "lock-ref-0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111-2222222222222222222222222222222222222222222222222222222222222222-3333333333333333333333333333333333333333333333333333333333333333",
+      "predicted_address": "0x169DB0031475d0C30bf061C88CA86943b30A877b",
+      "product_slug": "enterprise",
+      "salt": "0x783ed98ce1738f83a61c34dd5786bf0fd6b08669dff4fd95f54eac1e4d31aa69"
+    }
   ]
 }
