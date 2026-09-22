@@ -315,7 +315,10 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
                 match topup::heartbeat::record(&pool).await {
                     Ok(record) => tracing::info!(
                         heartbeat_id = record.id,
-                        recorded_at = %record.recorded_at,
+                        // RFC 3339, so the value can be passed to --expected-heartbeat-at as is.
+                        recorded_at = %record
+                            .recorded_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
                         rpo_seconds = record.rpo_seconds,
                         wal_lsn = %record.wal_lsn,
                         "restore heartbeat recorded"
