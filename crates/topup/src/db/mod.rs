@@ -24,7 +24,8 @@ pub use addresses::{
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
-    TransitionUpdate, apply_transition, claim_deposit, get_deposit, insert_deposit,
+    TransitionUpdate, adopt_settlement_pricing, apply_transition, claim_deposit, get_deposit,
+    insert_deposit,
 };
 pub use flushes::{FlushedEvent, NewFlush, insert_flush, insert_flushed};
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
@@ -33,8 +34,8 @@ pub use products::{
 };
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
 pub use settlements::{
-    Settlement, SettlementIntent, SettlementStatus, mark_accepted, mark_rejected, mark_sent,
-    mark_sent_with_receipt, upsert_intent, upsert_intent_in,
+    Settlement, SettlementIntent, SettlementStatus, get_settlement, mark_accepted, mark_rejected,
+    mark_sent, mark_sent_with_receipt, upsert_intent, upsert_intent_in,
 };
 
 /// Embedded SQL migrations for the service database.

@@ -93,6 +93,25 @@ impl TryFrom<SettlementRecord> for Settlement {
     }
 }
 
+/// Fetches the durable settlement record for a deposit.
+pub async fn get_settlement(
+    pool: &PgPool,
+    deposit_id: Uuid,
+) -> Result<Option<Settlement>, sqlx::Error> {
+    let record = sqlx::query_as::<_, SettlementRecord>(
+        r#"
+        SELECT deposit_id, product_id, key, payload, status,
+               destination_tx_id, receipt, sent_at
+        FROM settlements
+        WHERE deposit_id = $1
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_optional(pool)
+    .await?;
+    record.map(TryInto::try_into).transpose()
+}
+
 /// Inserts a settlement intent or returns the original intent for that deposit.
 pub async fn upsert_intent(
     pool: &PgPool,

@@ -11,12 +11,21 @@ use std::time::Duration as StdDuration;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::post;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{Duration, Utc};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use tokio::sync::{Mutex, Semaphore};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::pump::{JitterSource, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::settle::SettleStep;
 use topup_adapters::settlement::http::{
@@ -37,6 +46,12 @@ type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 #[derive(Clone)]
 struct TestSigner(ed25519_dalek::SigningKey);
 
+impl TestSigner {
+    fn verifying_key(&self) -> VerifyingKey {
+        self.0.verifying_key()
+    }
+}
+
 impl CoreSigner for TestSigner {
     async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
         Err(SignerError::SigningFailed)
@@ -54,6 +69,97 @@ impl CoreSigner for TestSigner {
     async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
         Ok(Ed25519PublicKey(self.0.verifying_key().to_bytes()))
     }
+}
+
+#[derive(Clone)]
+struct WebhookState {
+    verifying_key: VerifyingKey,
+    bodies: Arc<Mutex<Vec<Value>>>,
+}
+
+struct ReferenceReceiver {
+    url: String,
+    bodies: Arc<Mutex<Vec<Value>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ReferenceReceiver {
+    async fn start(verifying_key: VerifyingKey) -> Result<Self> {
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/webhooks", post(reference_webhook))
+            .with_state(WebhookState {
+                verifying_key,
+                bodies: Arc::clone(&bodies),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(Self {
+            url: format!("http://{address}/webhooks"),
+            bodies,
+            task,
+        })
+    }
+
+    async fn stop(self) {
+        self.task.abort();
+        let _ = self.task.await;
+    }
+}
+
+async fn reference_webhook(
+    State(state): State<WebhookState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if verify_standard_webhook(&state.verifying_key, &headers, &body).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let Ok(envelope) = serde_json::from_slice(&body) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    state.bodies.lock().await.push(envelope);
+    StatusCode::OK
+}
+
+fn verify_standard_webhook(
+    verifying_key: &VerifyingKey,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), ()> {
+    let id = webhook_header(headers, "webhook-id")?;
+    let timestamp = webhook_header(headers, "webhook-timestamp")?;
+    let timestamp_value = timestamp.parse::<i64>().map_err(|_| ())?;
+    if Utc::now().timestamp().abs_diff(timestamp_value) > 5 * 60 {
+        return Err(());
+    }
+    let content = [id.as_bytes(), b".", timestamp.as_bytes(), b".", body].concat();
+    let signatures = webhook_header(headers, "webhook-signature")?;
+    if signatures.split_whitespace().any(|candidate| {
+        let Some(("v1a", encoded)) = candidate.split_once(',') else {
+            return false;
+        };
+        let Ok(bytes) = STANDARD.decode(encoded) else {
+            return false;
+        };
+        let Ok(bytes) = <[u8; 64]>::try_from(bytes) else {
+            return false;
+        };
+        verifying_key
+            .verify_strict(&content, &Signature::from_bytes(&bytes))
+            .is_ok()
+    }) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn webhook_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, ()> {
+    headers.get(name).ok_or(())?.to_str().map_err(|_| ())
 }
 
 struct TestContext {
@@ -203,9 +309,12 @@ impl MockSettlementApi {
     }
 
     fn blocking() -> Self {
+        let payload = json!({});
         Self {
             block_post: true,
-            ..Self::with_post(MockOutcome::Answer(SettlementAnswer::Processing))
+            ..Self::with_post(MockOutcome::Answer(SettlementAnswer::Processing {
+                payload,
+            }))
         }
     }
 }
@@ -259,11 +368,12 @@ impl SettlementApi for MockSettlementApi {
 async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
+            let accepted_id = seed_cleared(&context.app_pool, 1).await?;
             let accepted_api =
                 MockSettlementApi::with_post(MockOutcome::Answer(SettlementAnswer::Accepted {
                     destination_tx_id: "credit-1".to_owned(),
+                    payload: settlement_payload(&context.app_pool, accepted_id).await?,
                 }));
-            let accepted_id = seed_cleared(&context.app_pool, 1).await?;
             let accepted = pump(&context.app_pool, accepted_api, StdDuration::from_secs(1))?;
             ensure!(
                 accepted.run_once().await?
@@ -280,12 +390,14 @@ async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> 
             .await?;
             let row = settlement(&context.app_pool, accepted_id).await?;
             ensure!(row.0 == "accepted" && row.1.as_deref() == Some("credit-1"));
+            assert_event_product(&context.app_pool, accepted_id, "deposit.credited").await?;
 
+            let rejected_id = seed_cleared(&context.app_pool, 2).await?;
             let rejected_api =
                 MockSettlementApi::with_post(MockOutcome::Answer(SettlementAnswer::Rejected {
                     reason: "cap".to_owned(),
+                    payload: settlement_payload(&context.app_pool, rejected_id).await?,
                 }));
-            let rejected_id = seed_cleared(&context.app_pool, 2).await?;
             let rejected = pump(&context.app_pool, rejected_api, StdDuration::from_secs(1))?;
             rejected.run_once().await?;
             assert_state_and_event(
@@ -297,6 +409,212 @@ async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> 
             .await?;
             let row = settlement(&context.app_pool, rejected_id).await?;
             ensure!(row.0 == "rejected" && row.1.is_none());
+            assert_event_product(&context.app_pool, rejected_id, "deposit.rejected").await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let webhook_signer =
+                Arc::new(TestSigner(ed25519_dalek::SigningKey::from_bytes(&[12; 32])));
+            let receiver = ReferenceReceiver::start(webhook_signer.verifying_key()).await?;
+
+            let accepted_id = seed_cleared(&context.app_pool, 12).await?;
+            set_product_webhook(&context.app_pool, accepted_id, &receiver.url).await?;
+            let accepted_api =
+                MockSettlementApi::with_post(MockOutcome::Answer(SettlementAnswer::Accepted {
+                    destination_tx_id: "credit-delivery".to_owned(),
+                    payload: settlement_payload(&context.app_pool, accepted_id).await?,
+                }));
+            pump(&context.app_pool, accepted_api, StdDuration::from_secs(1))?
+                .run_once()
+                .await?;
+
+            let rejected_id = seed_cleared(&context.app_pool, 13).await?;
+            set_product_webhook(&context.app_pool, rejected_id, &receiver.url).await?;
+            let rejected_api =
+                MockSettlementApi::with_post(MockOutcome::Answer(SettlementAnswer::Rejected {
+                    reason: "cap".to_owned(),
+                    payload: settlement_payload(&context.app_pool, rejected_id).await?,
+                }));
+            pump(&context.app_pool, rejected_api, StdDuration::from_secs(1))?
+                .run_once()
+                .await?;
+
+            let delivery = DeliveryWorker::new(
+                context.app_pool.clone(),
+                webhook_signer,
+                DeliveryConfig {
+                    batch_size: 2,
+                    request_timeout: StdDuration::from_secs(2),
+                    claim_lease: StdDuration::from_secs(10),
+                    poll_interval: StdDuration::from_millis(10),
+                    response_body_limit: 1024,
+                    age_alert_threshold: StdDuration::from_secs(60),
+                },
+            )?;
+            ensure!(delivery.run_once().await? == 2);
+            let bodies = receiver.bodies.lock().await;
+            ensure!(bodies.len() == 2);
+            ensure!(bodies.iter().any(|body| {
+                body["type"] == "deposit.credited"
+                    && body["data"]["deposit_id"] == accepted_id.to_string()
+                    && body["data"].get("product_id").is_some()
+            }));
+            ensure!(bodies.iter().any(|body| {
+                body["type"] == "deposit.rejected"
+                    && body["data"]["deposit_id"] == rejected_id.to_string()
+                    && body["data"].get("product_id").is_some()
+            }));
+            drop(bodies);
+            receiver.stop().await;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sent_row_gets_authoritative_answer_and_adopts_product_pricing() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let id = seed_cleared(&context.app_pool, 6).await?;
+            let mut payload = settlement_payload(&context.app_pool, id).await?;
+            let product_valuation = Utc::now() - Duration::minutes(7);
+            payload["amount_minor"] = json!("999");
+            payload["evidence"]["price_scaled"] = json!("33300000");
+            payload["evidence"]["valuation_at"] = json!(product_valuation);
+            persist_intent(&context.app_pool, id, settlement_payload(&context.app_pool, id).await?)
+                .await?;
+            db::mark_sent(&context.app_pool, id).await?;
+            let api = MockSettlementApi::with_sequences(
+                Vec::new(),
+                vec![MockOutcome::Answer(SettlementAnswer::Accepted {
+                    destination_tx_id: "credit-authoritative".to_owned(),
+                    payload,
+                })],
+            );
+            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            worker.run_once().await?;
+
+            ensure!(api.gets.load(Ordering::SeqCst) == 1);
+            ensure!(api.posts.lock().await.is_empty());
+            let deposit = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("deposit must exist")?;
+            ensure!(deposit.credit_minor.context("credit minor")?.value() == 999);
+            ensure!(deposit.price_scaled == Some(33_300_000));
+            ensure!(
+                deposit.valuation_at.map(|value| value.timestamp_micros())
+                    == Some(product_valuation.timestamp_micros())
+            );
+            let transition: Value =
+                sqlx::query_scalar("SELECT evidence FROM transitions WHERE deposit_id = $1")
+                    .bind(id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(transition["pricing"]["local"]["amount_minor"] == 250);
+            ensure!(transition["pricing"]["product"]["amount_minor"] == 999);
+            let event: Value = sqlx::query_scalar(
+                "SELECT payload FROM outbox WHERE event_type = 'deposit.credited' AND payload->>'deposit_id' = $1",
+            )
+            .bind(id.to_string())
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(event["amount_minor"] == "999");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn terminal_row_restores_transition_without_get_or_post() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let id = seed_cleared(&context.app_pool, 7).await?;
+            let payload = settlement_payload(&context.app_pool, id).await?;
+            persist_intent(&context.app_pool, id, payload.clone()).await?;
+            db::mark_accepted(
+                &context.app_pool,
+                id,
+                "credit-saved",
+                &json!({
+                    "status": "accepted",
+                    "destination_tx_id": "credit-saved",
+                    "payload": payload,
+                }),
+            )
+            .await?;
+            let api = MockSettlementApi::default();
+            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            worker.run_once().await?;
+
+            ensure!(api.gets.load(Ordering::SeqCst) == 0);
+            ensure!(api.posts.lock().await.is_empty());
+            assert_state_and_event(&context.app_pool, id, "credited", "deposit.credited").await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn pauses_block_new_posts_but_not_get_adoption() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let api = MockSettlementApi::default();
+            for (number, scope) in [(8, "account"), (9, "product"), (10, "route")] {
+                let id = seed_cleared(&context.app_pool, number).await?;
+                pause_settlement(&context.app_pool, id, scope).await?;
+                let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+                worker.run_once().await?;
+                let stored = db::get_deposit(&context.app_pool, id)
+                    .await?
+                    .context("deposit must exist")?;
+                ensure!(stored.state == DepositState::Cleared);
+                let evidence: Value = sqlx::query_scalar(
+                    "SELECT evidence FROM transitions WHERE deposit_id = $1 ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(id)
+                .fetch_one(&context.app_pool)
+                .await?;
+                ensure!(evidence["reason"] == "settlement_paused");
+            }
+            ensure!(api.posts.lock().await.is_empty());
+
+            let id = seed_cleared(&context.app_pool, 11).await?;
+            let payload = settlement_payload(&context.app_pool, id).await?;
+            persist_intent(&context.app_pool, id, payload.clone()).await?;
+            db::mark_sent(&context.app_pool, id).await?;
+            pause_settlement(&context.app_pool, id, "account").await?;
+            let adopting_api = MockSettlementApi::with_sequences(
+                Vec::new(),
+                vec![MockOutcome::Answer(SettlementAnswer::Accepted {
+                    destination_tx_id: "credit-paused".to_owned(),
+                    payload,
+                })],
+            );
+            let worker = pump(
+                &context.app_pool,
+                adopting_api.clone(),
+                StdDuration::from_secs(1),
+            )?;
+            worker.run_once().await?;
+            ensure!(adopting_api.gets.load(Ordering::SeqCst) == 1);
+            ensure!(adopting_api.posts.lock().await.is_empty());
+            ensure!(
+                db::get_deposit(&context.app_pool, id)
+                    .await?
+                    .context("deposit must exist")?
+                    .state
+                    == DepositState::Credited
+            );
             Ok(())
         })
     })
@@ -307,16 +625,17 @@ async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> 
 async fn unknown_result_gets_before_resend_and_keeps_payload_identical() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
+            let id = seed_cleared(&context.app_pool, 3).await?;
             let api = MockSettlementApi::with_sequences(
                 vec![
                     MockOutcome::Failure,
                     MockOutcome::Answer(SettlementAnswer::Accepted {
                         destination_tx_id: "credit-2".to_owned(),
+                        payload: settlement_payload(&context.app_pool, id).await?,
                     }),
                 ],
                 vec![MockOutcome::Failure],
             );
-            let id = seed_cleared(&context.app_pool, 3).await?;
             let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
             worker.run_once().await?;
             sqlx::query(
@@ -365,7 +684,7 @@ async fn payload_mismatch_is_alert_retry_and_is_never_resent() -> Result<()> {
             .await?;
             worker.run_once().await?;
             ensure!(api.posts.lock().await.len() == 1);
-            ensure!(api.gets.load(Ordering::SeqCst) == 1);
+            ensure!(api.gets.load(Ordering::SeqCst) == 2);
             Ok(())
         })
     })
@@ -517,6 +836,115 @@ async fn settlement(pool: &PgPool, id: Uuid) -> Result<(String, Option<String>)>
             .fetch_one(pool)
             .await?;
     Ok((row.try_get(0)?, row.try_get(1)?))
+}
+
+async fn settlement_payload(pool: &PgPool, id: Uuid) -> Result<Value> {
+    let deposit = db::get_deposit(pool, id)
+        .await?
+        .context("deposit must exist")?;
+    let account = db::get_account(pool, deposit.account_id)
+        .await?
+        .context("account must exist")?;
+    let address = db::get_address(pool, deposit.address_id)
+        .await?
+        .context("address must exist")?;
+    Ok(json!({
+        "version": 1,
+        "idempotency_key": format!("deposit:{}", deposit.id),
+        "account_id": account.external_id,
+        "unit": "USD",
+        "amount_minor": deposit.credit_minor.context("credit minor")?.value().to_string(),
+        "source": "crypto_deposit",
+        "evidence": {
+            "chain_id": deposit.chain_id,
+            "asset_contract": format!("{:#x}", deposit.asset_contract),
+            "route": deposit.route.context("route")?,
+            "route_version": deposit.route_version.context("route version")?,
+            "tx_hash": format!("{:#x}", deposit.tx_hash),
+            "log_index": deposit.log_index,
+            "to": format!("{:#x}", address.address),
+            "amount_atomic": deposit.amount_atomic.value().to_string(),
+            "price_scaled": deposit.price_scaled.context("price scaled")?.to_string(),
+            "price_scale": topup_core::money::PRICE_SCALE,
+            "valuation_at": deposit.valuation_at.context("valuation at")?,
+            "lock_ref": address.lock_ref,
+        },
+    }))
+}
+
+async fn persist_intent(pool: &PgPool, id: Uuid, payload: Value) -> Result<()> {
+    let deposit = db::get_deposit(pool, id)
+        .await?
+        .context("deposit must exist")?;
+    let account = db::get_account(pool, deposit.account_id)
+        .await?
+        .context("account must exist")?;
+    db::upsert_intent(
+        pool,
+        &db::SettlementIntent {
+            deposit_id: id,
+            product_id: account.product_id,
+            key: format!("deposit:{id}"),
+            payload,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn pause_settlement(pool: &PgPool, id: Uuid, level: &str) -> Result<()> {
+    let deposit = db::get_deposit(pool, id)
+        .await?
+        .context("deposit must exist")?;
+    let account = db::get_account(pool, deposit.account_id)
+        .await?
+        .context("account must exist")?;
+    match level {
+        "account" => {
+            db::set_account_paused_scopes(pool, account.id, &["settlement".to_owned()]).await?;
+        }
+        "product" => {
+            db::set_product_paused_scopes(pool, account.product_id, &["settlement".to_owned()])
+                .await?;
+        }
+        "route" => {
+            sqlx::query(
+                "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['settlement']) ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes",
+            )
+            .bind(deposit.route.context("route")?)
+            .execute(pool)
+            .await?;
+        }
+        _ => anyhow::bail!("unknown pause level"),
+    }
+    Ok(())
+}
+
+async fn set_product_webhook(pool: &PgPool, id: Uuid, webhook_url: &str) -> Result<()> {
+    let deposit = db::get_deposit(pool, id)
+        .await?
+        .context("deposit must exist")?;
+    let account = db::get_account(pool, deposit.account_id)
+        .await?
+        .context("account must exist")?;
+    sqlx::query("UPDATE products SET webhook_url = $2 WHERE id = $1")
+        .bind(account.product_id)
+        .bind(webhook_url)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn assert_event_product(pool: &PgPool, id: Uuid, event_type: &str) -> Result<()> {
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox WHERE event_type = $1 AND payload->>'deposit_id' = $2",
+    )
+    .bind(event_type)
+    .bind(id.to_string())
+    .fetch_one(pool)
+    .await?;
+    ensure!(payload.get("product_id").and_then(Value::as_str).is_some());
+    Ok(())
 }
 
 async fn assert_state_and_event(

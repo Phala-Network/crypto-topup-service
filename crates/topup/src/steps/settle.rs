@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use topup_adapters::settlement::http::{
@@ -108,18 +108,29 @@ impl SettleStep {
             address.lock_ref,
         )?)
         .map_err(|_| SettleStepError::Encode)?;
-        if settlement.payload != expected_payload {
+        if settlement.status == SettlementStatus::Intent && settlement.payload != expected_payload {
             intent_transaction.commit().await?;
             return Ok(invariant_result("settlement_payload_changed"));
         }
         intent_transaction.commit().await?;
+
+        if let Some(answer) = terminal_answer(&settlement)? {
+            return self
+                .apply_answer(deposit, account.product_id, &account.external_id, answer)
+                .await;
+        }
+
         let request = SettlementRequest {
             idempotency_key: settlement.key.clone(),
             payload: settlement.payload.clone(),
         };
-        if settlement.status == SettlementStatus::Sent {
+        if settlement.status != SettlementStatus::Intent {
             match client.get_by_key(&settlement.key).await {
-                Ok(Some(answer)) => return self.apply_answer(deposit, answer).await,
+                Ok(Some(answer)) => {
+                    return self
+                        .apply_answer(deposit, account.product_id, &account.external_id, answer)
+                        .await;
+                }
                 Ok(None) if settlement.receipt.as_ref().is_some_and(is_payload_mismatch) => {
                     return Ok(invariant_result("settlement_payload_mismatch"));
                 }
@@ -130,43 +141,103 @@ impl SettleStep {
             }
         }
 
+        if settlement_paused(
+            &self.pool,
+            deposit,
+            &account.paused_scopes,
+            &product.paused_scopes,
+        )
+        .await?
+        {
+            return Ok(StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::Paused,
+                },
+                json!({"outcome": "wait", "reason": "settlement_paused"}),
+            ));
+        }
+
+        db::mark_sent(&self.pool, deposit.id).await?;
+
         match client.post(&request).await {
-            Ok(answer) => self.apply_answer(deposit, answer).await,
-            Err(error) => {
-                db::mark_sent(&self.pool, deposit.id).await?;
-                Ok(transport_result("settlement_post_failed", &error))
+            Ok(SettlementAnswer::PayloadMismatch422) => {
+                db::mark_sent_with_receipt(
+                    &self.pool,
+                    deposit.id,
+                    &json!({"status": "payload_mismatch"}),
+                )
+                .await?;
+                match client.get_by_key(&settlement.key).await {
+                    Ok(Some(answer)) => {
+                        self.apply_answer(deposit, account.product_id, &account.external_id, answer)
+                            .await
+                    }
+                    Ok(None) => Ok(invariant_result("settlement_payload_mismatch")),
+                    Err(error) => Ok(transport_result("settlement_get_failed", &error)),
+                }
             }
+            Ok(answer) => {
+                self.apply_answer(deposit, account.product_id, &account.external_id, answer)
+                    .await
+            }
+            Err(error) => Ok(transport_result("settlement_post_failed", &error)),
         }
     }
 
     async fn apply_answer(
         &self,
         deposit: &db::Deposit,
+        product_id: Uuid,
+        account_external_id: &str,
         answer: SettlementAnswer,
     ) -> Result<StepResult, SettleStepError> {
         match answer {
-            SettlementAnswer::Accepted { destination_tx_id } => {
+            SettlementAnswer::Accepted {
+                destination_tx_id,
+                payload,
+            } => {
+                let payload =
+                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
                 let receipt = json!({
                     "status": "accepted",
                     "destination_tx_id": &destination_tx_id,
+                    "payload": &payload,
                 });
                 db::mark_accepted(&self.pool, deposit.id, &destination_tx_id, &receipt).await?;
+                let pricing = payload.pricing()?;
+                db::adopt_settlement_pricing(
+                    &self.pool,
+                    deposit.id,
+                    pricing.amount_minor,
+                    pricing.price_scaled,
+                    pricing.valuation_at,
+                )
+                .await?;
+                let evidence = terminal_evidence("accepted", deposit, &payload, &receipt)?;
                 Ok(StepResult {
                     outcome: StepOutcome::Advance,
-                    evidence: receipt.clone(),
+                    evidence,
                     events: vec![event(
                         "deposit.credited",
                         json!({
+                            "product_id": product_id,
                             "deposit_id": deposit.id,
                             "destination_tx_id": receipt["destination_tx_id"],
-                            "amount_minor": deposit.credit_minor.map(|amount| amount.value().to_string()),
-                            "unit": "USD",
+                            "amount_minor": payload.amount_minor,
+                            "unit": payload.unit,
                         }),
                     )],
                 })
             }
-            SettlementAnswer::Processing | SettlementAnswer::Conflict409 => {
-                db::mark_sent(&self.pool, deposit.id).await?;
+            SettlementAnswer::Processing { payload } => {
+                let payload =
+                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
+                db::mark_sent_with_receipt(
+                    &self.pool,
+                    deposit.id,
+                    &json!({"status": "processing", "payload": payload}),
+                )
+                .await?;
                 Ok(StepResult::new(
                     StepOutcome::Wait {
                         reason: WaitReason::ProductProcessing,
@@ -174,15 +245,38 @@ impl SettleStep {
                     json!({"outcome": "wait", "reason": "product_processing"}),
                 ))
             }
-            SettlementAnswer::Rejected { reason } => {
-                let receipt = json!({"status": "rejected", "reason": reason});
+            SettlementAnswer::Conflict409 => {
+                db::mark_sent_with_receipt(&self.pool, deposit.id, &json!({"status": "conflict"}))
+                    .await?;
+                Ok(StepResult::new(
+                    StepOutcome::Wait {
+                        reason: WaitReason::ProductProcessing,
+                    },
+                    json!({"outcome": "wait", "reason": "product_processing"}),
+                ))
+            }
+            SettlementAnswer::Rejected { reason, payload } => {
+                let payload =
+                    SettlementPayload::from_product(payload, deposit, account_external_id)?;
+                let receipt = json!({"status": "rejected", "reason": reason, "payload": &payload});
                 db::mark_rejected(&self.pool, deposit.id, &receipt).await?;
+                let pricing = payload.pricing()?;
+                db::adopt_settlement_pricing(
+                    &self.pool,
+                    deposit.id,
+                    pricing.amount_minor,
+                    pricing.price_scaled,
+                    pricing.valuation_at,
+                )
+                .await?;
+                let evidence = terminal_evidence("rejected", deposit, &payload, &receipt)?;
                 Ok(StepResult {
                     outcome: StepOutcome::Reject(RejectReason::ProductRefused),
-                    evidence: receipt.clone(),
+                    evidence,
                     events: vec![event(
                         "deposit.rejected",
                         json!({
+                            "product_id": product_id,
                             "deposit_id": deposit.id,
                             "reason": RejectReason::ProductRefused.code(),
                             "product_reason": receipt["reason"],
@@ -191,16 +285,15 @@ impl SettleStep {
                 })
             }
             SettlementAnswer::PayloadMismatch422 => {
-                db::mark_sent_with_receipt(
-                    &self.pool,
-                    deposit.id,
-                    &json!({"status": "payload_mismatch"}),
-                )
-                .await?;
                 Ok(invariant_result("settlement_payload_mismatch"))
             }
             SettlementAnswer::Unknown { status, body } => {
-                db::mark_sent(&self.pool, deposit.id).await?;
+                db::mark_sent_with_receipt(
+                    &self.pool,
+                    deposit.id,
+                    &json!({"status": "unknown", "http_status": status, "body": body}),
+                )
+                .await?;
                 Ok(StepResult::new(
                     StepOutcome::Retry {
                         error: RetryError::Transient,
@@ -242,6 +335,8 @@ enum SettleStepError {
     MissingAddress,
     MissingProduct,
     MissingField(&'static str),
+    InvalidProductPayload(&'static str),
+    InvalidStoredAnswer(&'static str),
     Encode,
     Client(SettlementClientError),
 }
@@ -257,6 +352,8 @@ impl SettleStepError {
             | Self::MissingAddress
             | Self::MissingProduct
             | Self::MissingField(_)
+            | Self::InvalidProductPayload(_)
+            | Self::InvalidStoredAnswer(_)
             | Self::Encode
             | Self::Client(_) => RetryError::InvariantViolation,
         }
@@ -269,6 +366,8 @@ impl SettleStepError {
             Self::MissingAddress => "settlement_address_missing",
             Self::MissingProduct => "settlement_product_missing",
             Self::MissingField(_) => "settlement_input_missing",
+            Self::InvalidProductPayload(_) => "settlement_product_payload_invalid",
+            Self::InvalidStoredAnswer(_) => "settlement_stored_answer_invalid",
             Self::Encode => "settlement_payload_encode_failed",
             Self::Client(_) => "settlement_client_configuration_failed",
         }
@@ -283,6 +382,18 @@ impl std::fmt::Display for SettleStepError {
             Self::MissingAddress => formatter.write_str("settlement address is missing"),
             Self::MissingProduct => formatter.write_str("settlement product is missing"),
             Self::MissingField(field) => write!(formatter, "settlement field `{field}` is missing"),
+            Self::InvalidProductPayload(field) => {
+                write!(
+                    formatter,
+                    "product settlement payload field `{field}` is invalid"
+                )
+            }
+            Self::InvalidStoredAnswer(field) => {
+                write!(
+                    formatter,
+                    "stored settlement answer field `{field}` is invalid"
+                )
+            }
             Self::Encode => formatter.write_str("failed to encode settlement payload"),
             Self::Client(error) => std::fmt::Display::fmt(error, formatter),
         }
@@ -297,18 +408,18 @@ impl From<sqlx::Error> for SettleStepError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct SettlementPayload {
     version: u8,
     idempotency_key: String,
     account_id: String,
-    unit: &'static str,
+    unit: String,
     amount_minor: String,
-    source: &'static str,
+    source: String,
     evidence: SettlementEvidence,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct SettlementEvidence {
     chain_id: u64,
     asset_contract: String,
@@ -351,9 +462,9 @@ impl SettlementPayload {
             version: 1,
             idempotency_key: format!("deposit:{}", deposit.id),
             account_id: external_id.to_owned(),
-            unit: "USD",
+            unit: "USD".to_owned(),
             amount_minor: credit_minor.value().to_string(),
-            source: "crypto_deposit",
+            source: "crypto_deposit".to_owned(),
             evidence: SettlementEvidence {
                 chain_id: deposit.chain_id,
                 asset_contract: format!("{:#x}", deposit.asset_contract),
@@ -370,6 +481,59 @@ impl SettlementPayload {
             },
         })
     }
+
+    fn from_product(
+        value: Value,
+        deposit: &db::Deposit,
+        account_external_id: &str,
+    ) -> Result<Self, SettleStepError> {
+        let payload: Self = serde_json::from_value(value)
+            .map_err(|_| SettleStepError::InvalidProductPayload("schema"))?;
+        let expected_key = format!("deposit:{}", deposit.id);
+        if payload.idempotency_key != expected_key {
+            return Err(SettleStepError::InvalidProductPayload("idempotency_key"));
+        }
+        if payload.account_id != account_external_id {
+            return Err(SettleStepError::InvalidProductPayload("account_id"));
+        }
+        if payload.evidence.chain_id != deposit.chain_id {
+            return Err(SettleStepError::InvalidProductPayload("chain_id"));
+        }
+        if payload.evidence.tx_hash != format!("{:#x}", deposit.tx_hash) {
+            return Err(SettleStepError::InvalidProductPayload("tx_hash"));
+        }
+        if payload.evidence.log_index != deposit.log_index {
+            return Err(SettleStepError::InvalidProductPayload("log_index"));
+        }
+        Ok(payload)
+    }
+
+    fn pricing(&self) -> Result<ProductPricing, SettleStepError> {
+        let amount_minor = self
+            .amount_minor
+            .parse()
+            .map_err(|_| SettleStepError::InvalidProductPayload("amount_minor"))?;
+        let price_scaled = self
+            .evidence
+            .price_scaled
+            .parse()
+            .map_err(|_| SettleStepError::InvalidProductPayload("price_scaled"))?;
+        if price_scaled == 0 || self.evidence.price_scale != PRICE_SCALE {
+            return Err(SettleStepError::InvalidProductPayload("price_scale"));
+        }
+        Ok(ProductPricing {
+            amount_minor,
+            price_scaled,
+            valuation_at: self.evidence.valuation_at,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProductPricing {
+    amount_minor: u64,
+    price_scaled: u64,
+    valuation_at: chrono::DateTime<Utc>,
 }
 
 fn event(event_type: &str, payload: Value) -> OutboxEvent {
@@ -408,4 +572,96 @@ fn transport_result(error: &str, source: &SettlementClientError) -> StepResult {
 
 fn is_payload_mismatch(receipt: &Value) -> bool {
     receipt.get("status").and_then(Value::as_str) == Some("payload_mismatch")
+}
+
+fn terminal_answer(
+    settlement: &db::Settlement,
+) -> Result<Option<SettlementAnswer>, SettleStepError> {
+    let payload = || {
+        settlement
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.get("payload"))
+            .cloned()
+            .unwrap_or_else(|| settlement.payload.clone())
+    };
+    match settlement.status {
+        SettlementStatus::Accepted => {
+            let destination_tx_id = settlement
+                .destination_tx_id
+                .clone()
+                .filter(|value| !value.is_empty())
+                .ok_or(SettleStepError::InvalidStoredAnswer("destination_tx_id"))?;
+            Ok(Some(SettlementAnswer::Accepted {
+                destination_tx_id,
+                payload: payload(),
+            }))
+        }
+        SettlementStatus::Rejected => {
+            let reason = settlement
+                .receipt
+                .as_ref()
+                .and_then(|receipt| receipt.get("reason"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(SettleStepError::InvalidStoredAnswer("reason"))?
+                .to_owned();
+            Ok(Some(SettlementAnswer::Rejected {
+                reason,
+                payload: payload(),
+            }))
+        }
+        SettlementStatus::Intent | SettlementStatus::Sent => Ok(None),
+    }
+}
+
+async fn settlement_paused(
+    pool: &PgPool,
+    deposit: &db::Deposit,
+    account_scopes: &[String],
+    product_scopes: &[String],
+) -> Result<bool, sqlx::Error> {
+    if has_settlement_scope(account_scopes) || has_settlement_scope(product_scopes) {
+        return Ok(true);
+    }
+    let Some(route) = deposit.route.as_deref() else {
+        return Ok(false);
+    };
+    let route_scopes = sqlx::query_scalar::<_, Vec<String>>(
+        "SELECT paused_scopes FROM route_pauses WHERE route = $1",
+    )
+    .bind(route)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_default();
+    Ok(has_settlement_scope(&route_scopes))
+}
+
+fn has_settlement_scope(scopes: &[String]) -> bool {
+    scopes.iter().any(|scope| scope == "settlement")
+}
+
+fn terminal_evidence(
+    status: &str,
+    deposit: &db::Deposit,
+    payload: &SettlementPayload,
+    receipt: &Value,
+) -> Result<Value, SettleStepError> {
+    let pricing = payload.pricing()?;
+    Ok(json!({
+        "status": status,
+        "receipt": receipt,
+        "pricing": {
+            "local": {
+                "amount_minor": deposit.credit_minor.map(|amount| amount.value()),
+                "price_scaled": deposit.price_scaled,
+                "valuation_at": deposit.valuation_at,
+            },
+            "product": {
+                "amount_minor": pricing.amount_minor,
+                "price_scaled": pricing.price_scaled,
+                "valuation_at": pricing.valuation_at,
+            },
+        },
+    }))
 }
