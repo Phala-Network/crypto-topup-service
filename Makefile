@@ -1,7 +1,11 @@
-.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image restore-drill deploy-check runbook-check
+.PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image restore-drill deploy-check runbook-check
 
 build:
 	cargo build --workspace --locked
+
+# The runtime binary alone, as the image builds it, so no tool-only feature is unified into it.
+build-topup:
+	cargo build --release --locked -p topup
 
 test:
 	cargo test --workspace --locked
