@@ -112,6 +112,53 @@ impl AlloyChainClient {
         })
     }
 
+    /// Reads ERC-20 balances at one block in bounded JSON-RPC batches.
+    pub async fn token_balances_at(
+        &self,
+        token: Address,
+        addresses: &[Address],
+        block: u64,
+    ) -> Result<Vec<U256>, ChainError> {
+        self.balance_of_at(token, addresses, BlockNumberOrTag::Number(block))
+            .await
+    }
+
+    async fn balance_of_at(
+        &self,
+        token: Address,
+        addresses: &[Address],
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<U256>, ChainError> {
+        let mut result = Vec::with_capacity(addresses.len());
+        for chunk in addresses.chunks(self.balance_batch_size) {
+            let params = chunk
+                .iter()
+                .map(|address| {
+                    let tx = TransactionRequest::default()
+                        .to(token)
+                        .input(TransactionInput::new(encode_balance_of(*address)));
+                    serde_json::to_value((tx, block))
+                        .map_err(|error| ChainError::rpc(format!("serialize eth_call: {error}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let decoded = self
+                .batch_calls("eth_call", params)
+                .await?
+                .into_iter()
+                .map(|value| {
+                    let encoded: Bytes = serde_json::from_value(value).map_err(|error| {
+                        ChainError::rpc(format!("decode eth_call bytes: {error}"))
+                    })?;
+                    decode_balance_of(&encoded).map_err(|error| {
+                        ChainError::rpc(format!("decode balanceOf result: {error}"))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            result.extend(decoded);
+        }
+        Ok(result)
+    }
+
     /// Reads deterministic forwarder addresses in bounded JSON-RPC batches.
     pub async fn factory_addresses(
         &self,
@@ -156,34 +203,8 @@ impl ChainClient for AlloyChainClient {
         token: Address,
         addresses: &[Address],
     ) -> Result<Vec<U256>, ChainError> {
-        let mut result = Vec::with_capacity(addresses.len());
-        for chunk in addresses.chunks(self.balance_batch_size) {
-            let params = chunk
-                .iter()
-                .map(|address| {
-                    let tx = TransactionRequest::default()
-                        .to(token)
-                        .input(TransactionInput::new(encode_balance_of(*address)));
-                    serde_json::to_value((tx, BlockNumberOrTag::Latest))
-                        .map_err(|error| ChainError::rpc(format!("serialize eth_call: {error}")))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let decoded = self
-                .batch_calls("eth_call", params)
-                .await?
-                .into_iter()
-                .map(|value| {
-                    let encoded: Bytes = serde_json::from_value(value).map_err(|error| {
-                        ChainError::rpc(format!("decode eth_call bytes: {error}"))
-                    })?;
-                    decode_balance_of(&encoded).map_err(|error| {
-                        ChainError::rpc(format!("decode balanceOf result: {error}"))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            result.extend(decoded);
-        }
-        Ok(result)
+        self.balance_of_at(token, addresses, BlockNumberOrTag::Latest)
+            .await
     }
 
     async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {

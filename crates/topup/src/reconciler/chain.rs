@@ -9,7 +9,8 @@ use topup_adapters::chain::evm::{ChainReader, EvmChain, TransferLog};
 use topup_adapters::chain::flush::{decode_flushed, flushed_signature};
 use url::Url;
 
-use crate::flusher::{AlloyChainClient, ChainClient};
+use crate::flusher::AlloyChainClient;
+use crate::scanner::MAX_SCAN_WINDOW;
 
 use super::ReconciliationError;
 
@@ -27,11 +28,12 @@ pub trait ReconciliationChain: Send + Sync {
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ReconciliationError>;
 
-    /// Returns token balances in bounded JSON-RPC batches.
+    /// Returns token balances at one block in bounded JSON-RPC batches.
     async fn token_balances(
         &self,
         token: Address,
         addresses: &[Address],
+        block: u64,
     ) -> Result<Vec<U256>, ReconciliationError>;
 
     /// Returns the sum of finalized on-chain `Flushed` events for one token.
@@ -112,9 +114,10 @@ impl ReconciliationChain for RpcReconciliationChain {
         &self,
         token: Address,
         addresses: &[Address],
+        block: u64,
     ) -> Result<Vec<U256>, ReconciliationError> {
         self.flusher
-            .token_balances(token, addresses)
+            .token_balances_at(token, addresses, block)
             .await
             .map_err(Into::into)
     }
@@ -129,7 +132,9 @@ impl ReconciliationChain for RpcReconciliationChain {
         let mut total = U256::ZERO;
         let mut start = from_block;
         loop {
-            let end = start.saturating_add(1_999).min(to_block);
+            let end = start
+                .saturating_add(MAX_SCAN_WINDOW.saturating_sub(1))
+                .min(to_block);
             let filter = Filter::new()
                 .address(factory)
                 .from_block(start)

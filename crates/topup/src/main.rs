@@ -323,21 +323,19 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let configured_chains = routes
-        .iter()
-        .map(|route| route.chain.chain_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    for chain_id in configured_chains {
-        match topup::reconciler::chain_is_blocked(&pool, chain_id).await {
-            Ok(false) => {}
-            Ok(true) => {
-                tracing::error!(chain_id, "reconciliation block freezes configured chain");
-                return ExitCode::FAILURE;
+    match topup::reconciler::frozen_chains(&pool, &routes).await {
+        Ok(frozen) => {
+            for chain_id in frozen {
+                tracing::error!(
+                    chain_id,
+                    "reconciliation froze configured chain; its scanner, pumps, flusher, and \
+                     address issuance stay paused until the block is removed"
+                );
             }
-            Err(error) => {
-                tracing::error!(%error, chain_id, "failed to load reconciliation blocks");
-                return ExitCode::FAILURE;
-            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load reconciliation blocks");
+            return ExitCode::FAILURE;
         }
     }
     let reconciliation_metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
@@ -669,6 +667,14 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             tracing::error!(
                 findings = report.findings.len(),
                 "post-restore reconciliation is incomplete"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(report) if !args.post_restore && !report.succeeded() => {
+            tracing::error!(
+                findings = report.findings.len(),
+                failed_checks = report.failed_checks.len(),
+                "reconciliation completed with failed checks"
             );
             ExitCode::FAILURE
         }

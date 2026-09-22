@@ -1,14 +1,24 @@
-use serde_json::json;
+use std::collections::BTreeSet;
+
+use alloy_primitives::{Address, U256};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use topup_core::deposit::{DepositState, RejectReason};
+use topup_core::route::RouteFile;
 use uuid::Uuid;
+
+use crate::db::{Deposit, OutboxEvent};
 
 use super::{Finding, ReconciliationError, ReconciliationMetrics};
 
+/// Persists a finding once and returns whether this call inserted it.
+///
+/// Every first insertion writes an audit row; only mismatches increment the metric.
 pub(crate) async fn persist_finding(
     pool: &PgPool,
     finding: &Finding,
     metrics: &ReconciliationMetrics,
-) -> Result<(), ReconciliationError> {
+) -> Result<bool, ReconciliationError> {
     let mut transaction = pool.begin().await?;
     let inserted = sqlx::query(
         r#"
@@ -31,14 +41,20 @@ pub(crate) async fn persist_finding(
     .rows_affected()
         == 1;
 
-    if inserted && !finding.repair_applied {
+    if inserted {
+        let action = if finding.repair_applied {
+            "reconciliation_repair"
+        } else {
+            "reconciliation_mismatch"
+        };
         sqlx::query(
             r#"
             INSERT INTO audit (id, actor, action, subject, reason)
-            VALUES ($1, 'reconciler', 'reconciliation_mismatch', $2, $3)
+            VALUES ($1, 'reconciler', $2, $3, $4)
             "#,
         )
         .bind(Uuid::new_v5(&finding.id, b"audit"))
+        .bind(action)
         .bind(serde_json::to_string(&finding.subjects)?)
         .bind(
             json!({
@@ -50,10 +66,12 @@ pub(crate) async fn persist_finding(
         )
         .execute(&mut *transaction)
         .await?;
-        metrics.record_mismatch(finding.check);
     }
     transaction.commit().await?;
-    Ok(())
+    if inserted && !finding.repair_applied {
+        metrics.record_mismatch(finding.check);
+    }
+    Ok(inserted)
 }
 
 pub(crate) async fn block_address(
@@ -63,8 +81,6 @@ pub(crate) async fn block_address(
     check_name: &str,
     reason: &str,
 ) -> Result<(), ReconciliationError> {
-    let chain_id = i64::try_from(chain_id)
-        .map_err(|_| ReconciliationError::Invariant("chain id exceeds PostgreSQL bigint"))?;
     sqlx::query(
         r#"
         INSERT INTO reconciliation_blocks
@@ -75,7 +91,7 @@ pub(crate) async fn block_address(
         "#,
     )
     .bind(format!("address:{address_id}"))
-    .bind(chain_id)
+    .bind(db_i64(chain_id)?)
     .bind(address_id)
     .bind(check_name)
     .bind(reason)
@@ -90,8 +106,6 @@ pub(crate) async fn block_chain(
     check_name: &str,
     reason: &str,
 ) -> Result<(), ReconciliationError> {
-    let chain_id_db = i64::try_from(chain_id)
-        .map_err(|_| ReconciliationError::Invariant("chain id exceeds PostgreSQL bigint"))?;
     sqlx::query(
         r#"
         INSERT INTO reconciliation_blocks
@@ -102,7 +116,7 @@ pub(crate) async fn block_chain(
         "#,
     )
     .bind(format!("chain:{chain_id}"))
-    .bind(chain_id_db)
+    .bind(db_i64(chain_id)?)
     .bind(check_name)
     .bind(reason)
     .execute(pool)
@@ -111,6 +125,9 @@ pub(crate) async fn block_chain(
 }
 
 /// Returns whether a chain has a persistent reconciliation freeze.
+///
+/// A frozen chain pauses its scanner, pumps, flusher, address issuance, and rate-lock creation
+/// until the database owner deletes the block row.
 pub async fn chain_is_blocked(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx::Error> {
     let chain_id =
         i64::try_from(chain_id).map_err(|error| sqlx::Error::Encode(error.to_string().into()))?;
@@ -120,6 +137,24 @@ pub async fn chain_is_blocked(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx
     .bind(chain_id)
     .fetch_one(pool)
     .await
+}
+
+/// Returns the configured chains which reconciliation has frozen.
+pub async fn frozen_chains(
+    pool: &PgPool,
+    routes: &[RouteFile],
+) -> Result<BTreeSet<u64>, sqlx::Error> {
+    let configured = routes
+        .iter()
+        .map(|route| route.chain.chain_id)
+        .collect::<BTreeSet<_>>();
+    let mut frozen = BTreeSet::new();
+    for chain_id in configured {
+        if chain_is_blocked(pool, chain_id).await? {
+            frozen.insert(chain_id);
+        }
+    }
+    Ok(frozen)
 }
 
 /// Returns address ids excluded from flushing by persistent reconciliation blocks.
@@ -134,37 +169,383 @@ pub async fn blocked_addresses(pool: &PgPool, chain_id: u64) -> Result<Vec<Uuid>
     .await
 }
 
+/// Per-address ledger totals for chain positions at or below one finalized block.
 pub(crate) async fn address_totals(
     pool: &PgPool,
     chain_id: u64,
-    token: &str,
-) -> Result<Vec<(Uuid, String, String)>, ReconciliationError> {
-    let chain_id = i64::try_from(chain_id)
-        .map_err(|_| ReconciliationError::Invariant("chain id exceeds PostgreSQL bigint"))?;
+    token: Address,
+    finalized: u64,
+) -> Result<Vec<(Uuid, U256, U256)>, ReconciliationError> {
     let rows = sqlx::query(
         r#"
         SELECT a.id,
                COALESCE((SELECT SUM(d.amount_atomic) FROM deposits d
-                         WHERE d.address_id = a.id AND d.asset_contract = $2), 0)::text AS deposits,
+                         WHERE d.address_id = a.id AND d.asset_contract = $2
+                           AND d.block_number <= $3), 0)::text AS deposits,
                COALESCE((SELECT SUM(f.amount_atomic) FROM flushed f
                          JOIN flushes x ON x.id = f.flush_id
-                         WHERE f.address_id = a.id AND x.status = 'confirmed' AND x.token = $2), 0)::text AS flushed
+                         WHERE f.address_id = a.id AND x.token = $2
+                           AND f.block_number <= $3), 0)::text AS flushed
         FROM addresses a
         WHERE a.chain_id = $1
         ORDER BY a.id
         "#,
     )
-    .bind(chain_id)
-    .bind(token)
+    .bind(db_i64(chain_id)?)
+    .bind(format!("{token:#x}"))
+    .bind(db_i64(finalized)?)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
         .map(|row| {
+            let deposits: String = row.try_get("deposits")?;
+            let flushed: String = row.try_get("flushed")?;
             Ok((
                 row.try_get("id")?,
-                row.try_get("deposits")?,
-                row.try_get("flushed")?,
+                parse_u256(&deposits)?,
+                parse_u256(&flushed)?,
             ))
         })
         .collect()
+}
+
+/// Returns addresses in planned or sent flushes whose on-chain effect is not yet recorded.
+pub(crate) async fn in_flight_flush_addresses(
+    pool: &PgPool,
+    chain_id: u64,
+    token: Address,
+) -> Result<BTreeSet<Uuid>, ReconciliationError> {
+    let ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT planned.item->>'address_id'
+        FROM flushes x
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(x.receipt->'plan', '[]'::jsonb))
+            AS planned(item)
+        WHERE x.chain_id = $1 AND x.token = $2 AND x.status IN ('planned', 'sent')
+        "#,
+    )
+    .bind(db_i64(chain_id)?)
+    .bind(format!("{token:#x}"))
+    .fetch_all(pool)
+    .await?;
+    ids.iter()
+        .map(|id| {
+            Uuid::parse_str(id)
+                .map_err(|_| ReconciliationError::Invariant("flush plan address id is invalid"))
+        })
+        .collect()
+}
+
+/// Confirmed flushes that can link at least one unlinked deposit, in chain order.
+pub(crate) async fn linkable_flushes(pool: &PgPool) -> Result<Vec<Uuid>, ReconciliationError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT f.flush_id
+        FROM flushed f
+        JOIN flushes x ON x.id = f.flush_id
+        WHERE x.status = 'confirmed'
+          AND EXISTS (
+              SELECT 1 FROM deposits d
+              WHERE d.address_id = f.address_id
+                AND d.asset_contract = x.token
+                AND d.flush_id IS NULL
+                AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
+          )
+        GROUP BY f.flush_id
+        ORDER BY min(f.block_number), min(f.log_index), f.flush_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Leases one deposit for settlement adoption, skipping rows a pump currently owns.
+///
+/// Normal mode claims only unleased `cleared` deposits. Post-restore mode runs before pumps
+/// resume, so restored lease columns carry no ownership and are replaced.
+pub(crate) async fn claim_deposit(
+    pool: &PgPool,
+    deposit_id: Uuid,
+    lease_token: Uuid,
+    post_restore: bool,
+) -> Result<bool, ReconciliationError> {
+    let claimed = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH candidate AS (
+            SELECT id FROM deposits
+            WHERE id = $1
+              AND ($3 OR (state = 'cleared'
+                          AND (lease_until IS NULL OR lease_until <= now())))
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE deposits d
+        SET lease_token = $2, lease_until = now() + interval '5 minutes', updated_at = now()
+        FROM candidate
+        WHERE d.id = candidate.id
+        RETURNING d.id
+        "#,
+    )
+    .bind(deposit_id)
+    .bind(lease_token)
+    .bind(post_restore)
+    .fetch_optional(pool)
+    .await?;
+    Ok(claimed.is_some())
+}
+
+/// Releases a reconciliation lease without changing the deposit schedule.
+pub(crate) async fn release_lease(
+    pool: &PgPool,
+    deposit_id: Uuid,
+    lease_token: Uuid,
+) -> Result<(), ReconciliationError> {
+    sqlx::query(
+        r#"
+        UPDATE deposits
+        SET lease_token = NULL, lease_until = NULL, updated_at = now()
+        WHERE id = $1 AND lease_token = $2
+        "#,
+    )
+    .bind(deposit_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Post-restore exception to `core::next`: moves a terminal deposit to the product's answer.
+///
+/// §13 makes the product answer authoritative after a restore, including terminal states that
+/// the forward-only state machine cannot reach, such as `credited → rejected`.
+pub(crate) async fn apply_product_answer(
+    pool: &PgPool,
+    deposit: &Deposit,
+    lease_token: Uuid,
+    target: DepositState,
+    evidence: &Value,
+    events: &[OutboxEvent],
+) -> Result<bool, ReconciliationError> {
+    let reason = (target == DepositState::Rejected).then_some(RejectReason::ProductRefused.code());
+    let mut transaction = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE deposits
+        SET state = $2, reason = $3, attempt = 0, next_attempt_at = now(),
+            lease_token = NULL, lease_until = NULL, updated_at = now()
+        WHERE id = $1 AND state = $4 AND lease_token = $5
+        "#,
+    )
+    .bind(deposit.id)
+    .bind(state_code(target))
+    .bind(reason)
+    .bind(state_code(deposit.state))
+    .bind(lease_token)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    if !updated {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
+        VALUES ($1, $2, $3, $4, 0, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(deposit.id)
+    .bind(state_code(deposit.state))
+    .bind(state_code(target))
+    .bind(json!({"source": "post_restore_product_answer", "adoption": evidence}))
+    .execute(&mut *transaction)
+    .await?;
+    for event in events {
+        sqlx::query(
+            "INSERT INTO outbox (id, event_type, payload, next_attempt_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(event.id)
+        .bind(&event.event_type)
+        .bind(&event.payload)
+        .bind(event.next_attempt_at)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(true)
+}
+
+/// Returns the next block of the missing-deposit scan, if one was recorded.
+pub(crate) async fn deposit_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+) -> Result<Option<u64>, ReconciliationError> {
+    let next: Option<i64> = sqlx::query_scalar(
+        "SELECT next_block FROM reconciliation_deposit_cursors WHERE chain_id = $1",
+    )
+    .bind(db_i64(chain_id)?)
+    .fetch_optional(pool)
+    .await?;
+    next.map(db_u64).transpose()
+}
+
+/// Advances the missing-deposit cursor from `from` to `next`; returns false if another pass did.
+pub(crate) async fn advance_deposit_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+    from: Option<u64>,
+    next: u64,
+) -> Result<bool, ReconciliationError> {
+    let chain_id = db_i64(chain_id)?;
+    let next = db_i64(next)?;
+    let rows = match from {
+        None => sqlx::query(
+            r#"
+            INSERT INTO reconciliation_deposit_cursors (chain_id, next_block)
+            VALUES ($1, $2)
+            ON CONFLICT (chain_id) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(next)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+        Some(from) => sqlx::query(
+            r#"
+            UPDATE reconciliation_deposit_cursors
+            SET next_block = $3, updated_at = now()
+            WHERE chain_id = $1 AND next_block = $2
+            "#,
+        )
+        .bind(chain_id)
+        .bind(db_i64(from)?)
+        .bind(next)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+    };
+    Ok(rows == 1)
+}
+
+/// Accumulated treasury and `Flushed` totals through `next_block - 1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CustodyCursor {
+    pub(crate) next_block: u64,
+    pub(crate) flushed_event_total: U256,
+    pub(crate) treasury_inflow_total: U256,
+}
+
+pub(crate) async fn custody_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+    factory: Address,
+    token: Address,
+) -> Result<Option<CustodyCursor>, ReconciliationError> {
+    let row = sqlx::query(
+        r#"
+        SELECT next_block, flushed_event_total::text AS flushed, treasury_inflow_total::text AS inflow
+        FROM reconciliation_custody_cursors
+        WHERE chain_id = $1 AND factory = $2 AND token = $3
+        "#,
+    )
+    .bind(db_i64(chain_id)?)
+    .bind(format!("{factory:#x}"))
+    .bind(format!("{token:#x}"))
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        let flushed: String = row.try_get("flushed")?;
+        let inflow: String = row.try_get("inflow")?;
+        Ok(CustodyCursor {
+            next_block: db_u64(row.try_get("next_block")?)?,
+            flushed_event_total: parse_u256(&flushed)?,
+            treasury_inflow_total: parse_u256(&inflow)?,
+        })
+    })
+    .transpose()
+}
+
+/// Stores new custody totals if the cursor still has the value this pass started from.
+pub(crate) async fn advance_custody_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+    factory: Address,
+    token: Address,
+    from: Option<CustodyCursor>,
+    next: CustodyCursor,
+) -> Result<bool, ReconciliationError> {
+    let chain_id = db_i64(chain_id)?;
+    let factory = format!("{factory:#x}");
+    let token = format!("{token:#x}");
+    let next_block = db_i64(next.next_block)?;
+    let flushed = next.flushed_event_total.to_string();
+    let inflow = next.treasury_inflow_total.to_string();
+    let rows = match from {
+        None => sqlx::query(
+            r#"
+            INSERT INTO reconciliation_custody_cursors
+                (chain_id, factory, token, next_block, flushed_event_total, treasury_inflow_total)
+            VALUES ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric)
+            ON CONFLICT (chain_id, factory, token) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(factory)
+        .bind(token)
+        .bind(next_block)
+        .bind(flushed)
+        .bind(inflow)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+        Some(from) => sqlx::query(
+            r#"
+            UPDATE reconciliation_custody_cursors
+            SET next_block = $4,
+                flushed_event_total = $5::text::numeric,
+                treasury_inflow_total = $6::text::numeric,
+                updated_at = now()
+            WHERE chain_id = $1 AND factory = $2 AND token = $3 AND next_block = $7
+            "#,
+        )
+        .bind(chain_id)
+        .bind(factory)
+        .bind(token)
+        .bind(next_block)
+        .bind(flushed)
+        .bind(inflow)
+        .bind(db_i64(from.next_block)?)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+    };
+    Ok(rows == 1)
+}
+
+pub(crate) const fn state_code(state: DepositState) -> &'static str {
+    match state {
+        DepositState::Detected => "detected",
+        DepositState::Confirmed => "confirmed",
+        DepositState::Cleared => "cleared",
+        DepositState::Credited => "credited",
+        DepositState::Swept => "swept",
+        DepositState::Rejected => "rejected",
+    }
+}
+
+fn parse_u256(value: &str) -> Result<U256, ReconciliationError> {
+    value
+        .parse()
+        .map_err(|_| ReconciliationError::Invariant("stored atomic total is invalid"))
+}
+
+fn db_i64(value: u64) -> Result<i64, ReconciliationError> {
+    i64::try_from(value)
+        .map_err(|_| ReconciliationError::Invariant("value exceeds PostgreSQL bigint"))
+}
+
+fn db_u64(value: i64) -> Result<u64, ReconciliationError> {
+    u64::try_from(value).map_err(|_| ReconciliationError::Invariant("stored block is negative"))
 }

@@ -100,11 +100,25 @@ impl Finding {
 pub struct ReconciliationReport {
     /// Findings observed during this pass, including already-deduplicated durable findings.
     pub findings: Vec<Finding>,
+    /// Checks which could not complete; every other check still ran.
+    pub failed_checks: Vec<CheckName>,
     /// Whether a post-restore caller must keep the service stopped.
+    ///
+    /// Only the post-restore product lookups set this flag; alert-only findings never do.
     pub incomplete: bool,
 }
 
+impl ReconciliationReport {
+    /// Returns whether every check completed.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.failed_checks.is_empty()
+    }
+}
+
 /// In-process counters reserved under the §16 reconciliation metric name.
+///
+/// These values are not exported yet; the heartbeat is logged after every successful round.
 #[derive(Debug, Default)]
 pub struct ReconciliationMetrics {
     missing_deposit: AtomicU64,
@@ -154,7 +168,7 @@ impl ReconciliationMetrics {
         counter.load(Ordering::Relaxed)
     }
 
-    /// Returns the last completed loop heartbeat as a Unix timestamp.
+    /// Returns the end of the last round in which every check completed, as a Unix timestamp.
     #[must_use]
     pub fn last_heartbeat_unix(&self) -> i64 {
         self.last_heartbeat_unix.load(Ordering::Relaxed)
