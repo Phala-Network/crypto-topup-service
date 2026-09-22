@@ -57,6 +57,9 @@ provider A for finalized scanning. For each chain and asset the scanner uses the
 route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to
 15 seconds.
 
+The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
+address.
+
 ## Status
 
 Design v5 is under review. Implementation has not started. Production policy values are set by
