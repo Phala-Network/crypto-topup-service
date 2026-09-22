@@ -16,5 +16,6 @@ pub mod api;
 pub mod db;
 pub mod outbox;
 pub mod pump;
+mod rpc_provider;
 pub mod scanner;
 pub mod steps;

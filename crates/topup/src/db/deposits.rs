@@ -158,6 +158,10 @@ pub struct CanonicalEvidence {
     pub from_address: Address,
     /// Canonical transfer amount.
     pub amount_atomic: AtomicAmount,
+    /// Route selected for the canonical token, when supported.
+    pub route: Option<String>,
+    /// Version selected for the canonical token, when supported.
+    pub route_version: Option<u64>,
 }
 
 /// Valuation columns committed with a transition.
@@ -193,6 +197,8 @@ pub struct SettlementAdoption {
 pub struct LockConsumption {
     /// Lock address row used as the rate-lock primary key.
     pub address_id: Uuid,
+    /// Whether an existing consumption by this same deposit is accepted.
+    pub idempotent: bool,
 }
 
 /// Additional writes atomically applied with one state transition.
@@ -513,11 +519,13 @@ pub async fn apply_transition(
             r#"
             UPDATE rate_locks
             SET consumed_by = $2
-            WHERE address_id = $1 AND consumed_by IS NULL
+            WHERE address_id = $1
+              AND (consumed_by IS NULL OR ($3 AND consumed_by = $2))
             "#,
         )
         .bind(consumption.address_id)
         .bind(deposit_id)
+        .bind(consumption.idempotent)
         .execute(&mut **transaction)
         .await?;
         if consumed.rows_affected() == 0 {
@@ -535,6 +543,8 @@ pub async fn apply_transition(
                 asset_contract = $5,
                 from_address = $6,
                 amount_atomic = $7::text::numeric,
+                route = $8,
+                route_version = $9,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -546,6 +556,13 @@ pub async fn apply_transition(
         .bind(address_hex(canonical.asset_contract))
         .bind(address_hex(canonical.from_address))
         .bind(atomic_decimal(canonical.amount_atomic))
+        .bind(&canonical.route)
+        .bind(
+            canonical
+                .route_version
+                .map(|version| to_i64(version, "deposits.route_version"))
+                .transpose()?,
+        )
         .execute(&mut **transaction)
         .await?;
     }

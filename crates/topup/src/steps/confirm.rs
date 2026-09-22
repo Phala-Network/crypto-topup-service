@@ -30,6 +30,7 @@ use crate::db::{
     TransitionEffects,
 };
 use crate::pump::{Step, StepResult};
+use crate::rpc_provider::configured_provider_url;
 
 /// Authoritative prior answer returned by the destination product.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,12 +78,11 @@ impl ProductLookup for NoStoredProductAnswers {
 #[async_trait]
 trait FinalityReader: Send + Sync {
     async fn finalized_head(&self) -> Result<u64, ChainError>;
-    async fn transfer_logs_to(
+    async fn transfer_log_by_identity(
         &self,
-        addresses: &[Address],
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<TransferLog>, ChainError>;
+        tx_hash: B256,
+        log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError>;
 }
 
 #[async_trait]
@@ -94,13 +94,12 @@ where
         ChainReader::finalized_head(self).await
     }
 
-    async fn transfer_logs_to(
+    async fn transfer_log_by_identity(
         &self,
-        addresses: &[Address],
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<TransferLog>, ChainError> {
-        ChainReader::transfer_logs_to(self, addresses, from_block, to_block).await
+        tx_hash: B256,
+        log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        ChainReader::transfer_log_by_identity(self, tx_hash, log_index).await
     }
 }
 
@@ -132,6 +131,7 @@ impl Error for ConfirmConfigError {}
 pub struct ConfirmStep {
     context_lookup: Arc<dyn ContextLookup>,
     routes: BTreeMap<(String, u64), RouteRuntime>,
+    asset_routes: BTreeMap<(u64, Address), (String, u64)>,
     chains: BTreeMap<u64, ChainPair>,
     product_lookup: Arc<dyn ProductLookup>,
 }
@@ -144,6 +144,7 @@ impl ConfirmStep {
         product_lookup: Arc<dyn ProductLookup>,
     ) -> Result<Self, ConfirmConfigError> {
         let mut runtimes = BTreeMap::new();
+        let mut asset_routes = BTreeMap::new();
         let mut chains = BTreeMap::new();
         for route in routes {
             route
@@ -170,7 +171,7 @@ impl ConfirmStep {
                 PricingMode::Stablecoin => (None, None),
             };
             runtimes.insert(
-                key,
+                key.clone(),
                 RouteRuntime {
                     route: route.clone(),
                     primary,
@@ -178,6 +179,19 @@ impl ConfirmStep {
                     fx,
                 },
             );
+            let asset_key = (route.chain.chain_id, route.asset.contract);
+            match asset_routes.get(&asset_key) {
+                Some((name, _)) if name != &route.route => {
+                    return Err(ConfirmConfigError(format!(
+                        "routes `{name}` and `{}` both select chain {} asset {:#x}",
+                        route.route, route.chain.chain_id, route.asset.contract
+                    )));
+                }
+                Some((_, version)) if *version >= route.version => {}
+                _ => {
+                    asset_routes.insert(asset_key, key);
+                }
+            }
 
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 chains.entry(route.chain.chain_id)
@@ -189,8 +203,12 @@ impl ConfirmStep {
                 let second = providers.next().ok_or_else(|| {
                     ConfirmConfigError("chain has no secondary RPC provider".to_owned())
                 })?;
-                let primary_url = provider_url(first)?;
-                let secondary_url = provider_url(second)?;
+                let primary_url = configured_provider_url(first).map_err(|environment| {
+                    ConfirmConfigError(format!("{environment} is required"))
+                })?;
+                let secondary_url = configured_provider_url(second).map_err(|environment| {
+                    ConfirmConfigError(format!("{environment} is required"))
+                })?;
                 entry.insert(ChainPair {
                     primary: Arc::new(
                         EvmChain::new(&primary_url)
@@ -206,6 +224,7 @@ impl ConfirmStep {
         Ok(Self {
             context_lookup: Arc::new(PostgresContextLookup(pool)),
             routes: runtimes,
+            asset_routes,
             chains,
             product_lookup,
         })
@@ -228,11 +247,12 @@ impl ConfirmStep {
         R2: ChainReader + Send + Sync + 'static,
     {
         let chain_id = route.chain.chain_id;
+        let asset_contract = route.asset.contract;
         let key = (route.route.clone(), route.version);
         Self {
             context_lookup: Arc::new(PostgresContextLookup(pool)),
             routes: BTreeMap::from([(
-                key,
+                key.clone(),
                 RouteRuntime {
                     route,
                     primary: primary_price,
@@ -240,6 +260,7 @@ impl ConfirmStep {
                     fx: fx_price,
                 },
             )]),
+            asset_routes: BTreeMap::from([((chain_id, asset_contract), key)]),
             chains: BTreeMap::from([(
                 chain_id,
                 ChainPair {
@@ -253,9 +274,8 @@ impl ConfirmStep {
 
     async fn execute(&self, deposit: &Deposit) -> StepResult {
         let key = format!("deposit:{}", deposit.id);
-        match self.product_lookup.get_by_key(&key).await {
-            Ok(Some(answer)) => return adopt_answer(deposit, key, answer),
-            Ok(None) => {}
+        let product_answer = match self.product_lookup.get_by_key(&key).await {
+            Ok(answer) => answer,
             Err(_) => {
                 return retry(
                     RetryError::Transient,
@@ -263,35 +283,6 @@ impl ConfirmStep {
                     TransitionEffects::default(),
                 );
             }
-        }
-
-        let Some(route_name) = deposit.route.as_ref() else {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "route", "error": "missing_route"}),
-                TransitionEffects::default(),
-            );
-        };
-        let Some(route_version) = deposit.route_version else {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "route", "error": "missing_route_version"}),
-                TransitionEffects::default(),
-            );
-        };
-        let Some(runtime) = self.routes.get(&(route_name.clone(), route_version)) else {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "route", "error": "unknown_route_version"}),
-                TransitionEffects::default(),
-            );
-        };
-        let Some(chains) = self.chains.get(&deposit.chain_id) else {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "chain", "error": "missing_chain"}),
-                TransitionEffects::default(),
-            );
         };
         let context = match self.context_lookup.load(deposit.address_id).await {
             Ok(context) => context,
@@ -303,6 +294,17 @@ impl ConfirmStep {
                     TransitionEffects::default(),
                 );
             }
+        };
+        if let Some(answer) = product_answer {
+            return adopt_answer(deposit, &context, key, answer);
+        }
+
+        let Some(chains) = self.chains.get(&deposit.chain_id) else {
+            return retry(
+                RetryError::InvariantViolation,
+                json!({"stage": "chain", "error": "missing_chain"}),
+                TransitionEffects::default(),
+            );
         };
 
         let canonical = match finalized_evidence(chains, deposit, context.address).await {
@@ -323,24 +325,41 @@ impl ConfirmStep {
                 );
             }
         };
-        let canonical_effect = canonical_effect(deposit, &canonical);
+        let selected_route = if canonical.token == deposit.asset_contract {
+            deposit.route.as_ref().zip(deposit.route_version)
+        } else {
+            self.asset_routes
+                .get(&(deposit.chain_id, canonical.token))
+                .map(|(name, version)| (name, *version))
+        };
+        let canonical_effect = canonical_effect(deposit, &canonical, selected_route);
         let mut effects = TransitionEffects {
             canonical_evidence: canonical_effect,
             ..TransitionEffects::default()
         };
+        let Some((route_name, route_version)) = selected_route else {
+            return rejected_result(
+                deposit,
+                context.product_id,
+                RejectReason::UnsupportedAsset,
+                json!({
+                    "stage": "route",
+                    "result": "unsupported_asset",
+                    "providers": provider_evidence(&canonical),
+                }),
+                effects,
+            );
+        };
+        let Some(runtime) = self.routes.get(&(route_name.clone(), route_version)) else {
+            return retry(
+                RetryError::InvariantViolation,
+                json!({"stage": "route", "error": "unknown_route_version"}),
+                effects,
+            );
+        };
 
         let valuation_at = Utc::now();
-        let now = match u64::try_from(valuation_at.timestamp()) {
-            Ok(timestamp) => UnixSeconds::new(timestamp),
-            Err(_) => {
-                return retry(
-                    RetryError::InvariantViolation,
-                    json!({"stage": "pricing", "error": "invalid_clock"}),
-                    effects,
-                );
-            }
-        };
-        let quote = match fetch_quote(runtime, now).await {
+        let quote = match fetch_quote(runtime).await {
             Ok(quote) => quote,
             Err(evidence) => {
                 return retry(RetryError::PriceUnavailable, evidence, effects);
@@ -349,7 +368,7 @@ impl ConfirmStep {
         let lock = context.lock.as_ref().and_then(|lock| {
             if lock.route == runtime.route.route {
                 Some(LockTerms {
-                    asset: runtime.route.asset.contract,
+                    asset: canonical.token,
                     amount: lock.amount,
                     price: lock.price,
                     credit_minor: lock.credit_minor,
@@ -376,7 +395,7 @@ impl ConfirmStep {
                     runtime.route.destination.unit_decimals,
                 );
                 let Ok(credit_minor) = computed else {
-                    return reject_out_of_range(effects, &quote, valuation_at);
+                    return reject_out_of_range(deposit, context.product_id, effects, &quote);
                 };
                 effects.valuation = Some(stored_valuation(
                     valuation_at,
@@ -385,20 +404,21 @@ impl ConfirmStep {
                     credit_minor,
                     quote.evidence.clone(),
                 ));
-                return StepResult {
-                    outcome: StepOutcome::Reject(RejectReason::BelowMinimum),
-                    evidence: json!({
+                return rejected_result(
+                    deposit,
+                    context.product_id,
+                    RejectReason::BelowMinimum,
+                    json!({
                         "stage": "valuation",
                         "result": "below_minimum",
                         "providers": provider_evidence(&canonical),
                         "quote": quote.evidence,
                     }),
-                    events: Vec::new(),
                     effects,
-                };
+                );
             }
             Err(ValuationError::ArithmeticOutOfRange | ValuationError::Credit(_)) => {
-                return reject_out_of_range(effects, &quote, valuation_at);
+                return reject_out_of_range(deposit, context.product_id, effects, &quote);
             }
             Err(error) => {
                 return retry(
@@ -415,6 +435,7 @@ impl ConfirmStep {
         if valuation.source == ValuationSource::Lock {
             effects.lock_consumption = Some(LockConsumption {
                 address_id: deposit.address_id,
+                idempotent: false,
             });
         }
         effects.valuation = Some(stored_valuation(
@@ -505,28 +526,11 @@ fn price_source(
     }
 }
 
-fn provider_url(provider: &str) -> Result<String, ConfirmConfigError> {
-    let mut name = provider
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    name.push_str("_RPC_URL");
-    std::env::var(&name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ConfirmConfigError(format!("{name} is required")))
-}
-
 #[derive(Clone)]
 struct ConfirmationContext {
     address: Address,
     product_id: Uuid,
+    lock_ref: Option<String>,
     lock: Option<StoredLock>,
 }
 
@@ -556,7 +560,7 @@ impl ContextLookup for PostgresContextLookup {
 async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address, account.product_id, address.kind,
+        SELECT address.address, address.lock_ref, account.product_id, address.kind,
                rate_lock.route, rate_lock.amount_atomic::text AS amount_atomic,
                rate_lock.price_scaled::text AS price_scaled,
                rate_lock.credit_minor, rate_lock.expires_at, rate_lock.consumed_by
@@ -578,7 +582,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
         let route: Option<String> = row.try_get("route")?;
         let amount: Option<String> = row.try_get("amount_atomic")?;
         let price: Option<String> = row.try_get("price_scaled")?;
-        let credit_minor: Option<i64> = row.try_get("credit_minor")?;
+        let credit_minor: Option<String> = row.try_get("credit_minor")?;
         let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
         Some(StoredLock {
             route: route.ok_or_else(|| sqlx::Error::Decode("lock route is missing".into()))?,
@@ -600,11 +604,11 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
             )
             .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?,
             credit_minor: MinorAmount::new(
-                u64::try_from(
-                    credit_minor
-                        .ok_or_else(|| sqlx::Error::Decode("lock credit is missing".into()))?,
-                )
-                .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?,
+                credit_minor
+                    .as_deref()
+                    .ok_or_else(|| sqlx::Error::Decode("lock credit is missing".into()))?
+                    .parse::<u64>()
+                    .map_err(|error| sqlx::Error::Decode(error.to_string().into()))?,
             ),
             expires_at: unix_seconds(
                 expires_at.ok_or_else(|| sqlx::Error::Decode("lock expiry is missing".into()))?,
@@ -617,6 +621,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
     Ok(ConfirmationContext {
         address,
         product_id: row.try_get("product_id")?,
+        lock_ref: row.try_get("lock_ref")?,
         lock,
     })
 }
@@ -632,54 +637,43 @@ async fn finalized_evidence(
     deposit: &Deposit,
     address: Address,
 ) -> FinalityResult {
-    let (primary_head, secondary_head) = tokio::join!(
+    let (primary_head, secondary_head, primary_log, secondary_log) = tokio::join!(
         chains.primary.finalized_head(),
-        chains.secondary.finalized_head()
-    );
-    let (primary_head, secondary_head) = match (primary_head, secondary_head) {
-        (Ok(primary), Ok(secondary)) => (primary, secondary),
-        (primary, secondary) => {
-            return FinalityResult::Retry(json!({
-                "stage": "finality",
-                "error": "rpc_failure",
-                "provider_a": chain_result_code(&primary),
-                "provider_b": chain_result_code(&secondary),
-            }));
-        }
-    };
-    if primary_head < deposit.block_number || secondary_head < deposit.block_number {
-        return FinalityResult::Wait(json!({
-            "stage": "finality",
-            "result": "not_final",
-            "required_block": deposit.block_number,
-            "provider_a_finalized": primary_head,
-            "provider_b_finalized": secondary_head,
-        }));
-    }
-    let addresses = [address];
-    let (primary_logs, secondary_logs) = tokio::join!(
+        chains.secondary.finalized_head(),
         chains
             .primary
-            .transfer_logs_to(&addresses, deposit.block_number, deposit.block_number,),
+            .transfer_log_by_identity(deposit.tx_hash, deposit.log_index),
         chains
             .secondary
-            .transfer_logs_to(&addresses, deposit.block_number, deposit.block_number,)
+            .transfer_log_by_identity(deposit.tx_hash, deposit.log_index),
     );
-    let (primary_logs, secondary_logs) = match (primary_logs, secondary_logs) {
-        (Ok(primary), Ok(secondary)) => (primary, secondary),
-        (primary, secondary) => {
-            return FinalityResult::Retry(json!({
-                "stage": "finality",
-                "error": "rpc_failure",
-                "provider_a": chain_result_code(&primary),
-                "provider_b": chain_result_code(&secondary),
-            }));
-        }
-    };
-    let primary = event_by_identity(primary_logs, deposit.tx_hash, deposit.log_index);
-    let secondary = event_by_identity(secondary_logs, deposit.tx_hash, deposit.log_index);
+    let (primary_head, secondary_head, primary, secondary) =
+        match (primary_head, secondary_head, primary_log, secondary_log) {
+            (Ok(primary_head), Ok(secondary_head), Ok(primary), Ok(secondary)) => {
+                (primary_head, secondary_head, primary, secondary)
+            }
+            (primary_head, secondary_head, primary_log, secondary_log) => {
+                return FinalityResult::Retry(json!({
+                    "stage": "finality",
+                    "error": "rpc_failure",
+                    "provider_a_head": chain_result_code(&primary_head),
+                    "provider_b_head": chain_result_code(&secondary_head),
+                    "provider_a_receipt": chain_result_code(&primary_log),
+                    "provider_b_receipt": chain_result_code(&secondary_log),
+                }));
+            }
+        };
     match (primary, secondary) {
         (Some(primary), Some(secondary)) if primary == secondary => {
+            if primary.to != address {
+                return FinalityResult::Retry(json!({
+                    "stage": "finality",
+                    "error": "recipient_mismatch",
+                    "expected_to": format!("{address:#x}"),
+                    "provider_a": provider_evidence(&primary),
+                    "provider_b": provider_evidence(&secondary),
+                }));
+            }
             if primary_head < primary.block_number || secondary_head < primary.block_number {
                 FinalityResult::Wait(json!({
                     "stage": "finality",
@@ -701,18 +695,6 @@ async fn finalized_evidence(
     }
 }
 
-fn event_by_identity(logs: Vec<TransferLog>, tx_hash: B256, log_index: u64) -> Option<TransferLog> {
-    let mut matching = logs
-        .into_iter()
-        .filter(|log| log.tx_hash == tx_hash && log.log_index == log_index);
-    let first = matching.next()?;
-    if matching.next().is_some() {
-        None
-    } else {
-        Some(first)
-    }
-}
-
 fn chain_result_code<T>(result: &Result<T, ChainError>) -> &'static str {
     match result {
         Ok(_) => "ok",
@@ -723,13 +705,21 @@ fn chain_result_code<T>(result: &Result<T, ChainError>) -> &'static str {
     }
 }
 
-fn canonical_effect(deposit: &Deposit, canonical: &TransferLog) -> Option<CanonicalEvidence> {
+fn canonical_effect(
+    deposit: &Deposit,
+    canonical: &TransferLog,
+    selected_route: Option<(&String, u64)>,
+) -> Option<CanonicalEvidence> {
+    let selected_name = selected_route.map(|(name, _)| name.as_str());
+    let selected_version = selected_route.map(|(_, version)| version);
     let changed = deposit.block_number != canonical.block_number
         || deposit.block_hash != canonical.block_hash
         || deposit.block_time != canonical.block_time
         || deposit.asset_contract != canonical.token
         || deposit.from_address != canonical.from
-        || deposit.amount_atomic != canonical.amount;
+        || deposit.amount_atomic != canonical.amount
+        || deposit.route.as_deref() != selected_name
+        || deposit.route_version != selected_version;
     changed.then_some(CanonicalEvidence {
         block_number: canonical.block_number,
         block_hash: canonical.block_hash,
@@ -737,6 +727,8 @@ fn canonical_effect(deposit: &Deposit, canonical: &TransferLog) -> Option<Canoni
         asset_contract: canonical.token,
         from_address: canonical.from,
         amount_atomic: canonical.amount,
+        route: selected_name.map(str::to_owned),
+        route_version: selected_version,
     })
 }
 
@@ -745,7 +737,7 @@ struct Quote {
     evidence: Value,
 }
 
-async fn fetch_quote(runtime: &RouteRuntime, now: UnixSeconds) -> Result<Quote, Value> {
+async fn fetch_quote(runtime: &RouteRuntime) -> Result<Quote, Value> {
     match runtime.route.pricing.mode {
         PricingMode::Spot => {
             let Some(check_source) = runtime.check.as_ref() else {
@@ -778,6 +770,7 @@ async fn fetch_quote(runtime: &RouteRuntime, now: UnixSeconds) -> Result<Quote, 
                 rate: fx.price,
                 observed_at: fx.observed_at,
             };
+            let now = pricing_validation_time()?;
             match validate_spot(
                 &primary,
                 &check,
@@ -807,6 +800,7 @@ async fn fetch_quote(runtime: &RouteRuntime, now: UnixSeconds) -> Result<Quote, 
                     );
                 }
             };
+            let now = pricing_validation_time()?;
             match stablecoin_price(&primary, now, ValuationPolicy::from(&runtime.route.pricing)) {
                 Ok(price) => Ok(Quote { price, evidence }),
                 Err(error) => Err(json!({
@@ -817,6 +811,10 @@ async fn fetch_quote(runtime: &RouteRuntime, now: UnixSeconds) -> Result<Quote, 
             }
         }
     }
+}
+
+fn pricing_validation_time() -> Result<UnixSeconds, Value> {
+    unix_seconds(Utc::now()).ok_or_else(|| json!({"stage": "pricing", "error": "invalid_clock"}))
 }
 
 fn observation_result(result: &Result<Observation, topup_adapters::pricing::PriceError>) -> Value {
@@ -866,20 +864,49 @@ const fn valuation_source_code(source: ValuationSource) -> &'static str {
 }
 
 fn reject_out_of_range(
-    mut effects: TransitionEffects,
+    deposit: &Deposit,
+    product_id: Uuid,
+    effects: TransitionEffects,
     quote: &Quote,
-    valuation_at: DateTime<Utc>,
 ) -> StepResult {
-    let _ = (&mut effects, quote, valuation_at);
-    StepResult {
-        outcome: StepOutcome::Reject(RejectReason::OutOfRange),
-        evidence: json!({
+    rejected_result(
+        deposit,
+        product_id,
+        RejectReason::OutOfRange,
+        json!({
             "stage": "valuation",
             "result": "out_of_range",
             "quote": quote.evidence,
         }),
-        events: Vec::new(),
         effects,
+    )
+}
+
+fn rejected_result(
+    deposit: &Deposit,
+    product_id: Uuid,
+    reason: RejectReason,
+    evidence: Value,
+    effects: TransitionEffects,
+) -> StepResult {
+    StepResult {
+        outcome: StepOutcome::Reject(reason),
+        evidence,
+        events: vec![rejected_event(deposit.id, product_id, reason)],
+        effects,
+    }
+}
+
+fn rejected_event(deposit_id: Uuid, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+    OutboxEvent {
+        id: Uuid::new_v4(),
+        event_type: "deposit.rejected".to_owned(),
+        payload: json!({
+            "product_id": product_id,
+            "deposit_id": deposit_id,
+            "reason": reason.code(),
+        }),
+        next_attempt_at: Utc::now(),
     }
 }
 
@@ -892,10 +919,14 @@ fn retry(error: RetryError, evidence: Value, effects: TransitionEffects) -> Step
     }
 }
 
-fn adopt_answer(deposit: &Deposit, key: String, answer: ProductAnswer) -> StepResult {
-    let valuation = parse_adopted_valuation(&answer.payload);
-    let valuation = match valuation {
-        Ok(valuation) => valuation,
+fn adopt_answer(
+    deposit: &Deposit,
+    context: &ConfirmationContext,
+    key: String,
+    answer: ProductAnswer,
+) -> StepResult {
+    let adopted = match parse_adopted_valuation(&answer.payload) {
+        Ok(adopted) => adopted,
         Err(error) => {
             return retry(
                 RetryError::InvariantViolation,
@@ -904,35 +935,65 @@ fn adopt_answer(deposit: &Deposit, key: String, answer: ProductAnswer) -> StepRe
             );
         }
     };
-    let accepted = answer.accepted;
+    if adopted.lock_ref.as_deref() != context.lock_ref.as_deref() && adopted.lock_ref.is_some() {
+        return retry(
+            RetryError::InvariantViolation,
+            json!({"stage": "product_lookup", "error": "product_payload_lock_ref"}),
+            TransitionEffects::default(),
+        );
+    }
+    let ProductAnswer {
+        accepted,
+        destination_tx_id,
+        payload,
+    } = answer;
+    let events = if accepted {
+        Vec::new()
+    } else {
+        vec![rejected_event(
+            deposit.id,
+            context.product_id,
+            RejectReason::ProductRefused,
+        )]
+    };
+    let lock_consumption = adopted.lock_ref.map(|_| LockConsumption {
+        address_id: deposit.address_id,
+        idempotent: true,
+    });
+    let valuation = adopted.valuation;
     StepResult {
         outcome: StepOutcome::AdoptProductAnswer { credited: accepted },
         evidence: json!({
             "stage": "product_lookup",
             "result": if accepted { "accepted" } else { "rejected" },
             "key": key,
-            "destination_tx_id": answer.destination_tx_id,
+            "destination_tx_id": destination_tx_id,
             "valuation_at": valuation.valuation_at,
             "price_scaled": valuation.price_scaled.to_string(),
             "credit_minor": valuation.credit_minor.value().to_string(),
             "deposit_id": deposit.id,
         }),
-        events: Vec::new(),
+        events,
         effects: TransitionEffects {
             canonical_evidence: None,
             valuation: Some(valuation),
             settlement_adoption: Some(SettlementAdoption {
                 key,
-                payload: answer.payload,
+                payload,
                 accepted,
-                destination_tx_id: answer.destination_tx_id,
+                destination_tx_id,
             }),
-            lock_consumption: None,
+            lock_consumption,
         },
     }
 }
 
-fn parse_adopted_valuation(payload: &Value) -> Result<StoredValuation, &'static str> {
+struct AdoptedValuation {
+    valuation: StoredValuation,
+    lock_ref: Option<String>,
+}
+
+fn parse_adopted_valuation(payload: &Value) -> Result<AdoptedValuation, &'static str> {
     let credit_minor = payload
         .get("amount_minor")
         .and_then(Value::as_str)
@@ -957,20 +1018,20 @@ fn parse_adopted_valuation(payload: &Value) -> Result<StoredValuation, &'static 
     let valuation_at = DateTime::parse_from_rfc3339(valuation_at)
         .map_err(|_| "product_payload_valuation_at")?
         .with_timezone(&Utc);
-    let source = if evidence
-        .get("lock_ref")
-        .is_some_and(|value| !value.is_null())
-    {
-        "lock"
-    } else {
-        "spot"
+    let lock_ref = match evidence.get("lock_ref") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(lock_ref)) if !lock_ref.is_empty() => Some(lock_ref.clone()),
+        Some(_) => return Err("product_payload_lock_ref"),
     };
-    Ok(StoredValuation {
-        valuation_at,
-        price_scaled,
-        price_source: source.to_owned(),
-        credit_minor: MinorAmount::new(credit_minor),
-        quote: payload.clone(),
+    Ok(AdoptedValuation {
+        valuation: StoredValuation {
+            valuation_at,
+            price_scaled,
+            price_source: if lock_ref.is_some() { "lock" } else { "spot" }.to_owned(),
+            credit_minor: MinorAmount::new(credit_minor),
+            quote: payload.clone(),
+        },
+        lock_ref,
     })
 }
 
@@ -1024,6 +1085,18 @@ mod tests {
         {
             ready(self.logs.clone())
         }
+
+        fn transfer_log_by_identity(
+            &self,
+            tx_hash: B256,
+            log_index: u64,
+        ) -> impl std::future::Future<Output = Result<Option<TransferLog>, ChainError>> + Send
+        {
+            ready(self.logs.clone().map(|logs| {
+                logs.into_iter()
+                    .find(|log| log.tx_hash == tx_hash && log.log_index == log_index)
+            }))
+        }
     }
 
     struct MockPrice(Result<Observation, PriceError>);
@@ -1069,7 +1142,7 @@ mod tests {
             chain(100, Vec::new()),
             prices(now_seconds()),
             Arc::new(MockProduct(Ok(Some(answer.clone())))),
-            context(None),
+            context_with_lock_ref(None, Some("lock-1")),
         )
         .run(&deposit(1_000))
         .await;
@@ -1357,11 +1430,12 @@ mod tests {
         context: ConfirmationContext,
     ) -> ConfirmStep {
         let chain_id = route.chain.chain_id;
+        let asset_contract = route.asset.contract;
         let key = (route.route.clone(), route.version);
         ConfirmStep {
             context_lookup: Arc::new(MockContext(context)),
             routes: BTreeMap::from([(
-                key,
+                key.clone(),
                 RouteRuntime {
                     route,
                     primary: Arc::new(MockPrice(Ok(prices.primary))),
@@ -1373,6 +1447,7 @@ mod tests {
                     }),
                 },
             )]),
+            asset_routes: BTreeMap::from([((chain_id, asset_contract), key)]),
             chains: BTreeMap::from([(
                 chain_id,
                 ChainPair {
@@ -1454,9 +1529,17 @@ mod tests {
     }
 
     fn context(lock: Option<StoredLock>) -> ConfirmationContext {
+        context_with_lock_ref(lock, None)
+    }
+
+    fn context_with_lock_ref(
+        lock: Option<StoredLock>,
+        lock_ref: Option<&str>,
+    ) -> ConfirmationContext {
         ConfirmationContext {
             address: recipient(),
             product_id: Uuid::new_v4(),
+            lock_ref: lock_ref.map(str::to_owned),
             lock,
         }
     }

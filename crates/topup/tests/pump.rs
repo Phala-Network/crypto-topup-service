@@ -444,6 +444,7 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
                     settlement_adoption: None,
                     lock_consumption: Some(LockConsumption {
                         address_id: seed.address_id,
+                        idempotent: false,
                     }),
                 },
             };

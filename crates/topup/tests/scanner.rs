@@ -79,6 +79,14 @@ impl ChainReader for RecordingReader {
             });
         Ok(Vec::new())
     }
+
+    async fn transfer_log_by_identity(
+        &self,
+        _tx_hash: B256,
+        _log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        Ok(None)
+    }
 }
 
 struct BackfillReader {
@@ -153,6 +161,14 @@ impl ChainReader for BackfillReader {
             logs.push(mock_transfer_log(self.token, self.recipient, 3_000, 2));
         }
         Ok(logs)
+    }
+
+    async fn transfer_log_by_identity(
+        &self,
+        _tx_hash: B256,
+        _log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        Ok(None)
     }
 }
 

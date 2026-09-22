@@ -193,6 +193,7 @@ configs:
         product_kid: phala-cloud/v1
 
       pricing:
+        mode: spot
         primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
         check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
         price_scale: 8
