@@ -749,6 +749,7 @@ fn app_state_with_attestor(
         )
         .expect("admin key is valid"),
         attestor,
+        rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
     }
 }
 

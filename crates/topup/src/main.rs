@@ -246,6 +246,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(&routes) {
+        Ok(provider) => Arc::new(provider) as Arc<dyn topup::locks::QuoteProvider>,
+        Err(error) => {
+            tracing::error!(%error, "invalid rate-lock pricing configuration");
+            return ExitCode::FAILURE;
+        }
+    };
     let scanner_routes = match topup::scanner::configure_routes(&routes) {
         Ok(routes) => routes,
         Err(error) => {
@@ -432,6 +439,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         routes: Arc::clone(&routes),
         admin_key,
         attestor: Arc::new(DstackAttestor::new()),
+        rate_lock_quotes,
     };
     let (application, _) = topup::api::router(state);
     let api_cancellation = cancellation.child_token();
@@ -471,6 +479,16 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
+    });
+    let expiry_metrics = Arc::new(topup::locks::ExpiryMetrics::default());
+    let expiry_worker = topup::locks::ExpiryWorker::new(
+        pool.clone(),
+        Arc::clone(&expiry_metrics),
+        Duration::from_secs(5),
+    );
+    let expiry_cancellation = cancellation.child_token();
+    let expiry_task = tokio::spawn(async move {
+        expiry_worker.run(expiry_cancellation).await;
     });
     let mut flusher_handles = Vec::with_capacity(flusher_tasks.len());
     for task in flusher_tasks {
@@ -586,6 +604,10 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
     }
+    if let Err(error) = expiry_task.await {
+        tracing::error!(%error, "rate-lock expiry task failed during shutdown");
+        clean_shutdown = false;
+    }
     for task in flusher_handles {
         if let Err(error) = task.await {
             tracing::error!(%error, "flusher task failed during shutdown");
@@ -596,6 +618,8 @@ async fn run(args: &RunArgs) -> ExitCode {
     tracing::info!(
         stuck_deposit_alerts = metrics.stuck_deposit_alerts(),
         reconciliation_heartbeat = reconciliation_metrics.last_heartbeat_unix(),
+        rate_lock_expiry_heartbeats = expiry_metrics.heartbeats(),
+        rate_locks_expired = expiry_metrics.expired(),
         "topup service stopped"
     );
 
@@ -718,11 +742,11 @@ fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
                 .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    validate_route_versions(&routes)?;
+    validate_route_set(&routes)?;
     Ok(routes)
 }
 
-fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
+fn validate_route_set(routes: &[RouteFile]) -> Result<(), String> {
     let mut versions = std::collections::BTreeSet::new();
     for route in routes {
         if !versions.insert((route.route.as_str(), route.version)) {
@@ -731,6 +755,18 @@ fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
                 route.route, route.version
             ));
         }
+    }
+    // Rate-lock exposure counters sum credit across routes, so every quote-first route must
+    // count credit in the same destination minor unit.
+    let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
+    if let Some(first) = lock_routes.next()
+        && let Some(other) = lock_routes
+            .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
+    {
+        return Err(format!(
+            "rate-lock routes `{}` and `{}` use different destination.unit_decimals; exposure caps require one unit",
+            first.route, other.route
+        ));
     }
     Ok(())
 }
@@ -849,7 +885,7 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nonce, validate_route_versions};
+    use super::{parse_nonce, validate_route_set};
     use topup_core::route::RouteFile;
 
     #[test]
@@ -877,10 +913,30 @@ mod tests {
         let mut newer = route.clone();
         newer.version = route.version + 1;
 
-        assert_eq!(validate_route_versions(&[route.clone(), newer]), Ok(()));
+        assert_eq!(validate_route_set(&[route.clone(), newer]), Ok(()));
         assert_eq!(
-            validate_route_versions(&[route.clone(), route]),
+            validate_route_set(&[route.clone(), route]),
             Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
         );
+    }
+
+    #[test]
+    fn route_loading_requires_one_unit_for_rate_lock_exposure() {
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let mut other = route.clone();
+        other.route = "other-route".to_owned();
+        other.destination.unit_decimals = route.destination.unit_decimals + 1;
+
+        assert_eq!(
+            validate_route_set(&[route.clone(), other.clone()]),
+            Err(format!(
+                "rate-lock routes `{}` and `other-route` use different destination.unit_decimals; exposure caps require one unit",
+                route.route
+            ))
+        );
+        other.rate_lock.enabled = false;
+        assert_eq!(validate_route_set(&[route, other]), Ok(()));
     }
 }

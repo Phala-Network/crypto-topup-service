@@ -6,8 +6,6 @@ use std::time::Duration;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use topup_core::screening::PauseScope;
@@ -21,11 +19,11 @@ use super::attestation::AttestationError;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
     AccountResponse, AdminRefundResponse, AttestationQuery, AttestationResponse,
-    CancelRateLockResponse, CreateRateLockRequest, DailyReportResponse, DepositAddressResponse,
-    DepositListQuery, DepositLookupQuery, DepositResponse, DepositsResponse, LimitsResponse,
-    NudgeResponse, PauseRequest, PauseResponse, PersistentSaltInputs, RateLockResponse,
-    RecordRefundRequest, RefundRequest, RefundResponse, RegisterAccountRequest,
-    RotateDepositAddressRequest, RoutePauseResponse, SupportDepositsResponse,
+    DailyReportResponse, DepositAddressResponse, DepositListQuery, DepositLookupQuery,
+    DepositResponse, DepositsResponse, LimitsResponse, NudgeResponse, PauseRequest, PauseResponse,
+    PersistentSaltInputs, RecordRefundRequest, RefundRequest, RefundResponse,
+    RegisterAccountRequest, RotateDepositAddressRequest, RoutePauseResponse,
+    SupportDepositsResponse,
 };
 use super::repository;
 
@@ -132,64 +130,6 @@ pub(crate) async fn rotate_deposit_address(
 }
 
 #[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts/{ext}/rate-locks",
-    params(("p" = String, Path), ("ext" = String, Path)),
-    request_body = CreateRateLockRequest,
-    responses(
-        (status = 200, body = RateLockResponse),
-        (status = 423, body = ErrorResponse),
-        (status = 501, body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "rate-locks"
-)]
-pub(crate) async fn create_rate_lock(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-    Json(_request): Json<CreateRateLockRequest>,
-) -> ApiResult<impl IntoResponse> {
-    require_account(&state, product.id, &external_id).await?;
-    require_unfrozen_chain(&state, state.route_for_product(&product)?).await?;
-    Err::<StatusCode, _>(ApiError::not_implemented("C10"))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}",
-    params(("p" = String, Path), ("ext" = String, Path), ("ref" = String, Path)),
-    responses((status = 200, body = RateLockResponse), (status = 501, body = ErrorResponse)),
-    security(("http_message_signature" = [])),
-    tag = "rate-locks"
-)]
-pub(crate) async fn get_rate_lock(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id, _lock_ref)): Path<(String, String, String)>,
-) -> ApiResult<impl IntoResponse> {
-    require_account(&state, product.id, &external_id).await?;
-    Err::<StatusCode, _>(ApiError::not_implemented("C10"))
-}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}",
-    params(("p" = String, Path), ("ext" = String, Path), ("ref" = String, Path)),
-    responses((status = 200, body = CancelRateLockResponse), (status = 501, body = ErrorResponse)),
-    security(("http_message_signature" = [])),
-    tag = "rate-locks"
-)]
-pub(crate) async fn cancel_rate_lock(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id, _lock_ref)): Path<(String, String, String)>,
-) -> ApiResult<impl IntoResponse> {
-    require_account(&state, product.id, &external_id).await?;
-    Err::<StatusCode, _>(ApiError::not_implemented("C10"))
-}
-
-#[utoipa::path(
     get,
     path = "/v1/products/{p}/accounts/{ext}/deposits",
     params(
@@ -275,8 +215,18 @@ pub(crate) async fn get_limits(
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
 ) -> ApiResult<Json<LimitsResponse>> {
-    require_account(&state, product.id, &external_id).await?;
+    let account = require_account(&state, product.id, &external_id).await?;
     let route = state.route_for_product(&product)?;
+    let availability = crate::locks::exposure_availability(
+        &state.pool,
+        account.id,
+        route.rate_lock.max_open_minor.account,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::locks::RateLockError::Database(error) => ApiError::from(error),
+        _ => ApiError::internal(),
+    })?;
     Ok(Json(LimitsResponse {
         route: route.route.clone(),
         min_deposit_atomic: route.screening.min_deposit_atomic.value().to_string(),
@@ -285,9 +235,8 @@ pub(crate) async fn get_limits(
         account_open_minor: route.rate_lock.max_open_minor.account,
         product_open_minor: route.rate_lock.max_open_minor.product,
         global_open_minor: route.rate_lock.max_open_minor.global,
-        // C10 will replace these placeholders with atomic exposure reservations.
-        remaining_account_minor: None,
-        reset_at: None,
+        remaining_account_minor: Some(availability.remaining_minor),
+        reset_at: availability.reset_at,
     }))
 }
 
