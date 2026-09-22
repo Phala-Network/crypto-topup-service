@@ -48,6 +48,8 @@ def test_any_listed_v1a_signature_may_match() -> None:
         ({**_rust_headers(), "Webhook-Id": "other"}, RUST_BODY, RUST_TIMESTAMP),
         (_rust_headers(RUST_SIGNATURE.replace("v1a,", "v1,")), RUST_BODY, RUST_TIMESTAMP),
         ({"Webhook-Id": RUST_ID}, RUST_BODY, RUST_TIMESTAMP),
+        # Non-ASCII digits pass str.isdigit() but are not a Unix timestamp.
+        ({**_rust_headers(), "Webhook-Timestamp": "\u0661\u0662"}, RUST_BODY, RUST_TIMESTAMP),
     ],
 )
 def test_tampered_or_stale_deliveries_are_rejected(

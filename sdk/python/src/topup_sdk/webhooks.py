@@ -76,7 +76,7 @@ def verify_webhook_signature(
         signatures = lowered["webhook-signature"]
     except KeyError as error:
         raise SignatureError("webhook headers missing") from error
-    if not timestamp.isdigit():
+    if not (timestamp.isascii() and timestamp.isdigit()):
         raise SignatureError("webhook timestamp malformed")
     now = int(time.time()) if now is None else now
     if abs(now - int(timestamp)) > tolerance_seconds:
