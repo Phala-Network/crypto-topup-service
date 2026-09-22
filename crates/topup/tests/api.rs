@@ -597,6 +597,81 @@ async fn route_pause_controls_address_routes() -> Result<()> {
     result.and(cleanup)
 }
 
+#[tokio::test]
+async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[31; 32]);
+        let admin_key = SigningKey::from_bytes(&[32; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        topup::db::create_account(
+            &database.app_pool,
+            &NewAccount {
+                id: Uuid::new_v4(),
+                product_id: product.id,
+                external_id: "frozen-account".to_owned(),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
+            VALUES ('chain:1', 'chain', 1, 'address_derivation', 'test freeze')
+            "#,
+        )
+        .execute(&database.app_pool)
+        .await?;
+
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let address_path = "/v1/products/phala-cloud/accounts/frozen-account/deposit-address";
+        for (method, created) in [(Method::GET, now), (Method::POST, now + 1)] {
+            let response = app
+                .clone()
+                .oneshot(signed_request(
+                    method,
+                    address_path,
+                    Vec::new(),
+                    PRODUCT_KID,
+                    &product_key,
+                    created,
+                ))
+                .await?;
+            ensure!(response.status() == StatusCode::LOCKED);
+            ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
+        }
+        let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM addresses")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(issued == 0);
+
+        let lock_body = serde_json::to_vec(&json!({
+            "amount_minor": "1000",
+            "product_lock_ref": "checkout-1",
+        }))?;
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts/frozen-account/rate-locks",
+                lock_body,
+                PRODUCT_KID,
+                &product_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[cfg(feature = "dev-signer")]
 #[tokio::test]
 async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {

@@ -942,6 +942,16 @@
               }
             }
           },
+          "423": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "501": {
             "description": "",
             "content": {
