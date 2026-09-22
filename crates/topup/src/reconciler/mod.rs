@@ -45,10 +45,10 @@ pub use types::{CheckName, Finding, ReconciliationMetrics, ReconciliationReport}
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
 const MAX_WINDOWS_PER_ROUND: usize = 64;
 
-/// Order in which a round runs its checks; derivation runs first so a freeze lands early.
 const LOOP_NAME: &str = "reconciler";
 const LOOP_INSTANCE: &str = "0";
 
+/// Order in which a round runs its checks; derivation runs first so a freeze lands early.
 const REGULAR_CHECKS: [CheckName; 6] = [
     CheckName::AddressDerivation,
     CheckName::MissingDeposit,
