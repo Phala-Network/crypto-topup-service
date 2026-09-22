@@ -1,3 +1,4 @@
-//! EVM chain contract adapters.
+//! Blockchain adapters.
 
+pub mod evm;
 pub mod flush;

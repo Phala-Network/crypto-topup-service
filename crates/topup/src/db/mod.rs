@@ -7,6 +7,7 @@ mod deposits;
 mod flushes;
 mod outbox;
 mod products;
+mod scanner;
 mod settlements;
 mod types;
 
@@ -35,6 +36,7 @@ pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark
 pub use products::{
     NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,
 };
+pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
 pub use settlements::{Settlement, SettlementIntent, upsert_intent};
 
 /// Embedded SQL migrations for the service database.
