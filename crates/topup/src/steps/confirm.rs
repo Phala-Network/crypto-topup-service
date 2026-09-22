@@ -803,18 +803,21 @@ fn rejected_result(
     StepResult {
         outcome: StepOutcome::Reject(reason),
         evidence,
-        events: vec![rejected_event(deposit.id, product_id, reason)],
+        events: vec![rejected_event(deposit, product_id, reason)],
         effects,
     }
 }
 
-fn rejected_event(deposit_id: Uuid, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
     OutboxEvent {
         id: Uuid::new_v4(),
         event_type: "deposit.rejected".to_owned(),
         payload: json!({
             "product_id": product_id,
-            "deposit_id": deposit_id,
+            "deposit_id": deposit.id,
+            "chain_id": deposit.chain_id,
+            "state": "rejected",
+            "route": deposit.route.as_deref(),
             "reason": reason.code(),
         }),
         next_attempt_at: Utc::now(),
@@ -862,7 +865,7 @@ fn adopt_answer(
         Vec::new()
     } else {
         vec![rejected_event(
-            deposit.id,
+            deposit,
             context.product_id,
             RejectReason::ProductRefused,
         )]
@@ -1724,6 +1727,9 @@ mod tests {
         assert_eq!(event.event_type, "deposit.rejected");
         assert_eq!(event.payload["product_id"], product_id.to_string());
         assert!(event.payload["deposit_id"].as_str().is_some());
+        assert!(event.payload["chain_id"].as_u64().is_some());
+        assert_eq!(event.payload["state"], "rejected");
+        assert!(event.payload["route"].as_str().is_some());
         assert_eq!(event.payload["reason"], reason.code());
     }
 

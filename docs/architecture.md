@@ -363,7 +363,11 @@ Signatures are single-use within the acceptance window. `rotate` is idempotent o
 
 Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
 `deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`. Events never
-change balances. OpenAPI from `utoipa`; SDKs generated from it, shipped with a runnable
+change balances. Every `deposit.credited` and `deposit.rejected` payload carries `product_id`,
+`deposit_id`, `chain_id`, `state` (`credited` or `rejected`), and `route` (null when no route
+was selected); `deposit.credited` adds the destination transaction and pricing fields, and
+`deposit.rejected` adds `reason` (plus `product_reason` for a product refusal). Payload changes
+are additive; receivers must ignore unknown fields. OpenAPI from `utoipa`; SDKs generated from it, shipped with a runnable
 Python integration example, a signing helper, and a versioning and deprecation policy. A
 sandbox (Sepolia, test token, product credentials, scripted late/under/over/rejected
 scenarios) is available to integrators before mainnet.
