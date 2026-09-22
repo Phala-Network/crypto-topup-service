@@ -140,6 +140,7 @@ pub struct SignatureOptions {
     pub label: String,
     pub parameters: Vec<SignatureParameter>,
     pub origin_form: bool,
+    pub idempotency_key: Option<String>,
 }
 
 impl Default for SignatureOptions {
@@ -152,6 +153,7 @@ impl Default for SignatureOptions {
                 SignatureParameter::Algorithm("ed25519".to_owned()),
             ],
             origin_form: false,
+            idempotency_key: None,
         }
     }
 }
@@ -169,11 +171,22 @@ pub fn signed_request_with_options(
     let target_uri = format!("http://api.test{path}");
     let digest = STANDARD.encode(Sha256::digest(&body));
     let content_digest = format!("sha-256=:{digest}:");
-    let signature_parameters = signature_parameters(kid, created, &options.parameters);
-    let base = format!(
-        "\"@method\": {}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}\n\"@signature-params\": {signature_parameters}",
+    let signature_parameters = signature_parameters(
+        kid,
+        created,
+        &options.parameters,
+        options.idempotency_key.is_some(),
+    );
+    let mut base = format!(
+        "\"@method\": {}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}",
         method.as_str()
     );
+    if let Some(idempotency_key) = &options.idempotency_key {
+        base.push_str("\n\"idempotency-key\": ");
+        base.push_str(idempotency_key);
+    }
+    base.push_str("\n\"@signature-params\": ");
+    base.push_str(&signature_parameters);
     let signature = key.sign(base.as_bytes()).to_bytes();
     let label = KeyRef::from_str(&options.label).expect("signature label must be an SFV key");
     let signature_input = format!("{label}={signature_parameters}");
@@ -189,19 +202,28 @@ pub fn signed_request_with_options(
     } else {
         &target_uri
     };
-    Request::builder()
+    let mut request = Request::builder()
         .method(method)
         .uri(request_target)
         .header("host", "api.test")
         .header("content-type", "application/json")
         .header("content-digest", content_digest)
         .header("signature-input", signature_input)
-        .header("signature", signature_header)
+        .header("signature", signature_header);
+    if let Some(idempotency_key) = &options.idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    request
         .body(Body::from(body))
         .expect("test request must be valid")
 }
 
-fn signature_parameters(kid: &str, created: i64, order: &[SignatureParameter]) -> String {
+fn signature_parameters(
+    kid: &str,
+    created: i64,
+    order: &[SignatureParameter],
+    include_idempotency_key: bool,
+) -> String {
     let mut serializer = ListSerializer::new();
     {
         let mut inner = serializer.inner_list();
@@ -209,6 +231,14 @@ fn signature_parameters(kid: &str, created: i64, order: &[SignatureParameter]) -
             let _ = inner
                 .bare_item(
                     StringRef::from_str(component)
+                        .expect("signature component must be an SFV string"),
+                )
+                .finish();
+        }
+        if include_idempotency_key {
+            let _ = inner
+                .bare_item(
+                    StringRef::from_str("idempotency-key")
                         .expect("signature component must be an SFV string"),
                 )
                 .finish();

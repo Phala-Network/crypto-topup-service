@@ -331,6 +331,34 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
     record.map(TryInto::try_into).transpose()
 }
 
+/// Replaces local pricing fields with the product's authoritative original settlement inputs.
+pub async fn adopt_settlement_pricing(
+    pool: &PgPool,
+    id: Uuid,
+    credit_minor: u64,
+    price_scaled: u64,
+    valuation_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE deposits
+        SET credit_minor = $2::text::numeric,
+            price_scaled = $3::text::numeric,
+            valuation_at = $4,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING id
+        "#,
+    )
+    .bind(id)
+    .bind(credit_minor.to_string())
+    .bind(price_scaled.to_string())
+    .bind(valuation_at)
+    .fetch_one(pool)
+    .await?;
+    Ok(())
+}
+
 /// Claims one due non-terminal deposit with a five-minute lease.
 pub async fn claim_deposit(
     pool: &PgPool,
