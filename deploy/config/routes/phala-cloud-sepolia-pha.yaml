@@ -62,6 +62,7 @@ rate_lock:
   lock_tolerance_bps: 100
   max_creations_per_minute: 10
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
+  max_creations_per_minute: 10
 
 alerts:
   stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }
