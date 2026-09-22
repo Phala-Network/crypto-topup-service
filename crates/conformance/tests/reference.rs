@@ -240,6 +240,7 @@ async fn run_suite(
         accounts: Accounts::default(),
         chain: ChainFixture::connect(manifest.clone()).await?,
         restart,
+        resend_window: Duration::from_secs(30),
     })
     .await
 }
@@ -269,6 +270,7 @@ async fn conforming_reference_passes_every_case() -> Result<()> {
     let manifest = anvil.prepare().await?;
     let report = run_memory_variant(&manifest, BrokenVariant::None).await?;
     assert!(report.passed, "{:#?}", report.tests);
+    assert_eq!(report.summary.warnings, 0, "{:#?}", report.tests);
     assert_eq!(report.tests.len(), 15);
     assert_eq!(ids_with(&report, TestStatus::Pass).len(), 15);
     let get_original = report
@@ -345,6 +347,47 @@ fn router_without_hooks(state: ReferenceState) -> Router {
     router(state).layer(middleware::from_fn(hide_conformance_hooks))
 }
 
+/// Answers the reference's transient `503` with a terminal rejection instead, as a product
+/// which stores rejections for unfinalized logs would.
+async fn reject_transient_reads(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+        return response;
+    }
+    axum::Json(json!({"status": "rejected", "reason": "not_finalized"})).into_response()
+}
+
+fn router_rejecting_transient_reads(state: ReferenceState) -> Router {
+    router(state).layer(middleware::from_fn(reject_transient_reads))
+}
+
+/// The suite does not enforce the transient-read rule, but must surface a violation.
+#[tokio::test(flavor = "multi_thread")]
+async fn stored_rejection_for_an_unfinalized_log_is_reported_as_a_warning() -> Result<()> {
+    let Some(anvil) = Anvil::start()? else {
+        return Ok(());
+    };
+    let manifest = anvil.prepare().await?;
+    let state = ReferenceState::new(config(manifest.clone(), BrokenVariant::None))?;
+    let server = Server::start(state, router_rejecting_transient_reads, memory_restart()).await?;
+    let report = run_suite(&manifest, &server, Some(server.clone())).await;
+    server.stop().await;
+    let report = report?;
+    assert!(report.passed, "{:#?}", report.tests);
+    assert_eq!(report.summary.warnings, 1);
+    let chain_evidence = report
+        .tests
+        .iter()
+        .find(|test| test.id == "chain_evidence")
+        .context("chain_evidence case")?;
+    assert_eq!(chain_evidence.warnings.len(), 1);
+    assert_eq!(
+        chain_evidence.evidence["not_finalized"]["first_answer"],
+        json!("rejected: not_finalized")
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_ledger_hook_and_restart_are_incomplete_never_pass() -> Result<()> {
     let Some(anvil) = Anvil::start()? else {
@@ -364,6 +407,7 @@ async fn missing_ledger_hook_and_restart_are_incomplete_never_pass() -> Result<(
             "business_refusal",
             "chain_evidence",
             "concurrency",
+            "per_deposit_cap",
             "per_period_cap",
             "processing",
             "replay",

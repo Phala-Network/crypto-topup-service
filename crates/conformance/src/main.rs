@@ -80,6 +80,9 @@ struct RunArgs {
     period_account_id: String,
     #[arg(long, default_value = "conformance-cap")]
     cap_account_id: String,
+    /// How long to keep resending an unchanged request that is not yet settled.
+    #[arg(long, default_value_t = 30)]
+    resend_window_seconds: u64,
     #[arg(long, default_value = "conformance-report.json")]
     report: PathBuf,
 }
@@ -141,6 +144,7 @@ async fn run(args: RunArgs) -> Result<()> {
         },
         chain,
         restart,
+        resend_window: Duration::from_secs(args.resend_window_seconds),
     })
     .await?;
     let bytes = serde_json::to_vec_pretty(&report)?;

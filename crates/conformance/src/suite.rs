@@ -156,6 +156,9 @@ pub struct SuiteConfig {
     pub chain: ChainFixture,
     /// Restart hook; without it the retention case is incomplete.
     pub restart: Option<Arc<dyn Restart>>,
+    /// How long an unchanged request is resent while the product answers `409`,
+    /// `processing`, or outside the contract, before the suite gives up.
+    pub resend_window: Duration,
 }
 
 /// One Transfer-log evidence object embedded in a settlement payload.
@@ -196,7 +199,7 @@ pub struct LedgerBody {
     pub mutations: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 struct Ledger {
     balance_minor: u64,
     mutations: u64,
@@ -264,6 +267,8 @@ struct Runner {
     tests: Vec<TestResult>,
     accepted: Option<AcceptedFixture>,
     retained: Vec<SettlementRequest>,
+    /// Warnings raised by the running case, attached to its result by `capture`.
+    warnings: Vec<String>,
 }
 
 impl Runner {
@@ -274,6 +279,7 @@ impl Runner {
             client,
             raw_client,
             tests: Vec::new(),
+            warnings: Vec::new(),
             accepted: None,
             retained: Vec::new(),
         })
@@ -404,6 +410,7 @@ impl Runner {
             obligation,
             status,
             evidence,
+            warnings: std::mem::take(&mut self.warnings),
         });
     }
 
@@ -622,6 +629,7 @@ impl Runner {
     async fn over_deposit_cap(&self) -> Result<Value> {
         let cap = self.config.caps.per_deposit;
         let account = &self.config.accounts.cap;
+        let before = self.ledger(account).await;
         let over = self.request(account, cap.saturating_add(1)).await?;
         let answer = self.client.post(&over).await?;
         let SettlementAnswer::Rejected { reason, .. } = answer else {
@@ -633,7 +641,19 @@ impl Runner {
             matches!(answer, SettlementAnswer::Accepted { .. }),
             "exactly the cap must be accepted (caps are inclusive): {answer:?}"
         );
-        Ok(json!({"cap": cap, "cap_plus_one_reason": reason, "exact_cap_accepted": true}))
+        let before = before?;
+        ensure!(
+            before == Ledger::default(),
+            "{account} must start with an empty ledger; use a fresh conformance namespace"
+        );
+        let after = self.ledger(account).await?;
+        before.ensure_delta(after, cap, 1)?;
+        Ok(json!({
+            "cap": cap,
+            "cap_plus_one_reason": reason,
+            "exact_cap_accepted": true,
+            "ledger_after": after,
+        }))
     }
 
     async fn per_period_cap(&mut self) -> Result<Value> {
@@ -642,11 +662,7 @@ impl Runner {
         let start = Instant::now();
         let before = self.ledger(&account).await?;
         ensure!(
-            before
-                == Ledger {
-                    balance_minor: 0,
-                    mutations: 0
-                },
+            before == Ledger::default(),
             "{account} must start with an empty ledger; use a fresh conformance namespace"
         );
         let result = self.fill_period(&account, caps).await;
@@ -685,10 +701,11 @@ impl Runner {
         for _ in 0..CONCURRENT_REQUESTS {
             racing.push(self.request(account, reserve).await?);
         }
+        let window = self.config.resend_window;
         let mut tasks = JoinSet::new();
         for request in racing {
             let client = self.client.clone();
-            tasks.spawn(async move { post_until_settled(&client, &request).await });
+            tasks.spawn(async move { post_until_settled(&client, &request, window).await });
         }
         let mut accepted = 0_u64;
         let mut refused = 0_u64;
@@ -733,7 +750,7 @@ impl Runner {
         }))
     }
 
-    async fn chain_evidence(&self) -> Result<Value> {
+    async fn chain_evidence(&mut self) -> Result<Value> {
         let account = &self.config.accounts.accepted;
         let valid = self.valid_emission(account);
         let manifest = self.config.chain.manifest();
@@ -797,11 +814,17 @@ impl Runner {
             "not_finalized: a log in a non-finalized block was accepted"
         );
         let after_pending = self.ledger(account).await;
-        let resent = if matches!(first, SettlementAnswer::Rejected { .. }) {
+        let resent = if let SettlementAnswer::Rejected { reason, .. } = &first {
+            self.warnings.push(format!(
+                "not_finalized: the product stored a terminal rejection ({reason}) for a log \
+                 that was only not finalized yet; transient chain reads must not be stored \
+                 (docs/conformance.md), which this suite reports but does not enforce"
+            ));
             None
         } else {
             self.config.chain.finalize().await?;
-            let answer = post_until_settled(&self.client, &pending).await?;
+            let answer =
+                post_until_settled(&self.client, &pending, self.config.resend_window).await?;
             ensure!(
                 matches!(answer, SettlementAnswer::Accepted { .. }),
                 "not_finalized: the identical request resent after finality was not accepted: \
@@ -1111,8 +1134,10 @@ struct RawAnswer<'a> {
 async fn post_until_settled(
     client: &SettlementClient,
     request: &SettlementRequest,
+    window: Duration,
 ) -> Result<SettlementAnswer> {
-    for _ in 0..50 {
+    let deadline = Instant::now() + window;
+    loop {
         let answer = client.post(request).await?;
         if matches!(
             answer,
@@ -1120,12 +1145,15 @@ async fn post_until_settled(
         ) {
             return Ok(answer);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        ensure!(
+            Instant::now() < deadline,
+            "{} was still {} after the {}s resend window",
+            request.idempotency_key,
+            answer_label(&answer),
+            window.as_secs()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    bail!(
-        "{} never reached a terminal answer",
-        request.idempotency_key
-    )
 }
 
 /// A short, payload-free description of an answer for report evidence.

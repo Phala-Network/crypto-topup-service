@@ -112,6 +112,14 @@ for a transient condition would permanently refuse a legitimate deposit whenever
 RPC lags the service's. This follows section 11: any answer outside the contract makes the
 service resend the same payload.
 
+The suite cannot tell a stored rejection for an unfinalized log from a correct deterministic
+one, so it does not enforce this rule: when the first answer for an unfinalized log is a terminal
+rejection, `chain_evidence` still passes but carries a warning. Treat any warning as a defect.
+
+While a request is answered with `409`, `processing`, or anything outside the contract, the suite
+resends it unchanged for `--resend-window-seconds` (default 30) before failing the case. Raise
+it if the product settles asynchronously after finality.
+
 ### Required ledger observation hook
 
 A conforming answer alone cannot prove that the ledger mutated exactly once, so the product test
@@ -154,9 +162,9 @@ Every case carries the section 11 obligation it checks; protocol cases have `nul
 | `get_original` | — | `GET` returns the status, destination id, and the original payload. Semantic JSON equality is required; `payload_byte_equal` separately reports whether the raw `payload` member of the `GET` body equals the exact bytes the suite sent, with SHA-256 of both. |
 | `authentication` | 1 | Invalid signature bytes, a valid signature under the wrong `keyid`, an expired `created`, and a tampered body are each rejected with `401` or `403`. |
 | `idempotency_coverage` | 1 | A request whose signature omits `idempotency-key` is rejected. |
-| `per_deposit_cap` | 4 | On the fresh cap account, `cap + 1` minor units is refused and exactly `cap` is accepted. |
-| `per_period_cap` | 4 | Distinct deposits credit the period account up to `cap − r` (`r` = the smaller cap); eight concurrent requests of `r` with distinct keys then yield exactly one acceptance, a further request of 1 is refused, and the ledger holds exactly the cap. This fails unless the cumulative check is atomic with the credit. |
-| `chain_evidence` | 5 | Four finalized on-chain counter-examples, each claiming the approved token, the account's forwarder, and a consistent deposit id, are refused: a log index past the receipt's logs, a real mint by the unapproved token, a real mint to a different recipient, and a claimed amount differing from the real one. A product which only checks request fields accepts them. A real, valid log that is not finalized yet must not be accepted or credited; unless that first answer was a terminal rejection, the suite then mines to finality and resends the identical request, which must be accepted. A finalized valid log is accepted, and the ledger reflects exactly the accepted credits. |
+| `per_deposit_cap` | 4 | The cap account starts with an empty ledger; `cap + 1` minor units is refused, exactly `cap` is accepted, and the ledger then holds exactly `cap` in one mutation. |
+| `per_period_cap` | 4 | Distinct deposits credit the period account up to `cap − r` (`r` = the per-deposit cap); eight concurrent requests of `r` with distinct keys then yield exactly one acceptance, a further request of 1 is refused, and the ledger holds exactly the cap. This fails unless the cumulative check is atomic with the credit. |
+| `chain_evidence` | 5 | Four finalized on-chain counter-examples, each claiming the approved token, the account's forwarder, and a consistent deposit id, are refused: a log index past the receipt's logs, a real mint by the unapproved token, a real mint to a different recipient, and a claimed amount differing from the real one. A product which only checks request fields accepts them. A real, valid log that is not finalized yet must not be accepted or credited; unless that first answer was a terminal rejection, the suite then mines to finality and resends the identical request, which must be accepted. A terminal rejection of the unfinalized log is not enforced and is reported as a warning (see "Transient chain reads"). A finalized valid log is accepted, and the ledger reflects exactly the accepted credits. |
 | `deposit_identity` | 6 | A key other than `deposit:` plus the UUIDv5 recomputed from chain id, transaction hash, and log index is refused. |
 | `business_refusal` | — | The refused account yields a typed `200 rejected` with a reason and no ledger change. |
 | `processing` | — | The processing account yields a typed `200 processing`, retained by `GET`, with no ledger change. |
@@ -175,7 +183,7 @@ The schema version is `2`:
   "started_at": "2026-09-22T00:00:00Z",
   "finished_at": "2026-09-22T00:00:09Z",
   "passed": true,
-  "summary": { "passed": 15, "failed": 0, "incomplete": 0 },
+  "summary": { "passed": 15, "failed": 0, "incomplete": 0, "warnings": 0 },
   "tests": [
     {
       "id": "accepted",
@@ -188,8 +196,10 @@ The schema version is `2`:
 }
 ```
 
-`status` is `pass`, `fail`, or `incomplete`. Evidence is bounded to response codes, destination
-ids, ledger observations, hashes, transaction hashes, reasons, and assertion details.
+`status` is `pass`, `fail`, or `incomplete`. A case may also carry `warnings`: behavior the
+documentation forbids but the suite does not enforce; warnings never change `passed`. Evidence is
+bounded to response codes, destination ids, ledger observations, hashes, transaction hashes,
+reasons, and assertion details.
 
 ## Reference endpoint
 

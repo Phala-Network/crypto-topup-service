@@ -39,6 +39,8 @@ pub struct Summary {
     pub failed: usize,
     /// Cases whose required observation was unavailable.
     pub incomplete: usize,
+    /// Warnings across all cases; they never affect `passed`.
+    pub warnings: usize,
 }
 
 /// Result of one independently named conformance case.
@@ -54,6 +56,9 @@ pub struct TestResult {
     pub status: TestStatus,
     /// Sanitized evidence suitable for CI artifacts.
     pub evidence: Value,
+    /// Behavior the documentation forbids but this case does not enforce.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Case outcome classification.
@@ -82,6 +87,7 @@ impl Report {
             passed: count(TestStatus::Pass),
             failed: count(TestStatus::Fail),
             incomplete: count(TestStatus::Incomplete),
+            warnings: tests.iter().map(|test| test.warnings.len()).sum(),
         };
         Self {
             version: REPORT_VERSION,
