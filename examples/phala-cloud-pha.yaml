@@ -45,7 +45,7 @@ screening:
   min_credit_minor: 100                              # USD 1.00
 
 rate_lock:
-  enabled: false                   # pilot: off; GA: on
+  enabled: true                    # quote-first is the default deposit flow
   window_s: 900
   spread_bps: 50                   # price_lock = price_spot / (1 + 0.005)
   lock_tolerance_bps: 100

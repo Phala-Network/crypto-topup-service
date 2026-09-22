@@ -3,7 +3,9 @@
 A private service, called by the Phala Cloud billing backend, that turns finalized ERC-20
 deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that
 can only pay the treasury; the service runs inside a dstack confidential VM and credits products
-through a signed HTTP settlement contract. Routes may offer rate-locked deposits.
+through a signed HTTP settlement contract. The default flow is quote first: the user locks a
+price, receives an exact amount and a single-use address, and pays within the window. A
+persistent address is available for send-any-amount deposits.
 
 First route: Ethereum Mainnet PHA → Phala Cloud USD credit. Further assets, chains, and products
 are added through route configuration and adapters.
@@ -11,8 +13,8 @@ are added through route configuration and adapters.
 ## Flow
 
 ```text
-product registers an account and requests a deposit address
-  → service computes the account's CREATE2 forwarder address (no key, nothing deployed)
+product registers an account; user asks for a quote (or a persistent address)
+  → service locks the price and computes a CREATE2 forwarder address (no key, nothing deployed)
   → scanner reads finalized blocks and records the transfer
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds

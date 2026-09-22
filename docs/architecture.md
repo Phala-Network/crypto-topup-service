@@ -28,10 +28,15 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 
 ## 1. Goal
 
-A private service, called by the Phala Cloud billing backend, that gives each product account
-a persistent deposit address, turns finalized and screened deposits of configured tokens into
-USD credit, and credits the product at most once through a signed HTTP call. Routes may offer
-rate-locked deposits.
+A private service, called by the Phala Cloud billing backend, that turns finalized and
+screened deposits of configured tokens into USD credit and credits the product at most once
+through a signed HTTP call. Two ways to deposit, both first-class:
+
+- **Quote first (default UI).** The user states a USD or token amount, receives a locked
+  price, an exact token amount, a single-use address, and a countdown, then pays. This is the
+  checkout model of Coinbase Commerce and BitPay.
+- **Persistent address (advanced).** Any amount, any time, valued at the price observed when
+  the deposit reaches finality. This is the exchange deposit model.
 
 Customer contract: *tokens are converted to non-transferable Phala Cloud USD credit at the
 published rate observed when the deposit reaches Ethereum finality; the USD value is fixed
@@ -208,19 +213,26 @@ routes use fixed `1.0` with the reference rate as a depeg guard.
 **Screening** is direct sanctions-list screening plus per-deposit bounds. KYT is a separate
 adapter that compliance may require before GA.
 
-## 9. Rate locks (off in pilot)
+## 9. Quote-first deposits (rate locks)
 
-Invoice model with this service's exception profile:
+Invoice model, enabled from the pilot, with this service's exception profile:
 
-- `POST …/rate-locks {amount_atomic, product_lock_ref}` returns a single-use address,
-  `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*, and
-  `expires_at = now + window` *(policy)*. Locks count against open-exposure caps per account,
-  per product, and global *(policy)*, reserved atomically at creation.
+- `POST …/rate-locks {amount_minor | amount_atomic, product_lock_ref}` returns
+  `{address, amount_atomic, price_scaled, credit_minor, expires_at, eip681_uri, salt_inputs}`.
+  `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*;
+  when the user states USD, the token amount is rounded up. `expires_at = now + window`
+  *(policy)*. Locks count against open-exposure caps per account, per product, and global
+  *(policy)*, reserved atomically at creation; creation is rate-limited per account.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
   `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
-  single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock`.
-- Any other deposit to a lock address (late, wrong amount, second payment) is valued at spot.
-  The product shows these rules to the user before payment.
+  single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock` and the
+  product receives exactly the `credit_minor` it showed the user.
+- Any other deposit to a lock address (late, wrong amount, second payment) is valued at spot
+  and still credited; the product shows this rule before payment. `rate_lock.expired` is
+  emitted when a lock passes `expires_at` unconsumed.
+- A "quote, then pay to the persistent address" variant is deliberately not offered: matching
+  a lock by amount alone is ambiguous, and the single-use address is the processor-standard
+  answer.
 
 ## 10. Signing and flush
 
@@ -319,6 +331,21 @@ Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
 `deposit.credited`, `deposit.rejected`, `rate_lock.expired`. Events never change balances.
 OpenAPI from `utoipa`; SDKs generated from it.
 
+### Customer experience obligations (product UI)
+
+These follow exchange and payment-processor conventions and are part of the integration
+checklist:
+
+| Topic | Requirement |
+|---|---|
+| Default flow | Quote first: amount input → locked price, exact token amount, single-use address, QR as an EIP-681 URI carrying token and amount, countdown to `expires_at`, and the rule for late or wrong-amount payments. |
+| Advanced flow | Persistent address behind an explicit "send any amount" option, with "valued at the rate when the deposit is final" and an indicative current rate. |
+| Warnings | Network name and chain id, full token contract, "only PHA on Ethereum", minimum deposit, and that below-minimum deposits are not credited. Never truncate addresses or hashes. |
+| Waiting | After payment the user sees "waiting for Ethereum finality, about 15 minutes" with a transaction-hash lookup and an explorer link; the service reports deposits only once final. |
+| History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
+| Exceptions | Wrong asset or below minimum: "contact support"; funds reach the treasury and finance may return them at its discretion. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
+| Notifications | Email or in-app notice on `deposit.credited` and `deposit.rejected`. |
+
 ## 13. Reconciliation
 
 | Check | Action |
@@ -366,7 +393,7 @@ compose) and pin `(keyid, public key)`.
 | Topic | Rule |
 |---|---|
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
-| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else; finance handles them there. |
+| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. Because they reach the treasury, finance can return them on a support case at its discretion, net of gas. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup keys keep prior versions. |
 | Retention | Deposits, transitions, settlements, audit: 7 years *(policy)*, append-only. |
@@ -398,16 +425,19 @@ pre-settlement snapshot with `GET`-first adoption. Conformance suite against Pha
 finance Safe verified on each chain; two RPC providers; object storage; treasury; policy
 numbers.
 
-**Phase 1, capped pilot**: full pipeline including flush, on Sepolia then mainnet with a
-per-deposit `max`, product-side caps, and allow-listed accounts; rate locks off. Acceptance:
-address issued without an operator and recomputable by the product; deposit recovered after
-restart and provider interruption; credit only after two-provider finality; duplicates and
+**Phase 1, capped pilot**: full pipeline including flush and quote-first deposits, on Sepolia
+then mainnet with a per-deposit `max`, small lock-exposure caps, product-side caps, and
+allow-listed accounts. Acceptance:
+address issued without an operator and recomputable by the product; a quote-first deposit is
+credited at exactly the amount shown to the user, and a late or wrong-amount payment at spot;
+deposit recovered after restart and provider interruption; credit only after two-provider
+finality; duplicates and
 concurrency yield one ledger mutation; outages only delay; balances flush and `Flushed`
 events match; reconciliation repairs the two safe cases and alerts on the rest; restore issues
 no duplicate; every deposit has a full evidence timeline; runbooks exercised once.
 
-**Phase 2, GA**: bounds raised; rate locks on with exposure caps; KYT adapter if compliance
-requires; dashboards.
+**Phase 2, GA**: bounds and lock-exposure caps raised; KYT adapter if compliance requires;
+dashboards; optional pre-finality "seen" notification for the waiting screen.
 
 **Phase 3**: Base PHA and USDC routes through chain and route files; same addresses on both
 chains.
