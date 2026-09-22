@@ -1,8 +1,8 @@
 # dstack staging deployment
 
 This directory implements work packages D1 and D2 from `docs/plan.md`. It prepares images and
-deployment artifacts; it does not deploy a CVM. D3 backup encryption, restore automation, and
-restore drills remain separate work.
+deployment artifacts; it does not deploy a CVM. D3 encrypted backups, restore, and restore drills
+are documented in [RESTORE.md](RESTORE.md).
 
 Every command that changes a registry, Phala Cloud, a CVM, a Safe, an on-chain contract, or secret
 state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against dstack commit
@@ -18,8 +18,8 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
 - `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
   compose and the compose hash reported for the CVM.
-- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G. Its hooks prepare D3 but do not claim
-  encrypted backups, a tested restore, or an achieved RPO/RTO.
+- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G and the D3 wrappers for encrypted,
+  key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
 
 ## Build and publish images
 
@@ -292,7 +292,7 @@ firewall boundary because it runs after Docker startup.
 Before enabling a route, also confirm real route addresses validate without template mode, both RPC
 providers agree at `finalized`, Safe/factory/implementation/CREATE2 checks pass, migrations completed,
 WAL archiving is current, the product pins the attested settlement key, pilot limits are approved,
-and D3 limitations are accepted explicitly.
+and a restore drill per [RESTORE.md](RESTORE.md) has passed.
 
 ## Local verification
 

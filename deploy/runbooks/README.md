@@ -3,8 +3,8 @@
 These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
 operations), C8 (reconciliation), C10 (rate locks), C7b (flush pause), and A2 (deterministic
 deployment) are on `main`.
-PRs #56 (alerts) and #58 (D3 backup/restore) were still open when these commands were re-exercised
-on 2026-09-22.
+PR #56 (alerts) was still open when these commands were re-exercised on 2026-09-22. D3 backup and
+restore (#58) is covered by `deploy/RESTORE.md` and `deploy/local/restore-drill.sh`.
 
 ## Required environment
 
@@ -112,7 +112,7 @@ for any runbook until #56 merges.
 | Lock expiry worker failure | Complete: running service, injected ledger drift, owner repair while running | [x] |
 | Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
-| Backup age | Blocked on #58 backup automation | [ ] |
+| Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |
 
 Run `make runbook-check` after editing any runbook. Exercise evidence is under

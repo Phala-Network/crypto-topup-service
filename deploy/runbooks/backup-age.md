@@ -3,8 +3,9 @@
 ## Trigger
 
 Trigger on `TopupBackupTooOld` (PR #56: successful backup marker older than 120 seconds), WAL
-archiving failures, or `wal-g backup-list` failing to read storage. The marker and encrypted
-backups come from D3 (PR #58), which is not on `main`.
+archiving failures, or `wal-g backup-list` failing to read storage. D3 provides the encrypted base
+backups, WAL archiving, and `key-versions/` metadata described in `deploy/RESTORE.md`; the backup-age
+alert itself is pending #56.
 
 ## Impact and blast radius
 
@@ -23,13 +24,14 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 
 - WAL archiver failing but object storage reachable: fix credentials/permissions and verify a new WAL.
 - Object storage unavailable: escalate provider outage; do not delete local WAL.
-- Backup age unknown because D3 marker is absent: treat as failed closed.
+- Backup age unknown (no recent `last_archived_time` or `key-versions/wal/` object): treat as failed
+  closed.
 
 ## Remediation
 
 **HUMAN-ONLY:** correct encrypted environment/object-storage policy through a new attested compose
-deployment. `main` lacks D3 encryption, success marker, key fallback, and restore drill. Do not run
-an unencrypted manual backup as a substitute.
+deployment. Follow `deploy/RESTORE.md` for key versions and fallbacks. Do not run an unencrypted
+manual backup as a substitute.
 
 ## Verification
 
