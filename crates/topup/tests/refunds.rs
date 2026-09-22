@@ -1249,8 +1249,11 @@ async fn seed_lock(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at)
+        INSERT INTO rate_locks (
+            address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+        )
         VALUES ($1, 'phala-cloud-ethereum-pha-usd', $2::text::numeric, 100000000,
+                $2::text::numeric,
                 now() + $3::text::interval)
         "#,
     )
