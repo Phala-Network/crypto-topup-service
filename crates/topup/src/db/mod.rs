@@ -23,8 +23,10 @@ pub use addresses::{
 };
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
-    ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
-    TransitionUpdate, apply_transition, claim_deposit, get_deposit, insert_deposit,
+    ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
+    LockConsumption, NewDeposit, OutboxEvent, SettlementAdoption, StoredValuation,
+    TransitionEffects, TransitionUpdate, TransitionWrites, apply_transition, claim_deposit,
+    get_deposit, insert_deposit, release_deposit_lease,
 };
 pub use flushes::{FlushedEvent, NewFlush, insert_flush, insert_flushed};
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};

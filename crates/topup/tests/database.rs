@@ -486,8 +486,11 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
                     attempt: 3,
                     next_attempt_at: Utc::now() - Duration::seconds(1),
                 },
-                &json!({"wait": "paused"}),
-                &[],
+                db::TransitionWrites {
+                    evidence: &json!({"wait": "paused"}),
+                    effects: &db::TransitionEffects::default(),
+                    outbox_events: &[],
+                },
             )
             .await?;
             ensure!(result == ApplyTransitionResult::Applied);
@@ -516,8 +519,11 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
                     attempt: 0,
                     next_attempt_at: Utc::now(),
                 },
-                &json!({"advance": true}),
-                &[],
+                db::TransitionWrites {
+                    evidence: &json!({"advance": true}),
+                    effects: &db::TransitionEffects::default(),
+                    outbox_events: &[],
+                },
             )
             .await?;
             transaction.commit().await?;
@@ -558,8 +564,11 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     DepositState::Detected,
                     Uuid::new_v4(),
                     update,
-                    &json!({}),
-                    &[],
+                    db::TransitionWrites {
+                        evidence: &json!({}),
+                        effects: &db::TransitionEffects::default(),
+                        outbox_events: &[],
+                    },
                 )
                 .await?
                     == ApplyTransitionResult::Stale
@@ -589,8 +598,11 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     DepositState::Detected,
                     claimed.lease_token.context("claim must have a token")?,
                     update,
-                    &json!({"atomic": true}),
-                    &events,
+                    db::TransitionWrites {
+                        evidence: &json!({"atomic": true}),
+                        effects: &db::TransitionEffects::default(),
+                        outbox_events: &events,
+                    },
                 )
                 .await
                 .is_err()
@@ -872,7 +884,7 @@ async fn insert_rate_lock(
     consumed_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, now() + interval '15 minutes', $2)",
+        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, expires_at, consumed_by) VALUES ($1, 'ethereum-pha', 1000, 25000000, 250, now() + interval '15 minutes', $2)",
     )
     .bind(address_id)
     .bind(consumed_by)

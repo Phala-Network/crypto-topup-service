@@ -143,6 +143,82 @@ pub struct OutboxEvent {
     pub next_attempt_at: DateTime<Utc>,
 }
 
+/// Canonical chain evidence corrected while a deposit remains detected.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalEvidence {
+    /// Canonical finalized block number.
+    pub block_number: u64,
+    /// Canonical finalized block hash.
+    pub block_hash: B256,
+    /// Canonical block timestamp.
+    pub block_time: DateTime<Utc>,
+    /// Canonical token contract.
+    pub asset_contract: Address,
+    /// Canonical transfer sender.
+    pub from_address: Address,
+    /// Canonical transfer amount.
+    pub amount_atomic: AtomicAmount,
+}
+
+/// Valuation columns committed with a transition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredValuation {
+    /// Time at which finality and prices were observed.
+    pub valuation_at: DateTime<Utc>,
+    /// Eight-decimal scaled price.
+    pub price_scaled: u64,
+    /// Stable source code, `spot` or `lock`.
+    pub price_source: String,
+    /// Product credit in minor units.
+    pub credit_minor: MinorAmount,
+    /// Raw price observations and validation result.
+    pub quote: Value,
+}
+
+/// Authoritative product answer adopted during restore recovery.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettlementAdoption {
+    /// Deterministic product idempotency key.
+    pub key: String,
+    /// Original immutable payload returned by the product.
+    pub payload: Value,
+    /// Whether the product accepted the credit.
+    pub accepted: bool,
+    /// Product ledger transaction identifier, when accepted.
+    pub destination_tx_id: Option<String>,
+}
+
+/// Conditional single-use rate-lock consumption.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LockConsumption {
+    /// Lock address row used as the rate-lock primary key.
+    pub address_id: Uuid,
+}
+
+/// Additional writes atomically applied with one state transition.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransitionEffects {
+    /// Optional correction to provisional scanner evidence.
+    pub canonical_evidence: Option<CanonicalEvidence>,
+    /// Optional valuation columns.
+    pub valuation: Option<StoredValuation>,
+    /// Optional authoritative product settlement record.
+    pub settlement_adoption: Option<SettlementAdoption>,
+    /// Optional conditional rate-lock consumption.
+    pub lock_consumption: Option<LockConsumption>,
+}
+
+/// Timeline and side effects written by one transition application.
+#[derive(Clone, Copy, Debug)]
+pub struct TransitionWrites<'a> {
+    /// Evidence appended to the transition timeline.
+    pub evidence: &'a Value,
+    /// Structured deposit, settlement, and lock writes.
+    pub effects: &'a TransitionEffects,
+    /// Outbox rows inserted after the state compare-and-swap succeeds.
+    pub outbox_events: &'a [OutboxEvent],
+}
+
 /// Result of the lease-token compare-and-swap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplyTransitionResult {
@@ -150,6 +226,8 @@ pub enum ApplyTransitionResult {
     Applied,
     /// The expected state or lease token no longer matched.
     Stale,
+    /// Another deposit consumed the selected rate lock before this transaction.
+    LockUnavailable,
 }
 
 /// Failure while validating or persisting a transition.
@@ -380,8 +458,7 @@ pub async fn apply_transition(
     expected_state: DepositState,
     lease_token: Uuid,
     update: TransitionUpdate,
-    evidence: &Value,
-    outbox_events: &[OutboxEvent],
+    writes: TransitionWrites<'_>,
 ) -> Result<ApplyTransitionResult, ApplyTransitionError> {
     if update.transition.from != expected_state {
         return Err(ApplyTransitionError::InvalidInput(
@@ -431,6 +508,104 @@ pub async fn apply_transition(
         return Ok(ApplyTransitionResult::Stale);
     }
 
+    if let Some(consumption) = writes.effects.lock_consumption {
+        let consumed = sqlx::query(
+            r#"
+            UPDATE rate_locks
+            SET consumed_by = $2
+            WHERE address_id = $1 AND consumed_by IS NULL
+            "#,
+        )
+        .bind(consumption.address_id)
+        .bind(deposit_id)
+        .execute(&mut **transaction)
+        .await?;
+        if consumed.rows_affected() == 0 {
+            return Ok(ApplyTransitionResult::LockUnavailable);
+        }
+    }
+
+    if let Some(canonical) = &writes.effects.canonical_evidence {
+        sqlx::query(
+            r#"
+            UPDATE deposits
+            SET block_number = $2,
+                block_hash = $3,
+                block_time = $4,
+                asset_contract = $5,
+                from_address = $6,
+                amount_atomic = $7::text::numeric,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(deposit_id)
+        .bind(to_i64(canonical.block_number, "deposits.block_number")?)
+        .bind(b256_hex(canonical.block_hash))
+        .bind(canonical.block_time)
+        .bind(address_hex(canonical.asset_contract))
+        .bind(address_hex(canonical.from_address))
+        .bind(atomic_decimal(canonical.amount_atomic))
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    if let Some(valuation) = &writes.effects.valuation {
+        sqlx::query(
+            r#"
+            UPDATE deposits
+            SET valuation_at = $2,
+                price_scaled = $3::text::numeric,
+                price_source = $4,
+                credit_minor = $5::text::numeric,
+                quote = $6,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(deposit_id)
+        .bind(valuation.valuation_at)
+        .bind(valuation.price_scaled.to_string())
+        .bind(&valuation.price_source)
+        .bind(valuation.credit_minor.value().to_string())
+        .bind(&valuation.quote)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    if let Some(adoption) = &writes.effects.settlement_adoption {
+        let status = if adoption.accepted {
+            "accepted"
+        } else {
+            "rejected"
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO settlements (
+                deposit_id, product_id, key, payload, status, destination_tx_id, receipt
+            )
+            SELECT $1, product.id, $2, $3, $4, $5, $6
+            FROM deposits AS deposit
+            JOIN accounts AS account ON account.id = deposit.account_id
+            JOIN products AS product ON product.id = account.product_id
+            WHERE deposit.id = $1
+            ON CONFLICT (deposit_id) DO UPDATE
+            SET payload = EXCLUDED.payload,
+                status = EXCLUDED.status,
+                destination_tx_id = EXCLUDED.destination_tx_id,
+                receipt = EXCLUDED.receipt
+            "#,
+        )
+        .bind(deposit_id)
+        .bind(&adoption.key)
+        .bind(&adoption.payload)
+        .bind(status)
+        .bind(&adoption.destination_tx_id)
+        .bind(serde_json::json!({"adopted": true}))
+        .execute(&mut **transaction)
+        .await?;
+    }
+
     sqlx::query!(
         r#"
         INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
@@ -441,12 +616,12 @@ pub async fn apply_transition(
         expected,
         target,
         update.attempt,
-        evidence
+        writes.evidence
     )
     .execute(&mut **transaction)
     .await?;
 
-    for event in outbox_events {
+    for event in writes.outbox_events {
         sqlx::query!(
             r#"
             INSERT INTO outbox (id, event_type, payload, next_attempt_at)
@@ -462,4 +637,27 @@ pub async fn apply_transition(
     }
 
     Ok(ApplyTransitionResult::Applied)
+}
+
+/// Releases a still-owned lease after an atomic rate-lock race is lost.
+pub async fn release_deposit_lease(
+    pool: &PgPool,
+    deposit_id: Uuid,
+    lease_token: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE deposits
+        SET lease_token = NULL,
+            lease_until = NULL,
+            next_attempt_at = now(),
+            updated_at = now()
+        WHERE id = $1 AND lease_token = $2
+        "#,
+    )
+    .bind(deposit_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

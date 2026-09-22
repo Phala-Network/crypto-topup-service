@@ -14,9 +14,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
-use topup::pump::{
-    AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
-};
+use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, PumpMetrics, StepSet};
+use topup::steps::confirm::{ConfirmStep, NoStoredProductAnswers};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
@@ -289,8 +288,18 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let steps = Arc::new(NoopStepSet::build());
-    tracing::warn!("NoopStepSet is active; deposit steps perform no real work");
+    let confirm_step =
+        match ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(NoStoredProductAnswers)) {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::error!(%error, "invalid confirm-step configuration");
+                return ExitCode::FAILURE;
+            }
+        };
+    let steps = Arc::new(StepSet::with_detected(Box::new(confirm_step)));
+    tracing::warn!(
+        "C6 product GET adapter is not merged; confirm lookup currently reports unknown keys"
+    );
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
