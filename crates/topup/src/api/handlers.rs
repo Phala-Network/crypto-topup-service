@@ -458,7 +458,13 @@ pub(crate) async fn approve_refund(
     Path(refund_id): Path<Uuid>,
 ) -> ApiResult<Json<AdminRefundResponse>> {
     Ok(Json(
-        repository::approve_refund(&state.pool, refund_id, &admin_actor(&state)).await?,
+        repository::approve_refund(
+            &state.pool,
+            refund_id,
+            state.routes.as_ref(),
+            &admin_actor(&state),
+        )
+        .await?,
     ))
 }
 

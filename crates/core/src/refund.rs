@@ -4,6 +4,7 @@ use alloy_primitives::U512;
 
 use crate::deposit::{DepositState, RejectReason};
 use crate::money::{AtomicAmount, Bps};
+use crate::valuation::UnixSeconds;
 
 /// Workspace lifecycle state relevant to late-fund refunds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +37,10 @@ pub struct RefundDeposit {
     pub min_refund: AtomicAmount,
     /// Owning workspace lifecycle state.
     pub account_status: RefundAccountStatus,
+    /// Finalized chain time of the deposit.
+    pub block_time: UnixSeconds,
+    /// Time the workspace closed, when recorded.
+    pub account_closed_at: Option<UnixSeconds>,
     /// Address kind that received the deposit.
     pub address_kind: RefundAddressKind,
     /// Expected amount for a lock address, when present.
@@ -53,6 +58,8 @@ pub enum RefundIneligible {
     Sanctioned,
     /// The deposit is below the route's refundable dust floor.
     Dust,
+    /// Refund requests cannot race a deposit that is still in the settlement pipeline.
+    NotRejected,
     /// No section 15 refundable case matched the supplied facts.
     NoRefundableCase,
 }
@@ -68,14 +75,23 @@ pub fn refund_eligibility(deposit: RefundDeposit) -> Result<(), RefundIneligible
     if deposit.amount < deposit.min_refund {
         return Err(RefundIneligible::Dust);
     }
-    if deposit.reason == Some(RejectReason::UnsupportedAsset)
-        || deposit.account_status == RefundAccountStatus::Closed
+    if deposit.state != DepositState::Rejected {
+        return Err(RefundIneligible::NotRejected);
+    }
+    if deposit.reason.is_some()
+        || is_late_closed_workspace_fund(deposit)
         || is_lock_overpayment(deposit)
-        || deposit.state == DepositState::Rejected
     {
         return Ok(());
     }
     Err(RefundIneligible::NoRefundableCase)
+}
+
+fn is_late_closed_workspace_fund(deposit: RefundDeposit) -> bool {
+    deposit.account_status == RefundAccountStatus::Closed
+        && deposit
+            .account_closed_at
+            .is_some_and(|closed_at| deposit.block_time > closed_at)
 }
 
 fn is_lock_overpayment(deposit: RefundDeposit) -> bool {
@@ -117,6 +133,8 @@ mod tests {
             amount: amount(100),
             min_refund: amount(10),
             account_status: RefundAccountStatus::Active,
+            block_time: UnixSeconds::new(200),
+            account_closed_at: None,
             address_kind: RefundAddressKind::Persistent,
             lock_amount: None,
             lock_tolerance: bps(100),
@@ -129,7 +147,7 @@ mod tests {
             (
                 "ordinary deposit",
                 deposit(),
-                Err(RefundIneligible::NoRefundableCase),
+                Err(RefundIneligible::NotRejected),
             ),
             (
                 "unsupported asset",
@@ -179,16 +197,55 @@ mod tests {
                 Ok(()),
             ),
             (
-                "closed workspace late funds",
+                "pending unsupported asset is not refundable",
+                RefundDeposit {
+                    reason: Some(RejectReason::UnsupportedAsset),
+                    ..deposit()
+                },
+                Err(RefundIneligible::NotRejected),
+            ),
+            (
+                "pending closed workspace late funds are not refundable",
                 RefundDeposit {
                     account_status: RefundAccountStatus::Closed,
+                    account_closed_at: Some(UnixSeconds::new(199)),
+                    ..deposit()
+                },
+                Err(RefundIneligible::NotRejected),
+            ),
+            (
+                "closed workspace deposit exactly at close is not late",
+                RefundDeposit {
+                    state: DepositState::Rejected,
+                    account_status: RefundAccountStatus::Closed,
+                    account_closed_at: Some(UnixSeconds::new(200)),
+                    ..deposit()
+                },
+                Err(RefundIneligible::NoRefundableCase),
+            ),
+            (
+                "closed workspace deposit one second after close is late",
+                RefundDeposit {
+                    state: DepositState::Rejected,
+                    account_status: RefundAccountStatus::Closed,
+                    account_closed_at: Some(UnixSeconds::new(199)),
                     ..deposit()
                 },
                 Ok(()),
             ),
             (
+                "closed workspace without a close time is not enough",
+                RefundDeposit {
+                    state: DepositState::Rejected,
+                    account_status: RefundAccountStatus::Closed,
+                    ..deposit()
+                },
+                Err(RefundIneligible::NoRefundableCase),
+            ),
+            (
                 "lock at upper tolerance",
                 RefundDeposit {
+                    state: DepositState::Rejected,
                     amount: amount(101),
                     address_kind: RefundAddressKind::Lock,
                     lock_amount: Some(amount(100)),
@@ -199,6 +256,7 @@ mod tests {
             (
                 "lock beyond upper tolerance",
                 RefundDeposit {
+                    state: DepositState::Rejected,
                     amount: amount(102),
                     address_kind: RefundAddressKind::Lock,
                     lock_amount: Some(amount(100)),
@@ -209,6 +267,7 @@ mod tests {
             (
                 "persistent address is not a lock overpayment",
                 RefundDeposit {
+                    state: DepositState::Rejected,
                     amount: amount(102),
                     lock_amount: Some(amount(100)),
                     ..deposit()

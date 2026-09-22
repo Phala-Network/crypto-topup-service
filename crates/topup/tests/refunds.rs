@@ -389,6 +389,234 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn refund_request_requires_rejection_and_approval_rechecks_current_state() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[61; 32]);
+        let admin_key = SigningKey::from_bytes(&[62; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let pending = seed_deposit(
+            &database.app_pool,
+            product.id,
+            "pending-refund",
+            100,
+            DepositState::Detected,
+            None,
+        )
+        .await?;
+        let refundable =
+            seed_rejected_deposit(&database.app_pool, product.id, "approval-recheck", 100).await?;
+        let sanctioned =
+            seed_rejected_deposit(&database.app_pool, product.id, "sanctions-recheck", 100).await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let body = serde_json::to_vec(&json!({
+            "to_address": REFUND_DESTINATION,
+            "amount": "100"
+        }))?;
+
+        let pending_path = format!(
+            "/v1/products/{}/deposits/{pending}/refund-requests",
+            product.slug
+        );
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &pending_path,
+                body.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+
+        let request_path = format!(
+            "/v1/products/{}/deposits/{refundable}/refund-requests",
+            product.slug
+        );
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &request_path,
+                body,
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let requested = response_json(response).await?;
+        let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
+
+        sqlx::query("UPDATE deposits SET state = 'credited', reason = NULL WHERE id = $1")
+            .bind(refundable)
+            .execute(&database.app_pool)
+            .await?;
+        let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &approve_path,
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+        let status: String = sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
+            .bind(refund_id)
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(status == "requested");
+        let approvals: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit WHERE action = 'refund_approved' AND subject = $1",
+        )
+        .bind(format!("refund:{refund_id}"))
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(approvals == 0);
+
+        let sanctioned_path = format!(
+            "/v1/products/{}/deposits/{sanctioned}/refund-requests",
+            product.slug
+        );
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &sanctioned_path,
+                serde_json::to_vec(&json!({
+                    "to_address": REFUND_DESTINATION,
+                    "amount": "100"
+                }))?,
+                PRODUCT_KID,
+                &product_key,
+                now + 3,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let requested = response_json(response).await?;
+        let sanctioned_refund =
+            Uuid::parse_str(requested["id"].as_str().context("sanctioned refund id")?)?;
+        sqlx::query("UPDATE deposits SET reason = 'sanctioned' WHERE id = $1")
+            .bind(sanctioned)
+            .execute(&database.app_pool)
+            .await?;
+        let approve_path = format!("/v1/admin/refunds/{sanctioned_refund}/approve");
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                &approve_path,
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 4,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+        let status: String = sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
+            .bind(sanctioned_refund)
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(status == "requested");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[63; 32]);
+        let admin_key = SigningKey::from_bytes(&[64; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let deposit =
+            seed_rejected_deposit(&database.app_pool, product.id, "unsupported-refund", 100)
+                .await?;
+        sqlx::query(
+            r#"
+            UPDATE deposits
+            SET route = NULL, route_version = NULL, reason = 'unsupported_asset',
+                asset_contract = '0x7777777777777777777777777777777777777777'
+            WHERE id = $1
+            "#,
+        )
+        .bind(deposit)
+        .execute(&database.app_pool)
+        .await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let request_path = format!(
+            "/v1/products/{}/deposits/{deposit}/refund-requests",
+            product.slug
+        );
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &request_path,
+                serde_json::to_vec(&json!({
+                    "to_address": REFUND_DESTINATION,
+                    "amount": "100"
+                }))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let requested = response_json(response).await?;
+        let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
+        let persisted_route: String = sqlx::query_scalar("SELECT route FROM refunds WHERE id = $1")
+            .bind(refund_id)
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(persisted_route == "phala-cloud-ethereum-pha-usd");
+
+        sqlx::query(
+            r#"
+            INSERT INTO route_pauses (route, paused_scopes)
+            VALUES ($1, ARRAY['refunds'])
+            ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes
+            "#,
+        )
+        .bind(&persisted_route)
+        .execute(&database.app_pool)
+        .await?;
+        let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                &approve_path,
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::LOCKED);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
 async fn one_transfer_log_confirms_only_one_refund() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
@@ -1270,9 +1498,10 @@ async fn seed_approved_refund(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64
     sqlx::query(
         r#"
         INSERT INTO refunds (
-            id, deposit_id, amount_atomic, to_address, status, requested_by, approved_by
+            id, deposit_id, amount_atomic, to_address, route, status, requested_by, approved_by
         )
-        VALUES ($1, $2, $3::text::numeric, $4, 'approved', 'test', 'admin:test')
+        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd',
+                'approved', 'test', 'admin:test')
         "#,
     )
     .bind(id)
@@ -1294,10 +1523,11 @@ async fn seed_sent_refund(
     sqlx::query(
         r#"
         INSERT INTO refunds (
-            id, deposit_id, amount_atomic, to_address, tx_hash, status,
+            id, deposit_id, amount_atomic, to_address, route, tx_hash, status,
             requested_by, approved_by, tx_version, next_check_at
         )
-        VALUES ($1, $2, $3::text::numeric, $4, $5, 'sent', 'test', 'admin:test', 1, now())
+        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd', $5,
+                'sent', 'test', 'admin:test', 1, now())
         "#,
     )
     .bind(id)
@@ -1371,8 +1601,11 @@ async fn seed_same_address_deposits(
 async fn seed_refund_row(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO refunds (id, deposit_id, amount_atomic, to_address, status, requested_by)
-        VALUES ($1, $2, $3::text::numeric, $4, 'requested', 'test')
+        INSERT INTO refunds (
+            id, deposit_id, amount_atomic, to_address, route, status, requested_by
+        )
+        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd',
+                'requested', 'test')
         "#,
     )
     .bind(Uuid::new_v4())
