@@ -245,9 +245,23 @@ npx --yes phala@1.1.22 ssh "$CVM_ID" -- \
 
 The output also reports `operator_keyid` and `operator_address` for `--operator-key-version`
 (default 1). dstack derives keys from the application identity rather than the compose hash, so
-before rotating the operator key, run the command in the current deployment with the next version
-to learn the address the admin Safe must grant `OPERATOR_ROLE` before `operator_key_version` is
-bumped in the attested chain configuration.
+the current deployment can report the next operator address before it is used. To rotate the
+operator key:
+
+1. Run the command above with `--operator-key-version <next>` to read the new operator address.
+2. **HUMAN-ONLY, admin Safe required:** `grantRole(OPERATOR_ROLE, <new operator>)` on each
+   chain's factory.
+3. Fund the new operator address with native gas on each chain.
+4. Bump `operator_key_version` in the attested chain and route files, then upgrade as above (new
+   compose hash, allow-list, deploy). Every current route on one chain must share the version.
+5. Confirm the `flusher operator holds OPERATOR_ROLE` log line with the new version; unsigned
+   plans are re-bound to the new operator and in-flight flushes of the old one keep confirming.
+6. **HUMAN-ONLY, admin Safe required:** once no flush of the old operator is in flight, revoke
+   its `OPERATOR_ROLE`.
+
+A flusher whose operator lacks the role plans and sends nothing, logs an error and raises an
+`OperatorRoleMissing` alert at every maintenance interval, and resumes by itself once the role
+is granted.
 
 **HUMAN-ONLY, verifier approval required:** verify the platform certificate/quote and TCB in the
 Phala Trust Center or official dstack verification flow, replay the RTMR event log, confirm the
