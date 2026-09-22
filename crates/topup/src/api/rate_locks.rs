@@ -45,6 +45,9 @@ pub(crate) async fn create_rate_lock(
 ) -> ApiResult<Json<RateLockResponse>> {
     let account = require_account(&state, product.id, &external_id).await?;
     let route = state.route_for_product(&product)?;
+    if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
+        return Err(ApiError::chain_frozen());
+    }
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
     if has_quotes_pause(&product, &account, &route_scopes) {
         return Err(ApiError::paused("rate-lock quotes are paused"));

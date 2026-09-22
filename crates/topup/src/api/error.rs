@@ -117,6 +117,16 @@ impl ApiError {
         Self::new(StatusCode::LOCKED, "paused", message)
     }
 
+    /// Returns a locked response for a chain frozen by reconciliation.
+    #[must_use]
+    pub fn chain_frozen() -> Self {
+        Self::new(
+            StatusCode::LOCKED,
+            "chain_frozen",
+            "the route chain is frozen pending reconciliation review",
+        )
+    }
+
     /// Returns a temporary dependency or pause failure.
     #[must_use]
     pub fn service_unavailable(message: impl Into<String>) -> Self {

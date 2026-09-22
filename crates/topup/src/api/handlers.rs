@@ -542,6 +542,7 @@ async fn deposit_address(
 ) -> ApiResult<Json<DepositAddressResponse>> {
     let account = require_account(state, product.id, external_id).await?;
     let route = state.route_for_product(product)?;
+    require_unfrozen_chain(state, route).await?;
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
     if has_scope(&product.paused_scopes, "addresses")
         || has_scope(&account.paused_scopes, "addresses")
@@ -597,6 +598,13 @@ fn address_response(
             version: address.version,
         },
     }
+}
+
+async fn require_unfrozen_chain(state: &AppState, route: &RouteFile) -> ApiResult<()> {
+    if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
+        return Err(ApiError::chain_frozen());
+    }
+    Ok(())
 }
 
 async fn require_account(
