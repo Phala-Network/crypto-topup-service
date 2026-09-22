@@ -1,5 +1,6 @@
 //! Standalone product settlement conformance suite and reference endpoint.
 
+pub mod chain;
 pub mod reference;
 pub mod report;
 pub mod suite;

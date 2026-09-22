@@ -4,8 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::chain::Manifest;
+
 /// Stable report schema version.
-pub const REPORT_VERSION: u32 = 1;
+pub const REPORT_VERSION: u32 = 2;
 
 /// Overall conformance run report.
 #[derive(Debug, Serialize)]
@@ -14,11 +16,13 @@ pub struct Report {
     pub version: u32,
     /// Endpoint exercised by the suite.
     pub settlement_url: String,
+    /// Chain fixture the run used.
+    pub manifest: Manifest,
     /// UTC start time.
     pub started_at: DateTime<Utc>,
     /// UTC completion time.
     pub finished_at: DateTime<Utc>,
-    /// True only when no test failed.
+    /// True only when every case passed; any `fail` or `incomplete` case makes this false.
     pub passed: bool,
     /// Aggregate result counts.
     pub summary: Summary,
@@ -29,28 +33,30 @@ pub struct Report {
 /// Aggregate result counts.
 #[derive(Debug, Serialize)]
 pub struct Summary {
-    /// Passed tests.
+    /// Passed cases.
     pub passed: usize,
-    /// Failed tests.
+    /// Failed cases.
     pub failed: usize,
-    /// Explicitly skipped optional tests.
-    pub skipped: usize,
+    /// Cases whose required observation was unavailable.
+    pub incomplete: usize,
 }
 
-/// Result of one independently named conformance assertion.
+/// Result of one independently named conformance case.
 #[derive(Debug, Serialize)]
 pub struct TestResult {
-    /// Stable machine-readable test identifier.
+    /// Stable machine-readable case identifier.
     pub id: String,
     /// Human-readable assertion name.
     pub name: String,
-    /// Pass, fail, or skip.
+    /// Architecture section 11 product obligation, or `null` for protocol cases.
+    pub obligation: Option<u8>,
+    /// Pass, fail, or incomplete.
     pub status: TestStatus,
     /// Sanitized evidence suitable for CI artifacts.
     pub evidence: Value,
 }
 
-/// Test outcome classification.
+/// Case outcome classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestStatus {
@@ -58,41 +64,33 @@ pub enum TestStatus {
     Pass,
     /// The endpoint violated the assertion or could not be exercised.
     Fail,
-    /// An optional dependency was not configured.
-    Skip,
+    /// A required observation (ledger hook or restart) was unavailable; never a pass.
+    Incomplete,
 }
 
 impl Report {
-    /// Builds aggregate counts from completed tests.
+    /// Builds aggregate counts from completed cases.
     #[must_use]
     pub fn complete(
         settlement_url: String,
+        manifest: Manifest,
         started_at: DateTime<Utc>,
         tests: Vec<TestResult>,
     ) -> Self {
-        let passed = tests
-            .iter()
-            .filter(|test| test.status == TestStatus::Pass)
-            .count();
-        let failed = tests
-            .iter()
-            .filter(|test| test.status == TestStatus::Fail)
-            .count();
-        let skipped = tests
-            .iter()
-            .filter(|test| test.status == TestStatus::Skip)
-            .count();
+        let count = |status| tests.iter().filter(|test| test.status == status).count();
+        let summary = Summary {
+            passed: count(TestStatus::Pass),
+            failed: count(TestStatus::Fail),
+            incomplete: count(TestStatus::Incomplete),
+        };
         Self {
             version: REPORT_VERSION,
             settlement_url,
+            manifest,
             started_at,
             finished_at: Utc::now(),
-            passed: failed == 0,
-            summary: Summary {
-                passed,
-                failed,
-                skipped,
-            },
+            passed: summary.failed == 0 && summary.incomplete == 0,
+            summary,
             tests,
         }
     }

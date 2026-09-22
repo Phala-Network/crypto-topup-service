@@ -1,8 +1,14 @@
 //! Axum reference implementation of the product-side settlement contract.
+//!
+//! The reference is runnable documentation for product teams: it verifies signatures with the
+//! service's shared RFC 9421 verifier, keeps idempotency records forever, enforces both caps in
+//! the same critical section as the credit, verifies the cited log against its own RPC, and
+//! recomputes the deposit id. Each [`BrokenVariant`] removes exactly one of those obligations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
@@ -13,25 +19,23 @@ use axum::http::header::HOST;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
-use ed25519_dalek::{Signature, VerifyingKey};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::VerifyingKey;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::sync::Mutex;
-use topup_core::address::{forwarder_address, persistent_salt};
-use topup_core::identity::deposit_id;
+use topup_adapters::http_signature::{self, SignedMessage};
 
-use crate::suite::Evidence;
+use crate::chain::{Manifest, Rpc, parse_quantity};
+use crate::suite::{Evidence, LedgerBody, key_from_evidence};
 
 #[cfg(feature = "postgres")]
 use sqlx::{PgPool, Row};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
-const SYNTHETIC_ASSET: &str = "0x1111111111111111111111111111111111111111";
-const SYNTHETIC_FACTORY: &str = "0x2222222222222222222222222222222222222222";
-const SYNTHETIC_IMPLEMENTATION: &str = "0x3333333333333333333333333333333333333333";
+/// Window which makes check-then-act defects in broken variants observable.
+const RACE_WINDOW: Duration = Duration::from_millis(100);
 
 /// Deliberate single-obligation failures used to prove the suite is sensitive.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,18 +43,50 @@ pub enum BrokenVariant {
     /// Fully conforming behavior.
     #[default]
     None,
-    /// Accepts requests without validating the pinned signature profile.
+    /// Obligation 1: accepts requests without verifying the pinned signature.
     Signature,
-    /// Discards idempotency records and credits exact replays again.
+    /// Obligation 2: answers a reused key from its record without comparing payloads.
     Idempotency,
-    /// Mutates the ledger for every concurrent replay.
+    /// Obligation 2: idempotency records live in process memory and vanish on restart.
+    Retention,
+    /// Obligation 3: checks for an existing record outside the critical section of the credit.
     Concurrency,
-    /// Does not enforce the product-owned cap.
+    /// Obligation 4: enforces neither the per-deposit nor the per-period cap.
     Caps,
-    /// Trusts supplied chain evidence.
+    /// Obligation 4: checks the per-period cap outside the critical section of the credit.
+    PeriodCapRace,
+    /// Obligation 5: trusts the request's evidence fields without consulting its RPC.
     Evidence,
-    /// Does not recompute the deterministic deposit id.
+    /// Obligation 6: does not recompute the deterministic deposit id.
     DepositIdentity,
+}
+
+impl BrokenVariant {
+    /// Every deliberately broken variant.
+    pub const BROKEN: [Self; 8] = [
+        Self::Signature,
+        Self::Idempotency,
+        Self::Retention,
+        Self::Concurrency,
+        Self::Caps,
+        Self::PeriodCapRace,
+        Self::Evidence,
+        Self::DepositIdentity,
+    ];
+
+    /// Architecture section 11 obligation this variant violates.
+    #[must_use]
+    pub fn obligation(self) -> Option<u8> {
+        match self {
+            Self::None => None,
+            Self::Signature => Some(1),
+            Self::Idempotency | Self::Retention => Some(2),
+            Self::Concurrency => Some(3),
+            Self::Caps | Self::PeriodCapRace => Some(4),
+            Self::Evidence => Some(5),
+            Self::DepositIdentity => Some(6),
+        }
+    }
 }
 
 impl FromStr for BrokenVariant {
@@ -61,8 +97,10 @@ impl FromStr for BrokenVariant {
             "none" => Ok(Self::None),
             "signature" => Ok(Self::Signature),
             "idempotency" => Ok(Self::Idempotency),
+            "retention" => Ok(Self::Retention),
             "concurrency" => Ok(Self::Concurrency),
             "caps" => Ok(Self::Caps),
+            "period-cap-race" => Ok(Self::PeriodCapRace),
             "evidence" => Ok(Self::Evidence),
             "deposit-identity" => Ok(Self::DepositIdentity),
             _ => anyhow::bail!("unknown broken variant {value}"),
@@ -77,183 +115,99 @@ pub struct ReferenceConfig {
     pub verifying_key: VerifyingKey,
     /// Required RFC 9421 key identifier.
     pub keyid: String,
-    /// Independent product cap in minor units.
+    /// Independent per-deposit cap in minor units.
     pub per_deposit_cap: u64,
+    /// Independent cumulative cap per account and rolling period, in minor units.
+    pub per_period_cap: u64,
+    /// Rolling period length.
+    pub period: Duration,
     /// Account id which returns a business refusal.
     pub refused_account_id: String,
     /// Account id which remains in processing.
     pub processing_account_id: String,
     /// Deliberate failure mode.
     pub broken: BrokenVariant,
-    /// Synthetic or RPC-backed evidence verification.
-    pub evidence_policy: EvidencePolicy,
+    /// Approved route and chain, with the product's own RPC URL in `rpc_url`.
+    pub manifest: Manifest,
 }
 
-/// Product route configuration used to verify chain evidence.
-#[derive(Clone)]
-pub enum EvidencePolicy {
-    /// Deterministic no-network fixture used by unit and integration tests.
-    Synthetic,
-    /// Independent verification against an Anvil JSON-RPC endpoint.
-    Rpc(RpcEvidenceConfig),
-}
-
-/// Approved route values for RPC-backed verification.
-#[derive(Clone)]
-pub struct RpcEvidenceConfig {
-    /// JSON-RPC endpoint queried by the product.
-    pub rpc_url: String,
-    /// Approved EVM chain id.
-    pub chain_id: u64,
-    /// Approved mock token contract.
-    pub asset_contract: Address,
-    /// A1 forwarder factory.
-    pub factory: Address,
-    /// A1 forwarder implementation.
-    pub implementation: Address,
-}
-
-/// Shared in-memory reference state.
+/// Shared reference state.
 #[derive(Clone)]
 pub struct ReferenceState {
-    config: ReferenceConfig,
+    config: Arc<ReferenceConfig>,
     storage: Arc<Storage>,
-    inflight: Arc<Mutex<HashSet<String>>>,
+    rpc: Rpc,
 }
 
 impl ReferenceState {
-    /// Creates an empty reference state.
-    #[must_use]
-    pub fn new(config: ReferenceConfig) -> Self {
-        Self {
-            config,
-            storage: Arc::new(Storage::Memory {
-                records: Mutex::new(HashMap::new()),
-                ledger: Mutex::new(HashMap::new()),
-            }),
-            inflight: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-
-    /// Creates the same reference contract backed by PostgreSQL tables.
-    #[cfg(feature = "postgres")]
-    pub async fn new_postgres(config: ReferenceConfig, pool: PgPool) -> Result<Self> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS conformance_settlements (\
-             key text PRIMARY KEY, payload jsonb NOT NULL, status text NOT NULL, \
-             destination_tx_id text, reason text)",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS conformance_ledger (\
-             key text PRIMARY KEY, mutations bigint NOT NULL CHECK (mutations > 0))",
-        )
-        .execute(&pool)
-        .await?;
+    /// Creates a reference backed by in-memory storage.
+    pub fn new(config: ReferenceConfig) -> Result<Self> {
+        let rpc = Rpc::new(&config.manifest.rpc_url)?;
         Ok(Self {
-            config,
-            storage: Arc::new(Storage::Postgres(pool)),
-            inflight: Arc::new(Mutex::new(HashSet::new())),
+            config: Arc::new(config),
+            storage: Arc::new(Storage::Memory(Mutex::new(MemoryStore::default()))),
+            rpc,
         })
     }
-}
 
-enum Storage {
-    Memory {
-        records: Mutex<HashMap<String, Record>>,
-        ledger: Mutex<HashMap<String, u64>>,
-    },
+    /// Creates the same reference backed by PostgreSQL tables; broken variants are memory-only.
     #[cfg(feature = "postgres")]
-    Postgres(PgPool),
+    pub async fn new_postgres(config: ReferenceConfig, pool: PgPool) -> Result<Self> {
+        ensure!(
+            config.broken == BrokenVariant::None,
+            "broken variants require in-memory storage"
+        );
+        for statement in [
+            "CREATE TABLE IF NOT EXISTS conformance_settlements (\
+             key text PRIMARY KEY, payload text NOT NULL, status text NOT NULL, \
+             destination_tx_id text, reason text)",
+            "CREATE TABLE IF NOT EXISTS conformance_accounts (\
+             account_id text PRIMARY KEY, balance_minor bigint NOT NULL, \
+             mutations bigint NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS conformance_credits (\
+             key text PRIMARY KEY REFERENCES conformance_settlements (key), \
+             account_id text NOT NULL, amount_minor bigint NOT NULL, \
+             credited_at timestamptz NOT NULL DEFAULT now())",
+        ] {
+            sqlx::query(statement).execute(&pool).await?;
+        }
+        let rpc = Rpc::new(&config.manifest.rpc_url)?;
+        Ok(Self {
+            config: Arc::new(config),
+            storage: Arc::new(Storage::Postgres(pool)),
+            rpc,
+        })
+    }
+
+    /// Simulates a process restart over the same durable storage.
+    ///
+    /// The [`BrokenVariant::Retention`] variant keeps idempotency records only in process memory,
+    /// so they are lost here while the ledger survives.
+    pub async fn restarted(&self) -> Self {
+        if self.config.broken == BrokenVariant::Retention
+            && let Storage::Memory(store) = self.storage.as_ref()
+        {
+            store.lock().await.records.clear();
+        }
+        self.clone()
+    }
 }
 
-enum Resolution {
-    Record(Record),
-    Mismatch,
-}
-
-impl Storage {
-    async fn resolve(
-        &self,
-        key: &str,
-        payload: Value,
-        proposed: StoredStatus,
-    ) -> Result<Resolution> {
-        match self {
-            Self::Memory { records, ledger } => {
-                let mut records = records.lock().await;
-                if let Some(record) = records.get(key) {
-                    return Ok(if record.payload == payload {
-                        Resolution::Record(record.clone())
-                    } else {
-                        Resolution::Mismatch
-                    });
-                }
-                let record = Record {
-                    payload,
-                    status: proposed,
-                };
-                if matches!(record.status, StoredStatus::Accepted { .. }) {
-                    ledger.lock().await.insert(key.to_owned(), 1);
-                }
-                records.insert(key.to_owned(), record.clone());
-                Ok(Resolution::Record(record))
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(pool) => resolve_postgres(pool, key, payload, proposed).await,
-        }
-    }
-
-    async fn get(&self, key: &str) -> Result<Option<Record>> {
-        match self {
-            Self::Memory { records, .. } => Ok(records.lock().await.get(key).cloned()),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(pool) => get_postgres(pool, key).await,
-        }
-    }
-
-    async fn mutate_without_idempotency(&self, key: &str) -> Result<()> {
-        match self {
-            Self::Memory { ledger, .. } => {
-                let mut ledger = ledger.lock().await;
-                let count = ledger.entry(key.to_owned()).or_default();
-                *count = count.saturating_add(1);
-                Ok(())
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO conformance_ledger (key, mutations) VALUES ($1, 1) \
-                     ON CONFLICT (key) DO UPDATE SET mutations = conformance_ledger.mutations + 1",
-                )
-                .bind(key)
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-        }
-    }
-
-    async fn ledger_count(&self, key: &str) -> Result<Option<u64>> {
-        match self {
-            Self::Memory { ledger, .. } => Ok(ledger.lock().await.get(key).copied()),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(pool) => {
-                let row = sqlx::query("SELECT mutations FROM conformance_ledger WHERE key = $1")
-                    .bind(key)
-                    .fetch_optional(pool)
-                    .await?;
-                row.map(|row| u64::try_from(row.get::<i64, _>("mutations")))
-                    .transpose()
-                    .map_err(Into::into)
-            }
-        }
-    }
+/// Builds the reference product router.
+pub fn router(state: ReferenceState) -> Router {
+    Router::new()
+        .route("/settlements", post(post_settlement))
+        .route("/settlements/{key}", get(get_settlement))
+        .route(
+            "/settlements/_conformance/ledger/{account_id}",
+            get(ledger_hook),
+        )
+        .with_state(state)
 }
 
 #[derive(Clone)]
 struct Record {
+    raw_payload: Box<RawValue>,
     payload: Value,
     status: StoredStatus,
 }
@@ -265,122 +219,306 @@ enum StoredStatus {
     Rejected { reason: String },
 }
 
-/// Builds the reference product router.
-pub fn router(state: ReferenceState) -> Router {
-    Router::new()
-        .route("/settlements", post(post_settlement))
-        .route("/settlements/{key}", get(get_settlement))
-        .route("/__conformance/ledger/{key}", get(ledger_probe))
-        .with_state(state)
+/// Outcome of the stateless checks, applied atomically by storage.
+enum Decision {
+    Credit { account_id: String, amount: u64 },
+    Processing,
+    Rejected(&'static str),
+}
+
+enum Resolution {
+    Record(Record),
+    Mismatch,
+}
+
+#[derive(Default)]
+struct MemoryStore {
+    records: HashMap<String, Record>,
+    accounts: HashMap<String, Account>,
+}
+
+#[derive(Default)]
+struct Account {
+    balance_minor: u64,
+    mutations: u64,
+    credits: Vec<(Instant, u64)>,
+}
+
+impl MemoryStore {
+    fn existing(&self, key: &str, payload: &Value, compare: bool) -> Option<Resolution> {
+        let record = self.records.get(key)?;
+        Some(if !compare || record.payload == *payload {
+            Resolution::Record(record.clone())
+        } else {
+            Resolution::Mismatch
+        })
+    }
+
+    fn period_total(&self, account_id: &str, period: Duration) -> u64 {
+        self.accounts.get(account_id).map_or(0, |account| {
+            account
+                .credits
+                .iter()
+                .filter(|(at, _)| at.elapsed() < period)
+                .fold(0_u64, |total, (_, amount)| total.saturating_add(*amount))
+        })
+    }
+
+    /// Applies a decision; `period_cap` is `None` when the cap was already decided elsewhere.
+    fn apply(
+        &mut self,
+        key: &str,
+        record: (Box<RawValue>, Value),
+        decision: Decision,
+        period_cap: Option<(u64, Duration)>,
+    ) -> Record {
+        let status = match decision {
+            Decision::Credit { account_id, amount } => {
+                let within = period_cap.is_none_or(|(cap, period)| {
+                    self.period_total(&account_id, period)
+                        .checked_add(amount)
+                        .is_some_and(|total| total <= cap)
+                });
+                if within {
+                    let account = self.accounts.entry(account_id).or_default();
+                    account.balance_minor = account.balance_minor.saturating_add(amount);
+                    account.mutations = account.mutations.saturating_add(1);
+                    account.credits.push((Instant::now(), amount));
+                    StoredStatus::Accepted {
+                        destination_tx_id: format!("credit-{}", uuid::Uuid::new_v4()),
+                    }
+                } else {
+                    StoredStatus::Rejected {
+                        reason: "per_period_cap".to_owned(),
+                    }
+                }
+            }
+            Decision::Processing => StoredStatus::Processing,
+            Decision::Rejected(reason) => StoredStatus::Rejected {
+                reason: reason.to_owned(),
+            },
+        };
+        let record = Record {
+            raw_payload: record.0,
+            payload: record.1,
+            status,
+        };
+        self.records.insert(key.to_owned(), record.clone());
+        record
+    }
+}
+
+enum Storage {
+    Memory(Mutex<MemoryStore>),
+    #[cfg(feature = "postgres")]
+    Postgres(PgPool),
+}
+
+impl Storage {
+    /// Atomically finds or creates the record for `key`, applying the credit and the
+    /// per-period cap in the same critical section.
+    async fn settle(
+        &self,
+        config: &ReferenceConfig,
+        key: &str,
+        raw_payload: Box<RawValue>,
+        payload: Value,
+        decision: Decision,
+    ) -> Result<Resolution> {
+        let broken = config.broken;
+        let period_cap =
+            (broken != BrokenVariant::Caps).then_some((config.per_period_cap, config.period));
+        match self {
+            Self::Memory(store) => {
+                let compare = broken != BrokenVariant::Idempotency;
+                match broken {
+                    BrokenVariant::Concurrency => {
+                        if let Some(existing) = store.lock().await.existing(key, &payload, compare)
+                        {
+                            return Ok(existing);
+                        }
+                        tokio::time::sleep(RACE_WINDOW).await;
+                        let mut store = store.lock().await;
+                        Ok(Resolution::Record(store.apply(
+                            key,
+                            (raw_payload, payload),
+                            decision,
+                            period_cap,
+                        )))
+                    }
+                    BrokenVariant::PeriodCapRace => {
+                        let decision = {
+                            let store = store.lock().await;
+                            if let Some(existing) = store.existing(key, &payload, compare) {
+                                return Ok(existing);
+                            }
+                            match decision {
+                                Decision::Credit { account_id, amount }
+                                    if store
+                                        .period_total(&account_id, config.period)
+                                        .saturating_add(amount)
+                                        > config.per_period_cap =>
+                                {
+                                    Decision::Rejected("per_period_cap")
+                                }
+                                other => other,
+                            }
+                        };
+                        tokio::time::sleep(RACE_WINDOW).await;
+                        let mut store = store.lock().await;
+                        if let Some(existing) = store.existing(key, &payload, compare) {
+                            return Ok(existing);
+                        }
+                        Ok(Resolution::Record(store.apply(
+                            key,
+                            (raw_payload, payload),
+                            decision,
+                            None,
+                        )))
+                    }
+                    _ => {
+                        let mut store = store.lock().await;
+                        if let Some(existing) = store.existing(key, &payload, compare) {
+                            return Ok(existing);
+                        }
+                        Ok(Resolution::Record(store.apply(
+                            key,
+                            (raw_payload, payload),
+                            decision,
+                            period_cap,
+                        )))
+                    }
+                }
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => {
+                settle_postgres(pool, config, key, raw_payload, payload, decision).await
+            }
+        }
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<Record>> {
+        match self {
+            Self::Memory(store) => Ok(store.lock().await.records.get(key).cloned()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => get_postgres(pool, key).await,
+        }
+    }
+
+    async fn ledger(&self, account_id: &str) -> Result<(u64, u64)> {
+        match self {
+            Self::Memory(store) => Ok(store
+                .lock()
+                .await
+                .accounts
+                .get(account_id)
+                .map_or((0, 0), |account| (account.balance_minor, account.mutations))),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT balance_minor, mutations FROM conformance_accounts \
+                     WHERE account_id = $1",
+                )
+                .bind(account_id)
+                .fetch_optional(pool)
+                .await?;
+                match row {
+                    Some(row) => Ok((
+                        u64::try_from(row.get::<i64, _>("balance_minor"))?,
+                        u64::try_from(row.get::<i64, _>("mutations"))?,
+                    )),
+                    None => Ok((0, 0)),
+                }
+            }
+        }
+    }
 }
 
 async fn post_settlement(State(state): State<ReferenceState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     if state.config.broken != BrokenVariant::Signature
-        && verify_signature(
-            &state.config.verifying_key,
-            &state.config.keyid,
-            "POST",
-            parts
-                .uri
-                .path_and_query()
-                .map_or("/", |value| value.as_str()),
-            &parts.headers,
-            &body,
-        )
-        .is_err()
+        && verify_signature(&state.config, "POST", &parts.uri, &parts.headers, &body).is_err()
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(raw_payload) = std::str::from_utf8(&body)
+        .map_err(|_| ())
+        .and_then(|text| RawValue::from_string(text.to_owned()).map_err(|_| ()))
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
-    let key = match unquote_header(&parts.headers, "idempotency-key") {
-        Ok(key) => key,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    let Ok(payload) = serde_json::from_str::<Value>(raw_payload.get()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Ok(key) = idempotency_key(&parts.headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
     if payload.get("idempotency_key").and_then(Value::as_str) != Some(key.as_str()) {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     }
 
-    if state.config.broken != BrokenVariant::Idempotency
-        && state.config.broken != BrokenVariant::Concurrency
+    let decision = decide(&state, &key, &payload).await;
+    match state
+        .storage
+        .settle(&state.config, &key, raw_payload, payload, decision)
+        .await
     {
-        if !state.inflight.lock().await.insert(key.clone()) {
-            return StatusCode::CONFLICT.into_response();
+        Ok(Resolution::Record(record)) => record_response(&record),
+        Ok(Resolution::Mismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "reference settlement storage failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let status = decide(&state, &key, &payload).await;
-        let response = match state.storage.resolve(&key, payload, status).await {
-            Ok(Resolution::Record(record)) => record_response(&record),
-            Ok(Resolution::Mismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-            Err(error) => {
-                tracing::error!(%error, "reference settlement storage failed");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        };
-        state.inflight.lock().await.remove(&key);
-        return response;
     }
-
-    let status = decide(&state, &key, &payload).await;
-    if matches!(status, StoredStatus::Accepted { .. })
-        && let Err(error) = state.storage.mutate_without_idempotency(&key).await
-    {
-        tracing::error!(%error, "reference ledger mutation failed");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    record_response(&Record { payload, status })
 }
 
-async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> StoredStatus {
+async fn decide(state: &ReferenceState, key: &str, payload: &Value) -> Decision {
+    let config = &state.config;
     let account_id = payload
         .get("account_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if account_id == state.config.refused_account_id {
-        return StoredStatus::Rejected {
-            reason: "business_refusal".to_owned(),
-        };
+    if account_id == config.refused_account_id {
+        return Decision::Rejected("business_refusal");
     }
-    if account_id == state.config.processing_account_id {
-        return StoredStatus::Processing;
+    if account_id == config.processing_account_id {
+        return Decision::Processing;
     }
-    if state.config.broken != BrokenVariant::Caps
-        && payload
-            .get("amount_minor")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_none_or(|amount| amount > state.config.per_deposit_cap)
+    let Some(amount) = payload
+        .get("amount_minor")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|amount| *amount > 0)
+    else {
+        return Decision::Rejected("invalid_amount");
+    };
+    if config.broken != BrokenVariant::Caps && amount > config.per_deposit_cap {
+        return Decision::Rejected("per_deposit_cap");
+    }
+    let Ok(evidence) = payload
+        .get("evidence")
+        .cloned()
+        .context("missing evidence")
+        .and_then(|evidence| serde_json::from_value::<Evidence>(evidence).map_err(Into::into))
+    else {
+        return Decision::Rejected("invalid_chain_evidence");
+    };
+    if let Err(error) = validate_evidence(state, account_id, &evidence).await {
+        tracing::info!(%error, "reference rejected chain evidence");
+        return Decision::Rejected("invalid_chain_evidence");
+    }
+    if config.broken != BrokenVariant::DepositIdentity
+        && key_from_evidence(&evidence).ok().as_deref() != Some(key)
     {
-        return StoredStatus::Rejected {
-            reason: "per_deposit_cap".to_owned(),
-        };
+        return Decision::Rejected("deposit_identity_mismatch");
     }
-    if state.config.broken != BrokenVariant::Evidence
-        && validate_evidence(payload, &state.config.evidence_policy)
-            .await
-            .is_err()
-    {
-        return StoredStatus::Rejected {
-            reason: "invalid_chain_evidence".to_owned(),
-        };
+    Decision::Credit {
+        account_id: account_id.to_owned(),
+        amount,
     }
-    if state.config.broken != BrokenVariant::DepositIdentity
-        && validate_deposit_identity(key, payload).is_err()
-    {
-        return StoredStatus::Rejected {
-            reason: "deposit_identity_mismatch".to_owned(),
-        };
-    }
-
-    let destination_tx_id = format!("credit-{}", uuid::Uuid::new_v4());
-    StoredStatus::Accepted { destination_tx_id }
 }
 
 async fn get_settlement(
@@ -389,23 +527,11 @@ async fn get_settlement(
     request: Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     if state.config.broken != BrokenVariant::Signature
-        && verify_signature(
-            &state.config.verifying_key,
-            &state.config.keyid,
-            "GET",
-            parts
-                .uri
-                .path_and_query()
-                .map_or("/", |value| value.as_str()),
-            &parts.headers,
-            &body,
-        )
-        .is_err()
+        && verify_signature(&state.config, "GET", &parts.uri, &parts.headers, &body).is_err()
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -419,10 +545,16 @@ async fn get_settlement(
     }
 }
 
-async fn ledger_probe(State(state): State<ReferenceState>, Path(key): Path<String>) -> Response {
-    match state.storage.ledger_count(&key).await {
-        Ok(Some(count)) => axum::Json(json!({"mutations": count})).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+async fn ledger_hook(
+    State(state): State<ReferenceState>,
+    Path(account_id): Path<String>,
+) -> Response {
+    match state.storage.ledger(&account_id).await {
+        Ok((balance_minor, mutations)) => axum::Json(LedgerBody {
+            balance_minor: balance_minor.to_string(),
+            mutations,
+        })
+        .into_response(),
         Err(error) => {
             tracing::error!(%error, "reference ledger lookup failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -430,73 +562,165 @@ async fn ledger_probe(State(state): State<ReferenceState>, Path(key): Path<Strin
     }
 }
 
+#[derive(Serialize)]
+struct AnswerBody<'a> {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination_tx_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    payload: &'a RawValue,
+}
+
+/// Answers with the stored payload bytes exactly as they were received.
+fn record_response(record: &Record) -> Response {
+    let (status, destination_tx_id, reason) = match &record.status {
+        StoredStatus::Accepted { destination_tx_id } => {
+            ("accepted", Some(destination_tx_id.as_str()), None)
+        }
+        StoredStatus::Processing => ("processing", None, None),
+        StoredStatus::Rejected { reason } => ("rejected", None, Some(reason.as_str())),
+    };
+    axum::Json(AnswerBody {
+        status,
+        destination_tx_id,
+        reason,
+        payload: &record.raw_payload,
+    })
+    .into_response()
+}
+
 #[cfg(feature = "postgres")]
-async fn resolve_postgres(
+async fn settle_postgres(
     pool: &PgPool,
+    config: &ReferenceConfig,
     key: &str,
+    raw_payload: Box<RawValue>,
     payload: Value,
-    proposed: StoredStatus,
+    decision: Decision,
 ) -> Result<Resolution> {
-    let (status, destination_tx_id, reason) = stored_status_columns(&proposed);
     let mut transaction = pool.begin().await?;
+    if let Some(record) = select_record(&mut transaction, key).await? {
+        transaction.commit().await?;
+        return Ok(resolution(record, &payload));
+    }
+    let (status, destination_tx_id, reason, credit) = match decision {
+        Decision::Credit { account_id, amount } => {
+            let amount_i64 = i64::try_from(amount)?;
+            sqlx::query(
+                "INSERT INTO conformance_accounts (account_id, balance_minor, mutations) \
+                 VALUES ($1, 0, 0) ON CONFLICT (account_id) DO NOTHING",
+            )
+            .bind(&account_id)
+            .execute(&mut *transaction)
+            .await?;
+            // The row lock serializes every credit to the account, so the period total read
+            // below cannot change before this transaction's credit commits.
+            sqlx::query("SELECT 1 FROM conformance_accounts WHERE account_id = $1 FOR UPDATE")
+                .bind(&account_id)
+                .execute(&mut *transaction)
+                .await?;
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(amount_minor), 0)::bigint FROM conformance_credits \
+                 WHERE account_id = $1 AND credited_at > now() - $2 * interval '1 second'",
+            )
+            .bind(&account_id)
+            .bind(i64::try_from(config.period.as_secs())?)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if u64::try_from(total)?.saturating_add(amount) > config.per_period_cap {
+                ("rejected", None, Some("per_period_cap".to_owned()), None)
+            } else {
+                (
+                    "accepted",
+                    Some(format!("credit-{}", uuid::Uuid::new_v4())),
+                    None,
+                    Some((account_id, amount_i64)),
+                )
+            }
+        }
+        Decision::Processing => ("processing", None, None, None),
+        Decision::Rejected(reason) => ("rejected", None, Some(reason.to_owned()), None),
+    };
     let inserted = sqlx::query(
         "INSERT INTO conformance_settlements \
          (key, payload, status, destination_tx_id, reason) VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (key) DO NOTHING",
     )
     .bind(key)
-    .bind(&payload)
+    .bind(raw_payload.get())
     .bind(status)
-    .bind(destination_tx_id)
-    .bind(reason)
+    .bind(&destination_tx_id)
+    .bind(&reason)
     .execute(&mut *transaction)
     .await?
     .rows_affected()
         == 1;
-    if inserted && matches!(proposed, StoredStatus::Accepted { .. }) {
-        sqlx::query("INSERT INTO conformance_ledger (key, mutations) VALUES ($1, 1)")
-            .bind(key)
-            .execute(&mut *transaction)
-            .await?;
+    if !inserted {
+        // A concurrent request with the same key committed first; adopt its record.
+        transaction.rollback().await?;
+        let record = get_postgres(pool, key)
+            .await?
+            .context("conflicting settlement disappeared")?;
+        return Ok(resolution(record, &payload));
     }
-    let row = sqlx::query(
-        "SELECT payload, status, destination_tx_id, reason \
-         FROM conformance_settlements WHERE key = $1 FOR UPDATE",
-    )
-    .bind(key)
-    .fetch_one(&mut *transaction)
-    .await?;
-    let record = record_from_row(&row)?;
+    if let Some((account_id, amount)) = credit {
+        sqlx::query(
+            "INSERT INTO conformance_credits (key, account_id, amount_minor) VALUES ($1, $2, $3)",
+        )
+        .bind(key)
+        .bind(&account_id)
+        .bind(amount)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE conformance_accounts SET balance_minor = balance_minor + $2, \
+             mutations = mutations + 1 WHERE account_id = $1",
+        )
+        .bind(&account_id)
+        .bind(amount)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
-    Ok(if record.payload == payload {
-        Resolution::Record(record)
-    } else {
-        Resolution::Mismatch
-    })
+    let status = match (status, destination_tx_id, reason) {
+        ("accepted", Some(destination_tx_id), _) => StoredStatus::Accepted { destination_tx_id },
+        ("rejected", _, Some(reason)) => StoredStatus::Rejected { reason },
+        _ => StoredStatus::Processing,
+    };
+    Ok(Resolution::Record(Record {
+        raw_payload,
+        payload,
+        status,
+    }))
 }
 
 #[cfg(feature = "postgres")]
-async fn get_postgres(pool: &PgPool, key: &str) -> Result<Option<Record>> {
+fn resolution(record: Record, payload: &Value) -> Resolution {
+    if record.payload == *payload {
+        Resolution::Record(record)
+    } else {
+        Resolution::Mismatch
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn select_record(transaction: &mut sqlx::PgConnection, key: &str) -> Result<Option<Record>> {
     sqlx::query(
         "SELECT payload, status, destination_tx_id, reason \
          FROM conformance_settlements WHERE key = $1",
     )
     .bind(key)
-    .fetch_optional(pool)
+    .fetch_optional(transaction)
     .await?
     .map(|row| record_from_row(&row))
     .transpose()
 }
 
 #[cfg(feature = "postgres")]
-fn stored_status_columns(status: &StoredStatus) -> (&'static str, Option<&str>, Option<&str>) {
-    match status {
-        StoredStatus::Accepted { destination_tx_id } => {
-            ("accepted", Some(destination_tx_id.as_str()), None)
-        }
-        StoredStatus::Processing => ("processing", None, None),
-        StoredStatus::Rejected { reason } => ("rejected", None, Some(reason.as_str())),
-    }
+async fn get_postgres(pool: &PgPool, key: &str) -> Result<Option<Record>> {
+    let mut connection = pool.acquire().await?;
+    select_record(&mut connection, key).await
 }
 
 #[cfg(feature = "postgres")]
@@ -515,142 +739,52 @@ fn record_from_row(row: &sqlx::postgres::PgRow) -> Result<Record> {
         },
         other => anyhow::bail!("unknown stored status {other}"),
     };
+    let raw_payload = RawValue::from_string(row.get::<String, _>("payload"))?;
+    let payload = serde_json::from_str(raw_payload.get())?;
     Ok(Record {
-        payload: row.get("payload"),
+        raw_payload,
+        payload,
         status,
     })
 }
 
-fn record_response(record: &Record) -> Response {
-    let body = match &record.status {
-        StoredStatus::Accepted { destination_tx_id } => json!({
-            "status": "accepted",
-            "destination_tx_id": destination_tx_id,
-            "payload": record.payload,
-        }),
-        StoredStatus::Processing => json!({
-            "status": "processing",
-            "payload": record.payload,
-        }),
-        StoredStatus::Rejected { reason } => json!({
-            "status": "rejected",
-            "reason": reason,
-            "payload": record.payload,
-        }),
-    };
-    (StatusCode::OK, axum::Json(body)).into_response()
-}
-
-fn validate_deposit_identity(key: &str, payload: &Value) -> Result<()> {
-    let evidence: Evidence = serde_json::from_value(
-        payload
-            .get("evidence")
-            .cloned()
-            .context("missing evidence")?,
-    )?;
-    let tx_hash = B256::from_str(&evidence.tx_hash)?;
-    ensure!(
-        key == format!(
-            "deposit:{}",
-            deposit_id(evidence.chain_id, tx_hash, evidence.log_index)
-        ),
-        "deposit id mismatch"
-    );
-    Ok(())
-}
-
-async fn validate_evidence(payload: &Value, policy: &EvidencePolicy) -> Result<()> {
-    let account_id = payload
-        .get("account_id")
-        .and_then(Value::as_str)
-        .context("missing account_id")?;
-    let evidence: Evidence = serde_json::from_value(
-        payload
-            .get("evidence")
-            .cloned()
-            .context("missing evidence")?,
-    )?;
-    ensure!(
-        evidence.route == "conformance" && evidence.route_version == 1,
-        "wrong route"
-    );
-    match policy {
-        EvidencePolicy::Synthetic => validate_synthetic_evidence(account_id, &evidence),
-        EvidencePolicy::Rpc(config) => validate_rpc_evidence(account_id, &evidence, config).await,
-    }
-}
-
-fn validate_synthetic_evidence(account_id: &str, evidence: &Evidence) -> Result<()> {
-    ensure!(
-        evidence.asset_contract == SYNTHETIC_ASSET,
-        "wrong emitting contract"
-    );
-    ensure!(evidence.log_index == 0, "log does not exist");
-    let factory = Address::from_str(SYNTHETIC_FACTORY)?;
-    let implementation = Address::from_str(SYNTHETIC_IMPLEMENTATION)?;
-    let expected_to = forwarder_address(
-        factory,
-        implementation,
-        persistent_salt("conformance", account_id, 1),
-    );
-    ensure!(
-        Address::from_str(&evidence.to)? == expected_to,
-        "wrong recipient"
-    );
-    let tx_hash = B256::from_str(&evidence.tx_hash)?;
-    let bytes = tx_hash.as_slice();
-    ensure!(bytes.first() != Some(&0xfe), "block is not finalized");
-    let amount_bytes: [u8; 8] = bytes
-        .get(24..)
-        .context("tx hash is too short")?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("tx hash amount marker is invalid"))?;
-    let expected_amount = u64::from_be_bytes(amount_bytes);
-    ensure!(
-        evidence.amount_atomic.parse::<u64>()? == expected_amount,
-        "wrong atomic amount"
-    );
-    Ok(())
-}
-
-async fn validate_rpc_evidence(
+async fn validate_evidence(
+    state: &ReferenceState,
     account_id: &str,
     evidence: &Evidence,
-    config: &RpcEvidenceConfig,
 ) -> Result<()> {
-    ensure!(evidence.chain_id == config.chain_id, "wrong chain id");
-    let asset_contract = Address::from_str(&evidence.asset_contract)?;
+    let manifest = &state.config.manifest;
     ensure!(
-        asset_contract == config.asset_contract,
-        "asset is not approved"
+        evidence.route == manifest.route && evidence.route_version == manifest.route_version,
+        "wrong route"
     );
-    let expected_to = forwarder_address(
-        config.factory,
-        config.implementation,
-        persistent_salt("conformance", account_id, 1),
+    ensure!(evidence.chain_id == manifest.chain_id, "wrong chain id");
+    ensure!(
+        Address::from_str(&evidence.asset_contract)? == manifest.asset_contract,
+        "asset is not approved for the route"
     );
+    let expected_to = manifest.forwarder(account_id);
     ensure!(
         Address::from_str(&evidence.to)? == expected_to,
-        "wrong recipient"
+        "to is not the account's forwarder"
     );
+    if state.config.broken == BrokenVariant::Evidence {
+        return Ok(());
+    }
 
-    let receipt = rpc_call(
-        &config.rpc_url,
-        "eth_getTransactionReceipt",
-        json!([evidence.tx_hash]),
-    )
-    .await?
-    .context("transaction receipt does not exist")?;
-    let logs = receipt
+    let rpc = &state.rpc;
+    let receipt = rpc
+        .receipt(B256::from_str(&evidence.tx_hash)?)
+        .await?
+        .context("transaction receipt does not exist")?;
+    let log = receipt
         .get("logs")
         .and_then(Value::as_array)
-        .context("receipt omitted logs")?;
-    let log = logs
-        .iter()
+        .into_iter()
+        .flatten()
         .find(|log| {
             log.get("logIndex")
-                .and_then(Value::as_str)
-                .and_then(|value| parse_hex_u64(value).ok())
+                .and_then(|value| parse_quantity(value).ok())
                 == Some(evidence.log_index)
         })
         .context("cited log does not exist")?;
@@ -659,148 +793,112 @@ async fn validate_rpc_evidence(
             .and_then(Value::as_str)
             .map(Address::from_str)
             .transpose()?
-            == Some(config.asset_contract),
-        "wrong emitting contract"
+            == Some(manifest.asset_contract),
+        "log was not emitted by the approved asset contract"
     );
-    let topics = log
-        .get("topics")
-        .and_then(Value::as_array)
-        .context("log omitted topics")?;
     let transfer_topic = format!("{:#x}", keccak256("Transfer(address,address,uint256)"));
     ensure!(
-        topics.first().and_then(Value::as_str) == Some(transfer_topic.as_str()),
+        log.pointer("/topics/0").and_then(Value::as_str) == Some(transfer_topic.as_str()),
         "log is not an ERC-20 Transfer"
     );
-    let recipient_topic = topics
-        .get(2)
-        .and_then(Value::as_str)
-        .context("Transfer log omitted recipient")?;
-    let recipient_word = B256::from_str(recipient_topic)?;
-    let recipient = Address::from_slice(
-        recipient_word
-            .as_slice()
-            .get(12..)
-            .context("recipient topic is malformed")?,
+    let recipient = B256::from_str(
+        log.pointer("/topics/2")
+            .and_then(Value::as_str)
+            .context("Transfer log omitted recipient")?,
+    )?;
+    ensure!(
+        recipient.as_slice().get(12..) == Some(expected_to.as_slice()),
+        "Transfer recipient is not the account's forwarder"
     );
-    ensure!(recipient == expected_to, "Transfer recipient is wrong");
     let amount = log
         .get("data")
         .and_then(Value::as_str)
         .context("Transfer log omitted amount")?;
     ensure!(
         U256::from_str(amount)? == U256::from_str(&evidence.amount_atomic)?,
-        "Transfer amount is wrong"
+        "Transfer amount differs from amount_atomic"
     );
-    let receipt_block = receipt
-        .get("blockNumber")
-        .and_then(Value::as_str)
-        .map(parse_hex_u64)
-        .transpose()?
-        .context("receipt is not mined")?;
-    let finalized = rpc_call(
-        &config.rpc_url,
-        "eth_getBlockByNumber",
-        json!(["finalized", false]),
-    )
-    .await?
-    .context("finalized block is unavailable")?;
-    let finalized_number = finalized
-        .get("number")
-        .and_then(Value::as_str)
-        .map(parse_hex_u64)
-        .transpose()?
-        .context("finalized block omitted number")?;
-    ensure!(receipt_block <= finalized_number, "block is not finalized");
+    let receipt_block =
+        parse_quantity(receipt.get("blockNumber").context("receipt is not mined")?)?;
+    ensure!(
+        receipt_block <= rpc.finalized_block().await?,
+        "block is not finalized"
+    );
     Ok(())
-}
-
-async fn rpc_call(rpc_url: &str, method: &str, params: Value) -> Result<Option<Value>> {
-    let response = reqwest::Client::new()
-        .post(rpc_url)
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body: Value = response.json().await?;
-    ensure!(body.get("error").is_none(), "RPC returned an error: {body}");
-    Ok(body.get("result").filter(|value| !value.is_null()).cloned())
-}
-
-fn parse_hex_u64(value: &str) -> Result<u64> {
-    u64::from_str_radix(value.strip_prefix("0x").context("hex value needs 0x")?, 16)
-        .map_err(Into::into)
 }
 
 fn verify_signature(
-    key: &VerifyingKey,
-    keyid: &str,
+    config: &ReferenceConfig,
     method: &str,
-    path: &str,
+    uri: &axum::http::Uri,
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<()> {
-    let digest = header(headers, "content-digest")?;
-    ensure!(
-        digest == format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body))),
-        "content digest mismatch"
-    );
-    let idempotency_key = header(headers, "idempotency-key")?;
-    let signature_input = header(headers, "signature-input")?;
-    let parameters = signature_input
-        .strip_prefix("sig1=")
-        .context("signature label must be sig1")?;
-    let prefix = "(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=";
-    let remainder = parameters
-        .strip_prefix(prefix)
-        .context("required signature components are missing")?;
-    let (created, supplied_keyid) = remainder
-        .split_once(";keyid=\"")
-        .context("created or keyid is missing")?;
-    let supplied_keyid = supplied_keyid
-        .strip_suffix('"')
-        .context("keyid is malformed")?;
-    ensure!(supplied_keyid == keyid, "keyid mismatch");
-    let created = created.parse::<i64>()?;
-    ensure!(
-        Utc::now().timestamp().abs_diff(created) <= 300,
-        "signature expired"
-    );
     let host = header(headers, HOST.as_str())?;
+    let path = uri.path_and_query().map_or("/", |value| value.as_str());
     let target_uri = format!("http://{host}{path}");
-    let base = format!(
-        "\"@method\": {method}\n\"@target-uri\": {target_uri}\n\"content-digest\": {digest}\n\"idempotency-key\": {idempotency_key}\n\"@signature-params\": {parameters}"
+    let verified = http_signature::verify(
+        &SignedMessage {
+            method,
+            target_uri: &target_uri,
+            content_digest: header(headers, "content-digest")?,
+            idempotency_key: Some(header(headers, "idempotency-key")?),
+            signature_input: header(headers, "signature-input")?,
+            signature: header(headers, "signature")?,
+            body,
+        },
+        &config.keyid,
+        &config.verifying_key,
+        Utc::now().timestamp(),
+    )?;
+    ensure!(
+        verified.covers_idempotency_key,
+        "settlement signatures must cover idempotency-key"
     );
-    let encoded = header(headers, "signature")?
-        .strip_prefix("sig1=:")
-        .and_then(|value| value.strip_suffix(':'))
-        .context("signature is malformed")?;
-    let signature = Signature::from_slice(&STANDARD.decode(encoded)?)?;
-    key.verify_strict(base.as_bytes(), &signature)?;
     Ok(())
 }
 
-fn unquote_header(headers: &HeaderMap, name: &'static str) -> Result<String> {
-    let value = header(headers, name)?;
-    let value = value
+/// Parses the `Idempotency-Key` Structured Field string.
+fn idempotency_key(headers: &HeaderMap) -> Result<String> {
+    let value = header(headers, "idempotency-key")?.trim();
+    let inner = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
-        .context("structured field string is required")?;
-    ensure!(
-        !value.contains(['"', '\\']),
-        "escaped idempotency keys are unsupported"
-    );
-    Ok(value.to_owned())
+        .context("idempotency-key must be a structured field string")?;
+    let mut key = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => match characters.next() {
+                Some(escaped @ ('"' | '\\')) => key.push(escaped),
+                _ => anyhow::bail!("invalid escape in idempotency-key"),
+            },
+            '"' => anyhow::bail!("unescaped quote in idempotency-key"),
+            character => key.push(character),
+        }
+    }
+    Ok(key)
 }
 
-fn header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str> {
+fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
     headers
         .get(name)
         .context("required header is missing")?
         .to_str()
         .context("header is not ASCII")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_key_unescapes_structured_field_strings() -> Result<()> {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", r#""deposit:\"a\\b""#.parse()?);
+        assert_eq!(idempotency_key(&headers)?, r#"deposit:"a\b"#);
+        headers.insert("idempotency-key", r#""bad\x""#.parse()?);
+        assert!(idempotency_key(&headers).is_err());
+        Ok(())
+    }
 }
