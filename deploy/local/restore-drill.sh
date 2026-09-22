@@ -452,7 +452,7 @@ wait_for "restored PostgreSQL" dc exec -T postgres pg_isready -U postgres -d top
 wait_for "archive recovery promotion" recovery_promoted
 
 set +e
-restore_report=$(dc run --rm --no-deps restore-check \
+restore_output=$(dc run --rm --no-deps restore-check \
     topup restore-check \
     --expected-heartbeat-at "$expected_heartbeat_at" \
     --expected-lsn "$expected_lsn" \
@@ -460,9 +460,12 @@ restore_report=$(dc run --rm --no-deps restore-check \
 restore_status=$?
 set -e
 if [ "$restore_status" -ne 0 ]; then
-    printf 'restore-check: %s\n' "$restore_report" >&2
+    printf 'restore-check: %s\n' "$restore_output" >&2
     exit "$restore_status"
 fi
+# JSON log lines share stdout with the report; keep only the report object.
+restore_report=$(printf '%s\n' "$restore_output" | jq -c 'select(has("post_restore_reconciliation"))')
+test -n "$restore_report"
 
 measured_rpo=$(printf '%s\n' "$restore_report" | jq -er '.measured_rpo_seconds')
 allowed_rpo=$(printf '%s\n' "$restore_report" | jq -er '.allowed_rpo_seconds')
