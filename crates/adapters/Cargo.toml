@@ -19,6 +19,7 @@ alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 alloy-tx-macros.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 dstack-sdk = { git = "https://github.com/Dstack-TEE/dstack", rev = "721df1b93fd93884224f2261c37dd86ca250432f", version = "=0.6.0" }
 ed25519-dalek.workspace = true

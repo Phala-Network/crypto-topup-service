@@ -18,3 +18,4 @@ pub mod flusher;
 pub mod outbox;
 pub mod pump;
 pub mod scanner;
+pub mod steps;

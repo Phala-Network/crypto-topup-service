@@ -1,0 +1,63 @@
+# Deployment template. Replace every placeholder and validate without --template before enabling it.
+chain:
+  chain_id: 11155111
+  name: ethereum-sepolia
+  finality: finalized
+  rpc_providers: [provider-a, provider-b]
+  contracts:
+    forwarder_factory: "0x0000000000000000000000000000000000000000"
+    implementation: "0x0000000000000000000000000000000000000000"
+    treasury: "0x0000000000000000000000000000000000000000"
+  flush:
+    schedule: "0 */6 * * *"
+    max_gas_ratio_bps: 200
+    native_price_asset: eth
+    max_fee_per_gas_wei: 500000000000
+    replacement_bps: 12500
+    replacement_after_blocks: 3
+    gas_limit_bps: 12000
+    rpc_timeout_ms: 10000
+    balance_batch_size: 500
+    recovery_scan_blocks: 128
+    estimation_retry_after_s: 3600
+    maintenance_interval_s: 5
+
+route: phala-cloud-sepolia-pha-usd
+version: 1
+
+asset:
+  symbol: PHA
+  contract: "0x1111111111111111111111111111111111111111"
+  decimals: 18
+  min_flush_atomic: "20000000000000000000000"
+
+destination:
+  product: phala-cloud
+  unit: USD
+  unit_decimals: 2
+  settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
+  product_kid: phala-cloud/v1
+
+pricing:
+  primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
+  check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
+  price_scale: 8
+  max_age_s: 120
+  max_deviation_bps: 100
+  max_fx_deviation_bps: 50
+
+screening:
+  sanctions_oracle: "0x2222222222222222222222222222222222222222"
+  min_deposit_atomic: "20000000000000000000"
+  max_deposit_atomic: "200000000000000000000000"
+  min_credit_minor: 100
+
+rate_lock:
+  enabled: true
+  window_s: 900
+  spread_bps: 50
+  lock_tolerance_bps: 100
+  max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
+
+alerts:
+  stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }

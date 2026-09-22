@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" != "backup-push" ] || [ "$#" -ne 2 ]; then
+    echo 'usage: walg-cron backup-push "MINUTE HOUR * * *"' >&2
+    exit 64
+fi
+
+schedule=$2
+set -f
+set -- $schedule
+set +f
+if [ "$#" -ne 5 ] || [ "$3" != "*" ] || [ "$4" != "*" ] || [ "$5" != "*" ]; then
+    echo "walg-cron supports one daily schedule: MINUTE HOUR * * *" >&2
+    exit 64
+fi
+
+minute=$1
+hour=$2
+case "$minute:$hour" in
+    *[!0-9:]*|:*|*:) echo "minute and hour must be decimal integers" >&2; exit 64 ;;
+esac
+if [ "$minute" -gt 59 ] || [ "$hour" -gt 23 ]; then
+    echo "invalid daily schedule: $schedule" >&2
+    exit 64
+fi
+
+retention=${WALG_RETENTION_FULL:-7}
+case "$retention" in
+    ''|*[!0-9]*) echo "WALG_RETENTION_FULL must be a positive integer" >&2; exit 64 ;;
+esac
+if [ "$retention" -eq 0 ]; then
+    echo "WALG_RETENTION_FULL must be greater than zero" >&2
+    exit 64
+fi
+
+echo "parsed schedule: minute=$minute hour=$hour day-of-month=$3 month=$4 day-of-week=$5"
+
+if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
+    now=$(date -u +%s)
+    run_at=$(date -u -d "$(date -u +%F) $hour:$minute:00" +%s)
+    if [ "$run_at" -le "$now" ]; then
+        run_at=$(date -u -d "tomorrow $hour:$minute:00" +%s)
+    fi
+    echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
+    echo "dry-run: wal-g backup-push ${PGDATA:-/var/lib/postgresql/data}"
+    echo "dry-run: wal-g delete retain FULL $retention --use-sentinel-time --confirm"
+    exit 0
+fi
+
+while :; do
+    now=$(date -u +%s)
+    run_at=$(date -u -d "$(date -u +%F) $hour:$minute:00" +%s)
+    if [ "$run_at" -le "$now" ]; then
+        run_at=$(date -u -d "tomorrow $hour:$minute:00" +%s)
+    fi
+    delay=$((run_at - now))
+    echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
+    sleep "$delay"
+    wal-g backup-push "${PGDATA:-/var/lib/postgresql/data}"
+    wal-g delete retain FULL "$retention" --use-sentinel-time --confirm
+done

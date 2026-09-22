@@ -17,9 +17,11 @@ use tokio_util::sync::CancellationToken;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
 };
+use topup::steps::screen::ScreenStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
+use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -312,8 +314,17 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
+    {
+        Ok(step) => step,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure screening step");
+            return ExitCode::FAILURE;
+        }
+    };
     let steps = Arc::new(
         NoopStepSet::builder()
+            .with_confirmed(screen_step)
             .with_credited(topup::flusher::SweepStep)
             .build(),
     );
