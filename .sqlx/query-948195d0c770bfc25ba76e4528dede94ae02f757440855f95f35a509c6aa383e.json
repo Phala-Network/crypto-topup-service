@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE outbox\n        SET delivered_at = now(), response = $2\n        WHERE id = $1 AND delivered_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "948195d0c770bfc25ba76e4528dede94ae02f757440855f95f35a509c6aa383e"
+}

@@ -5,8 +5,9 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .sqlx ./.sqlx
 COPY crates ./crates
-RUN cargo build --release --locked
+RUN SQLX_OFFLINE=true cargo build --release --locked
 
 FROM gcr.io/distroless/cc-debian12:latest@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
 

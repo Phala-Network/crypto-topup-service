@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use sqlx::postgres::PgPoolOptions;
 
 #[derive(Parser)]
 #[command(name = "topup", version, about = "Crypto top-up service")]
@@ -37,7 +38,8 @@ enum RouteCommand {
     },
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     if let Err(error) = tracing_subscriber::fmt()
         .json()
         .with_target(false)
@@ -51,7 +53,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         TopupCommand::Run => not_implemented("run"),
-        TopupCommand::Migrate => not_implemented("migrate"),
+        TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
@@ -60,6 +62,33 @@ fn main() -> ExitCode {
     }
 
     ExitCode::FAILURE
+}
+
+async fn migrate() -> ExitCode {
+    let database_url = match std::env::var("MIGRATE_DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("MIGRATE_DATABASE_URL is required for migrate");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = topup::db::migrate(&pool).await {
+        tracing::error!(%error, "failed to apply database migrations");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!("database migrations applied");
+    ExitCode::SUCCESS
 }
 
 fn validate_route(file: &Path, template: bool) -> ExitCode {

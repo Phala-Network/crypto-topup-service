@@ -11,11 +11,21 @@ name = "topup"
 path = "src/main.rs"
 
 [dependencies]
+alloy-primitives.workspace = true
+chrono.workspace = true
 clap.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
 serde-saphyr.workspace = true
 topup-core = { path = "../core" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow = "=1.0.104"
+url = "=2.5.7"
 
 [lints.rust]
 unsafe_code = "forbid"
