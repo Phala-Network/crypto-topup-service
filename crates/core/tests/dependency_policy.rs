@@ -32,6 +32,7 @@ struct Package {
 
 #[derive(Deserialize)]
 struct Dependency {
+    name: String,
     kind: Option<String>,
 }
 
@@ -66,10 +67,10 @@ fn core_has_no_runtime_dependencies() -> Result<(), Box<dyn Error>> {
         .ok_or("topup-core was not present in cargo metadata")?;
 
     assert!(
-        core.dependencies
-            .iter()
-            .all(|dependency| dependency.kind.as_deref() == Some("dev")),
-        "topup-core runtime dependencies must be explicitly reviewed as pure and I/O-free"
+        core.dependencies.iter().all(|dependency| {
+            dependency.kind.as_deref() == Some("dev") || dependency.name == "serde"
+        }),
+        "topup-core runtime dependencies must be serde or explicitly reviewed as pure and I/O-free"
     );
 
     Ok(())
