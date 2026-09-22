@@ -16,5 +16,6 @@ pub mod api;
 pub mod db;
 pub mod outbox;
 pub mod pump;
+pub mod refunds;
 pub mod scanner;
 pub mod steps;
