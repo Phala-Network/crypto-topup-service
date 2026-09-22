@@ -62,7 +62,7 @@ settings=$(docker compose -p "$project" -f "$compose" exec -T postgres \
     psql -U postgres -d topup -At -c \
     "select name || '=' || setting from pg_settings where name in ('archive_command','archive_mode','archive_timeout') order by name")
 printf '%s\n' "$settings"
-printf '%s\n' "$settings" | grep -Fx 'archive_command=wal-g wal-push %p' >/dev/null
+printf '%s\n' "$settings" | grep -Fx 'archive_command=walg-wal-push %p' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_mode=on' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_timeout=60' >/dev/null
 echo "postgres archive settings passed"
@@ -71,7 +71,7 @@ dry_run=$(docker compose -p "$project" -f "$compose" run --rm --no-deps \
     -e WALG_CRON_DRY_RUN=1 backup walg-cron backup-push "0 3 * * *")
 printf '%s\n' "$dry_run"
 printf '%s\n' "$dry_run" | grep -F \
-    'dry-run: wal-g backup-push /var/lib/postgresql/data' >/dev/null
+    'dry-run: walg-base-backup /var/lib/postgresql/data' >/dev/null
 printf '%s\n' "$dry_run" | grep -F \
     'dry-run: wal-g delete retain FULL 2 --use-sentinel-time --confirm' >/dev/null
 echo "backup helper dry-run passed"

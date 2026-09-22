@@ -18,6 +18,8 @@ services:
       - backup-key
       - --version
       - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --fallback-versions
+      - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
       - --output
       - /run/wal-g/backup.key
       - --hold
@@ -39,6 +41,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - walg_key:/run/wal-g:ro
@@ -136,6 +139,7 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD:-}
       WALG_RETENTION_FULL: "7"
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
       - walg_key:/run/wal-g:ro
@@ -159,9 +163,23 @@ services:
     environment:
       <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - walg_key:/run/wal-g:ro
+    restart: "no"
+
+  restore-check:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    profiles: ["tools"]
+    command: ["topup", "restore-check"]
+    environment:
+      RESTORE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: "no"
 
 volumes:

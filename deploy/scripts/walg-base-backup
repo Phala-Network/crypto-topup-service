@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: walg-base-backup PGDATA" >&2
+    exit 64
+fi
+
+walg=${WALG_BIN:-wal-g}
+"$walg" backup-push "$1"
+backup_name=$("$walg" backup-list --json | jq -er 'sort_by(.start_time) | last | .backup_name')
+walg-key-manifest base "$backup_name"
+printf '%s\n' "$backup_name"

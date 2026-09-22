@@ -1,134 +1,215 @@
 # Backup and restore runbook
 
-This runbook implements architecture sections 13-15. Run it in a new throwaway CVM first. Do not
-reuse or attach the production PostgreSQL volume, and do not resume service traffic until
-`restore-check` and the product reconciliation step both pass.
+This runbook implements architecture sections 13-15. Restore into a new throwaway CVM. Keep
+application ingress, `topup`, `heartbeat`, and `backup` stopped until every check passes.
 
-## Backup key mechanism
+## Backup key and metadata
 
-The `backup-key` sidecar runs as UID/GID `999:999`, calls dstack `get_key` with the
-versioned secp256k1 domain `backup/v1`, hex-encodes the 32-byte secret, and atomically writes
-`/run/wal-g/backup.key` with mode `0600`. The directory is a Compose-managed tmpfs volume with
-mode `0700`; the sidecar remains alive to keep that tmpfs mounted, while PostgreSQL and the backup
-container mount it read-only. Its healthcheck validates only file size and permissions. WAL-G
-receives only:
+`backup-key` derives the current `backup/vN` dstack key plus the comma-separated retained versions
+in `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS`. It writes only to the Compose `walg_key` tmpfs:
 
 ```text
-WALG_LIBSODIUM_KEY_PATH=/run/wal-g/backup.key
-WALG_LIBSODIUM_KEY_TRANSFORM=hex
+/run/wal-g/backup.key       current version used for new uploads
+/run/wal-g/backup-v1.key    retained version 1
+/run/wal-g/backup-v0.key    retained version 0
 ```
 
-The secret value is never stored in the image, Compose environment, command line, or logs. Local
-Compose derives the same domain from the dstack simulator. A developer binary built with
-`--features dev-signer` may use `topup backup-key --dev` for isolated tests only.
+Every file is atomically published as UID/GID `999:999`, mode `0600`; the directory is mode `0700`.
+WAL-G receives the path through `WALG_LIBSODIUM_KEY_PATH`. No key value appears in an image,
+environment variable, command line, object metadata, or log.
 
-## Weekly local drill
+Every successful upload writes an unencrypted, uncompressed metadata object containing only the
+integer key version:
 
-Run the full base-backup plus archived-WAL restore against pinned MinIO images:
+```text
+key-versions/base/<backup-name>.json
+key-versions/wal/<wal-segment>.json
+key-versions/current.json
+```
+
+`walg-base-backup` records base-backup metadata and `walg-wal-push` records every WAL segment.
+`walg-backup-fetch` selects the base key from its metadata. `walg-restore-command` selects each WAL
+key independently, so one recovery range may cross key rotations. Keep all listed `backup/vN`
+domains until the corresponding base backups and WAL have expired.
+
+`wal-g backup-list` does not decrypt backup data. Never use it as a key test. A key is verified only
+by fetching the selected base backup into an empty volume and checking the extracted `PG_VERSION`.
+
+## Weekly local drills
+
+Run both modes weekly:
 
 ```sh
 make restore-drill
+# Or separately:
+deploy/local/restore-drill.sh controlled
+deploy/local/restore-drill.sh crash
 ```
 
-The command destroys only its uniquely named temporary Compose project, prints the JSON
-`restore-check` result, the restored marker IDs, measured RPO, and elapsed RTO, then removes its
-containers and volumes. Run it weekly because the complete image build and point-in-time recovery
-are intentionally not part of the bounded deployment CI job.
+`controlled` forces a WAL switch and requires the last source marker and LSN. `crash` waits for a
+natural `archive_timeout=60` upload, continues writing, kills PostgreSQL without another switch, and
+reports observed loss. Both pass the externally recorded source heartbeat and LSN to
+`restore-check`, assert RTO is at most 3600 seconds, exercise a signed product GET, and remove their
+uniquely named Compose projects and volumes. The full image build plus real 60-second archive window
+is intentionally a weekly job; the bounded deployment CI job runs the WAL-G wrapper tests instead.
 
-## Restore in a throwaway CVM
+## Authorize the replacement CVM
 
-1. Copy the exact attested Compose and route/chain configuration used by the failed CVM. Pin the
-   same `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE` digests. Configure the object-store variables and
-   leave application ingress disabled.
-2. Set `TOPUP_BACKUP_KEY_VERSION=1`. Start only the dstack socket integration and the key
-   service. Verify metadata, never contents:
+A fresh CVM derives the same `backup/vN` key only when it runs under the original dstack application
+identity: the same app id and KMS root, with an allowed attested compose. These are **HUMAN-ONLY**
+steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-key` yet.
+
+1. Retrieve the original incident records and set the original `DstackApp` authorization contract:
 
    ```sh
+   export ORIGINAL_APP_ID=0x<original-dstack-app-address>
+   export APP_AUTH_CONTRACT="$ORIGINAL_APP_ID"
+   export ORIGINAL_COMPOSE_HASH=0x<last-approved-compose-hash>
+   cast call "$APP_AUTH_CONTRACT" 'owner()(address)' --rpc-url "$ETH_RPC_URL"
+   ```
+
+   Require the owner to be the recorded Finance Safe and the KMS chain/root to match the failed
+   instance. Stop if the original app id or KMS root cannot be established.
+
+2. Use the Phala replacement-instance workflow for that existing app id, not the new-application
+   workflow. Prepare the exact retained compose and encrypted environment, then save the returned
+   JSON as `prepare.json`. It must report the original app id:
+
+   ```sh
+   export REPLACEMENT_APP_ID="$(jq -er '.app_id' prepare.json)"
+   test "${REPLACEMENT_APP_ID#0x}" = "${ORIGINAL_APP_ID#0x}"
+   export COMPOSE_HASH="$(jq -er '.compose_hash' prepare.json)"
+   export DEVICE_ID="$(jq -er '.device_id' prepare.json)"
+   jq '{app_id, compose_hash, device_id, chain_id, onchain_status}' prepare.json
+   ```
+
+3. **Finance Safe:** authorize the replacement compose and device on the original contract. Submit
+   the generated calldata through the Safe, wait for finality, then verify both reads return `true`:
+
+   ```sh
+   cast calldata 'addComposeHash(bytes32)' "$COMPOSE_HASH"
+   cast calldata 'addDevice(bytes32)' "$DEVICE_ID"
+   cast call "$APP_AUTH_CONTRACT" 'allowedComposeHashes(bytes32)(bool)' "$COMPOSE_HASH" \
+     --rpc-url "$ETH_RPC_URL"
+   cast call "$APP_AUTH_CONTRACT" 'allowedDeviceIds(bytes32)(bool)' "$DEVICE_ID" \
+     --rpc-url "$ETH_RPC_URL"
+   ```
+
+4. Commit the prepared replacement only after both authorizations are final. Fetch `cvm.json` and
+   `attestation.json`, then run the normal compose verification:
+
+   ```sh
+   deploy/verify-attested-compose.sh \
+     attestation.json cvm.json deploy/docker-compose.yml
+   ```
+
+5. Request a fresh application-bound quote inside the replacement CVM. Verify the quote, TCB, RTMR
+   event log, KMS chain, and compose through the official dstack verification flow. The CLI includes
+   dstack's reported app id; compare it to the original before deriving any backup key:
+
+   ```sh
+   export NONCE="$(openssl rand -hex 32)"
+   docker compose run --rm --no-deps topup topup attest --nonce "$NONCE" > restore-attestation.json
+   jq -e --arg app "${ORIGINAL_APP_ID,,}" \
+     '(.app_id | ascii_downcase) == $app and (.quote | length > 0)' \
+     restore-attestation.json
+   ```
+
+   A mismatched or unverifiable app id means this instance cannot be trusted to derive the original
+   backup key. Stop; do not try decryption and do not create a new key under an old version number.
+
+## Restore the database
+
+1. Record the source failure point outside the destroyed PostgreSQL volume. Use the last committed
+   heartbeat timestamp and source WAL insert LSN from incident monitoring:
+
+   ```sh
+   export EXPECTED_HEARTBEAT_AT=2026-09-22T14:35:18.172465Z
+   export EXPECTED_LSN=0/5000000
+   ```
+
+   If either value is unavailable, the RPO cannot be proven. Continue only as an explicitly declared
+   incident exception and keep service traffic stopped.
+
+2. Configure the current and retained key versions, start only the key service, and verify metadata,
+   never contents:
+
+   ```sh
+   export TOPUP_BACKUP_KEY_VERSION=1
+   export TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0
    docker compose up -d backup-key
-   docker compose ps backup-key
    docker compose run --rm --no-deps --entrypoint /usr/bin/stat postgres \
      -c '%a %u %g' /run/wal-g/backup.key
    # Expected: 600 999 999
    ```
 
-3. Create a fresh empty PostgreSQL volume. Fetch the newest base backup as UID 999:
+3. Choose a base backup by incident time. Listing is selection only. Read its version metadata and
+   fetch it into a new empty PostgreSQL volume; this fetch is the decryption check:
 
    ```sh
-   docker compose run --rm --no-deps restore '
+   docker compose run --rm --no-deps restore wal-g backup-list --json
+   export BACKUP_NAME=base_000000010000000000000003
+   docker compose run --rm --no-deps restore \
+     wal-g st cat "key-versions/base/$BACKUP_NAME.json"
+   docker compose run --rm --no-deps -e BACKUP_NAME restore '
      test -z "$(ls -A "$PGDATA")"
-     wal-g backup-fetch "$PGDATA" LATEST
+     walg-backup-fetch "$PGDATA" "$BACKUP_NAME"
+     test -s "$PGDATA/PG_VERSION"
    '
    ```
 
-4. Choose a recovery target from the incident timeline. To recover all available WAL, omit
-   `recovery_target_lsn`; otherwise set the last verified archived LSN. Add the recovery settings
-   to the restored data directory and create `recovery.signal`:
+4. Configure archive recovery. The wrapper returns a normal nonzero status only when WAL-G returns
+   `74` (WAL genuinely absent), allowing recovery to end. Decryption, metadata, and storage errors
+   return `126`, which makes PostgreSQL abort recovery instead of silently promoting:
 
    ```text
-   restore_command = 'wal-g wal-fetch %f %p'
-   recovery_target_lsn = '0/00000000'
+   restore_command = 'walg-restore-command %f %p'
+   recovery_target_lsn = '0/5000000'
    recovery_target_inclusive = true
    recovery_target_action = 'promote'
    ```
 
-5. Start PostgreSQL with application, heartbeat, backup, and public ingress still stopped. Wait
-   for `pg_isready` and require `SELECT NOT pg_is_in_recovery()` to return `true`.
-6. Run the owner-credential check without putting the URL on the command line:
+   Omit `recovery_target_lsn` only when the incident decision is to replay every available WAL.
+   Create `recovery.signal`, set `$PGDATA` mode `0700`, then start only PostgreSQL.
+
+5. Require `pg_isready` and `SELECT NOT pg_is_in_recovery()` to return true. Keep the public service,
+   heartbeat, and backup processes stopped.
+
+6. Run the dedicated signer-enabled service. It mounts the dstack socket and uses owner credentials;
+   every deposit in `cleared`, `credited`, or `swept`, plus deposits rejected by the product after
+   reaching `cleared`, is queried by signed product GET, including settlements already stored as
+   accepted or rejected:
 
    ```sh
-   RESTORE_DATABASE_URL='postgres://...' topup restore-check
+   docker compose run --rm --no-deps restore-check \
+     topup restore-check \
+     --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" \
+     --expected-lsn "$EXPECTED_LSN"
    ```
 
-   It exits non-zero unless the restored schema matches the newest embedded migration, recovery
-   has promoted, a latest applied WAL LSN exists, the newest heartbeat is no older than its
-   recorded 60-second RPO, and durable table counts are readable and sane.
-7. `restore-check` calls the product `GET` endpoint for every settlement not in
-   `accepted`/`rejected`, using its stored idempotency key. It adopts authoritative accepted,
-   rejected, and processing answers and reports `status: "complete"` with outcome counts. A
-   missing key is safe for the normal GET-first retry path after resume. Any transport failure,
-   payload mismatch, `409`, `422`, or unknown response fails the check. C8 must extend this to
-   deposits at or beyond `cleared` that do not yet have a settlement row. Until C8 lands, this
-   query must return no rows before resuming; otherwise keep settlement processing paused and GET
-   each listed `deposit:<id>` key using the product for that deposit:
+   `status` must be `ok`. The check verifies migration checksums, WAL state and distance, externally
+   anchored RPO, table counts, product identity fields, authoritative pricing, settlement receipts,
+   deposit transitions, and outbox events. `processing`, not found, transport failure, protocol
+   failure, unsafe state reversal, or missing implementation is reported as `incomplete` and exits
+   nonzero. The product answer is authoritative; local payload equality is not required.
 
-   ```sql
-   SELECT d.id
-   FROM deposits d
-   LEFT JOIN settlements s ON s.deposit_id = d.id
-   WHERE d.state IN ('cleared', 'credited', 'swept') AND s.deposit_id IS NULL;
-   ```
-8. Compare expected row counts and incident markers, enable the backup and heartbeat services,
-   confirm a new WAL archive reaches object storage, then enable the application and ingress.
-   Addresses require no separate restore because their salts are deterministic from product data.
-
-## Prior backup key versions
-
-Keep every prior dstack backup domain. WAL-G decrypts one libsodium key at a time, so try versions
-without changing the backup objects:
-
-```sh
-for version in 1 0; do
-  TOPUP_BACKUP_KEY_VERSION=$version docker compose up -d --force-recreate backup-key
-  if docker compose run --rm --no-deps backup wal-g backup-list; then
-    echo "backup key version $version selected"
-    break
-  fi
-done
-```
-
-Use the selected version for both `backup-fetch` and every `wal-fetch`. Never overwrite or delete
-old dstack domains while retained backups depend on them. After restore, switch back to the current
-version before taking a new base backup.
+7. Compare incident markers and expected row counts. Start `heartbeat` and `backup`, require a new
+   WAL segment and its `key-versions/wal/<segment>.json` object, then start `topup` without ingress.
+   Enable ingress only after health and reconciliation remain clean. Addresses need no separate
+   restore because their salts are deterministic from product data.
 
 ## Failure handling
 
-- **Key/decryption failure:** stop. Try the documented prior version list. Do not create a new key
-  under an old version number and do not alter backup objects.
-- **Missing WAL or target not reached:** keep the failed volume for inspection, run `wal-g wal-show`
-  and `wal-g wal-verify integrity`, choose only a verified earlier target, and record the resulting
-  RPO breach before retrying with another fresh volume.
-- **Schema, heartbeat, WAL, or row-count failure:** do not resume. Preserve command output and
-  PostgreSQL/WAL-G logs, open an incident, and restore again from an earlier intact base backup.
-- **Product reconciliation mismatch:** product state wins. Apply only the safe repair defined in
-  architecture section 13; alert and keep settlement/flush processing paused for every other case.
-- **RTO over one hour:** escalate the incident even if the eventual restore passes.
+- **App id, KMS, compose, or attestation mismatch:** stop before key derivation. Correct the original
+  app authorization; never copy key files between CVMs.
+- **Base metadata missing or decryption failure:** stop. Verify object-storage integrity and the
+  retained version list. `backup-list` success is not evidence of a correct key.
+- **WAL metadata spans versions:** keep all referenced `backup-vN.key` files mounted. The restore
+  wrapper selects each segment's version; never rewrite old metadata to the current version.
+- **WAL-G `74`:** recovery may end only when the requested target has been reached or the incident
+  decision explicitly accepts replaying all available WAL.
+- **Any other WAL error:** PostgreSQL must remain stopped. Preserve logs and test storage access,
+  metadata, and decryption before retrying into another fresh volume.
+- **`restore-check` incomplete:** do not resume. Product state wins, but an unsafe reverse transition
+  or failed lookup requires an incident repair and another complete check.
+- **RTO over 3600 seconds:** escalate even if the eventual restore passes.

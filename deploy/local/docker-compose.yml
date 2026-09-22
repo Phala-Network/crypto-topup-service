@@ -56,6 +56,8 @@ services:
       - backup-key
       - --version
       - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --fallback-versions
+      - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
       - --output
       - /run/wal-g/backup.key
       - --hold
@@ -85,6 +87,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       TOPUP_APP_PASSWORD: topup
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - walg_key:/run/wal-g:ro
@@ -167,6 +170,18 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  mock-product:
+    image: python@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+    command: ["python3", "/opt/topup/mock-product.py"]
+    volumes:
+      - ./mock-product.py:/opt/topup/mock-product.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
   backup:
     image: crypto-topup-postgres-walg:local
     user: postgres
@@ -179,6 +194,7 @@ services:
       PGUSER: postgres
       PGPASSWORD: postgres
       WALG_RETENTION_FULL: "2"
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
       - walg_key:/run/wal-g:ro
@@ -204,9 +220,28 @@ services:
     environment:
       <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - walg_key:/run/wal-g:ro
+    restart: "no"
+
+  restore-check:
+    image: crypto-topup-service:local
+    profiles: ["tools"]
+    command: ["topup", "restore-check"]
+    environment:
+      RESTORE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+    volumes:
+      - dstack_socket:/var/run
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+      mock-product:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: "no"
 
 volumes:

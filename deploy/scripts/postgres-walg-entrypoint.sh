@@ -10,13 +10,13 @@ case "$1" in
         set -- "$@" \
             -c archive_mode=on \
             -c archive_timeout=60 \
-            -c "archive_command=wal-g wal-push %p"
+            -c "archive_command=walg-wal-push %p"
         ;;
     -*)
         set -- postgres "$@" \
             -c archive_mode=on \
             -c archive_timeout=60 \
-            -c "archive_command=wal-g wal-push %p"
+            -c "archive_command=walg-wal-push %p"
         ;;
 esac
 

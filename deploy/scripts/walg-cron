@@ -43,7 +43,7 @@ if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
         run_at=$(date -u -d "tomorrow $hour:$minute:00" +%s)
     fi
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
-    echo "dry-run: wal-g backup-push ${PGDATA:-/var/lib/postgresql/data}"
+    echo "dry-run: walg-base-backup ${PGDATA:-/var/lib/postgresql/data}"
     echo "dry-run: wal-g delete retain FULL $retention --use-sentinel-time --confirm"
     exit 0
 fi
@@ -57,6 +57,6 @@ while :; do
     delay=$((run_at - now))
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
     sleep "$delay"
-    wal-g backup-push "${PGDATA:-/var/lib/postgresql/data}"
+    walg-base-backup "${PGDATA:-/var/lib/postgresql/data}"
     wal-g delete retain FULL "$retention" --use-sentinel-time --confirm
 done

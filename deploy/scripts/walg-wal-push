@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: walg-wal-push WAL_PATH" >&2
+    exit 64
+fi
+
+walg=${WALG_BIN:-wal-g}
+wal_path=$1
+wal_name=${wal_path##*/}
+"$walg" wal-push "$wal_path"
+walg-key-manifest wal "$wal_name"
