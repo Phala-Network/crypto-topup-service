@@ -102,6 +102,14 @@ async fn verify_request(
     request: &mut Request,
     key: &VerificationKey,
 ) -> Result<VerifiedSignature, ()> {
+    verify_request_at(request, key, Utc::now().timestamp()).await
+}
+
+async fn verify_request_at(
+    request: &mut Request,
+    key: &VerificationKey,
+    now: i64,
+) -> Result<VerifiedSignature, ()> {
     let body = std::mem::replace(request.body_mut(), Body::empty());
     let bytes = to_bytes(body, MAX_SIGNED_BODY_BYTES)
         .await
@@ -113,7 +121,6 @@ async fn verify_request(
 
     let signature_inputs = parse_dictionary(header_value(request.headers(), "signature-input")?)?;
     let signatures = parse_dictionary(header_value(request.headers(), "signature")?)?;
-    let now = Utc::now().timestamp();
     let target_uri = target_uri(request.uri(), request.headers())?;
     let idempotency_key = request
         .headers()
@@ -406,6 +413,65 @@ mod tests {
         verify_request(&mut request, &key)
             .await
             .map_err(|()| "settlement signature must verify")?;
+        Ok(())
+    }
+
+    /// Requests signed by the Python SDK (`sdk/python/tests/vectors.py`) verify here unchanged.
+    #[tokio::test]
+    async fn python_sdk_signatures_verify() -> Result<(), Box<dyn Error>> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/rfc9421-python-signer.json"
+        ))?;
+        let key = VerificationKey::from_base64(
+            fixture["keyid"].as_str().ok_or("keyid")?.to_owned(),
+            fixture["public_key"].as_str().ok_or("public_key")?,
+        )?;
+        let created = fixture["created"].as_i64().ok_or("created")?;
+        let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
+        assert_eq!(vectors.len(), 4);
+
+        for vector in vectors {
+            let name = vector["name"].as_str().ok_or("name")?;
+            let body = vector["body"].as_str().ok_or("body")?;
+            let request = |body: &str| -> Result<Request, Box<dyn Error>> {
+                let mut builder = Request::builder()
+                    .method(vector["method"].as_str().ok_or("method")?)
+                    .uri(vector["target"].as_str().ok_or("target")?);
+                for (header, value) in vector["headers"].as_object().ok_or("headers")? {
+                    builder = builder.header(header, value.as_str().ok_or("header value")?);
+                }
+                Ok(builder.body(Body::from(body.to_owned()))?)
+            };
+
+            let verified = verify_request_at(&mut request(body)?, &key, created + 300)
+                .await
+                .map_err(|()| format!("{name}: Python signature must verify"))?;
+            assert_eq!(verified.kid, "sdk-vector/v1", "{name}");
+            assert_eq!(verified.created.timestamp(), created, "{name}");
+
+            assert!(
+                verify_request_at(&mut request(body)?, &key, created + 301)
+                    .await
+                    .is_err(),
+                "{name}: stale signature must fail"
+            );
+            assert!(
+                verify_request_at(&mut request(&format!("{body} "))?, &key, created)
+                    .await
+                    .is_err(),
+                "{name}: altered body must fail"
+            );
+            let other_key = VerificationKey::from_base64(
+                key.kid.clone(),
+                &STANDARD.encode(SigningKey::from_bytes(&[9; 32]).verifying_key().as_bytes()),
+            )?;
+            assert!(
+                verify_request_at(&mut request(body)?, &other_key, created)
+                    .await
+                    .is_err(),
+                "{name}: wrong key must fail"
+            );
+        }
         Ok(())
     }
 }
