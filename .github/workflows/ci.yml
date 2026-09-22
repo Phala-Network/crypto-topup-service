@@ -55,6 +55,13 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+      - name: Runtime binary builds without conformance-only features
+        run: |
+          cargo check -p topup --locked
+          if cargo tree -p topup --locked -e features -i topup-adapters | grep -q 'feature "conformance"'; then
+            echo "topup-adapters/conformance must never reach the topup runtime" >&2
+            exit 1
+          fi
 
   test:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}

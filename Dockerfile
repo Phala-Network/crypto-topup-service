@@ -10,7 +10,7 @@ COPY .sqlx ./.sqlx
 COPY crates ./crates
 RUN SQLX_OFFLINE=true \
     RUSTFLAGS="--remap-path-prefix=/workspace=. -C link-arg=-Wl,--build-id=none" \
-    cargo build --release --locked
+    cargo build --release --locked -p topup
 
 FROM gcr.io/distroless/cc-debian12:latest@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
 
