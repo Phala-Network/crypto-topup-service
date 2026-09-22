@@ -21,7 +21,6 @@ fn help_and_version_succeed() {
 fn placeholder_commands_fail_with_a_clear_message() {
     let commands: &[&[&str]] = &[
         &["run"],
-        &["migrate"],
         &["route", "validate", "route.toml"],
         &["attest"],
         &["restore-check"],
@@ -37,4 +36,21 @@ fn placeholder_commands_fail_with_a_clear_message() {
             "{args:?} should report that it is not implemented"
         );
     }
+}
+
+#[test]
+fn migrate_requires_a_database_url() {
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .arg("migrate")
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("DATABASE_URL is required for migrate")
+            || stderr.contains("DATABASE_URL is required for migrate")
+    );
 }
