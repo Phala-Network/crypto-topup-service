@@ -51,6 +51,9 @@ enum TopupCommand {
         /// Interval between deposit state-age scans.
         #[arg(long, default_value_t = 60)]
         age_alert_interval_s: u64,
+        /// Minimum interval between repeated alerts for the same deposit state.
+        #[arg(long, default_value_t = 60 * 60)]
+        age_alert_reminder_s: u64,
     },
     Migrate,
     Route {
@@ -100,6 +103,7 @@ async fn main() -> ExitCode {
             step_timeout_s,
             wait_interval_s,
             age_alert_interval_s,
+            age_alert_reminder_s,
         } => {
             return run(
                 &routes,
@@ -107,6 +111,7 @@ async fn main() -> ExitCode {
                 step_timeout_s,
                 wait_interval_s,
                 age_alert_interval_s,
+                age_alert_reminder_s,
             )
             .await;
         }
@@ -183,9 +188,14 @@ async fn run(
     step_timeout_s: u64,
     wait_interval_s: u64,
     age_alert_interval_s: u64,
+    age_alert_reminder_s: u64,
 ) -> ExitCode {
     if age_alert_interval_s == 0 {
         tracing::error!("age alert interval must be positive");
+        return ExitCode::FAILURE;
+    }
+    if age_alert_reminder_s == 0 {
+        tracing::error!("age alert reminder interval must be positive");
         return ExitCode::FAILURE;
     }
     let routes = match load_routes(route_paths) {
@@ -236,6 +246,7 @@ async fn run(
         }
     };
     let steps = Arc::new(NoopStepSet::build());
+    tracing::warn!("NoopStepSet is active; deposit steps perform no real work");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
@@ -254,11 +265,12 @@ async fn run(
         }));
     }
     let metrics = Arc::new(PumpMetrics::default());
-    let age_alerter = AgeAlerter::new(
+    let age_alerter = AgeAlerter::with_reminder_interval(
         pool.clone(),
         age_config,
         Arc::clone(&metrics),
         Duration::from_secs(age_alert_interval_s),
+        Duration::from_secs(age_alert_reminder_s),
     );
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
@@ -266,7 +278,7 @@ async fn run(
     });
 
     tracing::info!(pumps = pump_count.get(), "topup service started");
-    if let Err(error) = tokio::signal::ctrl_c().await {
+    if let Err(error) = wait_for_shutdown_signal().await {
         tracing::error!(%error, "failed to listen for shutdown signal");
         cancellation.cancel();
         return ExitCode::FAILURE;
@@ -296,6 +308,25 @@ async fn run(
     } else {
         ExitCode::FAILURE
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        received = terminate.recv() => received
+            .ok_or_else(|| Error::new(ErrorKind::BrokenPipe, "SIGTERM listener closed")),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {

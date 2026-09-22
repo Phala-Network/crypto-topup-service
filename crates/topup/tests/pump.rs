@@ -16,13 +16,14 @@ use sqlx::{Executor, PgPool, Row};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use topup::db::{
-    self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, SettlementIntent,
+    self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
+    SettlementIntent,
 };
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, PumpMetrics, RunOnceResult, Step,
-    StepSet,
+    StepResult, StepSet,
 };
-use topup_core::deposit::{DepositState, RetryError, StepOutcome, WaitReason};
+use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
@@ -224,34 +225,26 @@ async fn late_step_result_is_stale_after_the_lease_is_reclaimed() -> Result<()> 
 }
 
 #[tokio::test]
-async fn intent_survives_a_step_panic_and_the_deposit_is_reclaimed() -> Result<()> {
+async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 3).await?;
             let id = insert_deposit(&context.app_pool, seed, 3).await?;
-            let panic_step = IntentThenPanicStep {
-                pool: context.app_pool.clone(),
-                product_id: seed.product_id,
-            };
-            let steps = StepSet::new(
-                Box::new(panic_step),
-                Box::new(StaticStep(StepOutcome::Advance)),
-                Box::new(StaticStep(StepOutcome::Advance)),
-                Box::new(StaticStep(StepOutcome::Advance)),
-            );
-            let first = test_pump(&context.app_pool, steps, PumpConfig::default(), u64::MAX)?;
-            ensure!(first.run_once().await? == RunOnceResult::Applied { deposit_id: id });
-            let stored = db::get_deposit(&context.app_pool, id)
+            let dead_worker_lease = Uuid::new_v4();
+            let claimed = db::claim_deposit(&context.app_pool, dead_worker_lease)
                 .await?
-                .context("deposit must exist")?;
-            ensure!(stored.state == DepositState::Detected && stored.attempt == 1);
-            let intents: i64 =
-                sqlx::query("SELECT count(*) FROM settlements WHERE deposit_id = $1")
-                    .bind(id)
-                    .fetch_one(&context.app_pool)
-                    .await?
-                    .try_get(0)?;
-            ensure!(intents == 1);
+                .context("dead worker should claim the deposit")?;
+            ensure!(claimed.id == id);
+            db::upsert_intent(
+                &context.app_pool,
+                &SettlementIntent {
+                    deposit_id: id,
+                    product_id: seed.product_id,
+                    key: format!("deposit:{id}"),
+                    payload: json!({"deposit_id": id}),
+                },
+            )
+            .await?;
 
             let second = test_pump(
                 &context.app_pool,
@@ -264,15 +257,132 @@ async fn intent_survives_a_step_panic_and_the_deposit_is_reclaimed() -> Result<(
                 },
                 0,
             )?;
+            ensure!(second.run_once().await? == RunOnceResult::Idle);
+            let intents: i64 =
+                sqlx::query("SELECT count(*) FROM settlements WHERE deposit_id = $1")
+                    .bind(id)
+                    .fetch_one(&context.app_pool)
+                    .await?
+                    .try_get(0)?;
+            ensure!(intents == 1);
+
+            sqlx::query(
+                "UPDATE deposits SET lease_until = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&context.app_pool)
+            .await?;
             ensure!(second.run_once().await? == RunOnceResult::Applied { deposit_id: id });
-            ensure!(transition_count(&context.app_pool, id).await? == 2);
+            ensure!(transition_count(&context.app_pool, id).await? == 1);
             ensure!(
                 db::get_deposit(&context.app_pool, id)
                     .await?
                     .context("deposit must exist")?
                     .attempt
-                    == 1
+                    == 0
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn product_accepted_answer_is_adopted_as_credited() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 8).await?;
+            let accepted_id = insert_deposit(&context.app_pool, seed, 11).await?;
+            let accepted = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::AdoptProductAnswer { credited: true }),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                accepted.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: accepted_id
+                    }
+            );
+            let accepted_deposit = db::get_deposit(&context.app_pool, accepted_id)
+                .await?
+                .context("accepted deposit")?;
+            ensure!(accepted_deposit.state == DepositState::Credited);
+            ensure!(accepted_deposit.reason.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn product_rejected_answer_is_adopted_as_product_refused() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 10).await?;
+            let rejected_id = insert_deposit(&context.app_pool, seed, 12).await?;
+            let rejected = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::AdoptProductAnswer { credited: false }),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                rejected.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: rejected_id
+                    }
+            );
+            let rejected_deposit = db::get_deposit(&context.app_pool, rejected_id)
+                .await?
+                .context("rejected deposit")?;
+            ensure!(rejected_deposit.state == DepositState::Rejected);
+            ensure!(rejected_deposit.reason == Some(RejectReason::ProductRefused));
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 9).await?;
+            let id = insert_deposit(&context.app_pool, seed, 13).await?;
+            let event_id = Uuid::new_v4();
+            let result = StepResult {
+                outcome: StepOutcome::Advance,
+                evidence: json!({"provider": "test", "confirmed": true}),
+                events: vec![OutboxEvent {
+                    id: event_id,
+                    event_type: "deposit.confirmed".to_owned(),
+                    payload: json!({"deposit_id": id}),
+                    next_attempt_at: Utc::now(),
+                }],
+            };
+            let pump = test_pump(
+                &context.app_pool,
+                result_steps(result),
+                PumpConfig::default(),
+                0,
+            )?;
+
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id: id });
+            let evidence: serde_json::Value =
+                sqlx::query("SELECT evidence FROM transitions WHERE deposit_id = $1")
+                    .bind(id)
+                    .fetch_one(&context.app_pool)
+                    .await?
+                    .try_get(0)?;
+            ensure!(evidence == json!({"provider": "test", "confirmed": true}));
+            let event_count: i64 = sqlx::query("SELECT count(*) FROM outbox WHERE id = $1")
+                .bind(event_id)
+                .fetch_one(&context.app_pool)
+                .await?
+                .try_get(0)?;
+            ensure!(event_count == 1);
             Ok(())
         })
     })
@@ -287,9 +397,9 @@ async fn step_timeout_is_persisted_as_a_retry() -> Result<()> {
             let id = insert_deposit(&context.app_pool, seed, 10).await?;
             let steps = StepSet::new(
                 Box::new(SlowStep),
-                Box::new(StaticStep(StepOutcome::Advance)),
-                Box::new(StaticStep(StepOutcome::Advance)),
-                Box::new(StaticStep(StepOutcome::Advance)),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
             );
             let pump = test_pump(
                 &context.app_pool,
@@ -459,6 +569,7 @@ async fn age_alert_uses_route_threshold_and_increments_the_metric() -> Result<()
             let yaml = include_str!("fixtures/phala-cloud-pha.yaml");
             let mut route: RouteFile = serde_saphyr::from_str(yaml)?;
             route.alerts.stuck_after_s.detected = 1;
+            route.alerts.stuck_after_s.confirmed = 1;
             let config = AgeAlertConfig::from_routes(&[route])?;
             let metrics = Arc::new(PumpMetrics::default());
             let alerter = AgeAlerter::new(
@@ -468,20 +579,28 @@ async fn age_alert_uses_route_threshold_and_increments_the_metric() -> Result<()
                 StdDuration::from_secs(60),
             );
             ensure!(alerter.scan_once().await? == 1);
+            ensure!(alerter.scan_once().await? == 0);
             ensure!(metrics.stuck_deposit_alerts() == 1);
+
+            sqlx::query("UPDATE deposits SET state = 'confirmed' WHERE id = $1")
+                .bind(id)
+                .execute(&context.app_pool)
+                .await?;
+            ensure!(alerter.scan_once().await? == 1);
+            ensure!(metrics.stuck_deposit_alerts() == 2);
             Ok(())
         })
     })
     .await
 }
 
-#[derive(Clone, Copy)]
-struct StaticStep(StepOutcome);
+#[derive(Clone)]
+struct StaticStep(StepResult);
 
 #[async_trait]
 impl Step for StaticStep {
-    async fn run(&self, _deposit: &db::Deposit) -> StepOutcome {
-        self.0
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        self.0.clone()
     }
 }
 
@@ -489,9 +608,9 @@ struct SlowStep;
 
 #[async_trait]
 impl Step for SlowStep {
-    async fn run(&self, _deposit: &db::Deposit) -> StepOutcome {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
         tokio::time::sleep(StdDuration::from_secs(5)).await;
-        StepOutcome::Advance
+        step_result(StepOutcome::Advance)
     }
 }
 
@@ -537,7 +656,7 @@ struct BlockingStep {
 
 #[async_trait]
 impl Step for BlockingStep {
-    async fn run(&self, deposit: &db::Deposit) -> StepOutcome {
+    async fn run(&self, deposit: &db::Deposit) -> StepResult {
         self.control
             .claimed
             .lock()
@@ -547,32 +666,7 @@ impl Step for BlockingStep {
         if let Ok(permit) = self.control.release.acquire().await {
             permit.forget();
         }
-        self.outcome
-    }
-}
-
-struct IntentThenPanicStep {
-    pool: PgPool,
-    product_id: Uuid,
-}
-
-#[async_trait]
-impl Step for IntentThenPanicStep {
-    async fn run(&self, deposit: &db::Deposit) -> StepOutcome {
-        let result = db::upsert_intent(
-            &self.pool,
-            &SettlementIntent {
-                deposit_id: deposit.id,
-                product_id: self.product_id,
-                key: format!("deposit:{}", deposit.id),
-                payload: json!({"deposit_id": deposit.id}),
-            },
-        )
-        .await;
-        if let Err(error) = result {
-            panic!("failed to write settlement intent: {error}");
-        }
-        panic!("simulated crash after settlement intent");
+        step_result(self.outcome)
     }
 }
 
@@ -585,20 +679,28 @@ impl JitterSource for FixedJitter {
 }
 
 fn static_steps(outcome: StepOutcome) -> StepSet {
+    result_steps(step_result(outcome))
+}
+
+fn result_steps(result: StepResult) -> StepSet {
     StepSet::new(
-        Box::new(StaticStep(outcome)),
-        Box::new(StaticStep(outcome)),
-        Box::new(StaticStep(outcome)),
-        Box::new(StaticStep(outcome)),
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result)),
     )
+}
+
+fn step_result(outcome: StepOutcome) -> StepResult {
+    StepResult::new(outcome, json!({"source": "test"}))
 }
 
 fn blocking_steps(control: Arc<StepControl>, outcome: StepOutcome) -> StepSet {
     StepSet::new(
         Box::new(BlockingStep { control, outcome }),
-        Box::new(StaticStep(outcome)),
-        Box::new(StaticStep(outcome)),
-        Box::new(StaticStep(outcome)),
+        Box::new(StaticStep(step_result(outcome))),
+        Box::new(StaticStep(step_result(outcome))),
+        Box::new(StaticStep(step_result(outcome))),
     )
 }
 

@@ -1,4 +1,8 @@
 //! Concurrent deposit state-machine pumps and state-age alerts.
+//!
+//! A step panic is not caught: release builds abort the process, the outstanding lease expires,
+//! and another pump re-claims the deposit after the process restarts. Step timeouts remain durable
+//! retry outcomes.
 
 mod age;
 
@@ -11,16 +15,17 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use topup_core::deposit::{
-    DepositState, RetryError, StepOutcome, TransitionKind, WaitReason, next,
+    DepositState, RejectReason, RetryError, StepOutcome, TransitionKind, WaitReason, next,
 };
 use topup_core::retry::backoff;
 use uuid::Uuid;
 
-use crate::db::{self, ApplyTransitionError, ApplyTransitionResult, Deposit, TransitionUpdate};
+use crate::db::{
+    self, ApplyTransitionError, ApplyTransitionResult, Deposit, OutboxEvent, TransitionUpdate,
+};
 
 pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter, PumpMetrics};
 
@@ -29,8 +34,31 @@ const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 /// One asynchronous operation for a non-terminal deposit state.
 #[async_trait]
 pub trait Step: Send + Sync {
-    /// Runs the state-specific operation and returns its domain outcome.
-    async fn run(&self, deposit: &Deposit) -> StepOutcome;
+    /// Runs the state-specific operation and returns its atomic persistence result.
+    async fn run(&self, deposit: &Deposit) -> StepResult;
+}
+
+/// State-machine outcome and the evidence and events committed with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepResult {
+    /// Domain outcome used by [`topup_core::deposit::next`].
+    pub outcome: StepOutcome,
+    /// Evidence written to the transition timeline.
+    pub evidence: Value,
+    /// Outbox events committed in the same transaction as the transition.
+    pub events: Vec<OutboxEvent>,
+}
+
+impl StepResult {
+    /// Creates a result without outbox events.
+    #[must_use]
+    pub const fn new(outcome: StepOutcome, evidence: Value) -> Self {
+        Self {
+            outcome,
+            evidence,
+            events: Vec::new(),
+        }
+    }
 }
 
 /// Registry containing exactly one step for every non-terminal deposit state.
@@ -89,10 +117,13 @@ struct NoopStep;
 
 #[async_trait]
 impl Step for NoopStep {
-    async fn run(&self, _deposit: &Deposit) -> StepOutcome {
-        StepOutcome::Wait {
-            reason: WaitReason::Paused,
-        }
+    async fn run(&self, _deposit: &Deposit) -> StepResult {
+        StepResult::new(
+            StepOutcome::Wait {
+                reason: WaitReason::Paused,
+            },
+            json!({"outcome": "wait", "reason": "noop_step_set"}),
+        )
     }
 }
 
@@ -258,9 +289,9 @@ impl Pump {
             return Ok(RunOnceResult::Idle);
         };
         let deposit_id = deposit.id;
-        let outcome = self.run_step(deposit.clone()).await;
-        let (outcome, transition) = match next(deposit.state, &outcome) {
-            Ok(transition) => (outcome, transition),
+        let result = self.run_step(&deposit).await;
+        let result = match next(deposit.state, &result.outcome) {
+            Ok(transition) => (result, transition),
             Err(error) => {
                 tracing::error!(
                     deposit_id = %deposit.id,
@@ -268,14 +299,21 @@ impl Pump {
                     %error,
                     "step returned an invalid outcome"
                 );
-                let retry = StepOutcome::Retry {
-                    error: RetryError::InvariantViolation,
-                };
-                let transition = next(deposit.state, &retry)
+                let result = StepResult::new(
+                    StepOutcome::Retry {
+                        error: RetryError::InvariantViolation,
+                    },
+                    json!({
+                        "outcome": "retry",
+                        "error": "invalid_step_outcome",
+                    }),
+                );
+                let transition = next(deposit.state, &result.outcome)
                     .map_err(|_| PumpError::MissingStep(deposit.state))?;
-                (retry, transition)
+                (result, transition)
             }
         };
+        let (result, transition) = result;
         let now = Utc::now();
         let attempt = match transition.kind {
             TransitionKind::Advanced => 0,
@@ -297,14 +335,16 @@ impl Pump {
             .ok_or(PumpError::ScheduleOutsideChronoRange)?;
         let update = TransitionUpdate {
             transition,
-            rejection_reason: match outcome {
+            rejection_reason: match result.outcome {
                 StepOutcome::Reject(reason) => Some(reason),
+                StepOutcome::AdoptProductAnswer { credited: false } => {
+                    Some(RejectReason::ProductRefused)
+                }
                 _ => None,
             },
             attempt,
             next_attempt_at,
         };
-        let evidence = outcome_evidence(&outcome);
         let mut transaction = self.pool.begin().await?;
         let applied = db::apply_transition(
             &mut transaction,
@@ -312,8 +352,8 @@ impl Pump {
             deposit.state,
             lease_token,
             update,
-            &evidence,
-            &[],
+            &result.evidence,
+            &result.events,
         )
         .await?;
         transaction.commit().await?;
@@ -340,35 +380,28 @@ impl Pump {
         }
     }
 
-    async fn run_step(&self, deposit: Deposit) -> StepOutcome {
+    async fn run_step(&self, deposit: &Deposit) -> StepResult {
         let state = deposit.state;
-        let steps = Arc::clone(&self.steps);
-        let mut task: JoinHandle<Option<StepOutcome>> = tokio::spawn(async move {
-            let step = steps.get(state)?;
-            Some(step.run(&deposit).await)
-        });
-
-        match timeout(self.config.step_timeout, &mut task).await {
-            Ok(Ok(Some(outcome))) => outcome,
-            Ok(Ok(None)) => {
-                tracing::error!(state = ?state, "no step registered for claimed state");
+        let Some(step) = self.steps.get(state) else {
+            tracing::error!(state = ?state, "no step registered for claimed state");
+            return StepResult::new(
                 StepOutcome::Retry {
                     error: RetryError::InvariantViolation,
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(state = ?state, panic = error.is_panic(), "deposit step failed");
-                StepOutcome::Retry {
-                    error: RetryError::Transient,
-                }
-            }
+                },
+                json!({"outcome": "retry", "error": "missing_step"}),
+            );
+        };
+
+        match timeout(self.config.step_timeout, step.run(deposit)).await {
+            Ok(result) => result,
             Err(_) => {
-                task.abort();
-                let _ = task.await;
                 tracing::warn!(state = ?state, "deposit step timed out");
-                StepOutcome::Retry {
-                    error: RetryError::Transient,
-                }
+                StepResult::new(
+                    StepOutcome::Retry {
+                        error: RetryError::Transient,
+                    },
+                    json!({"outcome": "retry", "error": "step_timeout"}),
+                )
             }
         }
     }
@@ -422,36 +455,36 @@ impl From<ApplyTransitionError> for PumpError {
     }
 }
 
-fn outcome_evidence(outcome: &StepOutcome) -> Value {
-    match outcome {
-        StepOutcome::Advance => json!({"outcome": "advance"}),
-        StepOutcome::Reject(reason) => {
-            json!({"outcome": "reject", "reason": reason.code()})
-        }
-        StepOutcome::Retry { error } => {
-            json!({"outcome": "retry", "error": retry_error_code(*error)})
-        }
-        StepOutcome::Wait { reason } => {
-            json!({"outcome": "wait", "reason": wait_reason_code(*reason)})
-        }
-        StepOutcome::AdoptProductAnswer { credited } => {
-            json!({"outcome": "adopt_product_answer", "credited": credited})
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use serde_json::json;
+    use topup_adapters::signer::actor::SignerHandle;
+    use topup_core::Signer as _;
+    use topup_core::deposit::{StepOutcome, WaitReason};
+
+    use super::{Deposit, Step, StepResult};
+
+    struct SignerBackedStep {
+        signer: SignerHandle,
+    }
+
+    #[async_trait]
+    impl Step for SignerBackedStep {
+        async fn run(&self, _deposit: &Deposit) -> StepResult {
+            let _ = self.signer.settlement_public_key().await;
+            StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::Paused,
+                },
+                json!({"outcome": "wait"}),
+            )
         }
     }
-}
 
-const fn retry_error_code(error: RetryError) -> &'static str {
-    match error {
-        RetryError::Transient => "transient",
-        RetryError::SanctionsInconclusive => "sanctions_inconclusive",
-        RetryError::InvariantViolation => "invariant_violation",
-    }
-}
-
-const fn wait_reason_code(reason: WaitReason) -> &'static str {
-    match reason {
-        WaitReason::Paused => "paused",
-        WaitReason::ProductProcessing => "product_processing",
-        WaitReason::FlushNotConfirmed => "flush_not_confirmed",
+    #[test]
+    fn signer_handle_satisfies_step_send_bounds() {
+        fn assert_step<T: Step>() {}
+        assert_step::<SignerBackedStep>();
     }
 }

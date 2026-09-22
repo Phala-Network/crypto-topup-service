@@ -3,15 +3,18 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
+use tokio::sync::Mutex;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::deposit::DepositState;
 use topup_core::route::{RouteFile, StuckAfterConfig};
 use uuid::Uuid;
+
+const DEFAULT_REMINDER_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Route-version-indexed thresholds for state-age alerts.
 #[derive(Clone, Debug)]
@@ -93,6 +96,8 @@ pub struct AgeAlerter {
     config: AgeAlertConfig,
     metrics: Arc<PumpMetrics>,
     scan_interval: Duration,
+    reminder_interval: Duration,
+    alerts: Mutex<BTreeMap<Uuid, AlertRecord>>,
 }
 
 impl AgeAlerter {
@@ -104,11 +109,31 @@ impl AgeAlerter {
         metrics: Arc<PumpMetrics>,
         scan_interval: Duration,
     ) -> Self {
+        Self::with_reminder_interval(
+            pool,
+            config,
+            metrics,
+            scan_interval,
+            DEFAULT_REMINDER_INTERVAL,
+        )
+    }
+
+    /// Creates an alerter with an explicit reminder interval.
+    #[must_use]
+    pub fn with_reminder_interval(
+        pool: PgPool,
+        config: AgeAlertConfig,
+        metrics: Arc<PumpMetrics>,
+        scan_interval: Duration,
+        reminder_interval: Duration,
+    ) -> Self {
         Self {
             pool,
             config,
             metrics,
             scan_interval,
+            reminder_interval,
+            alerts: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -154,7 +179,10 @@ impl AgeAlerter {
         .fetch_all(&self.pool)
         .await?;
         let now = Utc::now();
+        let alert_now = Instant::now();
         let mut alert_count = 0_u64;
+        let mut observed_states = BTreeMap::new();
+        let mut alerts = self.alerts.lock().await;
         for row in rows {
             let Some(route) = row.route.as_deref() else {
                 continue;
@@ -168,6 +196,7 @@ impl AgeAlerter {
             let Some(state) = parse_active_state(&row.state) else {
                 continue;
             };
+            observed_states.insert(row.id, state);
             let Some(threshold) = self.config.threshold(route, version, state) else {
                 continue;
             };
@@ -175,7 +204,11 @@ impl AgeAlerter {
             let Ok(threshold_seconds) = i64::try_from(threshold) else {
                 continue;
             };
-            if age_seconds > threshold_seconds {
+            let reminder_due = alerts.get(&row.id).is_none_or(|alert| {
+                alert.state != state
+                    || alert_now.duration_since(alert.last_alerted_at) >= self.reminder_interval
+            });
+            if age_seconds > threshold_seconds && reminder_due {
                 tracing::warn!(
                     deposit_id = %row.id,
                     route,
@@ -187,10 +220,23 @@ impl AgeAlerter {
                 );
                 self.metrics.record_stuck_deposit();
                 alert_count = alert_count.saturating_add(1);
+                alerts.insert(
+                    row.id,
+                    AlertRecord {
+                        state,
+                        last_alerted_at: alert_now,
+                    },
+                );
             }
         }
+        alerts.retain(|id, alert| observed_states.get(id) == Some(&alert.state));
         Ok(alert_count)
     }
+}
+
+struct AlertRecord {
+    state: DepositState,
+    last_alerted_at: Instant,
 }
 
 #[derive(FromRow)]
