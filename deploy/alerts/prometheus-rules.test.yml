@@ -82,19 +82,24 @@ tests:
         alertname: TopupLoopStopped
         exp_alerts: []
 
-  - name: long running pump step is healthy until its execution deadline
+  - name: a pump step using its full 240s timeout does not page
     interval: 1m
     input_series:
       - series: 'topup_loop_expected{loop="pump",loop_instance="0",producer_enabled="true"}'
         values: '1x10'
+      # The step starts at 1m and never finishes; its deadline is heartbeat + 240s.
       - series: 'topup_loop_heartbeat_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
-        values: '1x10'
+        values: '0 60x10'
       - series: 'topup_loop_wait_until_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
         values: '0x10'
       - series: 'topup_loop_deadline_unixtime_seconds{loop="pump",loop_instance="0",producer_enabled="true"}'
-        values: '300x10'
+        values: '0 300x10'
     alert_rule_test:
+      # Without the deadline the 120s heartbeat threshold plus `for: 1m` would fire at 5m.
       - eval_time: 4m
+        alertname: TopupLoopStopped
+        exp_alerts: []
+      - eval_time: 5m
         alertname: TopupLoopStopped
         exp_alerts: []
       - eval_time: 6m
