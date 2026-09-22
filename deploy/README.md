@@ -115,6 +115,14 @@ export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager. Do not add
 `--prepare-only`; it does not halt the create path in this CLI version.
 
+Phala CLI 1.1.22 writes `Provisioning CVM ...` to stdout before writing the pretty-printed JSON
+object, and its deploy command has no separate output-file option. Preserve the complete stdout for
+the deployment record, then extract from the first JSON object line and validate it before reading
+any fields. See the pinned
+[create handler](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts#L750-L752),
+[JSON response](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts#L869-L887),
+and [deploy options](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts#L373-L377).
+
 ```sh
 npx --yes phala@1.1.22 deploy --json \
   --name crypto-topup-staging \
@@ -131,7 +139,9 @@ npx --yes phala@1.1.22 deploy --json \
   --no-public-sysinfo \
   --public-tcbinfo \
   --secure-time \
-  --wait > provision.json
+  --wait > provision.raw
+sed -n '/^{/,$p' provision.raw > provision.json
+jq -e . provision.json >/dev/null
 export CVM_ID="$(jq -er '.vm_uuid' provision.json)"
 export APP_ID="$(jq -er '.app_id' provision.json)"
 case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
