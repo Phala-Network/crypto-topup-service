@@ -1,0 +1,8 @@
+.git
+.github
+target
+contracts/cache
+contracts/out
+contracts/broadcast
+.env
+.env.*
