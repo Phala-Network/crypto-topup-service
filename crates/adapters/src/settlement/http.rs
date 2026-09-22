@@ -454,9 +454,7 @@ mod tests {
             Err(SignerError::KeyUnavailable)
         }
 
-        async fn settlement_public_key(
-            &self,
-        ) -> Result<topup_core::Ed25519PublicKey, SignerError> {
+        async fn settlement_public_key(&self) -> Result<topup_core::Ed25519PublicKey, SignerError> {
             Ok(topup_core::Ed25519PublicKey(
                 self.0.verifying_key().to_bytes(),
             ))
