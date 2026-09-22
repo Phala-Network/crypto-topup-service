@@ -7,6 +7,7 @@ chain:
   name: ethereum-sepolia
   finality: finalized
   rpc_providers: [provider-a, provider-b]
+  operator_key_version: 1
   contracts:
     forwarder_factory: "${FORWARDER_FACTORY}"
     implementation: "${IMPLEMENTATION}"
