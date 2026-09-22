@@ -4,12 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
 use topup_core::address::{forwarder_address, persistent_salt};
 use topup_core::money::AtomicAmount;
-use topup_core::refund::{RefundDeposit, refund_eligibility};
+use topup_core::refund::{
+    RefundAccountStatus, RefundAddressKind, RefundDeposit, refund_eligibility,
+};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
@@ -87,7 +92,7 @@ pub async fn register_account(
     .await?;
     let account = sqlx::query_as::<_, AccountRow>(
         r#"
-        SELECT id, product_id, external_id, paused_scopes
+        SELECT id, product_id, external_id, status, paused_scopes
         FROM accounts
         WHERE product_id = $1 AND external_id = $2
         "#,
@@ -109,7 +114,7 @@ pub async fn find_account(
 ) -> Result<Option<Account>, ApiError> {
     let row = sqlx::query_as::<_, AccountRow>(
         r#"
-        SELECT id, product_id, external_id, paused_scopes
+        SELECT id, product_id, external_id, status, paused_scopes
         FROM accounts
         WHERE product_id = $1 AND external_id = $2
         "#,
@@ -292,6 +297,15 @@ pub async fn lookup_product_deposits(
             ));
         }
     }
+    if let Some(cursor) = filters.cursor.as_deref() {
+        let cursor = decode_support_cursor(cursor)?;
+        query
+            .push(" AND (deposit.created_at, deposit.id) < (")
+            .push_bind(cursor.created_at)
+            .push(", ")
+            .push_bind(cursor.id)
+            .push(")");
+    }
     fetch_support_page(pool, query).await
 }
 
@@ -300,7 +314,7 @@ pub async fn request_refund(
     pool: &PgPool,
     product_id: Uuid,
     deposit_id: Uuid,
-    fallback_route: &str,
+    route: &RouteFile,
     to_address: EvmAddress,
     amount: AtomicAmount,
     actor: &str,
@@ -309,6 +323,8 @@ pub async fn request_refund(
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
+               account.status AS account_status, address.kind AS address_kind,
+               rate_lock.amount_atomic::text AS lock_amount_atomic,
                COALESCE(deposit.route, $3) AS pause_route,
                account.paused_scopes AS account_scopes,
                product.paused_scopes AS product_scopes,
@@ -316,6 +332,8 @@ pub async fn request_refund(
         FROM deposits AS deposit
         JOIN accounts AS account ON account.id = deposit.account_id
         JOIN products AS product ON product.id = account.product_id
+        JOIN addresses AS address ON address.id = deposit.address_id
+        LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
         LEFT JOIN route_pauses AS route_pause ON route_pause.route = COALESCE(deposit.route, $3)
         WHERE deposit.id = $1 AND product.id = $2
         FOR UPDATE OF deposit
@@ -323,7 +341,7 @@ pub async fn request_refund(
     )
     .bind(deposit_id)
     .bind(product_id)
-    .bind(fallback_route)
+    .bind(&route.route)
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(ApiError::not_found)?;
@@ -340,9 +358,31 @@ pub async fn request_refund(
 
     let state: String = row.try_get("state")?;
     let reason: Option<String> = row.try_get("reason")?;
+    let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
+    let account_status = match row.try_get::<String, _>("account_status")?.as_str() {
+        "active" => RefundAccountStatus::Active,
+        "closed" => RefundAccountStatus::Closed,
+        _ => return Err(ApiError::internal()),
+    };
+    let address_kind = match row.try_get::<String, _>("address_kind")?.as_str() {
+        "persistent" => RefundAddressKind::Persistent,
+        "lock" => RefundAddressKind::Lock,
+        _ => return Err(ApiError::internal()),
+    };
+    let lock_amount = row
+        .try_get::<Option<String>, _>("lock_amount_atomic")?
+        .map(parse_atomic)
+        .transpose()?
+        .map(AtomicAmount::new);
     let eligibility = RefundDeposit {
         state: crate::db::parse_state(&state).map_err(|_| ApiError::internal())?,
         reason: crate::db::parse_reason(reason.as_deref()).map_err(|_| ApiError::internal())?,
+        amount: AtomicAmount::new(deposit_amount),
+        min_refund: route.asset.min_refund_atomic,
+        account_status,
+        address_kind,
+        lock_amount,
+        lock_tolerance: route.rate_lock.lock_tolerance_bps,
     };
     refund_eligibility(eligibility)
         .map_err(|_| ApiError::conflict("deposit is not eligible for a refund"))?;
@@ -366,7 +406,6 @@ pub async fn request_refund(
         return Ok(existing.into());
     }
 
-    let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
     let prior_total = sqlx::query_scalar::<_, String>(
         "SELECT COALESCE(sum(amount_atomic), 0)::text FROM refunds WHERE deposit_id = $1",
     )
@@ -422,6 +461,9 @@ pub async fn approve_refund(
     let mut transaction = pool.begin().await?;
     let current = refund_admin_row(&mut transaction, refund_id).await?;
     if current.status == "requested" {
+        if refund_approval_paused(&mut transaction, refund_id).await? {
+            return Err(ApiError::paused("refund approvals are paused"));
+        }
         sqlx::query(
             "UPDATE refunds SET status = 'approved', approved_by = $2, updated_at = now() WHERE id = $1",
         )
@@ -458,7 +500,12 @@ pub async fn record_refund(
                 r#"
                 UPDATE refunds
                 SET status = 'sent', tx_hash = $2, next_check_at = now(),
-                    confirmation_evidence = NULL, updated_at = now()
+                    tx_version = tx_version + 1,
+                    confirmation_evidence = jsonb_build_object(
+                        'result', 'recorded', 'tx_hash', $2,
+                        'version', tx_version + 1
+                    ),
+                    updated_at = now()
                 WHERE id = $1
                 "#,
             )
@@ -474,10 +521,41 @@ pub async fn record_refund(
             )
             .await?;
         }
-        "sent" | "confirmed" if current.tx_hash.as_deref() == Some(tx_hash.as_str()) => {}
-        "sent" | "confirmed" => {
+        "sent" if current.tx_hash.as_deref() == Some(tx_hash.as_str()) => {}
+        "sent" => {
+            let previous = current.tx_hash.as_deref().ok_or_else(ApiError::internal)?;
+            sqlx::query(
+                r#"
+                UPDATE refunds
+                SET tx_hash = $2, tx_version = tx_version + 1, next_check_at = now(),
+                    confirmation_evidence = jsonb_build_object(
+                        'result', 'tx_hash_corrected',
+                        'previous_tx_hash', tx_hash,
+                        'replacement_tx_hash', $2,
+                        'previous_evidence', confirmation_evidence,
+                        'version', tx_version + 1
+                    ),
+                    updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(refund_id)
+            .bind(&tx_hash)
+            .execute(&mut *transaction)
+            .await?;
+            insert_audit_tx_with_reason(
+                &mut transaction,
+                actor,
+                "refund_tx_hash_corrected",
+                &format!("refund:{refund_id}"),
+                &format!("replaced {previous} with {tx_hash}"),
+            )
+            .await?;
+        }
+        "confirmed" if current.tx_hash.as_deref() == Some(tx_hash.as_str()) => {}
+        "confirmed" => {
             return Err(ApiError::conflict(
-                "refund already has a different transaction hash",
+                "confirmed refund transaction hash cannot be changed",
             ));
         }
         _ => {
@@ -632,6 +710,7 @@ struct AccountRow {
     id: Uuid,
     product_id: Uuid,
     external_id: String,
+    status: String,
     paused_scopes: Vec<String>,
 }
 
@@ -641,6 +720,7 @@ impl From<AccountRow> for Account {
             id: row.id,
             product_id: row.product_id,
             external_id: row.external_id,
+            status: row.status,
             paused_scopes: row.paused_scopes,
         }
     }
@@ -769,6 +849,12 @@ impl From<RefundAdminRow> for AdminRefundResponse {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct SupportCursor {
+    created_at: DateTime<Utc>,
+    id: Uuid,
+}
+
 impl TryFrom<DepositViewRow> for DepositResponse {
     type Error = ApiError;
 
@@ -879,8 +965,9 @@ async fn fetch_support_page(
             .push(transition.into());
     }
     let next_cursor = has_more
-        .then(|| deposits.last().map(|deposit| deposit.id))
-        .flatten();
+        .then(|| deposits.last().map(encode_support_cursor))
+        .flatten()
+        .transpose()?;
     let deposits = deposits
         .into_iter()
         .map(|deposit| SupportDepositResponse {
@@ -960,10 +1047,11 @@ pub async fn daily_report(
         r#"
         SELECT route, COALESCE(sum(amount_atomic), 0)::text AS amount
         FROM rate_locks
-        WHERE consumed_by IS NULL
+        WHERE consumed_by IS NULL AND expires_at > $1
         GROUP BY route
         "#,
     )
+    .bind(generated_at)
     .fetch_all(pool)
     .await?
     {
@@ -1097,6 +1185,12 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
             "TODO(C7): treasury balance requires the flusher chain balance reader".to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
+        exposure_minor: None,
+        exposure_minor_reason: "TODO(C10): rate locks do not yet persist destination exposure"
+            .to_owned(),
+        pnl_minor: None,
+        pnl_minor_reason: "TODO(C7): route PnL requires treasury balances and valuation inputs"
+            .to_owned(),
         rejected_holds_atomic: "0".to_owned(),
         deposits_by_state: zero_counts(&[
             "detected",
@@ -1130,6 +1224,11 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
                 .to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
+        exposure_minor: None,
+        exposure_minor_reason: "unrouted assets do not have destination rate-lock exposure"
+            .to_owned(),
+        pnl_minor: None,
+        pnl_minor_reason: "unrouted assets do not have route valuation inputs".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
         deposits_by_state: zero_counts(&[
             "detected",
@@ -1184,6 +1283,50 @@ async fn refund_admin_row(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or_else(ApiError::not_found)
+}
+
+async fn refund_approval_paused(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    refund_id: Uuid,
+) -> Result<bool, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT account.paused_scopes AS account_scopes,
+               product.paused_scopes AS product_scopes,
+               COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
+        FROM refunds AS refund
+        JOIN deposits AS deposit ON deposit.id = refund.deposit_id
+        JOIN accounts AS account ON account.id = deposit.account_id
+        JOIN products AS product ON product.id = account.product_id
+        LEFT JOIN route_pauses AS route_pause ON route_pause.route = deposit.route
+        WHERE refund.id = $1
+        "#,
+    )
+    .bind(refund_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let account_scopes: Vec<String> = row.try_get("account_scopes")?;
+    let product_scopes: Vec<String> = row.try_get("product_scopes")?;
+    let route_scopes: Vec<String> = row.try_get("route_scopes")?;
+    Ok([account_scopes, product_scopes, route_scopes]
+        .iter()
+        .any(|scopes| scopes.iter().any(|scope| scope == "refunds")))
+}
+
+fn encode_support_cursor(deposit: &DepositResponse) -> Result<String, ApiError> {
+    let cursor = SupportCursor {
+        created_at: deposit.created_at,
+        id: deposit.id,
+    };
+    let encoded = serde_json::to_vec(&cursor).map_err(|_| ApiError::internal())?;
+    Ok(URL_SAFE_NO_PAD.encode(encoded))
+}
+
+fn decode_support_cursor(cursor: &str) -> Result<SupportCursor, ApiError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| ApiError::bad_request("cursor is invalid"))?;
+    serde_json::from_slice(&decoded).map_err(|_| ApiError::bad_request("cursor is invalid"))
 }
 
 async fn lock_account(
@@ -1272,6 +1415,16 @@ async fn insert_audit_tx(
     action: &str,
     subject: &str,
 ) -> Result<(), ApiError> {
+    insert_audit_tx_with_reason(transaction, actor, action, subject, "signed API request").await
+}
+
+async fn insert_audit_tx_with_reason(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    actor: &str,
+    action: &str,
+    subject: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO audit (id, actor, action, subject, reason) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -1279,7 +1432,7 @@ async fn insert_audit_tx(
     .bind(actor)
     .bind(action)
     .bind(subject)
-    .bind("signed API request")
+    .bind(reason)
     .execute(&mut **transaction)
     .await?;
     Ok(())

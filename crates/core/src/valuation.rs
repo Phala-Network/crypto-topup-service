@@ -478,6 +478,7 @@ mod tests {
                     contract: asset,
                     decimals: 18,
                     min_flush_atomic: AtomicAmount::new(U256::ZERO),
+                    min_refund_atomic: AtomicAmount::new(U256::ZERO),
                 },
                 destination: DestinationConfig {
                     product: "phala-cloud".to_owned(),

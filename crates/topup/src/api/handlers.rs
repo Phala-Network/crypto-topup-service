@@ -351,13 +351,13 @@ pub(crate) async fn request_refund(
     let amount = U256::from_str(&request.amount)
         .map(AtomicAmount::new)
         .map_err(|_| ApiError::bad_request("amount must be an unsigned atomic integer"))?;
-    let fallback_route = state.route_for_product(&product)?.route.clone();
+    let route = state.route_for_product(&product)?;
     Ok(Json(
         repository::request_refund(
             &state.pool,
             product.id,
             deposit_id,
-            &fallback_route,
+            route,
             to_address,
             amount,
             &format!("product:{}", product.id),
@@ -678,6 +678,7 @@ fn account_response(account: Account) -> AccountResponse {
     AccountResponse {
         id: account.id,
         external_id: account.external_id,
+        status: account.status,
         paused_scopes: account.paused_scopes,
     }
 }

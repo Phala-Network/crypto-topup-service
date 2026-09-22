@@ -19,6 +19,8 @@ pub struct AccountResponse {
     pub id: Uuid,
     /// Product-owned account identifier.
     pub external_id: String,
+    /// Workspace lifecycle state.
+    pub status: String,
     /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
 }
@@ -80,6 +82,8 @@ pub struct DepositLookupQuery {
     pub address: Option<String>,
     /// Product lock reference.
     pub lock_ref: Option<String>,
+    /// Opaque `(created_at, id)` cursor returned by the previous support page.
+    pub cursor: Option<String>,
 }
 
 /// Product-visible deposit facts.
@@ -158,7 +162,7 @@ pub struct SupportDepositsResponse {
     /// Matching deposits in descending creation order.
     pub deposits: Vec<SupportDepositResponse>,
     /// Cursor for the next page, or `null` when exhausted.
-    pub next_cursor: Option<Uuid>,
+    pub next_cursor: Option<String>,
 }
 
 /// A page of deposits.
@@ -327,6 +331,14 @@ pub struct RouteDailyReport {
     pub unflushed_balance_atomic: String,
     /// Sum of unconsumed rate-lock token amounts.
     pub open_rate_lock_exposure_atomic: String,
+    /// Open lock exposure in destination minor units, when available.
+    pub exposure_minor: Option<String>,
+    /// Reason destination exposure is unavailable.
+    pub exposure_minor_reason: String,
+    /// Route PnL in destination minor units, when available.
+    pub pnl_minor: Option<String>,
+    /// Reason route PnL is unavailable.
+    pub pnl_minor_reason: String,
     /// Rejected token amount still held after confirmed refunds.
     pub rejected_holds_atomic: String,
     /// Deposit counts keyed by state.

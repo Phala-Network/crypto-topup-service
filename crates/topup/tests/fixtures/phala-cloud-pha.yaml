@@ -20,6 +20,7 @@ asset:
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
   min_flush_atomic: "20000000000000000000000"
+  min_refund_atomic: "20"
 
 destination:
   product: phala-cloud
