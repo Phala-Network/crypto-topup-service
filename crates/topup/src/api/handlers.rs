@@ -6,8 +6,6 @@ use std::time::Duration;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use topup_core::screening::PauseScope;
