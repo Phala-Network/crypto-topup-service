@@ -10,6 +10,7 @@ publish.workspace = true
 dev-signer = []
 
 [dependencies]
+alloy.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
@@ -19,6 +20,7 @@ alloy-signer-local.workspace = true
 alloy-tx-macros.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+chrono.workspace = true
 dstack-sdk = { git = "https://github.com/Dstack-TEE/dstack", rev = "721df1b93fd93884224f2261c37dd86ca250432f", version = "=0.6.0" }
 ed25519-dalek.workspace = true
 reqwest.workspace = true
@@ -27,6 +29,8 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 topup-core = { path = "../core" }
+tracing.workspace = true
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

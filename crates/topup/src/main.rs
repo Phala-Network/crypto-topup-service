@@ -239,6 +239,13 @@ async fn run(
             return ExitCode::FAILURE;
         }
     };
+    let scanner_routes = match topup::scanner::configure_routes(&routes) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::error!(%error, "invalid scanner route configuration");
+            return ExitCode::FAILURE;
+        }
+    };
     let pump_config = PumpConfig {
         step_timeout: Duration::from_secs(step_timeout_s),
         wait_interval: Duration::from_secs(wait_interval_s),
@@ -253,7 +260,7 @@ async fn run(
     };
     let connection_count = match u32::try_from(pump_count.get())
         .ok()
-        .and_then(|count| count.checked_add(2))
+        .and_then(|count| count.checked_add(3))
     {
         Some(count) => count,
         None => {
@@ -297,6 +304,12 @@ async fn run(
         }
     };
     let cancellation = CancellationToken::new();
+    let scanner_count = scanner_routes.len();
+    let scanner_pool = pool.clone();
+    let scanner_cancellation = cancellation.child_token();
+    let scanner_task = tokio::spawn(async move {
+        topup::scanner::run(scanner_pool, scanner_routes, scanner_cancellation).await
+    });
     let mut pump_tasks = Vec::with_capacity(pump_count.get());
     for worker in 0..pump_count.get() {
         let worker_pump = pump.clone();
@@ -319,16 +332,19 @@ async fn run(
         age_alerter.run(age_cancellation).await;
     });
 
-    tracing::info!(pumps = pump_count.get(), "topup service started");
+    tracing::info!(
+        pumps = pump_count.get(),
+        scanners = scanner_count,
+        "topup service started"
+    );
+    let mut clean_shutdown = true;
     if let Err(error) = wait_for_shutdown_signal().await {
         tracing::error!(%error, "failed to listen for shutdown signal");
-        cancellation.cancel();
-        return ExitCode::FAILURE;
+        clean_shutdown = false;
     }
     tracing::info!("shutdown requested; finishing in-flight deposit steps");
     cancellation.cancel();
 
-    let mut clean_shutdown = true;
     for task in pump_tasks {
         if let Err(error) = task.await {
             tracing::error!(%error, "deposit pump task failed during shutdown");
@@ -338,6 +354,17 @@ async fn run(
     if let Err(error) = age_task.await {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
+    }
+    match scanner_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, "scanner task failed during shutdown");
+            clean_shutdown = false;
+        }
+        Err(error) => {
+            tracing::error!(%error, "scanner task failed to join during shutdown");
+            clean_shutdown = false;
+        }
     }
     pool.close().await;
     tracing::info!(
