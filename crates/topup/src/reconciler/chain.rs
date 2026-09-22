@@ -1,0 +1,179 @@
+use std::time::Duration;
+
+use alloy_primitives::{Address, B256, U256};
+use alloy_provider::{Provider, RootProvider};
+use alloy_rpc_types_eth::Filter;
+use async_trait::async_trait;
+use tokio::time::timeout;
+use topup_adapters::chain::evm::{ChainReader, EvmChain, TransferLog};
+use topup_adapters::chain::flush::{decode_flushed, flushed_signature};
+use url::Url;
+
+use crate::flusher::AlloyChainClient;
+use crate::scanner::MAX_SCAN_WINDOW;
+
+use super::ReconciliationError;
+
+/// Bounded chain reads needed by reconciliation.
+#[async_trait]
+pub trait ReconciliationChain: Send + Sync {
+    /// Returns the reviewed finalized block.
+    async fn finalized_head(&self) -> Result<u64, ReconciliationError>;
+
+    /// Returns finalized ERC-20 transfers to tracked recipients.
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ReconciliationError>;
+
+    /// Returns token balances at one block in bounded JSON-RPC batches.
+    async fn token_balances(
+        &self,
+        token: Address,
+        addresses: &[Address],
+        block: u64,
+    ) -> Result<Vec<U256>, ReconciliationError>;
+
+    /// Returns the sum of finalized on-chain `Flushed` events for one token.
+    async fn flushed_total(
+        &self,
+        factory: Address,
+        token: Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<U256, ReconciliationError>;
+
+    /// Returns factory-derived forwarder addresses in bounded batches.
+    async fn factory_addresses(
+        &self,
+        factory: Address,
+        salts: &[B256],
+    ) -> Result<Vec<Address>, ReconciliationError>;
+}
+
+/// Production reconciliation client composed from the scanner and flusher RPC clients.
+pub struct RpcReconciliationChain {
+    scanner: EvmChain,
+    flusher: AlloyChainClient,
+    provider: RootProvider,
+    request_timeout: Duration,
+}
+
+impl RpcReconciliationChain {
+    /// Creates one bounded client for a configured RPC provider.
+    pub fn connect(
+        rpc_url: &str,
+        request_timeout: Duration,
+        balance_batch_size: usize,
+    ) -> Result<Self, ReconciliationError> {
+        let url = Url::parse(rpc_url)
+            .map_err(|error| ReconciliationError::Configuration(error.to_string()))?;
+        Ok(Self {
+            scanner: EvmChain::new(rpc_url)?,
+            flusher: AlloyChainClient::connect_http_with_policy(
+                rpc_url,
+                request_timeout,
+                balance_batch_size,
+            )?,
+            provider: RootProvider::new_http(url),
+            request_timeout,
+        })
+    }
+}
+
+#[async_trait]
+impl ReconciliationChain for RpcReconciliationChain {
+    async fn finalized_head(&self) -> Result<u64, ReconciliationError> {
+        timeout(
+            self.request_timeout,
+            ChainReader::finalized_head(&self.scanner),
+        )
+        .await
+        .map_err(|_| ReconciliationError::Chain("finalized-head request timed out".to_owned()))?
+        .map_err(Into::into)
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ReconciliationError> {
+        timeout(
+            self.request_timeout,
+            ChainReader::transfer_logs_to(&self.scanner, addresses, from_block, to_block),
+        )
+        .await
+        .map_err(|_| ReconciliationError::Chain("transfer-log request timed out".to_owned()))?
+        .map_err(Into::into)
+    }
+
+    async fn token_balances(
+        &self,
+        token: Address,
+        addresses: &[Address],
+        block: u64,
+    ) -> Result<Vec<U256>, ReconciliationError> {
+        self.flusher
+            .token_balances_at(token, addresses, block)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn flushed_total(
+        &self,
+        factory: Address,
+        token: Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<U256, ReconciliationError> {
+        let mut total = U256::ZERO;
+        let mut start = from_block;
+        loop {
+            let end = start
+                .saturating_add(MAX_SCAN_WINDOW.saturating_sub(1))
+                .min(to_block);
+            let filter = Filter::new()
+                .address(factory)
+                .from_block(start)
+                .to_block(end)
+                .event_signature(flushed_signature())
+                .topic3(token);
+            let logs = timeout(self.request_timeout, self.provider.get_logs(&filter))
+                .await
+                .map_err(|_| {
+                    ReconciliationError::Chain("Flushed log request timed out".to_owned())
+                })?
+                .map_err(|error| ReconciliationError::Chain(error.to_string()))?;
+            for log in logs {
+                let decoded = decode_flushed(log.data())
+                    .map_err(|error| ReconciliationError::Chain(error.to_string()))?;
+                total = total
+                    .checked_add(decoded.amount)
+                    .ok_or(ReconciliationError::Invariant(
+                        "Flushed event total overflowed U256",
+                    ))?;
+            }
+            if end == to_block {
+                break;
+            }
+            start = end.checked_add(1).ok_or(ReconciliationError::Invariant(
+                "Flushed log range overflowed",
+            ))?;
+        }
+        Ok(total)
+    }
+
+    async fn factory_addresses(
+        &self,
+        factory: Address,
+        salts: &[B256],
+    ) -> Result<Vec<Address>, ReconciliationError> {
+        self.flusher
+            .factory_addresses(factory, salts)
+            .await
+            .map_err(Into::into)
+    }
+}

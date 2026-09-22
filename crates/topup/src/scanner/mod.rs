@@ -269,8 +269,18 @@ pub async fn scan_once<R: ChainReader>(
     routes: &ChainRoutes,
 ) -> Result<ScanStats, ScannerError> {
     let chain_id = routes.chain.chain_id;
-    let finalized = reader.finalized_head().await?;
     let cursor = db::get_cursor(pool, chain_id).await?.unwrap_or(0);
+    if crate::reconciler::chain_is_blocked(pool, chain_id).await? {
+        tracing::warn!(
+            chain_id,
+            "finalized chain scan paused because reconciliation froze the chain"
+        );
+        return Ok(ScanStats {
+            cursor,
+            ..ScanStats::default()
+        });
+    }
+    let finalized = reader.finalized_head().await?;
     if finalized < cursor {
         return Err(ScannerError::FinalizedBehindCursor { cursor, finalized });
     }
@@ -529,6 +539,14 @@ fn address_index(addresses: &[ScanAddress]) -> BTreeMap<Address, ScanAddress> {
         .cloned()
         .map(|address| (address.address, address))
         .collect()
+}
+
+pub(crate) fn resolve_logs_for_reconciliation(
+    logs: Vec<TransferLog>,
+    addresses: &[ScanAddress],
+    routes: &ChainRoutes,
+) -> Result<Vec<NewDeposit>, ScannerError> {
+    resolve_logs(logs, &address_index(addresses), routes)
 }
 
 fn resolve_logs(

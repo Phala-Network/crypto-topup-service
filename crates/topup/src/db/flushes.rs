@@ -685,12 +685,23 @@ async fn insert_flushed_in(
     Ok(())
 }
 
+/// Replays the §7 linkage rule for one confirmed flush and returns the deposits it linked.
+///
+/// The target state is computed from the row locked by this statement, so a deposit advanced
+/// concurrently is never written back to an older state.
+pub async fn link_confirmed_flush(pool: &PgPool, flush_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let linked = link_deposits_for_flush(&mut transaction, flush_id).await?;
+    transaction.commit().await?;
+    Ok(linked)
+}
+
 async fn link_deposits_for_flush(
     transaction: &mut Transaction<'_, Postgres>,
     flush_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let evidence = json!({"flush_id": flush_id, "outcome": "advance"});
-    sqlx::query(
+    sqlx::query_scalar::<_, Uuid>(
         r#"
         WITH eligible AS (
             SELECT d.id, d.state
@@ -714,18 +725,19 @@ async fn link_deposits_for_flush(
             FROM eligible e
             WHERE d.id = e.id
             RETURNING d.id, e.state
+        ), swept AS (
+            INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
+            SELECT gen_random_uuid(), id, 'credited', 'swept', 0, $2
+            FROM updated
+            WHERE state = 'credited'
         )
-        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
-        SELECT gen_random_uuid(), id, 'credited', 'swept', 0, $2
-        FROM updated
-        WHERE state = 'credited'
+        SELECT id FROM updated ORDER BY id
         "#,
     )
     .bind(flush_id)
     .bind(evidence)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    .fetch_all(&mut **transaction)
+    .await
 }
 
 fn parse_flush_row(row: sqlx::postgres::PgRow) -> Result<Flush, sqlx::Error> {

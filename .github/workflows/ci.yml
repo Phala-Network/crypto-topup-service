@@ -195,7 +195,7 @@ jobs:
           docker compose -f deploy/local/docker-compose.yml config >/dev/null
       - name: Validate deployment scripts and app compose
         run: |
-          for file in deploy/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
+          for file in deploy/*.sh deploy/contracts/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
             case "$(head -n 1 "$file")" in
               *bash) bash -n "$file" ;;
               *) sh -n "$file" ;;
@@ -235,3 +235,7 @@ jobs:
         if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         working-directory: contracts
         run: forge test
+      - name: Check deterministic deployment
+        run: |
+          deploy/contracts/check-build.sh --check
+          deploy/contracts/test-determinism.sh

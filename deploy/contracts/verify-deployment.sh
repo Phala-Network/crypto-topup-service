@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+source "$(dirname -- "$0")/common.sh"
+
+safe_expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
+rpcs=()
+while (($#)); do
+    case "$1" in
+        --safe-expectations) safe_expectations="${2:-}"; shift 2 ;;
+        --rpc) rpcs+=("${2:-}"); shift 2 ;;
+        *) die "usage: $0 [--safe-expectations FILE] --rpc NETWORK[/LABEL]=URL [--rpc ...]" ;;
+    esac
+done
+((${#rpcs[@]} > 0)) || die "at least one --rpc NETWORK[/LABEL]=URL is required"
+
+require_command cast
+require_command jq
+
+"$DEPLOY_CONTRACTS_DIR/check-build.sh" --check >/dev/null
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-verification.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+if ! validate_deployment_params "$safe_expectations" "$tmp_dir/safe.json" "${rpcs[@]}"; then
+    jq -n --slurpfile safe "$tmp_dir/safe.json" \
+        '{safe: ($safe[0] // null), chains: [], passed: false}'
+    exit 1
+fi
+
+reference="$tmp_dir/reference.json"
+"$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" \
+    --admin "$EXPECTED_ADMIN" \
+    --treasury "$EXPECTED_TREASURY" \
+    --output "$reference" >/dev/null
+
+factory="$(jq -er '.factory' "$reference")"
+implementation="$(jq -er '.implementation' "$reference")"
+expected_proxy_hash="$(lower "$(jq -er '.proxy_code_hash' "$reference")")"
+expected_factory_hash="$(lower "$(jq -er '.factory_code_hash' "$reference")")"
+expected_implementation_hash="$(lower "$(jq -er '.implementation_code_hash' "$reference")")"
+reports="$tmp_dir/reports.jsonl"
+status=0
+
+for entry in "${rpcs[@]}"; do
+    parse_target "$safe_expectations" "$entry"
+    rpc_url="$TARGET_RPC_URL"
+    chain_id="$(rpc_chain_id "$rpc_url")"
+    chain_id_ok=false
+    [[ "$chain_id" == "$TARGET_EXPECTED_CHAIN_ID" ]] && chain_id_ok=true
+
+    proxy_hash="$(lower "$(code_hash "$rpc_url" "$DETERMINISTIC_PROXY")")"
+    factory_hash="$(lower "$(code_hash "$rpc_url" "$factory")")"
+    implementation_hash="$(lower "$(code_hash "$rpc_url" "$implementation")")"
+
+    proxy_ok=false
+    factory_hash_ok=false
+    implementation_hash_ok=false
+    [[ "$proxy_hash" == "$expected_proxy_hash" ]] && proxy_ok=true
+    [[ "$factory_hash" == "$expected_factory_hash" ]] && factory_hash_ok=true
+    [[ "$implementation_hash" == "$expected_implementation_hash" ]] && implementation_hash_ok=true
+
+    implementation_actual="error"
+    treasury_actual="error"
+    factory_binding_actual="error"
+    admin_role_actual="error"
+    cast_call_ok=true
+    implementation_actual="$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
+    treasury_actual="$(cast call "$implementation" 'treasury()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
+    factory_binding_actual="$(cast call "$implementation" 'factory()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
+    admin_role_actual="$(cast call "$factory" 'hasRole(bytes32,address)(bool)' \
+        0x0000000000000000000000000000000000000000000000000000000000000000 \
+        "$EXPECTED_ADMIN" --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
+
+    implementation_ok=false
+    treasury_ok=false
+    factory_binding_ok=false
+    admin_role_ok=false
+    [[ "$cast_call_ok" == true && "$(lower "$implementation_actual")" == "$(lower "$implementation")" ]] && implementation_ok=true
+    [[ "$cast_call_ok" == true && "$(lower "$treasury_actual")" == "$(lower "$EXPECTED_TREASURY")" ]] && treasury_ok=true
+    [[ "$cast_call_ok" == true && "$(lower "$factory_binding_actual")" == "$(lower "$factory")" ]] && factory_binding_ok=true
+    [[ "$cast_call_ok" == true && "$admin_role_actual" == "true" ]] && admin_role_ok=true
+
+    vector_reports='[]'
+    vectors_ok=true
+    while IFS=$'\t' read -r salt expected_address; do
+        actual_address="error"
+        if ! actual_address="$(cast call "$factory" 'addressOf(bytes32)(address)' \
+            "$salt" --rpc-url "$rpc_url" 2>/dev/null)"; then
+            vectors_ok=false
+        fi
+        vector_ok=false
+        if [[ "$(lower "$actual_address")" == "$(lower "$expected_address")" ]]; then
+            vector_ok=true
+        else
+            vectors_ok=false
+        fi
+        vector_reports="$(jq -c \
+            --arg salt "$salt" \
+            --arg expected "$expected_address" \
+            --arg actual "$actual_address" \
+            --argjson passed "$vector_ok" \
+            '. + [{salt: $salt, expected: $expected, actual: $actual, passed: $passed}]' \
+            <<<"$vector_reports")"
+    done < <(jq -r '.sample_forwarders[] | [.salt, .address] | @tsv' "$reference")
+
+    passed=false
+    if [[ "$chain_id_ok" == true && "$proxy_ok" == true && "$factory_hash_ok" == true && \
+        "$implementation_hash_ok" == true && "$implementation_ok" == true && \
+        "$treasury_ok" == true && "$factory_binding_ok" == true && \
+        "$admin_role_ok" == true && "$vectors_ok" == true ]]; then
+        passed=true
+    else
+        status=1
+    fi
+
+    jq -n \
+        --arg target "$TARGET_NAME" \
+        --arg network "$TARGET_NETWORK" \
+        --argjson expected_chain_id "$TARGET_EXPECTED_CHAIN_ID" \
+        --arg chain_id "$chain_id" \
+        --argjson chain_id_ok "$chain_id_ok" \
+        --arg factory "$factory" \
+        --arg implementation "$implementation_actual" \
+        --arg treasury "$treasury_actual" \
+        --arg factory_code_hash "$factory_hash" \
+        --arg implementation_code_hash "$implementation_hash" \
+        --arg proxy_code_hash "$proxy_hash" \
+        --argjson proxy_ok "$proxy_ok" \
+        --argjson factory_hash_ok "$factory_hash_ok" \
+        --argjson implementation_hash_ok "$implementation_hash_ok" \
+        --argjson implementation_ok "$implementation_ok" \
+        --argjson treasury_ok "$treasury_ok" \
+        --argjson factory_binding_ok "$factory_binding_ok" \
+        --argjson admin_role_ok "$admin_role_ok" \
+        --argjson vectors_ok "$vectors_ok" \
+        --argjson vectors "$vector_reports" \
+        --argjson passed "$passed" \
+        '{target: $target, network: $network, expected_chain_id: $expected_chain_id,
+          chain_id: ($chain_id | tonumber? // $chain_id),
+          factory: $factory, implementation: $implementation, treasury: $treasury,
+          code_hashes: {proxy: $proxy_code_hash, factory: $factory_code_hash,
+                        implementation: $implementation_code_hash},
+          checks: {chain_id: $chain_id_ok, proxy: $proxy_ok,
+                   factory_code_hash: $factory_hash_ok,
+                   implementation_code_hash: $implementation_hash_ok,
+                   implementation: $implementation_ok, treasury: $treasury_ok,
+                   implementation_factory: $factory_binding_ok,
+                   default_admin_role: $admin_role_ok, sample_forwarders: $vectors_ok},
+          vectors: $vectors, passed: $passed}' >>"$reports"
+done
+
+jq -n \
+    --slurpfile safe "$tmp_dir/safe.json" \
+    --slurpfile chains "$reports" \
+    --slurpfile reference "$reference" \
+    '{reference: $reference[0], safe: $safe[0], chains: $chains,
+      passed: all($chains[]; .passed)}'
+exit "$status"
