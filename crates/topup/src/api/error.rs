@@ -61,6 +61,22 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
+    /// Returns a conflict for an already consumed request signature.
+    #[must_use]
+    pub fn signature_replayed() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "signature_replayed",
+            "request signature has already been used",
+        )
+    }
+
+    /// Returns a locked response for an operation blocked by a pause scope.
+    #[must_use]
+    pub fn paused(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::LOCKED, "paused", message)
+    }
+
     /// Returns a temporary dependency or pause failure.
     #[must_use]
     pub fn service_unavailable(message: impl Into<String>) -> Self {

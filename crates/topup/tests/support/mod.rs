@@ -8,6 +8,7 @@ use axum::http::{Method, Request};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer as _, SigningKey};
+use sfv::{DictSerializer, Integer, KeyRef, ListSerializer, StringRef};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
@@ -116,27 +117,124 @@ pub fn signed_request(
     key: &SigningKey,
     created: i64,
 ) -> Request<Body> {
+    signed_request_with_options(
+        method,
+        path,
+        body,
+        kid,
+        key,
+        created,
+        &SignatureOptions::default(),
+    )
+}
+
+#[derive(Clone, Debug)]
+pub enum SignatureParameter {
+    Created,
+    KeyId,
+    Algorithm(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct SignatureOptions {
+    pub label: String,
+    pub parameters: Vec<SignatureParameter>,
+    pub origin_form: bool,
+}
+
+impl Default for SignatureOptions {
+    fn default() -> Self {
+        Self {
+            label: "sig1".to_owned(),
+            parameters: vec![
+                SignatureParameter::Created,
+                SignatureParameter::KeyId,
+                SignatureParameter::Algorithm("ed25519".to_owned()),
+            ],
+            origin_form: false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn signed_request_with_options(
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    kid: &str,
+    key: &SigningKey,
+    created: i64,
+    options: &SignatureOptions,
+) -> Request<Body> {
     let target_uri = format!("http://api.test{path}");
     let digest = STANDARD.encode(Sha256::digest(&body));
     let content_digest = format!("sha-256=:{digest}:");
-    let signature_parameters = format!(
-        "(\"@method\" \"@target-uri\" \"content-digest\");created={created};keyid=\"{kid}\""
-    );
+    let signature_parameters = signature_parameters(kid, created, &options.parameters);
     let base = format!(
         "\"@method\": {}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}\n\"@signature-params\": {signature_parameters}",
         method.as_str()
     );
-    let signature = STANDARD.encode(key.sign(base.as_bytes()).to_bytes());
+    let signature = key.sign(base.as_bytes()).to_bytes();
+    let label = KeyRef::from_str(&options.label).expect("signature label must be an SFV key");
+    let signature_input = format!("{label}={signature_parameters}");
+    let mut signature_serializer = DictSerializer::new();
+    let _ = signature_serializer
+        .bare_item(label, signature.as_slice())
+        .finish();
+    let signature_header = signature_serializer
+        .finish()
+        .expect("signature dictionary must not be empty");
+    let request_target = if options.origin_form {
+        path
+    } else {
+        &target_uri
+    };
     Request::builder()
         .method(method)
-        .uri(target_uri)
+        .uri(request_target)
         .header("host", "api.test")
         .header("content-type", "application/json")
         .header("content-digest", content_digest)
-        .header("signature-input", format!("sig1={signature_parameters}"))
-        .header("signature", format!("sig1=:{signature}:"))
+        .header("signature-input", signature_input)
+        .header("signature", signature_header)
         .body(Body::from(body))
         .expect("test request must be valid")
+}
+
+fn signature_parameters(kid: &str, created: i64, order: &[SignatureParameter]) -> String {
+    let mut serializer = ListSerializer::new();
+    {
+        let mut inner = serializer.inner_list();
+        for component in ["@method", "@target-uri", "content-digest"] {
+            let _ = inner
+                .bare_item(
+                    StringRef::from_str(component)
+                        .expect("signature component must be an SFV string"),
+                )
+                .finish();
+        }
+        let mut parameters = inner.finish();
+        for parameter in order {
+            parameters = match parameter {
+                SignatureParameter::Created => parameters.parameter(
+                    KeyRef::from_str("created").expect("created must be an SFV key"),
+                    Integer::try_from(created).expect("created must fit an SFV integer"),
+                ),
+                SignatureParameter::KeyId => parameters.parameter(
+                    KeyRef::from_str("keyid").expect("keyid must be an SFV key"),
+                    StringRef::from_str(kid).expect("kid must be an SFV string"),
+                ),
+                SignatureParameter::Algorithm(algorithm) => parameters.parameter(
+                    KeyRef::from_str("alg").expect("alg must be an SFV key"),
+                    StringRef::from_str(algorithm).expect("algorithm must be an SFV string"),
+                ),
+            };
+        }
+        let _ = parameters.finish();
+    }
+    serializer
+        .finish()
+        .expect("signature parameter inner list must not be empty")
 }
 
 fn required_url(name: &str) -> Option<String> {

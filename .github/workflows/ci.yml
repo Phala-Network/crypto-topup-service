@@ -97,8 +97,10 @@ jobs:
         env:
           SQLX_OFFLINE: false
         run: cargo sqlx prepare --workspace --check -- --all-targets
-      - name: Run database integration tests
-        run: cargo test --locked -p topup --test database -- --nocapture
+      - name: Run PostgreSQL integration tests
+        run: >-
+          cargo test --locked -p topup --features dev-signer
+          --test database --test api -- --nocapture
 
   deny:
     runs-on: ubuntu-latest

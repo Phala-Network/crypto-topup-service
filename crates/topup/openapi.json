@@ -1,17 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "utoipa-axum",
-    "description": "Utoipa's axum bindings for seamless integration for the two",
-    "contact": {
-      "name": "Juha Kukkonen",
-      "email": "juha7kukkonen@gmail.com"
-    },
-    "license": {
-      "name": "MIT OR Apache-2.0",
-      "identifier": "MIT OR Apache-2.0"
-    },
-    "version": "0.2.0"
+    "title": "Crypto Top-up Service API",
+    "description": "Authenticated product and administrative API for deterministic crypto top-ups.",
+    "version": "0.1.0"
   },
   "paths": {
     "/v1/admin/deposits/{id}/nudge": {
@@ -316,7 +308,7 @@
         "parameters": [
           {
             "name": "nonce",
-            "in": "path",
+            "in": "query",
             "description": "Non-empty hexadecimal nonce of at most 32 bytes.",
             "required": true,
             "schema": {
@@ -490,6 +482,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -553,6 +555,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -588,6 +600,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateDepositAddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "",
@@ -610,6 +632,26 @@
             }
           },
           "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "423": {
             "description": "",
             "content": {
               "application/json": {
@@ -652,52 +694,40 @@
           },
           {
             "name": "state",
-            "in": "path",
+            "in": "query",
             "description": "Filter by state.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "from",
-            "in": "path",
+            "in": "query",
             "description": "Include deposits created at or after this time.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": "string",
               "format": "date-time"
             }
           },
           {
             "name": "to",
-            "in": "path",
+            "in": "query",
             "description": "Include deposits created before this time.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": "string",
               "format": "date-time"
             }
           },
           {
             "name": "cursor",
-            "in": "path",
+            "in": "query",
             "description": "Opaque cursor returned by the previous page.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": "string",
               "format": "uuid"
             }
           }
@@ -1120,38 +1150,29 @@
           },
           {
             "name": "tx_hash",
-            "in": "path",
+            "in": "query",
             "description": "Canonical transaction hash.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "address",
-            "in": "path",
+            "in": "query",
             "description": "Canonical receiving address.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "lock_ref",
-            "in": "path",
+            "in": "query",
             "description": "Product lock reference.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -2014,6 +2035,21 @@
           "external_id": {
             "type": "string",
             "description": "Product-owned account identifier."
+          }
+        }
+      },
+      "RotateDepositAddressRequest": {
+        "type": "object",
+        "description": "Idempotent persistent-address rotation request.",
+        "required": [
+          "from_version"
+        ],
+        "properties": {
+          "from_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Address version the caller observed before requesting rotation.",
+            "minimum": 0
           }
         }
       },

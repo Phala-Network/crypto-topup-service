@@ -20,7 +20,8 @@ use super::models::{
     CancelRateLockResponse, CreateRateLockRequest, DailyReportResponse, DepositAddressResponse,
     DepositListQuery, DepositLookupQuery, DepositResponse, DepositsResponse, LimitsResponse,
     NudgeResponse, PauseRequest, PauseResponse, PersistentSaltInputs, RateLockResponse,
-    RecordRefundRequest, RefundRequest, RefundResponse, RegisterAccountRequest, RoutePauseResponse,
+    RecordRefundRequest, RefundRequest, RefundResponse, RegisterAccountRequest,
+    RotateDepositAddressRequest, RoutePauseResponse,
 };
 use super::repository;
 
@@ -61,7 +62,8 @@ pub(crate) async fn register_account(
     responses(
         (status = 200, body = DepositAddressResponse),
         (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 404, body = ErrorResponse),
+        (status = 423, body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -71,7 +73,7 @@ pub(crate) async fn get_deposit_address(
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, false).await
+    deposit_address(&state, &product, &external_id, None).await
 }
 
 #[utoipa::path(
@@ -84,7 +86,8 @@ pub(crate) async fn get_deposit_address(
     responses(
         (status = 200, body = DepositAddressResponse),
         (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 404, body = ErrorResponse),
+        (status = 423, body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -94,7 +97,7 @@ pub(crate) async fn create_deposit_address(
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, false).await
+    deposit_address(&state, &product, &external_id, None).await
 }
 
 #[utoipa::path(
@@ -104,10 +107,13 @@ pub(crate) async fn create_deposit_address(
         ("p" = String, Path, description = "Product slug"),
         ("ext" = String, Path, description = "Product-owned account identifier")
     ),
+    request_body = RotateDepositAddressRequest,
     responses(
         (status = 200, body = DepositAddressResponse),
         (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 423, body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -116,8 +122,9 @@ pub(crate) async fn rotate_deposit_address(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
+    Json(request): Json<RotateDepositAddressRequest>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, true).await
+    deposit_address(&state, &product, &external_id, Some(request.from_version)).await
 }
 
 #[utoipa::path(
@@ -451,24 +458,18 @@ async fn deposit_address(
     state: &AppState,
     product: &Product,
     external_id: &str,
-    rotate: bool,
+    rotate_from_version: Option<u64>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
     let account = require_account(state, product.id, external_id).await?;
-    if product
-        .paused_scopes
-        .iter()
-        .any(|scope| scope == "addresses")
-        || account
-            .paused_scopes
-            .iter()
-            .any(|scope| scope == "addresses")
-    {
-        return Err(ApiError::service_unavailable(
-            "deposit addresses are paused",
-        ));
-    }
     let route = state.route_for_product(product)?;
-    let address = if rotate {
+    let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
+    if has_scope(&product.paused_scopes, "addresses")
+        || has_scope(&account.paused_scopes, "addresses")
+        || has_scope(&route_scopes, "addresses")
+    {
+        return Err(ApiError::paused("deposit addresses are paused"));
+    }
+    let address = if let Some(from_version) = rotate_from_version {
         repository::rotate_persistent_address(
             &state.pool,
             product.id,
@@ -477,6 +478,7 @@ async fn deposit_address(
             route.chain.chain_id,
             route.chain.contracts.forwarder_factory,
             route.chain.contracts.implementation,
+            from_version,
         )
         .await?
     } else {
@@ -492,6 +494,10 @@ async fn deposit_address(
         .await?
     };
     Ok(Json(address_response(route, product, &account, address)))
+}
+
+fn has_scope(scopes: &[String], expected: &str) -> bool {
+    scopes.iter().any(|scope| scope == expected)
 }
 
 fn address_response(

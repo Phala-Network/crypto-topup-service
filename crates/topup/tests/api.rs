@@ -13,16 +13,29 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row;
-use topup::api::{AppState, UnavailableAttestor, VerificationKey};
+#[cfg(feature = "dev-signer")]
+use topup::api::models::AttestationResponse;
+use topup::api::{AppState, Attestor, UnavailableAttestor, VerificationKey};
+#[cfg(feature = "dev-signer")]
+use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+#[cfg(feature = "dev-signer")]
+use topup_adapters::attestation::report_data;
+#[cfg(feature = "dev-signer")]
+use topup_adapters::signer::DevSigner;
 use topup_core::deposit::DepositState;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
+#[cfg(feature = "dev-signer")]
+use topup_core::{SETTLEMENT_KEY_DOMAIN, SecretKey32, Signer as _};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::{TestDatabase, public_key_base64, signed_request};
+use support::{
+    SignatureOptions, SignatureParameter, TestDatabase, public_key_base64, signed_request,
+    signed_request_with_options,
+};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
@@ -44,16 +57,110 @@ async fn signature_verification_vectors() -> Result<()> {
 
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(signed_request_with_options(
                 Method::POST,
                 &path,
                 body.clone(),
                 PRODUCT_KID,
                 &product_key,
                 now,
+                &SignatureOptions {
+                    parameters: vec![SignatureParameter::Created, SignatureParameter::KeyId],
+                    ..SignatureOptions::default()
+                },
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "with-alg"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request_with_options(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "reordered-parameters"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    parameters: vec![
+                        SignatureParameter::Algorithm("ed25519".to_owned()),
+                        SignatureParameter::KeyId,
+                        SignatureParameter::Created,
+                    ],
+                    ..SignatureOptions::default()
+                },
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request_with_options(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "different-label"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    label: "checkout".to_owned(),
+                    ..SignatureOptions::default()
+                },
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let origin_path = format!("{path}?source=checkout");
+        let response = app
+            .clone()
+            .oneshot(signed_request_with_options(
+                Method::POST,
+                &origin_path,
+                serde_json::to_vec(&json!({"external_id": "origin-form-query"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    origin_form: true,
+                    ..SignatureOptions::default()
+                },
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request_with_options(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "wrong-algorithm"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    parameters: vec![
+                        SignatureParameter::Created,
+                        SignatureParameter::KeyId,
+                        SignatureParameter::Algorithm("rsa-pss-sha512".to_owned()),
+                    ],
+                    ..SignatureOptions::default()
+                },
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
 
         let wrong_key = SigningKey::from_bytes(&[8; 32]);
         let response = app
@@ -65,6 +172,19 @@ async fn signature_verification_vectors() -> Result<()> {
                 PRODUCT_KID,
                 &wrong_key,
                 now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "future-created"}))?,
+                PRODUCT_KID,
+                &product_key,
+                (Utc::now() + Duration::minutes(6)).timestamp(),
             ))
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
@@ -94,15 +214,49 @@ async fn signature_verification_vectors() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
 
-        let mut missing_component =
-            signed_request(Method::POST, &path, body, PRODUCT_KID, &product_key, now);
+        let mut missing_component = signed_request(
+            Method::POST,
+            &path,
+            serde_json::to_vec(&json!({"external_id": "missing-component"}))?,
+            PRODUCT_KID,
+            &product_key,
+            now,
+        );
         missing_component.headers_mut().insert(
             "signature-input",
-            format!("sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{PRODUCT_KID}\"")
-                .parse()?,
+            format!(
+                "sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{PRODUCT_KID}\";alg=\"ed25519\""
+            )
+            .parse()?,
         );
-        let response = app.oneshot(missing_component).await?;
+        let response = app.clone().oneshot(missing_component).await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
+
+        let replay_body = serde_json::to_vec(&json!({"external_id": "replay"}))?;
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &path,
+                replay_body.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                &path,
+                replay_body,
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response_json(response).await?["error"]["code"] == "signature_replayed");
         Ok(())
     }
     .await;
@@ -148,7 +302,7 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
                 register_body,
                 PRODUCT_KID,
                 &product_key,
-                now,
+                now + 1,
             ))
             .await?;
         ensure!(second.status() == StatusCode::OK);
@@ -175,14 +329,35 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         ensure!(response_json(same_address).await?["address"] == first_address["address"]);
 
         let rotate_path = format!("{address_path}/rotate");
+        let rotate_body = serde_json::to_vec(&json!({"from_version": 1}))?;
         let rotated = app
             .clone()
-            .oneshot(signed_request(Method::POST, &rotate_path, Vec::new(), PRODUCT_KID, &product_key, now))
+            .oneshot(signed_request(
+                Method::POST,
+                &rotate_path,
+                rotate_body.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
             .await?;
         ensure!(rotated.status() == StatusCode::OK);
         let rotated = response_json(rotated).await?;
         ensure!(rotated["address"] != first_address["address"]);
         ensure!(rotated["salt_inputs"]["version"] == 2);
+        let retried = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &rotate_path,
+                rotate_body,
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(retried.status() == StatusCode::OK);
+        ensure!(response_json(retried).await?["address"] == rotated["address"]);
         let address_counts = sqlx::query(
             "SELECT count(*) AS total, count(*) FILTER (WHERE retired_at IS NOT NULL) AS retired FROM addresses WHERE account_id = $1",
         )
@@ -223,6 +398,20 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
             .await?;
         ensure!(audit_count == 1);
 
+        let paused_address = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &address_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(paused_address.status() == StatusCode::LOCKED);
+        ensure!(response_json(paused_address).await?["error"]["code"] == "paused");
+
         let admin_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
         let admin_body = serde_json::to_vec(&json!({"scopes": ["flush"]}))?;
         let product_signed = app
@@ -248,12 +437,180 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn route_pause_controls_address_routes() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[27; 32]);
+        let admin_key = SigningKey::from_bytes(&[28; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let account = topup::db::create_account(
+            &database.app_pool,
+            &NewAccount {
+                id: Uuid::new_v4(),
+                product_id: product.id,
+                external_id: "route-pause-account".to_owned(),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
+        topup::db::set_product_paused_scopes(
+            &database.app_pool,
+            product.id,
+            &["quotes".to_owned()],
+        )
+        .await?;
+        topup::db::set_account_paused_scopes(
+            &database.app_pool,
+            account.id,
+            &["settlement".to_owned()],
+        )
+        .await?;
+
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let address_path = "/v1/products/phala-cloud/accounts/route-pause-account/deposit-address";
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                address_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let pause_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                pause_path,
+                serde_json::to_vec(&json!({"scopes": ["flush"]}))?,
+                ADMIN_KID,
+                &admin_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                address_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                pause_path,
+                serde_json::to_vec(&json!({"scopes": ["addresses"]}))?,
+                ADMIN_KID,
+                &admin_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                address_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response_json(response).await?["error"]["code"] == "paused");
+
+        let resume_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/resume";
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                resume_path,
+                serde_json::to_vec(&json!({"scopes": ["addresses"]}))?,
+                ADMIN_KID,
+                &admin_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .oneshot(signed_request(
+                Method::GET,
+                address_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 3,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[cfg(feature = "dev-signer")]
+#[tokio::test]
+async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {
+    let admin_key = SigningKey::from_bytes(&[30; 32]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+    let attestor = Arc::new(DevHttpAttestor(DevSigner::new(
+        SecretKey32::new([1; 32]),
+        SecretKey32::new([2; 32]),
+    )));
+    let state = app_state_with_attestor(pool, &admin_key, attestor);
+    let app = topup::api::router(state).0;
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/attestation?nonce=00010203")
+                .body(Body::empty())?,
+        )
+        .await?;
+    ensure!(response.status() == StatusCode::OK);
+    let response = response_json(response).await?;
+    ensure!(response["keyid"] == SETTLEMENT_KEY_DOMAIN);
+    ensure!(response["settlement_pubkey"].as_str().map(str::len) == Some(64));
+    ensure!(response["report_data"].as_str().map(str::len) == Some(64));
+    ensure!(response["quote"] == "");
+    Ok(())
+}
+
+#[tokio::test]
 async fn openapi_snapshot() -> Result<()> {
     let admin_key = SigningKey::from_bytes(&[29; 32]);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
     let state = app_state(pool, &admin_key);
     let actual = topup::api::openapi_json(state)?;
+    let document: Value = serde_json::from_str(&actual)?;
+    ensure!(document["info"]["title"] == "Crypto Top-up Service API");
+    ensure!(document["info"]["version"] == env!("CARGO_PKG_VERSION"));
+    ensure!(document["info"]["description"].as_str().is_some());
+    assert_query_parameters(&document)?;
     let path = format!("{}/openapi.json", env!("CARGO_MANIFEST_DIR"));
     if std::env::var_os("UPDATE_OPENAPI").is_some() {
         std::fs::write(&path, &actual)?;
@@ -271,6 +628,14 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
 }
 
 fn app_state(pool: sqlx::PgPool, admin_key: &SigningKey) -> AppState {
+    app_state_with_attestor(pool, admin_key, Arc::new(UnavailableAttestor))
+}
+
+fn app_state_with_attestor(
+    pool: sqlx::PgPool,
+    admin_key: &SigningKey,
+    attestor: Arc<dyn Attestor>,
+) -> AppState {
     let route: RouteFile = serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
         .expect("valid route fixture");
     route.validate().expect("route fixture validates");
@@ -282,8 +647,66 @@ fn app_state(pool: sqlx::PgPool, admin_key: &SigningKey) -> AppState {
             &public_key_base64(admin_key),
         )
         .expect("admin key is valid"),
-        attestor: Arc::new(UnavailableAttestor),
+        attestor,
     }
+}
+
+#[cfg(feature = "dev-signer")]
+struct DevHttpAttestor(DevSigner);
+
+#[cfg(feature = "dev-signer")]
+impl Attestor for DevHttpAttestor {
+    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a> {
+        Box::pin(async move {
+            let public_key = self
+                .0
+                .settlement_public_key()
+                .await
+                .map_err(|_| AttestationError::Unavailable)?;
+            Ok(AttestationResponse {
+                keyid: SETTLEMENT_KEY_DOMAIN.to_owned(),
+                settlement_pubkey: hex::encode(public_key.0),
+                report_data: hex::encode(report_data(nonce, &public_key)),
+                quote: String::new(),
+            })
+        })
+    }
+}
+
+fn assert_query_parameters(document: &Value) -> Result<()> {
+    let cases = [
+        (
+            "/v1/products/{p}/accounts/{ext}/deposits",
+            &["state", "from", "to", "cursor"][..],
+        ),
+        (
+            "/v1/products/{p}/deposits",
+            &["tx_hash", "address", "lock_ref"][..],
+        ),
+    ];
+    for (path, expected_names) in cases {
+        let parameters = document["paths"][path]["get"]["parameters"]
+            .as_array()
+            .context("OpenAPI operation parameters")?;
+        for name in expected_names {
+            let parameter = parameters
+                .iter()
+                .find(|parameter| parameter["name"] == *name)
+                .with_context(|| format!("missing query parameter {name}"))?;
+            ensure!(parameter["in"] == "query");
+            ensure!(parameter.get("required").and_then(Value::as_bool) != Some(true));
+        }
+    }
+
+    let nonce = document["paths"]["/v1/attestation"]["get"]["parameters"]
+        .as_array()
+        .context("attestation parameters")?
+        .iter()
+        .find(|parameter| parameter["name"] == "nonce")
+        .context("missing nonce parameter")?;
+    ensure!(nonce["in"] == "query");
+    ensure!(nonce["required"] == true);
+    Ok(())
 }
 
 async fn seed_product(

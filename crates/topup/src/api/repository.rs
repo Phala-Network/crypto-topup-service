@@ -11,8 +11,37 @@ use uuid::Uuid;
 
 use crate::db::{Account, Address, AddressKind, Product};
 
+use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{DepositListQuery, DepositLookupQuery, DepositResponse, DepositsResponse};
+
+/// Records a verified request signature exactly once within the acceptance window.
+pub async fn record_signature(
+    pool: &PgPool,
+    signature: &VerifiedSignature,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM seen_signatures WHERE created < now() - interval '5 minutes'")
+        .execute(&mut *transaction)
+        .await?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO seen_signatures (kid, signature_hash, created)
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&signature.kid)
+    .bind(signature.signature_hash.as_slice())
+    .bind(signature.created)
+    .execute(&mut *transaction)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::signature_replayed());
+    }
+    transaction.commit().await?;
+    Ok(())
+}
 
 /// Finds the unique product selected by an external API slug.
 pub async fn find_product_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Product>, ApiError> {
@@ -125,12 +154,22 @@ pub async fn rotate_persistent_address(
     chain_id: u64,
     factory: EvmAddress,
     implementation: EvmAddress,
+    from_version: u64,
 ) -> Result<Address, ApiError> {
     let mut transaction = pool.begin().await?;
     lock_account(&mut transaction, product_id, account.id).await?;
     let current = find_active_address(&mut transaction, account.id, chain_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if current.version > from_version {
+        transaction.commit().await?;
+        return Ok(current);
+    }
+    if current.version < from_version {
+        return Err(ApiError::conflict(
+            "from_version is newer than the current address version",
+        ));
+    }
     let version = current
         .version
         .checked_add(1)
@@ -318,6 +357,17 @@ pub async fn mutate_route_scopes(
     .await?;
     transaction.commit().await?;
     Ok(updated)
+}
+
+/// Returns active pause scopes for a route, or an empty set when it has no pause row.
+pub async fn route_paused_scopes(pool: &PgPool, route: &str) -> Result<Vec<String>, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT paused_scopes FROM route_pauses WHERE route = $1")
+            .bind(route)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(FromRow)]

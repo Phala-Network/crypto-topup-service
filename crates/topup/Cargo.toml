@@ -24,6 +24,7 @@ hex.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
+sfv.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 topup-adapters = { path = "../adapters" }

@@ -49,8 +49,16 @@ pub struct DepositAddressResponse {
     pub salt_inputs: PersistentSaltInputs,
 }
 
+/// Idempotent persistent-address rotation request.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct RotateDepositAddressRequest {
+    /// Address version the caller observed before requesting rotation.
+    pub from_version: u64,
+}
+
 /// Deposit-list filters.
 #[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DepositListQuery {
     /// Filter by state.
     pub state: Option<String>,
@@ -64,6 +72,7 @@ pub struct DepositListQuery {
 
 /// Product-wide support lookup filters.
 #[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DepositLookupQuery {
     /// Canonical transaction hash.
     pub tx_hash: Option<String>,
@@ -293,6 +302,7 @@ pub struct RoutePauseResponse {
 
 /// Attestation query parameters.
 #[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AttestationQuery {
     /// Non-empty hexadecimal nonce of at most 32 bytes.
     pub nonce: String,

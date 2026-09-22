@@ -15,8 +15,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
-use utoipa::openapi::OpenApi;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+use utoipa::openapi::{Info, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -94,6 +94,11 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .merge(product)
         .merge(admin)
         .routes(routes!(handlers::get_attestation));
+    let mut info = Info::new("Crypto Top-up Service API", env!("CARGO_PKG_VERSION"));
+    info.description = Some(
+        "Authenticated product and administrative API for deterministic crypto top-ups.".to_owned(),
+    );
+    documented.get_openapi_mut().info = info;
     documented
         .get_openapi_mut()
         .components
