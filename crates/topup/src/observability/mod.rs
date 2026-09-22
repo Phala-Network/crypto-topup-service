@@ -8,8 +8,8 @@ mod spans;
 pub use metrics::{
     InitError, LockExposureCaps, clear_execution_deadline, collect_backup_metrics,
     collect_database_metrics, execution_deadline, heartbeat, init, metrics_response,
-    metrics_router, progress, record_scanner_lag, record_scanner_success, register_loop,
-    register_metrics, register_scanner, waiting,
+    metrics_router, progress, record_flush_send_paused, record_scanner_lag, record_scanner_success,
+    register_loop, register_metrics, register_scanner, waiting,
 };
 pub use redaction::{Redacted, RedactedTransportError};
 pub use request::request_context;

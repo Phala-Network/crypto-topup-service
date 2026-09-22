@@ -152,6 +152,10 @@ pub fn register_metrics() {
         "topup_loop_expected",
         "Whether a loop instance is expected to emit heartbeats"
     );
+    describe_gauge!(
+        "topup_flush_send_paused",
+        "Whether the next planned flush on a chain is held by a flush pause scope"
+    );
     describe_counter!(
         "topup_unsupported_inflows_total",
         "Finalized unsupported-asset inflows observed by the scanner"
@@ -332,6 +336,12 @@ impl LockExposureCaps {
                     .map(|(slug, cap)| ("product", slug.as_str(), *cap)),
             )
     }
+}
+
+/// Records whether a chain's next planned flush is held by an operator pause.
+pub fn record_flush_send_paused(chain: u64, paused: bool) {
+    gauge!("topup_flush_send_paused", "chain" => chain.to_string(), "producer_enabled" => "true")
+        .set(if paused { 1.0 } else { 0.0 });
 }
 
 /// Periodically refreshes metrics sourced from PostgreSQL.

@@ -98,6 +98,7 @@ impl Flusher {
             db::next_planned_flush(&mut transaction, route.chain.chain_id, operator).await?
         else {
             transaction.commit().await?;
+            crate::observability::record_flush_send_paused(route.chain.chain_id, false);
             return Ok(RunResult::Idle);
         };
         let mut evidence = parse_evidence(&flush)?;
@@ -117,6 +118,7 @@ impl Flusher {
                 db::record_flush_send_paused(&mut transaction, flush.id, &evidence.binding.route)
                     .await?;
             transaction.commit().await?;
+            crate::observability::record_flush_send_paused(route.chain.chain_id, true);
             if recorded {
                 tracing::info!(
                     flush_id = %flush.id,
@@ -127,6 +129,7 @@ impl Flusher {
             }
             return Ok(RunResult::Idle);
         }
+        crate::observability::record_flush_send_paused(route.chain.chain_id, false);
         let (factory, token, salts) = bound_call(&flush, &evidence)?;
         let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
         let priority = fees.max_priority_fee_per_gas.min(max_fee);
