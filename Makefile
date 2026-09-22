@@ -1,4 +1,4 @@
-.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image restore-drill
+.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image restore-drill deploy-check
 
 build:
 	cargo build --workspace --locked
@@ -35,3 +35,10 @@ verify-image:
 
 restore-drill:
 	deploy/local/restore-drill.sh
+
+deploy-check:
+	cd contracts && forge fmt --check
+	cd contracts && forge build
+	cd contracts && forge test
+	deploy/contracts/check-build.sh --check
+	deploy/contracts/test-determinism.sh

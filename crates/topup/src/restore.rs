@@ -1,22 +1,14 @@
 //! Post-restore database validation.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use sqlx::{PgPool, Row as _};
-use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi};
-use topup_core::deposit::{DepositState, RejectReason, StepOutcome, next};
-use uuid::Uuid;
 
-use crate::db::{self, ApplyTransitionResult, MIGRATOR, SettlementIntent, TransitionUpdate};
-use crate::pump::StepResult;
-use crate::steps::settle::SettleStep;
+use crate::db::MIGRATOR;
+use crate::reconciler::{self, CheckName, Finding, Reconciler};
 
-/// Version of the newest migration embedded in this binary.
-pub const LATEST_MIGRATION_VERSION: i64 = 20_260_922_000_011;
 const HEARTBEAT_SAMPLING_SECONDS: i32 = 60;
 
 /// Source-side failure point recorded outside the PostgreSQL volume being restored.
@@ -61,41 +53,30 @@ pub struct RestoreReport {
     pub heartbeat_sampling_seconds: i32,
     /// Exact counts for durable service tables.
     pub row_counts: BTreeMap<&'static str, i64>,
-    /// Restore-specific product reconciliation status.
-    pub post_restore_reconciliation: ReconciliationReport,
+    /// Result of the library post-restore reconciliation round.
+    pub post_restore_reconciliation: PostRestoreReconciliation,
 }
 
-/// Product reconciliation completed before the restored service resumes.
+/// Outcome of the §13 post-restore reconciliation gate.
 #[derive(Debug, Serialize)]
-pub struct ReconciliationReport {
-    /// `complete` only when every required product GET was adopted.
+pub struct PostRestoreReconciliation {
+    /// `complete` unless a post-restore product lookup left a deposit unverified.
     pub status: &'static str,
-    /// Deposits for which architecture section 13 requires a product GET before resume.
-    pub deposits_at_or_beyond_cleared: i64,
-    /// Product GET requests attempted by idempotency key.
-    pub settlements_queried: i64,
-    /// Product answers adopted as accepted.
-    pub accepted: i64,
-    /// Product answers adopted as rejected.
-    pub rejected: i64,
-    /// Deposits still processing and therefore unsafe to resume.
-    pub processing: i64,
-    /// Product keys not found and therefore unsafe to resume.
-    pub not_found: i64,
-    /// Per-deposit failures that make this report incomplete.
-    pub failures: Vec<String>,
+    /// Checks that could not finish; only the post-restore settlement check gates resume.
+    pub failed_checks: Vec<CheckName>,
+    /// Every finding of the round, including alert-only findings from the regular checks.
+    pub findings: Vec<Finding>,
 }
 
-/// Creates a product settlement API for one configured endpoint.
-pub type SettlementApiFactory<'a> =
-    dyn Fn(&str) -> Result<Arc<dyn SettlementApi>, String> + Send + Sync + 'a;
-
-/// Validates migration state, WAL application, externally anchored RPO, table counts, and product
-/// reconciliation. The service must remain stopped while this runs.
+/// Validates migration state, WAL application, externally anchored RPO, and table counts, then runs
+/// the §13 post-restore reconciliation through [`reconciler::post_restore_once`].
+///
+/// The service, heartbeat, and backup processes must remain stopped while this runs: the
+/// post-restore round claims every deposit at or beyond `cleared` and may apply product answers.
 pub async fn check(
     pool: &PgPool,
     expectations: &RestoreExpectations,
-    client_factory: &SettlementApiFactory<'_>,
+    reconciler: &Reconciler,
 ) -> Result<RestoreReport, String> {
     let latest_migration = check_migrations(pool).await?;
 
@@ -153,7 +134,18 @@ pub async fn check(
         .num_seconds()
         .max(0);
 
-    let post_restore_reconciliation = reconcile_settlements(pool, client_factory).await?;
+    let round = reconciler::post_restore_once(reconciler)
+        .await
+        .map_err(|_| "post-restore reconciliation failed".to_owned())?;
+    let post_restore_reconciliation = PostRestoreReconciliation {
+        status: if round.incomplete {
+            "incomplete"
+        } else {
+            "complete"
+        },
+        failed_checks: round.failed_checks,
+        findings: round.findings,
+    };
     let row_counts = row_counts(pool).await?;
     let deposits = *row_counts
         .get("deposits")
@@ -171,7 +163,25 @@ pub async fn check(
             "restore RPO exceeded: measured {measured_rpo_seconds}s > allowed {allowed_rpo_seconds}s"
         ));
     }
-    failures.extend(post_restore_reconciliation.failures.iter().cloned());
+    failures.extend(
+        post_restore_reconciliation
+            .findings
+            .iter()
+            .filter(|finding| finding.incomplete)
+            .map(|finding| {
+                let subject = finding
+                    .subjects
+                    .get("deposit_id")
+                    .map_or("unknown", String::as_str);
+                format!("post-restore reconciliation is incomplete for deposit {subject}")
+            }),
+    );
+    if post_restore_reconciliation
+        .failed_checks
+        .contains(&CheckName::PostRestoreSettlement)
+    {
+        failures.push("post-restore settlement check did not complete".to_owned());
+    }
     let status = if failures.is_empty() {
         "ok"
     } else {
@@ -235,392 +245,45 @@ async fn check_migrations(pool: &PgPool) -> Result<i64, String> {
             ));
         }
     }
-    let latest = expected
+    expected
         .last()
         .map(|migration| migration.version)
-        .ok_or_else(|| "binary contains no database migrations".to_owned())?;
-    if latest != LATEST_MIGRATION_VERSION {
-        return Err("binary latest migration constant is stale".to_owned());
-    }
-    Ok(latest)
+        .ok_or_else(|| "binary contains no database migrations".to_owned())
 }
 
-#[derive(Debug)]
-struct ReconciliationCandidate {
-    deposit_id: Uuid,
-    product_id: Uuid,
-    account_external_id: String,
-    settlement_url: String,
-    settlement_key: Option<String>,
-    settlement_product_id: Option<Uuid>,
-}
-
-async fn reconcile_settlements(
-    pool: &PgPool,
-    client_factory: &SettlementApiFactory<'_>,
-) -> Result<ReconciliationReport, String> {
-    let rows = sqlx::query(
-        "SELECT d.id AS deposit_id, p.id AS product_id, a.external_id, p.settlement_url, \
-         s.key AS settlement_key, s.product_id AS settlement_product_id \
-         FROM deposits d \
-         JOIN accounts a ON a.id = d.account_id \
-         JOIN products p ON p.id = a.product_id \
-         LEFT JOIN settlements s ON s.deposit_id = d.id \
-         WHERE d.state IN ('cleared', 'credited', 'swept') \
-            OR (d.state = 'rejected' AND d.reason = 'product_refused') \
-         ORDER BY d.id",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| "failed to load deposits requiring restore reconciliation".to_owned())?;
-    let deposits_at_or_beyond_cleared = i64::try_from(rows.len())
-        .map_err(|_| "restore settlement reconciliation count overflowed".to_owned())?;
-    let candidates = rows
-        .into_iter()
-        .map(|row| {
-            Ok(ReconciliationCandidate {
-                deposit_id: row
-                    .try_get("deposit_id")
-                    .map_err(|_| "restore settlement deposit identifier is invalid".to_owned())?,
-                product_id: row
-                    .try_get("product_id")
-                    .map_err(|_| "restore settlement product identifier is invalid".to_owned())?,
-                account_external_id: row
-                    .try_get("external_id")
-                    .map_err(|_| "restore settlement account identifier is invalid".to_owned())?,
-                settlement_url: row
-                    .try_get("settlement_url")
-                    .map_err(|_| "restore settlement product endpoint is invalid".to_owned())?,
-                settlement_key: row
-                    .try_get("settlement_key")
-                    .map_err(|_| "restore settlement key is invalid".to_owned())?,
-                settlement_product_id: row
-                    .try_get("settlement_product_id")
-                    .map_err(|_| "restore settlement product link is invalid".to_owned())?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let mut clients = BTreeMap::<String, Arc<dyn SettlementApi>>::new();
-    let mut report = ReconciliationReport {
-        status: "complete",
-        deposits_at_or_beyond_cleared,
-        settlements_queried: 0,
-        accepted: 0,
-        rejected: 0,
-        processing: 0,
-        not_found: 0,
-        failures: Vec::new(),
-    };
-    for candidate in candidates {
-        reconcile_candidate(pool, client_factory, &mut clients, &candidate, &mut report).await;
-    }
-    if !report.failures.is_empty() {
-        report.status = "incomplete";
-    }
-    Ok(report)
-}
-
-async fn reconcile_candidate(
-    pool: &PgPool,
-    client_factory: &SettlementApiFactory<'_>,
-    clients: &mut BTreeMap<String, Arc<dyn SettlementApi>>,
-    candidate: &ReconciliationCandidate,
-    report: &mut ReconciliationReport,
-) {
-    let key = format!("deposit:{}", candidate.deposit_id);
-    if candidate
-        .settlement_key
-        .as_deref()
-        .is_some_and(|stored| stored != key)
-    {
-        report.failures.push(format!(
-            "deposit {} has a non-canonical settlement key",
-            candidate.deposit_id
-        ));
-        return;
-    }
-    if candidate
-        .settlement_product_id
-        .is_some_and(|stored| stored != candidate.product_id)
-    {
-        report.failures.push(format!(
-            "deposit {} has a settlement linked to the wrong product",
-            candidate.deposit_id
-        ));
-        return;
-    }
-    let client = match clients.get(&candidate.settlement_url) {
-        Some(client) => Arc::clone(client),
-        None => match client_factory(&candidate.settlement_url) {
-            Ok(client) => {
-                clients.insert(candidate.settlement_url.clone(), Arc::clone(&client));
-                client
-            }
-            Err(_) => {
-                report.failures.push(format!(
-                    "product client creation failed for deposit {}",
-                    candidate.deposit_id
-                ));
-                return;
-            }
-        },
-    };
-    report.settlements_queried += 1;
-    let answer = match client.get_by_key(&key).await {
-        Ok(Some(answer)) => answer,
-        Ok(None) => {
-            report.not_found += 1;
-            report.failures.push(format!(
-                "product has no settlement for deposit {}",
-                candidate.deposit_id
-            ));
-            return;
-        }
-        Err(_) => {
-            report.failures.push(format!(
-                "product lookup failed for deposit {}",
-                candidate.deposit_id
-            ));
-            return;
-        }
-    };
-    let deposit = match db::get_deposit(pool, candidate.deposit_id).await {
-        Ok(Some(deposit)) => deposit,
-        Ok(None) | Err(_) => {
-            report.failures.push(format!(
-                "deposit {} disappeared during reconciliation",
-                candidate.deposit_id
-            ));
-            return;
-        }
-    };
-    if candidate.settlement_key.is_none() {
-        let Some(payload) = answer_payload(&answer) else {
-            report.failures.push(format!(
-                "deposit {} has no settlement row and product answer has no recoverable payload",
-                candidate.deposit_id
-            ));
-            return;
-        };
-        if db::upsert_intent(
-            pool,
-            &SettlementIntent {
-                deposit_id: deposit.id,
-                product_id: candidate.product_id,
-                key: key.clone(),
-                payload,
-            },
-        )
-        .await
-        .is_err()
-        {
-            report.failures.push(format!(
-                "failed to recreate settlement intent for deposit {}",
-                candidate.deposit_id
-            ));
-            return;
-        }
-    }
-
-    let result = match SettleStep::adopt_product_answer(
-        pool,
-        &deposit,
-        candidate.product_id,
-        &candidate.account_external_id,
-        answer,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            report.failures.push(format!(
-                "product answer failed identity verification or persistence for deposit {}",
-                candidate.deposit_id
-            ));
-            return;
-        }
-    };
-    match result.outcome {
-        StepOutcome::Advance => {
-            report.accepted += 1;
-            match deposit.state {
-                DepositState::Cleared => {
-                    if apply_restore_transition(pool, &deposit, &result)
-                        .await
-                        .is_err()
-                    {
-                        report.failures.push(format!(
-                            "failed to advance accepted deposit {}",
-                            candidate.deposit_id
-                        ));
-                    }
-                }
-                DepositState::Credited | DepositState::Swept => {}
-                DepositState::Rejected => report.failures.push(format!(
-                    "product accepted locally rejected deposit {}; manual repair is required",
-                    candidate.deposit_id
-                )),
-                DepositState::Detected | DepositState::Confirmed => report.failures.push(format!(
-                    "deposit {} was selected below the cleared state",
-                    candidate.deposit_id
-                )),
-            }
-        }
-        StepOutcome::Reject(RejectReason::ProductRefused) => {
-            report.rejected += 1;
-            match deposit.state {
-                DepositState::Cleared => {
-                    if apply_restore_transition(pool, &deposit, &result)
-                        .await
-                        .is_err()
-                    {
-                        report
-                            .failures
-                            .push(format!("failed to reject deposit {}", candidate.deposit_id));
-                    }
-                }
-                DepositState::Rejected if deposit.reason == Some(RejectReason::ProductRefused) => {}
-                DepositState::Credited | DepositState::Swept => report.failures.push(format!(
-                    "product rejected deposit {} after local credit; manual repair is required",
-                    candidate.deposit_id
-                )),
-                DepositState::Rejected => report.failures.push(format!(
-                    "product answer conflicts with the local rejection reason for deposit {}",
-                    candidate.deposit_id
-                )),
-                DepositState::Detected | DepositState::Confirmed => report.failures.push(format!(
-                    "deposit {} was selected below the cleared state",
-                    candidate.deposit_id
-                )),
-            }
-        }
-        StepOutcome::Wait { .. } => {
-            report.processing += 1;
-            report.failures.push(format!(
-                "product settlement is still processing for deposit {}",
-                candidate.deposit_id
-            ));
-        }
-        StepOutcome::Retry { .. }
-        | StepOutcome::AdoptProductAnswer { .. }
-        | StepOutcome::Reject(_) => {
-            report.failures.push(format!(
-                "product returned a non-adoptable answer for deposit {}",
-                candidate.deposit_id
-            ));
-        }
-    }
-}
-
-fn answer_payload(answer: &SettlementAnswer) -> Option<Value> {
-    match answer {
-        SettlementAnswer::Accepted { payload, .. }
-        | SettlementAnswer::Processing { payload }
-        | SettlementAnswer::Rejected { payload, .. } => Some(payload.clone()),
-        SettlementAnswer::Conflict409
-        | SettlementAnswer::PayloadMismatch422
-        | SettlementAnswer::Unknown { .. } => None,
-    }
-}
-
-async fn apply_restore_transition(
-    pool: &PgPool,
-    deposit: &db::Deposit,
-    result: &StepResult,
-) -> Result<(), String> {
-    let transition = next(deposit.state, &result.outcome)
-        .map_err(|_| "product answer cannot be applied to restored deposit state".to_owned())?;
-    let rejection_reason = match result.outcome {
-        StepOutcome::Reject(reason) => Some(reason),
-        _ => None,
-    };
-    let lease_token = Uuid::new_v4();
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|_| "failed to start restore transition".to_owned())?;
-    let claimed = sqlx::query_scalar::<_, Uuid>(
-        "UPDATE deposits SET lease_token = $2, lease_until = now() + interval '5 minutes' \
-         WHERE id = $1 AND state = $3 RETURNING id",
-    )
-    .bind(deposit.id)
-    .bind(lease_token)
-    .bind(db::state_code(deposit.state))
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(|_| "failed to lock restored deposit".to_owned())?;
-    if claimed.is_none() {
-        return Err("restored deposit state changed during reconciliation".to_owned());
-    }
-    let applied = db::apply_transition(
-        &mut transaction,
-        deposit.id,
-        deposit.state,
-        lease_token,
-        TransitionUpdate {
-            transition,
-            rejection_reason,
-            attempt: 0,
-            next_attempt_at: Utc::now(),
-        },
-        db::TransitionWrites {
-            evidence: &result.evidence,
-            effects: &result.effects,
-            outbox_events: &result.events,
-        },
-    )
-    .await
-    .map_err(|_| "failed to persist restored deposit transition".to_owned())?;
-    if applied != ApplyTransitionResult::Applied {
-        return Err("restored deposit transition became stale".to_owned());
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(|_| "failed to commit restored deposit transition".to_owned())
-}
+/// Durable tables whose exact counts are reported; identifiers are constants, never input.
+const COUNTED_TABLES: [&str; 16] = [
+    "products",
+    "accounts",
+    "addresses",
+    "rate_locks",
+    "cursors",
+    "deposits",
+    "transitions",
+    "settlements",
+    "flushes",
+    "flushed",
+    "refunds",
+    "outbox",
+    "audit",
+    "reconciliation_findings",
+    "reconciliation_blocks",
+    "heartbeat",
+];
 
 async fn row_counts(pool: &PgPool) -> Result<BTreeMap<&'static str, i64>, String> {
-    const TABLES: [&str; 14] = [
-        "products",
-        "accounts",
-        "addresses",
-        "rate_locks",
-        "cursors",
-        "deposits",
-        "transitions",
-        "settlements",
-        "flushes",
-        "flushed",
-        "refunds",
-        "outbox",
-        "audit",
-        "heartbeat",
-    ];
-    let row = sqlx::query(
-        "SELECT \
-         (SELECT count(*) FROM products)::bigint AS products, \
-         (SELECT count(*) FROM accounts)::bigint AS accounts, \
-         (SELECT count(*) FROM addresses)::bigint AS addresses, \
-         (SELECT count(*) FROM rate_locks)::bigint AS rate_locks, \
-         (SELECT count(*) FROM cursors)::bigint AS cursors, \
-         (SELECT count(*) FROM deposits)::bigint AS deposits, \
-         (SELECT count(*) FROM transitions)::bigint AS transitions, \
-         (SELECT count(*) FROM settlements)::bigint AS settlements, \
-         (SELECT count(*) FROM flushes)::bigint AS flushes, \
-         (SELECT count(*) FROM flushed)::bigint AS flushed, \
-         (SELECT count(*) FROM refunds)::bigint AS refunds, \
-         (SELECT count(*) FROM outbox)::bigint AS outbox, \
-         (SELECT count(*) FROM audit)::bigint AS audit, \
-         (SELECT count(*) FROM heartbeat)::bigint AS heartbeat",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| "failed to read durable table counts".to_owned())?;
+    let columns = COUNTED_TABLES
+        .iter()
+        .map(|table| format!("(SELECT count(*) FROM {table})::bigint AS {table}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = sqlx::query(&format!("SELECT {columns}"))
+        .fetch_one(pool)
+        .await
+        .map_err(|_| "failed to read durable table counts".to_owned())?;
 
     let mut counts = BTreeMap::new();
-    for table in TABLES {
+    for table in COUNTED_TABLES {
         let count = row
             .try_get(table)
             .map_err(|_| format!("row count for {table} is invalid"))?;

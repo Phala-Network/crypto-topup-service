@@ -428,15 +428,28 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             sqlx::query(
                 r#"
                 INSERT INTO rate_locks (
-                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
+                    exposure_reserved
                 )
                 VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
-                        now() + interval '15 minutes')
+                        now() + interval '15 minutes', true)
                 "#,
             )
             .bind(seed.address_id)
             .execute(&context.app_pool)
             .await?;
+            for key in [
+                format!("account:{}", seed.account_id),
+                format!("product:{}", seed.product_id),
+                "global".to_owned(),
+            ] {
+                sqlx::query(
+                    "INSERT INTO lock_exposure (scope_key, open_minor) VALUES ($1, 777)",
+                )
+                .bind(key)
+                .execute(&context.app_pool)
+                .await?;
+            }
             let first = db::get_deposit(&context.app_pool, first_id)
                 .await?
                 .context("first deposit")?;
@@ -496,6 +509,255 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             .fetch_one(&context.app_pool)
             .await?;
             ensure!(locked == 1);
+            let lock_status: String = sqlx::query_scalar(
+                "SELECT status FROM rate_locks WHERE address_id = $1",
+            )
+            .bind(seed.address_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(lock_status == "consumed");
+            let open_exposure: Vec<String> = sqlx::query_scalar(
+                "SELECT open_minor::text FROM lock_exposure ORDER BY scope_key",
+            )
+            .fetch_all(&context.app_pool)
+            .await?;
+            ensure!(open_exposure == ["0", "0", "0"]);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let cases = [
+                ("within", 19_u8, 1_010_u64, 900_i64, "lock", 777_u64, true),
+                ("under", 20, 989, 900, "spot", 98, false),
+                ("over", 21, 1_011, 900, "spot", 101, false),
+                ("late", 22, 1_000, -1, "spot", 100, false),
+            ];
+
+            for (name, number, amount, expiry_seconds, source, credit, consumed) in cases {
+                let seed = seed_account(&context.app_pool, number).await?;
+                let lock_ref = format!("{name}-lock");
+                sqlx::query("UPDATE addresses SET kind = 'lock', lock_ref = $2 WHERE id = $1")
+                    .bind(seed.address_id)
+                    .bind(&lock_ref)
+                    .execute(&context.app_pool)
+                    .await?;
+                let deposit_id = insert_deposit(&context.app_pool, seed, number).await?;
+                sqlx::query("UPDATE deposits SET amount_atomic = $2::text::numeric WHERE id = $1")
+                    .bind(deposit_id)
+                    .bind(amount.to_string())
+                    .execute(&context.app_pool)
+                    .await?;
+                let expires_at = Utc::now() + Duration::seconds(expiry_seconds);
+                sqlx::query(
+                    r#"
+                    INSERT INTO rate_locks (
+                        address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
+                        exposure_reserved
+                    )
+                    VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777, $2, true)
+                    "#,
+                )
+                .bind(seed.address_id)
+                .bind(expires_at)
+                .execute(&context.app_pool)
+                .await?;
+                for key in [
+                    format!("account:{}", seed.account_id),
+                    format!("product:{}", seed.product_id),
+                    "global".to_owned(),
+                ] {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO lock_exposure (scope_key, open_minor)
+                        VALUES ($1, 777)
+                        ON CONFLICT (scope_key) DO UPDATE
+                        SET open_minor = lock_exposure.open_minor + EXCLUDED.open_minor
+                        "#,
+                    )
+                    .bind(key)
+                    .execute(&context.app_pool)
+                    .await?;
+                }
+
+                let deposit = db::get_deposit(&context.app_pool, deposit_id)
+                    .await?
+                    .context("rate-lock deposit")?;
+                let pump = test_pump(
+                    &context.app_pool,
+                    confirm_steps(
+                        &context.app_pool,
+                        vec![transfer_log(&deposit, evm_address(number))],
+                        Arc::new(ProductAnswers::default()),
+                        None,
+                    ),
+                    PumpConfig::default(),
+                    0,
+                )?;
+                ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id });
+
+                let stored = db::get_deposit(&context.app_pool, deposit_id)
+                    .await?
+                    .context("confirmed rate-lock deposit")?;
+                ensure!(stored.price_source.as_deref() == Some(source), "{name}");
+                ensure!(
+                    stored.credit_minor == Some(MinorAmount::new(credit)),
+                    "{name}"
+                );
+                let lock_status: String =
+                    sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
+                        .bind(seed.address_id)
+                        .fetch_one(&context.app_pool)
+                        .await?;
+                ensure!(
+                    lock_status == if consumed { "consumed" } else { "open" },
+                    "{name}"
+                );
+                let account_open: String = sqlx::query_scalar(
+                    "SELECT open_minor::text FROM lock_exposure WHERE scope_key = $1",
+                )
+                .bind(format!("account:{}", seed.account_id))
+                .fetch_one(&context.app_pool)
+                .await?;
+                ensure!(account_open == if consumed { "0" } else { "777" }, "{name}");
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 23).await?;
+            sqlx::query(
+                "UPDATE addresses SET kind = 'lock', lock_ref = 'expiry-race' WHERE id = $1",
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let deposit_id = insert_deposit(&context.app_pool, seed, 23).await?;
+            let expires_at = Utc::now() - Duration::seconds(1);
+            sqlx::query("UPDATE deposits SET block_time = $2 WHERE id = $1")
+                .bind(deposit_id)
+                .bind(expires_at - Duration::seconds(1))
+                .execute(&context.app_pool)
+                .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
+                    exposure_reserved
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777, $2, true)
+                "#,
+            )
+            .bind(seed.address_id)
+            .bind(expires_at)
+            .execute(&context.app_pool)
+            .await?;
+            for key in [
+                format!("account:{}", seed.account_id),
+                format!("product:{}", seed.product_id),
+                "global".to_owned(),
+            ] {
+                sqlx::query("INSERT INTO lock_exposure (scope_key, open_minor) VALUES ($1, 777)")
+                    .bind(key)
+                    .execute(&context.app_pool)
+                    .await?;
+            }
+
+            ensure!(topup::locks::expire_once(&context.app_pool).await? == 1);
+            let deposit = db::get_deposit(&context.app_pool, deposit_id)
+                .await?
+                .context("expiry-race deposit")?;
+            let pump = test_pump(
+                &context.app_pool,
+                confirm_steps(
+                    &context.app_pool,
+                    vec![transfer_log(&deposit, evm_address(23))],
+                    Arc::new(ProductAnswers::default()),
+                    None,
+                ),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id });
+
+            let stored = db::get_deposit(&context.app_pool, deposit_id)
+                .await?
+                .context("confirmed expiry-race deposit")?;
+            ensure!(stored.price_source.as_deref() == Some("lock"));
+            ensure!(stored.credit_minor == Some(MinorAmount::new(777)));
+            let lock_status: String =
+                sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(lock_status == "consumed");
+            let exposure: Vec<String> =
+                sqlx::query_scalar("SELECT open_minor::text FROM lock_exposure ORDER BY scope_key")
+                    .fetch_all(&context.app_pool)
+                    .await?;
+            ensure!(exposure == ["0", "0", "0"]);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn cancelled_lock_payment_is_credited_at_spot() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 18).await?;
+            sqlx::query(
+                "UPDATE addresses SET kind = 'lock', lock_ref = 'cancelled-lock' WHERE id = $1",
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
+                    status, closed_at
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
+                        now() + interval '15 minutes', 'cancelled', now())
+                "#,
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let deposit_id = insert_deposit(&context.app_pool, seed, 18).await?;
+            let deposit = db::get_deposit(&context.app_pool, deposit_id)
+                .await?
+                .context("cancelled-lock deposit")?;
+            let pump = test_pump(
+                &context.app_pool,
+                confirm_steps(
+                    &context.app_pool,
+                    vec![transfer_log(&deposit, evm_address(18))],
+                    Arc::new(ProductAnswers::default()),
+                    None,
+                ),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id });
+            let stored = db::get_deposit(&context.app_pool, deposit_id)
+                .await?
+                .context("confirmed cancelled-lock deposit")?;
+            ensure!(stored.price_source.as_deref() == Some("spot"));
+            ensure!(stored.credit_minor == Some(MinorAmount::new(100)));
             Ok(())
         })
     })

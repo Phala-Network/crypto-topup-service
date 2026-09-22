@@ -19,6 +19,10 @@ fn help_and_version_succeed() {
 
 #[test]
 fn restore_check_requires_a_database_url() {
+    let route = format!(
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .arg("restore-check")
         .args([
@@ -26,6 +30,8 @@ fn restore_check_requires_a_database_url() {
             "2026-09-22T00:00:00Z",
             "--expected-lsn",
             "0/0",
+            "--route",
+            &route,
         ])
         .env_remove("RESTORE_DATABASE_URL")
         .env_remove("MIGRATE_DATABASE_URL")
@@ -230,4 +236,24 @@ fn outbox_replay_validates_selector_and_timestamp_before_connecting() {
         String::from_utf8_lossy(&invalid.stderr).contains("RFC 3339")
             || String::from_utf8_lossy(&invalid.stdout).contains("RFC 3339")
     );
+}
+
+#[test]
+fn reconcile_help_exposes_once_and_post_restore_modes() {
+    let output = topup(&["reconcile", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--once"));
+    assert!(help.contains("--post-restore"));
+    assert!(help.contains("--route"));
+    assert!(help.contains("processes are stopped"));
+}
+
+#[test]
+fn restore_check_help_requires_a_stopped_service() {
+    let output = topup(&["restore-check", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--route"));
+    assert!(help.contains("processes are stopped"));
 }

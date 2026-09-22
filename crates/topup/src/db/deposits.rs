@@ -601,23 +601,16 @@ pub async fn apply_transition(
         return Ok(ApplyTransitionResult::Stale);
     }
 
-    if let Some(consumption) = writes.effects.lock_consumption {
-        let consumed = sqlx::query(
-            r#"
-            UPDATE rate_locks
-            SET consumed_by = $2
-            WHERE address_id = $1
-              AND (consumed_by IS NULL OR ($3 AND consumed_by = $2))
-            "#,
+    if let Some(consumption) = writes.effects.lock_consumption
+        && !crate::locks::consume(
+            transaction,
+            consumption.address_id,
+            deposit_id,
+            consumption.idempotent,
         )
-        .bind(consumption.address_id)
-        .bind(deposit_id)
-        .bind(consumption.idempotent)
-        .execute(&mut **transaction)
-        .await?;
-        if consumed.rows_affected() == 0 {
-            return Ok(ApplyTransitionResult::LockUnavailable);
-        }
+        .await?
+    {
+        return Ok(ApplyTransitionResult::LockUnavailable);
     }
 
     if let Some(canonical) = &writes.effects.canonical_evidence {
