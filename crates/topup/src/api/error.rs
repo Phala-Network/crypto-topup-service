@@ -61,6 +61,26 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
+    /// Returns a typed open-exposure cap conflict.
+    #[must_use]
+    pub fn exposure_cap(scope: &'static str) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "exposure_cap_exceeded",
+            format!("{scope} open rate-lock exposure cap would be exceeded"),
+        )
+    }
+
+    /// Returns a typed per-account rate-limit response.
+    #[must_use]
+    pub fn rate_limited() -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate-lock creation limit exceeded",
+        )
+    }
+
     /// Returns a conflict for an already consumed request signature.
     #[must_use]
     pub fn signature_replayed() -> Self {

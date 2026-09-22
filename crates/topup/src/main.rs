@@ -224,6 +224,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(&routes) {
+        Ok(provider) => Arc::new(provider) as Arc<dyn topup::locks::QuoteProvider>,
+        Err(error) => {
+            tracing::error!(%error, "invalid rate-lock pricing configuration");
+            return ExitCode::FAILURE;
+        }
+    };
     let scanner_routes = match topup::scanner::configure_routes(&routes) {
         Ok(routes) => routes,
         Err(error) => {
@@ -358,6 +365,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         routes: Arc::new(routes),
         admin_key,
         attestor: Arc::new(DstackAttestor::new()),
+        rate_lock_quotes,
     };
     let (application, _) = topup::api::router(state);
     let api_cancellation = cancellation.child_token();
@@ -393,6 +401,16 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
+    });
+    let expiry_metrics = Arc::new(topup::locks::ExpiryMetrics::default());
+    let expiry_worker = topup::locks::ExpiryWorker::new(
+        pool.clone(),
+        Arc::clone(&expiry_metrics),
+        Duration::from_secs(5),
+    );
+    let expiry_cancellation = cancellation.child_token();
+    let expiry_task = tokio::spawn(async move {
+        expiry_worker.run(expiry_cancellation).await;
     });
     let mut flusher_handles = Vec::with_capacity(flusher_tasks.len());
     for task in flusher_tasks {
@@ -475,6 +493,10 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
     }
+    if let Err(error) = expiry_task.await {
+        tracing::error!(%error, "rate-lock expiry task failed during shutdown");
+        clean_shutdown = false;
+    }
     for task in flusher_handles {
         if let Err(error) = task.await {
             tracing::error!(%error, "flusher task failed during shutdown");
@@ -484,6 +506,8 @@ async fn run(args: &RunArgs) -> ExitCode {
     pool.close().await;
     tracing::info!(
         stuck_deposit_alerts = metrics.stuck_deposit_alerts(),
+        rate_lock_expiry_heartbeats = expiry_metrics.heartbeats(),
+        rate_locks_expired = expiry_metrics.expired(),
         "topup service stopped"
     );
 
