@@ -15,6 +15,7 @@ dev-signer = ["topup-adapters/dev-signer"]
 
 [dependencies]
 alloy-primitives.workspace = true
+async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -28,6 +29,7 @@ sqlx.workspace = true
 topup-adapters = { path = "../adapters" }
 topup-core = { path = "../core" }
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

@@ -19,7 +19,7 @@ fn help_and_version_succeed() {
 
 #[test]
 fn placeholder_commands_fail_with_a_clear_message() {
-    let commands: &[&[&str]] = &[&["run"], &["restore-check"]];
+    let commands: &[&[&str]] = &[&["restore-check"]];
 
     for args in commands {
         let output = topup(args);
@@ -31,6 +31,27 @@ fn placeholder_commands_fail_with_a_clear_message() {
             "{args:?} should report that it is not implemented"
         );
     }
+}
+
+#[test]
+fn run_requires_a_database_url() {
+    let route = format!(
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["run", "--route", &route])
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("DATABASE_URL is required for run")
+            || stderr.contains("DATABASE_URL is required for run")
+    );
 }
 
 #[test]

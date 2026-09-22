@@ -1,0 +1,808 @@
+//! PostgreSQL integration tests for concurrent deposit pumps.
+
+use std::env;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
+
+use alloy_primitives::{Address, B256, U256};
+use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
+use chrono::{Duration, Utc};
+use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Executor, PgPool, Row};
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
+use topup::db::{
+    self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
+    SettlementIntent,
+};
+use topup::pump::{
+    AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, PumpMetrics, RunOnceResult, Step,
+    StepResult, StepSet,
+};
+use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
+use topup_core::identity::deposit_id;
+use topup_core::money::AtomicAmount;
+use topup_core::route::RouteFile;
+use url::Url;
+use uuid::Uuid;
+
+type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+
+struct TestContext {
+    admin_pool: PgPool,
+    owner_pool: PgPool,
+    app_pool: PgPool,
+    database_name: String,
+    app_role: String,
+}
+
+impl TestContext {
+    async fn create() -> Result<Option<Self>> {
+        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
+            return Ok(None);
+        };
+        let Some(app_template) = required_url("DATABASE_URL") else {
+            return Ok(None);
+        };
+
+        let mut admin_url =
+            Url::parse(&owner_template).context("MIGRATE_DATABASE_URL must be a PostgreSQL URL")?;
+        admin_url.set_path("/postgres");
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(admin_url.as_str())
+            .await
+            .context("connect to the PostgreSQL maintenance database")?;
+        sqlx::query("SELECT pg_advisory_lock(704_202_001)")
+            .execute(&admin_pool)
+            .await?;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let database_name = format!("topup_c2_{suffix}");
+        let app_role = format!("topup_c2_app_{suffix}");
+        let password = format!("c2_{suffix}");
+        admin_pool
+            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
+            .await
+            .context("create isolated test database")?;
+
+        let mut owner_url = Url::parse(&owner_template)?;
+        owner_url.set_path(&format!("/{database_name}"));
+        let owner_pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(owner_url.as_str())
+            .await
+            .context("connect to isolated test database as owner")?;
+        db::migrate(&owner_pool).await.context("apply migrations")?;
+
+        admin_pool
+            .execute(
+                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
+                    .as_str(),
+            )
+            .await
+            .context("create isolated application login role")?;
+
+        let mut app_url = Url::parse(&app_template).context("DATABASE_URL must be a URL")?;
+        app_url
+            .set_username(&app_role)
+            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application username"))?;
+        app_url
+            .set_password(Some(&password))
+            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application password"))?;
+        app_url.set_path(&format!("/{database_name}"));
+        let app_pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(app_url.as_str())
+            .await
+            .context("connect to isolated test database as application role")?;
+
+        sqlx::query("SELECT pg_advisory_unlock(704_202_001)")
+            .execute(&admin_pool)
+            .await?;
+
+        Ok(Some(Self {
+            admin_pool,
+            owner_pool,
+            app_pool,
+            database_name,
+            app_role,
+        }))
+    }
+
+    async fn cleanup(self) -> Result<()> {
+        self.app_pool.close().await;
+        self.owner_pool.close().await;
+        self.admin_pool
+            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
+            .await
+            .context("drop isolated test database")?;
+        self.admin_pool
+            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
+            .await
+            .context("drop isolated application login role")?;
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
+
+fn required_url(name: &str) -> Option<String> {
+    match env::var(name).ok().filter(|value| !value.is_empty()) {
+        Some(value) => Some(value),
+        None => {
+            eprintln!("skipping pump integration test: {name} is not set");
+            None
+        }
+    }
+}
+
+async fn with_database<F>(test: F) -> Result<()>
+where
+    F: for<'a> FnOnce(&'a TestContext) -> TestFuture<'a>,
+{
+    let Some(context) = TestContext::create().await? else {
+        return Ok(());
+    };
+    let result = test(&context).await;
+    let cleanup = context.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn two_pumps_racing_on_one_deposit_apply_exactly_one_transition() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 1).await?;
+            let id = insert_deposit(&context.app_pool, seed, 1).await?;
+            let control = Arc::new(StepControl::default());
+            let steps = blocking_steps(Arc::clone(&control), StepOutcome::Advance);
+            let pump = test_pump(&context.app_pool, steps, PumpConfig::default(), 0)?;
+
+            let first_pump = pump.clone();
+            let first = tokio::spawn(async move { first_pump.run_once().await });
+            control.wait_started().await?;
+            let second = pump.run_once().await?;
+            ensure!(second == RunOnceResult::Idle);
+            control.release();
+            ensure!(
+                first.await.context("first pump task")??
+                    == RunOnceResult::Applied { deposit_id: id }
+            );
+            ensure!(transition_count(&context.app_pool, id).await? == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn late_step_result_is_stale_after_the_lease_is_reclaimed() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 2).await?;
+            let id = insert_deposit(&context.app_pool, seed, 2).await?;
+            let control = Arc::new(StepControl::default());
+            let slow = test_pump(
+                &context.app_pool,
+                blocking_steps(Arc::clone(&control), StepOutcome::Advance),
+                PumpConfig::default(),
+                0,
+            )?;
+            let slow_task = tokio::spawn(async move { slow.run_once().await });
+            control.wait_started().await?;
+
+            sqlx::query(
+                "UPDATE deposits SET lease_until = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&context.app_pool)
+            .await?;
+            let fast = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::Advance),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(fast.run_once().await? == RunOnceResult::Applied { deposit_id: id });
+            control.release();
+            ensure!(
+                slow_task.await.context("slow pump task")??
+                    == RunOnceResult::Stale { deposit_id: id }
+            );
+            ensure!(transition_count(&context.app_pool, id).await? == 1);
+            let stored = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("deposit must exist")?;
+            ensure!(stored.state == DepositState::Confirmed);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 3).await?;
+            let id = insert_deposit(&context.app_pool, seed, 3).await?;
+            let dead_worker_lease = Uuid::new_v4();
+            let claimed = db::claim_deposit(&context.app_pool, dead_worker_lease)
+                .await?
+                .context("dead worker should claim the deposit")?;
+            ensure!(claimed.id == id);
+            db::upsert_intent(
+                &context.app_pool,
+                &SettlementIntent {
+                    deposit_id: id,
+                    product_id: seed.product_id,
+                    key: format!("deposit:{id}"),
+                    payload: json!({"deposit_id": id}),
+                },
+            )
+            .await?;
+
+            let second = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::Wait {
+                    reason: WaitReason::Paused,
+                }),
+                PumpConfig {
+                    wait_interval: StdDuration::from_secs(5),
+                    ..PumpConfig::default()
+                },
+                0,
+            )?;
+            ensure!(second.run_once().await? == RunOnceResult::Idle);
+            let intents: i64 =
+                sqlx::query("SELECT count(*) FROM settlements WHERE deposit_id = $1")
+                    .bind(id)
+                    .fetch_one(&context.app_pool)
+                    .await?
+                    .try_get(0)?;
+            ensure!(intents == 1);
+
+            sqlx::query(
+                "UPDATE deposits SET lease_until = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&context.app_pool)
+            .await?;
+            ensure!(second.run_once().await? == RunOnceResult::Applied { deposit_id: id });
+            ensure!(transition_count(&context.app_pool, id).await? == 1);
+            ensure!(
+                db::get_deposit(&context.app_pool, id)
+                    .await?
+                    .context("deposit must exist")?
+                    .attempt
+                    == 0
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn product_accepted_answer_is_adopted_as_credited() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 8).await?;
+            let accepted_id = insert_deposit(&context.app_pool, seed, 11).await?;
+            let accepted = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::AdoptProductAnswer { credited: true }),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                accepted.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: accepted_id
+                    }
+            );
+            let accepted_deposit = db::get_deposit(&context.app_pool, accepted_id)
+                .await?
+                .context("accepted deposit")?;
+            ensure!(accepted_deposit.state == DepositState::Credited);
+            ensure!(accepted_deposit.reason.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn product_rejected_answer_is_adopted_as_product_refused() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 10).await?;
+            let rejected_id = insert_deposit(&context.app_pool, seed, 12).await?;
+            let rejected = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::AdoptProductAnswer { credited: false }),
+                PumpConfig::default(),
+                0,
+            )?;
+            ensure!(
+                rejected.run_once().await?
+                    == RunOnceResult::Applied {
+                        deposit_id: rejected_id
+                    }
+            );
+            let rejected_deposit = db::get_deposit(&context.app_pool, rejected_id)
+                .await?
+                .context("rejected deposit")?;
+            ensure!(rejected_deposit.state == DepositState::Rejected);
+            ensure!(rejected_deposit.reason == Some(RejectReason::ProductRefused));
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 9).await?;
+            let id = insert_deposit(&context.app_pool, seed, 13).await?;
+            let event_id = Uuid::new_v4();
+            let result = StepResult {
+                outcome: StepOutcome::Advance,
+                evidence: json!({"provider": "test", "confirmed": true}),
+                events: vec![OutboxEvent {
+                    id: event_id,
+                    event_type: "deposit.confirmed".to_owned(),
+                    payload: json!({"deposit_id": id}),
+                    next_attempt_at: Utc::now(),
+                }],
+            };
+            let pump = test_pump(
+                &context.app_pool,
+                result_steps(result),
+                PumpConfig::default(),
+                0,
+            )?;
+
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id: id });
+            let evidence: serde_json::Value =
+                sqlx::query("SELECT evidence FROM transitions WHERE deposit_id = $1")
+                    .bind(id)
+                    .fetch_one(&context.app_pool)
+                    .await?
+                    .try_get(0)?;
+            ensure!(evidence == json!({"provider": "test", "confirmed": true}));
+            let event_count: i64 = sqlx::query("SELECT count(*) FROM outbox WHERE id = $1")
+                .bind(event_id)
+                .fetch_one(&context.app_pool)
+                .await?
+                .try_get(0)?;
+            ensure!(event_count == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn step_timeout_is_persisted_as_a_retry() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 7).await?;
+            let id = insert_deposit(&context.app_pool, seed, 10).await?;
+            let steps = StepSet::new(
+                Box::new(SlowStep),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
+                Box::new(StaticStep(step_result(StepOutcome::Advance))),
+            );
+            let pump = test_pump(
+                &context.app_pool,
+                steps,
+                PumpConfig {
+                    step_timeout: StdDuration::from_millis(10),
+                    ..PumpConfig::default()
+                },
+                u64::MAX,
+            )?;
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id: id });
+            let stored = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("deposit must exist")?;
+            ensure!(stored.state == DepositState::Detected && stored.attempt == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn retry_wait_and_advance_maintain_attempt_and_schedule_contracts() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 4).await?;
+
+            let retry_id = insert_deposit(&context.app_pool, seed, 4).await?;
+            sqlx::query("UPDATE deposits SET attempt = 2 WHERE id = $1")
+                .bind(retry_id)
+                .execute(&context.app_pool)
+                .await?;
+            let before_retry = Utc::now();
+            let retry_pump = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::Retry {
+                    error: RetryError::Transient,
+                }),
+                PumpConfig::default(),
+                0,
+            )?;
+            retry_pump.run_once().await?;
+            let retry = db::get_deposit(&context.app_pool, retry_id)
+                .await?
+                .context("retry deposit")?;
+            ensure!(retry.attempt == 3 && retry.state == DepositState::Detected);
+            ensure!(retry.next_attempt_at >= before_retry + Duration::seconds(120));
+            ensure!(retry.next_attempt_at <= Utc::now() + Duration::seconds(121));
+
+            let wait_id = insert_deposit(&context.app_pool, seed, 5).await?;
+            sqlx::query("UPDATE deposits SET attempt = 2 WHERE id = $1")
+                .bind(wait_id)
+                .execute(&context.app_pool)
+                .await?;
+            let before_wait = Utc::now();
+            let wait_pump = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::Wait {
+                    reason: WaitReason::Paused,
+                }),
+                PumpConfig {
+                    wait_interval: StdDuration::from_secs(5),
+                    ..PumpConfig::default()
+                },
+                0,
+            )?;
+            wait_pump.run_once().await?;
+            let wait = db::get_deposit(&context.app_pool, wait_id)
+                .await?
+                .context("wait deposit")?;
+            ensure!(wait.attempt == 2 && wait.state == DepositState::Detected);
+            ensure!(wait.next_attempt_at >= before_wait + Duration::seconds(5));
+            ensure!(wait.next_attempt_at <= Utc::now() + Duration::seconds(6));
+
+            let advance_id = insert_deposit(&context.app_pool, seed, 6).await?;
+            sqlx::query("UPDATE deposits SET attempt = 2 WHERE id = $1")
+                .bind(advance_id)
+                .execute(&context.app_pool)
+                .await?;
+            let advance_pump = test_pump(
+                &context.app_pool,
+                static_steps(StepOutcome::Advance),
+                PumpConfig::default(),
+                0,
+            )?;
+            advance_pump.run_once().await?;
+            let advance = db::get_deposit(&context.app_pool, advance_id)
+                .await?
+                .context("advance deposit")?;
+            ensure!(advance.attempt == 0 && advance.state == DepositState::Confirmed);
+            ensure!(advance.next_attempt_at <= Utc::now());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn graceful_shutdown_finishes_in_flight_work_and_claims_nothing_else() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 5).await?;
+            let first_id = insert_deposit(&context.app_pool, seed, 7).await?;
+            let second_id = insert_deposit(&context.app_pool, seed, 8).await?;
+            let control = Arc::new(StepControl::default());
+            let pump = test_pump(
+                &context.app_pool,
+                blocking_steps(
+                    Arc::clone(&control),
+                    StepOutcome::Wait {
+                        reason: WaitReason::Paused,
+                    },
+                ),
+                PumpConfig {
+                    wait_interval: StdDuration::from_secs(5),
+                    idle_poll_interval: StdDuration::from_millis(10),
+                    ..PumpConfig::default()
+                },
+                0,
+            )?;
+            let cancellation = CancellationToken::new();
+            let worker_cancellation = cancellation.clone();
+            let worker = tokio::spawn(async move {
+                pump.run(worker_cancellation).await;
+            });
+            control.wait_started().await?;
+            cancellation.cancel();
+            control.release();
+            tokio::time::timeout(StdDuration::from_secs(2), worker)
+                .await
+                .context("pump did not stop")?
+                .context("pump task failed")?;
+
+            ensure!(total_transition_count(&context.app_pool).await? == 1);
+            let claimed = control.claimed_ids();
+            ensure!(claimed.len() == 1);
+            let claimed_id = claimed[0];
+            ensure!(claimed_id == first_id || claimed_id == second_id);
+            let untouched_id = if claimed_id == first_id {
+                second_id
+            } else {
+                first_id
+            };
+            let untouched = db::get_deposit(&context.app_pool, untouched_id)
+                .await?
+                .context("untouched deposit")?;
+            ensure!(untouched.lease_token.is_none());
+            ensure!(transition_count(&context.app_pool, untouched_id).await? == 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn age_alert_uses_route_threshold_and_increments_the_metric() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 6).await?;
+            let id = insert_deposit(&context.app_pool, seed, 9).await?;
+            sqlx::query(
+                "UPDATE deposits SET created_at = now() - interval '2 hours' WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&context.app_pool)
+            .await?;
+            let yaml = include_str!("fixtures/phala-cloud-pha.yaml");
+            let mut route: RouteFile = serde_saphyr::from_str(yaml)?;
+            route.alerts.stuck_after_s.detected = 1;
+            route.alerts.stuck_after_s.confirmed = 1;
+            let config = AgeAlertConfig::from_routes(&[route])?;
+            let metrics = Arc::new(PumpMetrics::default());
+            let alerter = AgeAlerter::new(
+                context.app_pool.clone(),
+                config,
+                Arc::clone(&metrics),
+                StdDuration::from_secs(60),
+            );
+            ensure!(alerter.scan_once().await? == 1);
+            ensure!(alerter.scan_once().await? == 0);
+            ensure!(metrics.stuck_deposit_alerts() == 1);
+
+            sqlx::query("UPDATE deposits SET state = 'confirmed' WHERE id = $1")
+                .bind(id)
+                .execute(&context.app_pool)
+                .await?;
+            ensure!(alerter.scan_once().await? == 1);
+            ensure!(metrics.stuck_deposit_alerts() == 2);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[derive(Clone)]
+struct StaticStep(StepResult);
+
+#[async_trait]
+impl Step for StaticStep {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        self.0.clone()
+    }
+}
+
+struct SlowStep;
+
+#[async_trait]
+impl Step for SlowStep {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        tokio::time::sleep(StdDuration::from_secs(5)).await;
+        step_result(StepOutcome::Advance)
+    }
+}
+
+struct StepControl {
+    started: Semaphore,
+    release: Semaphore,
+    claimed: Mutex<Vec<Uuid>>,
+}
+
+impl Default for StepControl {
+    fn default() -> Self {
+        Self {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+            claimed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl StepControl {
+    async fn wait_started(&self) -> Result<()> {
+        self.started
+            .acquire()
+            .await
+            .context("started semaphore closed")?
+            .forget();
+        Ok(())
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    fn claimed_ids(&self) -> Vec<Uuid> {
+        self.claimed.lock().expect("claimed lock poisoned").clone()
+    }
+}
+
+struct BlockingStep {
+    control: Arc<StepControl>,
+    outcome: StepOutcome,
+}
+
+#[async_trait]
+impl Step for BlockingStep {
+    async fn run(&self, deposit: &db::Deposit) -> StepResult {
+        self.control
+            .claimed
+            .lock()
+            .expect("claimed lock poisoned")
+            .push(deposit.id);
+        self.control.started.add_permits(1);
+        if let Ok(permit) = self.control.release.acquire().await {
+            permit.forget();
+        }
+        step_result(self.outcome)
+    }
+}
+
+struct FixedJitter(u64);
+
+impl JitterSource for FixedJitter {
+    fn next_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+fn static_steps(outcome: StepOutcome) -> StepSet {
+    result_steps(step_result(outcome))
+}
+
+fn result_steps(result: StepResult) -> StepSet {
+    StepSet::new(
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result.clone())),
+        Box::new(StaticStep(result)),
+    )
+}
+
+fn step_result(outcome: StepOutcome) -> StepResult {
+    StepResult::new(outcome, json!({"source": "test"}))
+}
+
+fn blocking_steps(control: Arc<StepControl>, outcome: StepOutcome) -> StepSet {
+    StepSet::new(
+        Box::new(BlockingStep { control, outcome }),
+        Box::new(StaticStep(step_result(outcome))),
+        Box::new(StaticStep(step_result(outcome))),
+        Box::new(StaticStep(step_result(outcome))),
+    )
+}
+
+fn test_pump(pool: &PgPool, steps: StepSet, config: PumpConfig, jitter: u64) -> Result<Pump> {
+    Pump::with_jitter(
+        pool.clone(),
+        Arc::new(steps),
+        config,
+        Arc::new(FixedJitter(jitter)),
+    )
+    .map_err(Into::into)
+}
+
+#[derive(Clone, Copy)]
+struct Seed {
+    product_id: Uuid,
+    account_id: Uuid,
+    address_id: Uuid,
+}
+
+async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
+    let product = NewProduct {
+        id: Uuid::new_v4(),
+        slug: format!("product-{number}"),
+        settlement_url: format!("https://product-{number}.test/settlements"),
+        webhook_url: format!("https://product-{number}.test/webhooks"),
+        pubkey: format!("public-key-{number}"),
+        kid: format!("product/{number}"),
+        paused_scopes: Vec::new(),
+    };
+    db::create_product(pool, &product).await?;
+    let account = NewAccount {
+        id: Uuid::new_v4(),
+        product_id: product.id,
+        external_id: format!("workspace-{number}"),
+        paused_scopes: Vec::new(),
+    };
+    db::create_account(pool, &account).await?;
+    let address = NewAddress {
+        id: Uuid::new_v4(),
+        account_id: account.id,
+        chain_id: 1,
+        kind: AddressKind::Persistent,
+        version: 1,
+        lock_ref: None,
+        salt: b256(number),
+        address: evm_address(number),
+        retired_at: None,
+    };
+    db::insert_address(pool, &address).await?;
+    Ok(Seed {
+        product_id: product.id,
+        account_id: account.id,
+        address_id: address.id,
+    })
+}
+
+async fn insert_deposit(pool: &PgPool, seed: Seed, number: u8) -> Result<Uuid> {
+    let deposit = NewDeposit {
+        chain_id: 1,
+        tx_hash: b256(number),
+        log_index: 0,
+        block_number: 100 + u64::from(number),
+        block_hash: b256(number.wrapping_add(1)),
+        block_time: Utc::now(),
+        address_id: seed.address_id,
+        account_id: seed.account_id,
+        route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
+        route_version: Some(1),
+        asset_contract: evm_address(200),
+        from_address: evm_address(number.wrapping_add(100)),
+        amount_atomic: AtomicAmount::new(U256::from(1_000)),
+        state: DepositState::Detected,
+        reason: None,
+        next_attempt_at: Utc::now() - Duration::seconds(1),
+    };
+    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    ensure!(db::insert_deposit(pool, &deposit).await?);
+    Ok(id)
+}
+
+async fn transition_count(pool: &PgPool, deposit_id: Uuid) -> Result<i64> {
+    Ok(
+        sqlx::query("SELECT count(*) FROM transitions WHERE deposit_id = $1")
+            .bind(deposit_id)
+            .fetch_one(pool)
+            .await?
+            .try_get(0)?,
+    )
+}
+
+async fn total_transition_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query("SELECT count(*) FROM transitions")
+        .fetch_one(pool)
+        .await?
+        .try_get(0)?)
+}
+
+fn evm_address(byte: u8) -> Address {
+    Address::from([byte; 20])
+}
+
+fn b256(byte: u8) -> B256 {
+    B256::from([byte; 32])
+}

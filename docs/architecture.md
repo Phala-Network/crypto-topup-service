@@ -195,7 +195,7 @@ handled there by finance.
 Transitions are applied with `UPDATE … WHERE id = $1 AND state = $expected AND lease_token =
 $token`, writing transition and outbox rows in the same transaction. `N` pumps claim with
 `FOR UPDATE SKIP LOCKED`, hold a 5-minute lease, run one step with shorter timeouts, persist
-once.
+once. A step panic aborts the process; the lease expires and another pump re-claims the deposit.
 
 | Step | Does |
 |---|---|
