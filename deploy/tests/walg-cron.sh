@@ -41,5 +41,6 @@ PATH="$tmp/bin:$PATH" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment"
 grep -F "wal-push $tmp/segment" "$tmp/wal-g.call" >/dev/null
 grep -E '^[0-9]+$' "$tmp/marker/last-success" >/dev/null
+[ "$(stat -c %a "$tmp/marker/last-success")" = 644 ]
 
 echo "walg-cron dry-run test passed"

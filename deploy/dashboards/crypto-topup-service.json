@@ -2,7 +2,7 @@
   "annotations": {"list": []},
   "editable": false,
   "panels": [
-    {"id": 1, "title": "Scanner lag", "type": "timeseries", "targets": [{"expr": "topup_scanner_lag_blocks", "legendFormat": "{{chain}} blocks"}, {"expr": "topup_scanner_lag_seconds", "legendFormat": "{{chain}} seconds"}]},
+    {"id": 1, "title": "Scanner lag", "type": "timeseries", "targets": [{"expr": "topup_scanner_lag_blocks{producer_enabled=\"true\"}", "legendFormat": "{{chain}} blocks"}, {"expr": "time() - topup_scanner_last_success_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{chain}} seconds since success"}]},
     {"id": 2, "title": "Deposits by state", "type": "timeseries", "targets": [{"expr": "topup_deposits", "legendFormat": "{{state}}"}]},
     {"id": 3, "title": "Age in state", "type": "timeseries", "targets": [{"expr": "topup_deposit_state_age_seconds", "legendFormat": "{{route}} {{state}}"}, {"expr": "topup_deposit_state_age_policy_seconds", "legendFormat": "{{route}} {{state}} policy"}]},
     {"id": 4, "title": "Provider and price checks", "type": "timeseries", "targets": [{"expr": "rate(topup_provider_disagreements_total[5m])", "legendFormat": "provider disagreements"}, {"expr": "topup_price_deviation_basis_points", "legendFormat": "price {{route}}"}, {"expr": "topup_fx_deviation_basis_points", "legendFormat": "FX {{route}}"}]},
@@ -11,9 +11,9 @@
     {"id": 7, "title": "Unflushed balance", "type": "timeseries", "targets": [{"expr": "topup_unflushed_balance_atomic", "legendFormat": "{{route}}"}]},
     {"id": 8, "title": "Operator gas", "type": "timeseries", "targets": [{"expr": "topup_operator_gas_balance_wei", "legendFormat": "{{chain}}"}]},
     {"id": 9, "title": "Open lock exposure", "type": "timeseries", "targets": [{"expr": "topup_open_lock_exposure_minor", "legendFormat": "{{scope}} {{id}}"}, {"expr": "topup_open_lock_exposure_cap_minor", "legendFormat": "{{scope}} {{id}} cap"}]},
-    {"id": 10, "title": "Backup age", "type": "timeseries", "targets": [{"expr": "topup_backup_age_seconds", "legendFormat": "seconds"}]},
+    {"id": 10, "title": "Backup age", "type": "timeseries", "targets": [{"expr": "time() - topup_backup_last_success_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "seconds"}]},
     {"id": 11, "title": "Reconciliation mismatches", "type": "timeseries", "targets": [{"expr": "rate(topup_reconciliation_mismatches_total[5m])", "legendFormat": "{{check}}"}]},
-    {"id": 12, "title": "Loop heartbeats", "type": "timeseries", "targets": [{"expr": "time() - topup_loop_heartbeat_unixtime_seconds", "legendFormat": "{{loop}} age"}]}
+    {"id": 12, "title": "Loop health", "type": "timeseries", "targets": [{"expr": "time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{instance}} heartbeat age"}, {"expr": "time() - topup_loop_progress_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{instance}} progress age"}, {"expr": "clamp_min(topup_loop_wait_until_unixtime_seconds{producer_enabled=\"true\"} - time(), 0)", "legendFormat": "{{loop}} {{instance}} planned wait"}]}
   ],
   "schemaVersion": 39,
   "tags": ["crypto-topup-service"],

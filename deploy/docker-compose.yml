@@ -47,6 +47,8 @@ services:
       - run
       - --bind
       - 0.0.0.0:8080
+      - --metrics-bind
+      - 0.0.0.0:9464
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
@@ -79,6 +81,8 @@ services:
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     ports:
       - "8080:8080"
+    expose:
+      - "9464"
     healthcheck:
       test: ["CMD", "topup", "attest", "--nonce", "00"]
       interval: 30s

@@ -6,8 +6,11 @@ write_marker() {
     marker_dir=$(dirname "$marker")
     mkdir -p "$marker_dir"
     marker_tmp="$marker.tmp.$$"
-    umask 077
-    date -u +%s > "$marker_tmp"
+    (
+        umask 022
+        date -u +%s > "$marker_tmp"
+        chmod 0644 "$marker_tmp"
+    )
     mv "$marker_tmp" "$marker"
 }
 

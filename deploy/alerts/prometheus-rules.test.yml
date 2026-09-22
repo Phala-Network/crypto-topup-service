@@ -1,0 +1,70 @@
+rule_files:
+  - prometheus-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: zero gas balance alerts for an enabled producer
+    interval: 1m
+    input_series:
+      - series: 'topup_operator_gas_balance_wei{chain="1",producer_enabled="true"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TopupOperatorGasReserveLow
+        exp_alerts:
+          - exp_labels:
+              chain: "1"
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Operator gas reserve is below 0.001 native token
+
+  - name: a new reconciliation mismatch alerts
+    interval: 1m
+    input_series:
+      - series: 'topup_reconciliation_mismatches_total{check="balances",producer_enabled="true"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TopupReconciliationMismatch
+        exp_alerts:
+          - exp_labels:
+              check: balances
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Reconciliation found a new mismatch
+
+  - name: expected loop without a first heartbeat alerts
+    interval: 1m
+    input_series:
+      - series: 'topup_loop_expected{loop="scanner",instance="1",producer_enabled="true"}'
+        values: '1x5'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TopupLoopStopped
+        exp_alerts:
+          - exp_labels:
+              instance: "1"
+              loop: scanner
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Service loop heartbeat stopped
+
+  - name: intentional long wait suppresses a stale heartbeat alert
+    interval: 1m
+    input_series:
+      - series: 'topup_loop_expected{loop="scanner",instance="1",producer_enabled="true"}'
+        values: '1x10'
+      - series: 'topup_loop_heartbeat_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+        values: '1x10'
+      - series: 'topup_loop_wait_until_unixtime_seconds{loop="scanner",instance="1",producer_enabled="true"}'
+        values: '3600x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TopupLoopStopped
+        exp_alerts: []

@@ -21,18 +21,24 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
 - `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G. Its hooks prepare D3 but do not claim
   encrypted backups, a tested restore, or an achieved RPO/RTO.
 - `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
-  Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and must remain
-  reachable only through the service-bound monitoring path, not a separate public listener.
+  Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and is served on the
+  separate `--metrics-bind` listener (default `127.0.0.1:9464`). The measured compose binds that
+  listener to the container network on port 9464 with `expose`; it is not published through the
+  port-8080 gateway. Only the monitoring collector may reach it. The local compose publishes it on
+  loopback port 19464 for smoke testing.
 
 ## Backup age marker contract
 
 After a successful `wal-g wal-push` or `wal-g backup-push`, `walg-cron` atomically writes the
-current Unix timestamp as decimal ASCII plus a newline to `TOPUP_BACKUP_TIMESTAMP_FILE`. PostgreSQL
+current Unix timestamp as decimal ASCII plus a newline to `TOPUP_BACKUP_TIMESTAMP_FILE` with mode
+`0644`; the marker is operational metadata and contains no secret. PostgreSQL
 uses `walg-cron wal-push %p` as its archive command, so the 60-second `archive_timeout` drives the
 two-minute alert. The measured compose shares
 `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and `backup`, and
-read-only with `topup`. A missing or malformed marker is exported as infinite backup age so the
-alert fails closed.
+read-only with `topup`. The service exports the marker value as
+`topup_backup_last_success_unixtime_seconds`; a missing or malformed marker exports zero so the
+PromQL age calculation fails closed. Secret files remain mode `0600` and must not be written into
+the observability volume.
 
 ## Build and publish images
 

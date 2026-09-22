@@ -2,49 +2,49 @@ groups:
   - name: crypto-topup-service
     rules:
       - alert: TopupDepositStateAgeExceeded
-        expr: topup_deposit_state_age_seconds > on (state, route, route_version) topup_deposit_state_age_policy_seconds
+        expr: topup_deposit_state_age_seconds{producer_enabled="true"} > on (state, route, route_version) topup_deposit_state_age_policy_seconds{producer_enabled="true"}
         for: 1m
         labels: { severity: page }
         annotations:
           summary: Deposit exceeded its route state-age policy
       - alert: TopupReconciliationMismatch
-        expr: topup_reconciliation_mismatches_total > 0
+        expr: increase(topup_reconciliation_mismatches_total{producer_enabled="true"}[15m]) > 0
         for: 0m
         labels: { severity: page }
         annotations:
-          summary: Reconciliation found a mismatch
+          summary: Reconciliation found a new mismatch
       - alert: TopupScannerLag
-        expr: topup_scanner_lag_seconds > 120 or topup_scanner_lag_blocks > 0
+        expr: time() - topup_scanner_last_success_unixtime_seconds{producer_enabled="true"} > 120 or topup_scanner_lag_blocks{producer_enabled="true"} > 0
         for: 5m
         labels: { severity: page }
         annotations:
           summary: Finalized scanner is behind
       - alert: TopupBackupTooOld
-        expr: topup_backup_age_seconds > 120
+        expr: time() - topup_backup_last_success_unixtime_seconds{producer_enabled="true"} > 120
         for: 1m
         labels: { severity: page }
         annotations:
           summary: Successful backup marker is older than two minutes
       - alert: TopupLoopStopped
-        expr: topup_loop_heartbeat_unixtime_seconds > 0 and time() - topup_loop_heartbeat_unixtime_seconds > 120
+        expr: (topup_loop_expected{producer_enabled="true"} unless on (loop, instance) topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"}) or ((time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled="true"} > 120) and on (loop, instance) (topup_loop_wait_until_unixtime_seconds{producer_enabled="true"} <= time()))
         for: 1m
         labels: { severity: page }
         annotations:
           summary: Service loop heartbeat stopped
       - alert: TopupOperatorGasReserveLow
-        expr: topup_operator_gas_balance_wei > 0 and topup_operator_gas_balance_wei < 1000000000000000
+        expr: topup_operator_gas_balance_wei{producer_enabled="true"} < 1000000000000000
         for: 5m
         labels: { severity: page }
         annotations:
           summary: Operator gas reserve is below 0.001 native token
       - alert: TopupLockExposureNearCap
-        expr: topup_open_lock_exposure_cap_minor > 0 and topup_open_lock_exposure_minor / topup_open_lock_exposure_cap_minor >= 0.9
+        expr: topup_open_lock_exposure_cap_minor{producer_enabled="true"} > 0 and topup_open_lock_exposure_minor{producer_enabled="true"} / topup_open_lock_exposure_cap_minor{producer_enabled="true"} >= 0.9
         for: 5m
         labels: { severity: page }
         annotations:
           summary: Open lock exposure is at least 90 percent of cap
       - alert: TopupUnsupportedInflows
-        expr: sum(increase(topup_unsupported_inflows_total[15m])) > 0
+        expr: sum(increase(topup_unsupported_inflows_total{producer_enabled="true"}[15m])) > 0
         for: 0m
         labels: { severity: warning }
         annotations:

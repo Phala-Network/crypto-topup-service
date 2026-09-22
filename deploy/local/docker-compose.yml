@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/local/Dockerfile.dstack-simulator
-    image: crypto-topup-dstack-simulator:local
+    image: ${TOPUP_LOCAL_DSTACK_IMAGE:-crypto-topup-dstack-simulator:local}
     volumes:
       - dstack_socket:/var/run
     healthcheck:
@@ -17,7 +17,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile.postgres-walg
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     environment:
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
@@ -43,7 +43,7 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     command: ["topup", "migrate"]
     environment:
       MIGRATE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
@@ -58,12 +58,14 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     command:
       - topup
       - run
       - --bind
       - 0.0.0.0:8080
+      - --metrics-bind
+      - 0.0.0.0:9464
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
@@ -83,6 +85,7 @@ services:
       - ${TOPUP_LOCAL_ROUTES_DIR:-../config/routes}:/etc/topup/routes:ro
     ports:
       - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
+      - "127.0.0.1:${TOPUP_LOCAL_METRICS_PORT:-19464}:9464"
     healthcheck:
       test: ["CMD", "topup", "attest", "--nonce", "00"]
       interval: 10s
@@ -96,7 +99,7 @@ services:
     restart: unless-stopped
 
   backup:
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     user: postgres
     command: ["walg-cron", "backup-push", "0 3 * * *"]
     environment:
