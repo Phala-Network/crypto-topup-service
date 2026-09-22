@@ -1,4 +1,5 @@
 use alloy_primitives::{Address, B256};
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use topup_core::money::AtomicAmount;
@@ -249,6 +250,132 @@ pub async fn has_sent_flush(
     .await
 }
 
+/// Returns whether any operator has a sent transaction for this chain and token.
+pub async fn has_sent_flush_for_token(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    token: Address,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM flushes WHERE chain_id = $1 AND token = $2 AND status = 'sent')",
+    )
+    .bind(to_i64(chain_id, "flushes.chain_id")?)
+    .bind(address_hex(token))
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+/// Rebinds unsigned plans for a token to the current operator and fresh nonce sequence.
+pub async fn rebind_planned_flushes(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    token: Address,
+    operator: Address,
+    pending_nonce: u64,
+) -> Result<Vec<Flush>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, chain_id, token, operator, nonce::text AS nonce, tx_hash, block_number,
+               status, COALESCE(receipt, '{}'::jsonb) AS receipt
+        FROM flushes
+        WHERE chain_id = $1 AND token = $2 AND status = 'planned'
+        ORDER BY nonce, id
+        FOR UPDATE
+        "#,
+    )
+    .bind(to_i64(chain_id, "flushes.chain_id")?)
+    .bind(address_hex(token))
+    .fetch_all(&mut **transaction)
+    .await?;
+    let plans = rows
+        .into_iter()
+        .map(parse_flush_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    if plans.is_empty() {
+        return Ok(plans);
+    }
+    let mut nonce = next_flush_nonce(transaction, chain_id, operator, pending_nonce).await?;
+    for plan in &plans {
+        if plan.operator != operator || plan.nonce != nonce {
+            sqlx::query(
+                "UPDATE flushes SET operator = $2, nonce = $3::text::numeric WHERE id = $1 AND status = 'planned'",
+            )
+            .bind(plan.id)
+            .bind(address_hex(operator))
+            .bind(nonce.to_string())
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO audit (id, actor, action, subject, reason)
+                VALUES ($1, $2, 'flush.plan_operator_rebound', $3, $4)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(address_hex(operator))
+            .bind(plan.id.to_string())
+            .bind(format!(
+                "rebound unsigned plan from operator {} nonce {}",
+                address_hex(plan.operator),
+                plan.nonce
+            ))
+            .execute(&mut **transaction)
+            .await?;
+        }
+        nonce = nonce.checked_add(1).ok_or_else(|| {
+            sqlx::Error::Protocol("flush nonce overflowed while rebinding plans".to_owned())
+        })?;
+    }
+    Ok(plans)
+}
+
+/// Lists address identifiers whose planning exclusion has not expired.
+pub async fn list_active_flush_exclusions(
+    pool: &PgPool,
+    chain_id: u64,
+    token: Address,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT address_id FROM flush_exclusions WHERE chain_id = $1 AND token = $2 AND retry_after > $3",
+    )
+    .bind(to_i64(chain_id, "flush_exclusions.chain_id")?)
+    .bind(address_hex(token))
+    .bind(now)
+    .fetch_all(pool)
+    .await
+}
+
+/// Persists or refreshes a singleton planning exclusion.
+pub async fn upsert_flush_exclusion(
+    pool: &PgPool,
+    chain_id: u64,
+    token: Address,
+    address_id: Uuid,
+    reason: &str,
+    retry_after: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO flush_exclusions (chain_id, token, address_id, reason, retry_after, failures)
+        VALUES ($1, $2, $3, $4, $5, 1)
+        ON CONFLICT (chain_id, token, address_id) DO UPDATE
+        SET reason = EXCLUDED.reason,
+            retry_after = EXCLUDED.retry_after,
+            failures = flush_exclusions.failures + 1,
+            updated_at = now()
+        "#,
+    )
+    .bind(to_i64(chain_id, "flush_exclusions.chain_id")?)
+    .bind(address_hex(token))
+    .bind(address_id)
+    .bind(reason)
+    .bind(retry_after)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Returns whether a chain and token already has a planned or sent flush.
 pub async fn has_open_flush(
     pool: &PgPool,
@@ -346,6 +473,44 @@ pub async fn store_flush_replacement(
     require_one(result.rows_affected(), "sent flush was not available")
 }
 
+/// Stores a replacement only if the caller still owns the observed current hash.
+pub async fn store_flush_replacement_cas(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    expected_hash: B256,
+    tx_hash: B256,
+    receipt: &Value,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE flushes SET tx_hash = $3, receipt = $4 WHERE id = $1 AND status = 'sent' AND tx_hash = $2",
+    )
+    .bind(id)
+    .bind(b256_hex(expected_hash))
+    .bind(b256_hex(tx_hash))
+    .bind(receipt)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Replaces sent evidence without changing the transaction hash.
+pub async fn update_sent_evidence(
+    pool: &PgPool,
+    id: Uuid,
+    expected_hash: B256,
+    receipt: &Value,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE flushes SET receipt = $3 WHERE id = $1 AND status = 'sent' AND tx_hash = $2",
+    )
+    .bind(id)
+    .bind(b256_hex(expected_hash))
+    .bind(receipt)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Lists all flushes in one status, ordered deterministically.
 pub async fn list_flushes(pool: &PgPool, status: FlushStatus) -> Result<Vec<Flush>, sqlx::Error> {
     let rows = sqlx::query(
@@ -374,6 +539,25 @@ pub async fn get_flush(pool: &PgPool, id: Uuid) -> Result<Option<Flush>, sqlx::E
     )
     .bind(id)
     .fetch_optional(pool)
+    .await?;
+    row.map(parse_flush_row).transpose()
+}
+
+/// Locks and fetches one flush by identifier inside a caller-owned transaction.
+pub async fn get_flush_locked(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<Option<Flush>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, chain_id, token, operator, nonce::text AS nonce, tx_hash, block_number,
+               status, COALESCE(receipt, '{}'::jsonb) AS receipt
+        FROM flushes WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut **transaction)
     .await?;
     row.map(parse_flush_row).transpose()
 }

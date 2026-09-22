@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use alloy_primitives::{B256, LogData, U256, keccak256};
+use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use serde_json::{Value, json, to_value};
 use sqlx::PgPool;
 use topup_adapters::chain::flush::{decode_flushed, encode_flush, flushed_signature};
@@ -14,8 +14,8 @@ use crate::db::{self, Flush, FlushStatus, FlushedEvent};
 
 use super::planner::{parse_address, parse_salt, parse_u256};
 use super::{
-    AlertSink, ChainClient, ChainReceipt, FlushAlert, FlushEvidence, FlusherError, FlusherPolicy,
-    PlannedAddress, SignedVersion, map_chain, map_signer,
+    AlertSink, ChainClient, ChainReceipt, FeeQuote, FlushAlert, FlushEvidence, FlusherError,
+    FlusherPolicy, PlannedAddress, SignedVersion, map_chain, map_signer,
 };
 
 /// Result of one flusher lifecycle action.
@@ -89,6 +89,8 @@ impl Flusher {
     /// Signs and broadcasts the oldest planned row if this operator has no in-flight flush.
     pub async fn send_next(&self, route: &RouteFile) -> Result<RunResult, FlusherError> {
         let operator = self.signer.operator_address().await.map_err(map_signer)?;
+        let latest = self.chain.latest_block().await.map_err(map_chain)?;
+        let fees = self.chain.fee_quote().await.map_err(map_chain)?;
         let mut transaction = self.pool.begin().await?;
         db::lock_operator(&mut transaction, route.chain.chain_id, operator).await?;
         let Some(flush) =
@@ -98,18 +100,16 @@ impl Flusher {
             return Ok(RunResult::Idle);
         };
         let mut evidence = parse_evidence(&flush)?;
-        let salts = plan_salts(&evidence.plan)?;
-        let latest = self.chain.latest_block().await.map_err(map_chain)?;
-        let fees = self.chain.fee_quote().await.map_err(map_chain)?;
+        let (factory, token, salts) = bound_call(&flush, &evidence)?;
         let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
         let priority = fees.max_priority_fee_per_gas.min(max_fee);
         let gas_limit = buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?;
         let request = TxRequest {
             chain_id: flush.chain_id,
             nonce: flush.nonce,
-            to: route.chain.contracts.forwarder_factory,
+            to: factory,
             value: U256::ZERO,
-            data: encode_flush(salts, flush.token),
+            data: encode_flush(salts, token),
             gas_limit,
             max_fee_per_gas: max_fee,
             max_priority_fee_per_gas: priority,
@@ -152,7 +152,7 @@ impl Flusher {
             flush.chain_id == route.chain.chain_id && flush.token == route.asset.contract
         }) {
             if let Some(receipt) = self.known_receipt(&flush).await? {
-                if let Some(result) = self.process_receipt(route, &flush, receipt).await? {
+                if let Some(result) = self.process_receipt(&flush, receipt).await? {
                     return Ok(Some(result));
                 }
                 continue;
@@ -165,21 +165,43 @@ impl Flusher {
             if confirmed_nonce > flush.nonce {
                 let evidence = parse_evidence(&flush)?;
                 let from_block = evidence
-                    .signed
-                    .first()
+                    .recovery_from_block
+                    .or_else(|| {
+                        evidence
+                            .signed
+                            .first()
+                            .map(|version| version.signed_at_block)
+                    })
                     .ok_or(FlusherError::StoredEvidence(
                         "sent flush has no raw transaction",
-                    ))?
-                    .signed_at_block;
-                if let Some(receipt) = self
+                    ))?;
+                let search = self
                     .chain
-                    .receipt_by_sender_nonce(flush.operator, flush.nonce, from_block)
+                    .receipt_by_sender_nonce(
+                        flush.operator,
+                        flush.nonce,
+                        from_block,
+                        self.policy.recovery_scan_blocks,
+                    )
                     .await
-                    .map_err(map_chain)?
-                {
-                    if let Some(result) = self.process_receipt(route, &flush, receipt).await? {
+                    .map_err(map_chain)?;
+                if let Some(receipt) = search.receipt {
+                    if let Some(result) = self.process_receipt(&flush, receipt).await? {
                         return Ok(Some(result));
                     }
+                } else if let Some(next_block) = search.next_block {
+                    let mut progressed = evidence;
+                    progressed.recovery_from_block = Some(next_block);
+                    let expected = flush.tx_hash.ok_or(FlusherError::StoredEvidence(
+                        "sent flush has no transaction hash",
+                    ))?;
+                    db::update_sent_evidence(
+                        &self.pool,
+                        flush.id,
+                        expected,
+                        &to_value(progressed)?,
+                    )
+                    .await?;
                 } else {
                     self.alerts.emit(FlushAlert::MissingConsumedReceipt {
                         chain_id: flush.chain_id,
@@ -201,7 +223,11 @@ impl Flusher {
                 .checked_add(self.policy.replacement_after_blocks)
                 .ok_or(FlusherError::Arithmetic)?;
             if current_operator == flush.operator && latest >= stale_at {
-                return self.replace(route, flush, evidence, latest).await.map(Some);
+                let suggested = self.chain.fee_quote().await.map_err(map_chain)?;
+                return self
+                    .replace(flush, evidence, latest, suggested)
+                    .await
+                    .map(Some);
             }
             let raw = decode_raw(last)?;
             let hash = self
@@ -233,28 +259,30 @@ impl Flusher {
 
     async fn replace(
         &self,
-        route: &RouteFile,
         flush: Flush,
-        mut evidence: FlushEvidence,
+        evidence: FlushEvidence,
         latest: u64,
+        suggested: FeeQuote,
     ) -> Result<RunResult, FlusherError> {
         let previous = evidence.signed.last().ok_or(FlusherError::StoredEvidence(
             "sent flush has no signed version",
         ))?;
-        let suggested = self.chain.fee_quote().await.map_err(map_chain)?;
-        let max_fee = bumped_fee(
+        let required_max_fee = required_bumped_fee(
             previous.max_fee_per_gas,
             suggested.max_fee_per_gas,
             self.policy.replacement_bps,
-            self.policy.max_fee_per_gas,
         )?;
-        let priority = bumped_fee(
+        let required_priority = required_bumped_fee(
             previous.max_priority_fee_per_gas,
             suggested.max_priority_fee_per_gas,
             self.policy.replacement_bps,
-            max_fee,
         )?;
-        if max_fee == previous.max_fee_per_gas && priority == previous.max_priority_fee_per_gas {
+        if required_max_fee > self.policy.max_fee_per_gas || required_priority > required_max_fee {
+            self.alerts.emit(FlushAlert::FeeCapReached {
+                flush_id: flush.id,
+                required_max_fee_per_gas: required_max_fee,
+                cap: self.policy.max_fee_per_gas,
+            });
             let raw = decode_raw(previous)?;
             self.chain
                 .send_raw_transaction(&raw)
@@ -262,15 +290,35 @@ impl Flusher {
                 .map_err(map_chain)?;
             return Ok(RunResult::Rebroadcast { flush_id: flush.id });
         }
+        let observed_hash = parse_hash(&previous.hash)?;
+        let mut transaction = self.pool.begin().await?;
+        db::lock_operator(&mut transaction, flush.chain_id, flush.operator).await?;
+        let Some(current) = db::get_flush_locked(&mut transaction, flush.id).await? else {
+            transaction.commit().await?;
+            return Ok(RunResult::Idle);
+        };
+        if current.status != FlushStatus::Sent || current.tx_hash != Some(observed_hash) {
+            transaction.commit().await?;
+            return Ok(RunResult::Idle);
+        }
+        let mut evidence = parse_evidence(&current)?;
+        let current_previous = evidence.signed.last().ok_or(FlusherError::StoredEvidence(
+            "sent flush has no signed version",
+        ))?;
+        if parse_hash(&current_previous.hash)? != observed_hash {
+            transaction.commit().await?;
+            return Ok(RunResult::Idle);
+        }
+        let (factory, token, salts) = bound_call(&current, &evidence)?;
         let request = TxRequest {
             chain_id: flush.chain_id,
             nonce: flush.nonce,
-            to: route.chain.contracts.forwarder_factory,
+            to: factory,
             value: U256::ZERO,
-            data: encode_flush(plan_salts(&evidence.plan)?, flush.token),
+            data: encode_flush(salts, token),
             gas_limit: buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?,
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: priority,
+            max_fee_per_gas: required_max_fee,
+            max_priority_fee_per_gas: required_priority,
         };
         let signed = self
             .signer
@@ -282,13 +330,21 @@ impl Flusher {
             hash: format!("{hash:#x}"),
             raw: hex::encode(&signed.raw_signed_bytes),
             signed_at_block: latest,
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: priority,
+            max_fee_per_gas: required_max_fee,
+            max_priority_fee_per_gas: required_priority,
         });
-        let mut transaction = self.pool.begin().await?;
-        db::lock_operator(&mut transaction, flush.chain_id, flush.operator).await?;
-        db::store_flush_replacement(&mut transaction, flush.id, hash, &to_value(&evidence)?)
-            .await?;
+        if !db::store_flush_replacement_cas(
+            &mut transaction,
+            flush.id,
+            observed_hash,
+            hash,
+            &to_value(&evidence)?,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(RunResult::Idle);
+        }
         transaction.commit().await?;
         let broadcast = self
             .chain
@@ -305,7 +361,6 @@ impl Flusher {
 
     async fn process_receipt(
         &self,
-        route: &RouteFile,
         flush: &Flush,
         receipt: ChainReceipt,
     ) -> Result<Option<RunResult>, FlusherError> {
@@ -318,13 +373,18 @@ impl Flusher {
             return Ok(Some(RunResult::Reverted { flush_id: flush.id }));
         }
         let evidence = parse_evidence(flush)?;
+        let factory = parse_address(&evidence.binding.factory)?;
+        let token = parse_address(&evidence.binding.token)?;
+        if token != flush.token {
+            return Err(FlusherError::StoredEvidence(
+                "bound token differs from flush row",
+            ));
+        }
         let planned = planned_by_salt(&evidence.plan)?;
         let mut seen = BTreeSet::new();
         let mut events = Vec::new();
         for log in &receipt.logs {
-            if log.address != route.chain.contracts.forwarder_factory
-                || log.topics.first() != Some(&flushed_signature())
-            {
+            if log.address != factory || log.topics.first() != Some(&flushed_signature()) {
                 continue;
             }
             let log_data = LogData::new(log.topics.clone(), log.data.clone())
@@ -384,7 +444,9 @@ impl Flusher {
         let operator = self.signer.operator_address().await.map_err(map_signer)?;
         let mut replans = Vec::new();
         for group in groups {
-            let mut next = FlushEvidence::planned(group, evidence.estimated_gas);
+            let mut binding = evidence.binding.clone();
+            binding.salts = group.iter().map(|item| item.salt.clone()).collect();
+            let mut next = FlushEvidence::planned(binding, group, evidence.estimated_gas);
             next.failure_attempt = evidence
                 .failure_attempt
                 .checked_add(1)
@@ -450,6 +512,31 @@ fn plan_salts(plan: &[PlannedAddress]) -> Result<Vec<B256>, FlusherError> {
     plan.iter().map(|item| parse_salt(&item.salt)).collect()
 }
 
+fn bound_call(
+    flush: &Flush,
+    evidence: &FlushEvidence,
+) -> Result<(Address, Address, Vec<B256>), FlusherError> {
+    let factory = parse_address(&evidence.binding.factory)?;
+    let token = parse_address(&evidence.binding.token)?;
+    if token != flush.token {
+        return Err(FlusherError::StoredEvidence(
+            "bound token differs from flush row",
+        ));
+    }
+    let salts = evidence
+        .binding
+        .salts
+        .iter()
+        .map(|salt| parse_salt(salt))
+        .collect::<Result<Vec<_>, _>>()?;
+    if salts != plan_salts(&evidence.plan)? {
+        return Err(FlusherError::StoredEvidence(
+            "bound salts differ from planned addresses",
+        ));
+    }
+    Ok((factory, token, salts))
+}
+
 fn planned_by_salt(
     plan: &[PlannedAddress],
 ) -> Result<BTreeMap<B256, &PlannedAddress>, FlusherError> {
@@ -475,11 +562,10 @@ fn buffered_gas(estimate: u64, multiplier_bps: u16) -> Result<u64, FlusherError>
     u64::try_from(result).map_err(|_| FlusherError::Arithmetic)
 }
 
-fn bumped_fee(
+fn required_bumped_fee(
     previous: u128,
     suggested: u128,
     multiplier_bps: u16,
-    cap: u128,
 ) -> Result<u128, FlusherError> {
     let bumped = previous
         .checked_mul(u128::from(multiplier_bps))
@@ -487,7 +573,7 @@ fn bumped_fee(
         .and_then(|value| value.checked_div(10_000))
         .and_then(|value| value.checked_add(1))
         .ok_or(FlusherError::Arithmetic)?;
-    Ok(bumped.max(suggested).min(cap))
+    Ok(bumped.max(suggested))
 }
 
 fn decode_raw(version: &SignedVersion) -> Result<Vec<u8>, FlusherError> {
@@ -536,6 +622,16 @@ mod tests {
 
     use super::*;
 
+    fn binding(items: &[PlannedAddress]) -> super::super::FlushCallBinding {
+        super::super::FlushCallBinding {
+            route: "test".to_owned(),
+            config_version: 1,
+            factory: format!("{:#x}", Address::from([9; 20])),
+            token: format!("{:#x}", Address::from([8; 20])),
+            salts: items.iter().map(|item| item.salt.clone()).collect(),
+        }
+    }
+
     fn item(number: u8) -> PlannedAddress {
         PlannedAddress {
             address_id: Uuid::from_u128(u128::from(number)),
@@ -547,7 +643,8 @@ mod tests {
 
     #[test]
     fn first_failure_retries_the_batch_then_bisects_persistent_failure() {
-        let mut evidence = FlushEvidence::planned(vec![item(1), item(2), item(3)], 100);
+        let items = vec![item(1), item(2), item(3)];
+        let mut evidence = FlushEvidence::planned(binding(&items), items, 100);
         assert_eq!(failed_groups(&evidence), vec![evidence.plan.clone()]);
         evidence.failure_attempt = 1;
         let groups = failed_groups(&evidence);
@@ -559,18 +656,18 @@ mod tests {
     }
 
     #[test]
-    fn replacement_fee_is_strictly_higher_and_capped() {
+    fn replacement_fee_is_strictly_higher_and_not_silently_capped() {
         assert_eq!(
-            bumped_fee(100, 90, 12_500, 1_000).expect("fee should fit"),
+            required_bumped_fee(100, 90, 12_500).expect("fee should fit"),
             126
         );
         assert_eq!(
-            bumped_fee(999, 900, 12_500, 1_000).expect("fee should fit"),
-            1_000
+            required_bumped_fee(999, 900, 12_500).expect("fee should fit"),
+            1_250
         );
         assert_eq!(
-            bumped_fee(1_000, 900, 12_500, 1_000).expect("fee should fit"),
-            1_000
+            required_bumped_fee(1_000, 900, 12_500).expect("fee should fit"),
+            1_251
         );
     }
 }

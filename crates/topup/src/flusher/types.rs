@@ -44,6 +44,15 @@ pub struct ChainReceipt {
     pub logs: Vec<ChainLog>,
 }
 
+/// One bounded sender/nonce recovery scan result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonceReceiptSearch {
+    /// Matching receipt when found in the scanned window.
+    pub receipt: Option<ChainReceipt>,
+    /// First block of the next window, or `None` when the latest block was reached.
+    pub next_block: Option<u64>,
+}
+
 /// Chain operations required by planning, sending, confirmation, and recovery.
 #[async_trait]
 pub trait ChainClient: Send + Sync {
@@ -93,14 +102,15 @@ pub trait ChainClient: Send + Sync {
         operator: Address,
         nonce: u64,
         from_block: u64,
-    ) -> Result<Option<ChainReceipt>, ChainError>;
+        max_blocks: u64,
+    ) -> Result<NonceReceiptSearch, ChainError>;
 }
 
 /// Primary route-price source used by the planner.
 #[async_trait]
 pub trait PriceSource: Send + Sync {
-    /// Returns the latest validated primary price for a route.
-    async fn latest_primary_price(&self, route: &str) -> Result<ScaledPrice, PriceError>;
+    /// Returns the latest validated USD price for one provider asset identifier.
+    async fn price_usd(&self, asset: &str) -> Result<ScaledPrice, PriceError>;
 }
 
 /// Operational notification emitted by the flusher.
@@ -144,6 +154,26 @@ pub enum FlushAlert {
         /// Consumed nonce.
         nonce: u64,
     },
+    /// Planning excluded an address whose singleton estimate reverted.
+    PlanningExcluded {
+        /// Chain containing the forwarder.
+        chain_id: u64,
+        /// Token whose flush estimate reverted.
+        token: Address,
+        /// Address row identifier.
+        address_id: Uuid,
+        /// Human-readable exclusion reason.
+        reason: String,
+    },
+    /// A replacement could not satisfy the required bump below the configured cap.
+    FeeCapReached {
+        /// Flush row identifier.
+        flush_id: Uuid,
+        /// Required maximum fee per gas.
+        required_max_fee_per_gas: u128,
+        /// Configured maximum fee per gas.
+        cap: u128,
+    },
 }
 
 /// Sink for flusher alerts and alert metrics.
@@ -170,6 +200,8 @@ pub struct FlusherPolicy {
     pub max_fee_per_gas: u128,
     /// Gas-limit multiplier in basis points over `eth_estimateGas`.
     pub gas_limit_bps: u16,
+    /// Maximum blocks inspected per consumed-nonce recovery iteration.
+    pub recovery_scan_blocks: u64,
 }
 
 impl Default for FlusherPolicy {
@@ -179,6 +211,7 @@ impl Default for FlusherPolicy {
             replacement_bps: 12_500,
             max_fee_per_gas: 500_000_000_000,
             gas_limit_bps: 12_000,
+            recovery_scan_blocks: 128,
         }
     }
 }
@@ -214,6 +247,8 @@ pub struct SignedVersion {
 /// JSON shape stored in `flushes.receipt` throughout the transaction lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FlushEvidence {
+    /// Immutable route and contract binding used by every lifecycle phase.
+    pub binding: FlushCallBinding,
     /// Planned addresses and salts.
     pub plan: Vec<PlannedAddress>,
     /// Gas estimate used for signing.
@@ -226,30 +261,82 @@ pub struct FlushEvidence {
     pub signed: Vec<SignedVersion>,
     /// Final chain receipt serialized for operations and reconciliation.
     pub chain_receipt: Option<serde_json::Value>,
+    /// Next block to inspect when recovering a consumed nonce.
+    pub recovery_from_block: Option<u64>,
 }
 
 impl FlushEvidence {
     /// Creates evidence for a newly planned batch.
     #[must_use]
-    pub const fn planned(plan: Vec<PlannedAddress>, estimated_gas: u64) -> Self {
+    pub const fn planned(
+        binding: FlushCallBinding,
+        plan: Vec<PlannedAddress>,
+        estimated_gas: u64,
+    ) -> Self {
         Self {
+            binding,
             plan,
             estimated_gas,
             failure_attempt: 0,
             parent_flush_id: None,
             signed: Vec::new(),
             chain_receipt: None,
+            recovery_from_block: None,
         }
     }
 }
 
+/// Immutable factory call binding persisted with a planned flush.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FlushCallBinding {
+    /// Stable route name used when the plan was created.
+    pub route: String,
+    /// Attested route configuration version.
+    pub config_version: u64,
+    /// Factory address as canonical hex.
+    pub factory: String,
+    /// Token address as canonical hex.
+    pub token: String,
+    /// Complete ordered salt parameters as canonical hex.
+    pub salts: Vec<String>,
+}
+
 /// Error returned by an EVM chain adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChainError(pub String);
+pub struct ChainError {
+    message: String,
+    estimation_revert: bool,
+}
+
+impl ChainError {
+    /// Creates an ordinary RPC or decoding failure.
+    #[must_use]
+    pub fn rpc(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            estimation_revert: false,
+        }
+    }
+
+    /// Creates an execution revert returned by `eth_estimateGas`.
+    #[must_use]
+    pub fn estimation_revert(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            estimation_revert: true,
+        }
+    }
+
+    /// Returns whether this error is a deterministic estimate execution revert.
+    #[must_use]
+    pub const fn is_estimation_revert(&self) -> bool {
+        self.estimation_revert
+    }
+}
 
 impl Display for ChainError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 

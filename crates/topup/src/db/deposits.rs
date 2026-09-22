@@ -260,6 +260,15 @@ impl TryFrom<DepositRecord> for Deposit {
 /// Inserts a deposit and returns `false` when the chain event already exists.
 pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    let inserted = insert_deposit_in(&mut transaction, deposit).await?;
+    transaction.commit().await?;
+    Ok(inserted)
+}
+
+pub(crate) async fn insert_deposit_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    deposit: &NewDeposit,
+) -> Result<bool, sqlx::Error> {
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     let chain_id = to_i64(deposit.chain_id, "deposits.chain_id")?;
     let tx_hash = b256_hex(deposit.tx_hash);
@@ -306,13 +315,12 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
         reason,
         deposit.next_attempt_at
     )
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     let inserted = result.rows_affected() == 1;
     if inserted {
-        link_inserted_deposit(&mut transaction, id).await?;
+        link_inserted_deposit(transaction, id).await?;
     }
-    transaction.commit().await?;
     Ok(inserted)
 }
 

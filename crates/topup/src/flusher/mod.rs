@@ -3,6 +3,7 @@
 mod chain;
 mod engine;
 mod planner;
+pub mod runtime;
 mod sweep;
 mod types;
 
@@ -13,12 +14,12 @@ use topup_core::SignerError;
 
 pub use chain::AlloyChainClient;
 pub use engine::{Flusher, RunResult};
-pub use planner::{Planner, gas_ratio_allowed};
+pub use planner::{GasRatioInput, Planner, gas_ratio_allowed};
 pub use sweep::SweepStep;
 pub use types::{
     AlertSink, ChainClient, ChainError, ChainLog, ChainReceipt, FeeQuote, FlushAlert,
-    FlushEvidence, FlusherPolicy, NoopAlertSink, PlannedAddress, PriceError, PriceSource,
-    SignedVersion,
+    FlushCallBinding, FlushEvidence, FlusherPolicy, NonceReceiptSearch, NoopAlertSink,
+    PlannedAddress, PriceError, PriceSource, SignedVersion,
 };
 
 /// Failure while running a flusher operation.
