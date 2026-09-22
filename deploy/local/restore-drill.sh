@@ -104,14 +104,17 @@ wal_object_uploaded_epoch() {
 }
 
 # PostgreSQL creates <segment>.ready when the segment closes; the rename to .done keeps its mtime.
+# pg_ls_archive_statusdir() truncates mtime to whole seconds, so stat the file itself; try .ready
+# first, then .done in case the archiver renamed it in between.
 wal_closed_epoch() {
-    closed=$(psql_value "SELECT extract(epoch FROM modification)::numeric(20,3) \
-        FROM pg_ls_archive_statusdir() WHERE name IN ('$1.ready', '$1.done')")
-    test -n "$closed" || {
+    closed=$(dc exec -T postgres sh -c '
+        cd "$PGDATA/pg_wal/archive_status"
+        stat -c %y "$1.ready" 2>/dev/null || stat -c %y "$1.done"
+    ' sh "$1") || {
         echo "archive status for $1 is gone; a checkpoint removed it before timing" >&2
         return 1
     }
-    printf '%s\n' "$closed"
+    date -u -d "$closed" +%s.%3N
 }
 
 pending_wals() {
@@ -133,6 +136,13 @@ recovery_promoted() {
 
 record_sample() {
     psql_value "INSERT INTO heartbeat DEFAULT VALUES; INSERT INTO restore_drill_marker(mode) VALUES ('$mode') RETURNING id" | tail -1
+}
+
+# Records the first sample and the WAL segment holding it, in the same statement as the insert.
+first_sample() {
+    psql_value "INSERT INTO heartbeat DEFAULT VALUES; \
+        INSERT INTO restore_drill_marker(mode) VALUES ('$mode') \
+        RETURNING id || ' ' || pg_walfile_name(pg_current_wal_insert_lsn())" | tail -1
 }
 
 marker_epoch() {
@@ -396,10 +406,10 @@ else
     rotation_v2_wals=not-run
 fi
 
-# Name the segment from the insert position just after the first write: at a segment boundary
-# pg_walfile_name returns the previous segment, which holds that write's last byte.
-first_marker=$(record_sample)
-timed_wal=$(psql_value 'SELECT pg_walfile_name(pg_current_wal_insert_lsn())')
+# Time the segment that holds the first write, not whichever segment is current beforehand.
+set -- $(first_sample)
+first_marker=$1
+timed_wal=$2
 if [ "$mode" = controlled ]; then
     last_marker=$(record_sample)
     psql_value 'SELECT pg_switch_wal()' >/dev/null
@@ -431,8 +441,10 @@ segment_closed_at=$(wal_closed_epoch "$timed_wal")
 object_uploaded_at=$(wal_object_uploaded_epoch "$timed_wal")
 archive_wait_seconds=$(seconds_between "$first_write_at" "$segment_closed_at")
 upload_latency_seconds=$(seconds_between "$segment_closed_at" "$object_uploaded_at")
+# File mtimes come from the kernel's coarse clock, up to one tick (<=10 ms) behind clock_timestamp().
+# Each interval spans at least one psql round trip, so anything below that tolerance is an error.
 for seconds in "$archive_wait_seconds" "$upload_latency_seconds"; do
-    awk -v value="$seconds" 'BEGIN { exit !(value >= 0) }' || {
+    awk -v value="$seconds" 'BEGIN { exit !(value >= -0.010) }' || {
         echo "WAL timing is negative (${seconds}s); the timed segment is wrong" >&2
         exit 1
     }
