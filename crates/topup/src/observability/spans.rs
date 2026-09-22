@@ -58,16 +58,16 @@ pub fn outbox_delivery_span(event_id: uuid::Uuid, payload: &Value, attempt: i32)
     )
 }
 
-/// Creates the span convention consumed by the C7 flusher when it lands.
+/// Creates the required span for one flusher action.
 #[must_use]
-pub fn flush_action_span(chain: u64, route: &str, attempt: u32) -> Span {
+pub fn flush_action_span(chain: u64, route: &str, state: &str, attempt: u32) -> Span {
     tracing::info_span!(
         "flush.action",
         chain_id = chain,
         route,
+        state,
         attempt,
         deposit_id = field::Empty,
-        state = field::Empty,
     )
 }
 

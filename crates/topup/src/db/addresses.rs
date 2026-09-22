@@ -79,7 +79,7 @@ pub struct NewAddress {
     pub retired_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, sqlx::FromRow)]
 struct AddressRecord {
     id: Uuid,
     account_id: Uuid,
@@ -191,4 +191,24 @@ pub async fn find_active_persistent(
     .fetch_optional(pool)
     .await?;
     record.map(TryInto::try_into).transpose()
+}
+
+/// Lists every active or retired forwarder address stored for a chain.
+pub async fn list_chain_addresses(
+    pool: &PgPool,
+    chain_id: u64,
+) -> Result<Vec<Address>, sqlx::Error> {
+    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
+    let records = sqlx::query_as::<_, AddressRecord>(
+        r#"
+        SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
+        FROM addresses
+        WHERE chain_id = $1
+        ORDER BY address, id
+        "#,
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(TryInto::try_into).collect()
 }

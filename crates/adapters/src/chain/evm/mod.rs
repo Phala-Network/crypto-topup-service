@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::types::{Filter, Topic};
+use alloy::rpc::types::{Filter, Log, Topic};
 use alloy::sol;
 use alloy::sol_types::SolEvent;
 use chrono::{DateTime, Utc};
@@ -131,6 +131,13 @@ pub trait ChainReader: Send + Sync {
         from_block: u64,
         to_block: u64,
     ) -> impl Future<Output = Result<Vec<TransferLog>, ChainError>> + Send;
+
+    /// Locates one log by its immutable transaction hash and block-wide log index.
+    fn transfer_log_by_identity(
+        &self,
+        tx_hash: B256,
+        log_index: u64,
+    ) -> impl Future<Output = Result<Option<TransferLog>, ChainError>> + Send;
 }
 
 #[derive(Debug, Default)]
@@ -210,31 +217,7 @@ impl EvmChain {
             .map_err(|_| ChainError::Rpc("transfer log fetch"))?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
-            let topic_count = log.topics().len();
-            let data_length = log.data().data.len();
-            if topic_count != 3 || data_length != 32 {
-                tracing::warn!(
-                    transaction_hash = ?log.transaction_hash,
-                    log_index = ?log.log_index,
-                    topic_count,
-                    data_length,
-                    "skipping Transfer log with a non-ERC-20 layout"
-                );
-                continue;
-            }
-            let decoded = match log.log_decode_validate::<Transfer>() {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(
-                        transaction_hash = ?log.transaction_hash,
-                        log_index = ?log.log_index,
-                        %error,
-                        "skipping invalid ERC-20 Transfer log"
-                    );
-                    continue;
-                }
-            };
-            let block_number = decoded
+            let block_number = log
                 .block_number
                 .ok_or(ChainError::MissingField("log.block_number"))?;
             let block_time = match timestamps.get(&block_number) {
@@ -245,26 +228,61 @@ impl EvmChain {
                     timestamp
                 }
             };
-            transfers.push(TransferLog {
-                tx_hash: decoded
-                    .transaction_hash
-                    .ok_or(ChainError::MissingField("log.transaction_hash"))?,
-                log_index: decoded
-                    .log_index
-                    .ok_or(ChainError::MissingField("log.log_index"))?,
-                block_number,
-                block_hash: decoded
-                    .block_hash
-                    .ok_or(ChainError::MissingField("log.block_hash"))?,
-                block_time,
-                token: decoded.address(),
-                from: decoded.inner.data.from,
-                to: decoded.inner.data.to,
-                amount: AtomicAmount::new(decoded.inner.data.amount),
-            });
+            if let Some(transfer) = decode_transfer_log(&log, block_time)? {
+                transfers.push(transfer);
+            }
         }
         Ok(transfers)
     }
+}
+
+fn decode_transfer_log(
+    log: &Log,
+    block_time: DateTime<Utc>,
+) -> Result<Option<TransferLog>, ChainError> {
+    let topic_count = log.topics().len();
+    let data_length = log.data().data.len();
+    if topic_count != 3 || data_length != 32 {
+        tracing::warn!(
+            transaction_hash = ?log.transaction_hash,
+            log_index = ?log.log_index,
+            topic_count,
+            data_length,
+            "skipping Transfer log with a non-ERC-20 layout"
+        );
+        return Ok(None);
+    }
+    let decoded = match log.log_decode_validate::<Transfer>() {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            tracing::warn!(
+                transaction_hash = ?log.transaction_hash,
+                log_index = ?log.log_index,
+                %error,
+                "skipping invalid ERC-20 Transfer log"
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(TransferLog {
+        tx_hash: decoded
+            .transaction_hash
+            .ok_or(ChainError::MissingField("log.transaction_hash"))?,
+        log_index: decoded
+            .log_index
+            .ok_or(ChainError::MissingField("log.log_index"))?,
+        block_number: decoded
+            .block_number
+            .ok_or(ChainError::MissingField("log.block_number"))?,
+        block_hash: decoded
+            .block_hash
+            .ok_or(ChainError::MissingField("log.block_hash"))?,
+        block_time,
+        token: decoded.address(),
+        from: decoded.inner.data.from,
+        to: decoded.inner.data.to,
+        amount: AtomicAmount::new(decoded.inner.data.amount),
+    }))
 }
 
 impl ChainReader for EvmChain {
@@ -319,6 +337,42 @@ impl ChainReader for EvmChain {
             }
         }
         Ok(transfers)
+    }
+
+    async fn transfer_log_by_identity(
+        &self,
+        tx_hash: B256,
+        log_index: u64,
+    ) -> Result<Option<TransferLog>, ChainError> {
+        let Some(receipt) = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|_| ChainError::Rpc("transaction receipt fetch"))?
+        else {
+            return Ok(None);
+        };
+        let block_number = receipt
+            .block_number
+            .ok_or(ChainError::MissingField("receipt.block_number"))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or(ChainError::MissingField("receipt.block_hash"))?;
+        let Some(log) = receipt
+            .logs()
+            .iter()
+            .find(|log| log.log_index == Some(log_index))
+        else {
+            return Ok(None);
+        };
+        if log.transaction_hash != Some(tx_hash)
+            || log.block_number != Some(block_number)
+            || log.block_hash != Some(block_hash)
+        {
+            return Err(ChainError::MissingField("receipt.log_identity"));
+        }
+        let block_time = self.block_time(block_number).await?;
+        decode_transfer_log(log, block_time)
     }
 }
 

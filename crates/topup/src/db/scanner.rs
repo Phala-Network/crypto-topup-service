@@ -1,12 +1,10 @@
 use alloy_primitives::Address as EvmAddress;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use topup_core::deposit::RejectReason;
-use topup_core::identity::deposit_id;
 use uuid::Uuid;
 
-use super::deposits::NewDeposit;
-use super::state_code;
-use super::types::{address_hex, atomic_decimal, b256_hex, parse_address, to_i64, to_u64};
+use super::deposits::{NewDeposit, insert_deposit_in};
+use super::types::{parse_address, to_i64, to_u64};
 
 /// Address metadata required by the finalized-log scanner.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,7 +98,7 @@ pub async fn commit_scan(
     let mut inserted = 0_u64;
     let mut unsupported_inserted = 0_u64;
     for deposit in deposits {
-        if insert_deposit(&mut transaction, deposit).await? {
+        if insert_deposit_in(&mut transaction, deposit).await? {
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
@@ -142,50 +140,4 @@ pub async fn commit_scan(
         inserted,
         unsupported_inserted,
     })
-}
-
-async fn insert_deposit(
-    transaction: &mut Transaction<'_, Postgres>,
-    deposit: &NewDeposit,
-) -> Result<bool, sqlx::Error> {
-    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
-    let result = sqlx::query(
-        r#"
-        INSERT INTO deposits (
-            id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
-            address_id, account_id, route, route_version, asset_contract, from_address,
-            amount_atomic, state, reason, next_attempt_at
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14::text::numeric, $15, $16, $17
-        )
-        ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING
-        "#,
-    )
-    .bind(id)
-    .bind(to_i64(deposit.chain_id, "deposits.chain_id")?)
-    .bind(b256_hex(deposit.tx_hash))
-    .bind(to_i64(deposit.log_index, "deposits.log_index")?)
-    .bind(to_i64(deposit.block_number, "deposits.block_number")?)
-    .bind(b256_hex(deposit.block_hash))
-    .bind(deposit.block_time)
-    .bind(deposit.address_id)
-    .bind(deposit.account_id)
-    .bind(&deposit.route)
-    .bind(
-        deposit
-            .route_version
-            .map(|value| to_i64(value, "deposits.route_version"))
-            .transpose()?,
-    )
-    .bind(address_hex(deposit.asset_contract))
-    .bind(address_hex(deposit.from_address))
-    .bind(atomic_decimal(deposit.amount_atomic))
-    .bind(state_code(deposit.state))
-    .bind(deposit.reason.map(RejectReason::code))
-    .bind(deposit.next_attempt_at)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(result.rows_affected() == 1)
 }
