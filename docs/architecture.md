@@ -135,8 +135,9 @@ append-only. Physical addresses belong to an account and a chain; routes are sel
 deposit by `(chain_id, asset_contract)`.
 
 ```text
-products      id, slug, settlement_url, webhook_url, pubkey, kid, paused_at
-accounts      id, product_id, external_id, paused_at               UNIQUE (product_id, external_id)
+products      id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes text[]
+accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
+              -- scopes: quotes | addresses | settlement | flush | refunds; empty = active
 addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
               UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
@@ -157,7 +158,9 @@ flushes       id, chain_id, token, operator, nonce, tx_hash, block_number,
               UNIQUE (chain_id, operator, nonce)
 flushed       flush_id, address_id, amount_atomic, block_number, log_index   -- one row per Flushed event
               PRIMARY KEY (flush_id, address_id)
-outbox        id, event_type, payload jsonb, next_attempt_at, delivered_at
+refunds       id, deposit_id, amount_atomic, to_address, tx_hash, status (requested|approved|sent|confirmed),
+              requested_by, approved_by, created_at                 -- executed from the treasury Safe; recorded here
+outbox        id, event_type, payload jsonb, next_attempt_at, delivered_at, response jsonb
 audit         id, actor, action, subject, reason, created_at
 ```
 
@@ -317,19 +320,34 @@ recompute any address without the service. The admin key can only pause and resu
 call writes `audit`.
 
 ```text
-POST /v1/products/{p}/accounts
-POST /v1/products/{p}/accounts/{ext}/deposit-address           persistent; GET same
-POST /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
-POST /v1/products/{p}/accounts/{ext}/rate-locks                 single-use address + locked price
-GET  /v1/products/{p}/accounts/{ext}/deposits                   GET /v1/products/{p}/deposits/{id}
-POST /v1/products/{p}/accounts/{ext}/pause | resume
-GET  /v1/attestation?nonce=…
-POST /v1/admin/routes/{r}/pause | resume
+POST   /v1/products/{p}/accounts
+POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent; GET same
+POST   /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
+POST   /v1/products/{p}/accounts/{ext}/rate-locks                 single-use address + locked price
+GET    /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           resume a checkout page
+DELETE /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           cancel an unpaid lock; later payments credit at spot
+GET    /v1/products/{p}/accounts/{ext}/deposits?state&from&to&cursor
+GET    /v1/products/{p}/deposits/{id}
+GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
+GET    /v1/products/{p}/accounts/{ext}/limits                     caps, remaining, reset time
+POST   /v1/products/{p}/accounts/{ext}/pause | resume {scopes}
+POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   finance approves and executes (§15)
+GET    /v1/attestation?nonce=…
+
+GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
+
+POST   /v1/admin/routes/{r}/pause | resume {scopes}
+POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
+POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
+GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, exposure, PnL vs valuation
 ```
 
 Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
-`deposit.credited`, `deposit.rejected`, `rate_lock.expired`. Events never change balances.
-OpenAPI from `utoipa`; SDKs generated from it.
+`deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`. Events never
+change balances. OpenAPI from `utoipa`; SDKs generated from it, shipped with a runnable
+Python integration example, a signing helper, and a versioning and deprecation policy. A
+sandbox (Sepolia, test token, product credentials, scripted late/under/over/rejected
+scenarios) is available to integrators before mainnet.
 
 ### Customer experience obligations (product UI)
 
@@ -343,8 +361,12 @@ checklist:
 | Warnings | Network name and chain id, full token contract, "only PHA on Ethereum", minimum deposit, and that below-minimum deposits are not credited. Never truncate addresses or hashes. |
 | Waiting | After payment the user sees "waiting for Ethereum finality, about 15 minutes" with a transaction-hash lookup and an explorer link; the service reports deposits only once final. |
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
-| Exceptions | Wrong asset or below minimum: "contact support"; funds reach the treasury and finance may return them at its discretion. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
-| Notifications | Email or in-app notice on `deposit.credited` and `deposit.rejected`. |
+| Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
+| Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
+| Exceptions | Wrong asset, below minimum, or overpayment beyond tolerance: "contact support"; funds reach the treasury and finance may return them per the refund policy (§15). Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
+| After credit | Shows the new available balance, debt settled, and whether service resumed. |
+| Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`. |
+| Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
 
 ## 13. Reconciliation
 
@@ -393,11 +415,15 @@ compose) and pin `(keyid, public key)`.
 | Topic | Rule |
 |---|---|
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
-| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. Because they reach the treasury, finance can return them on a support case at its discretion, net of gas. |
+| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. |
+| Refunds | Refundable: wrong asset, overpayment beyond tolerance, rejected-not-sanctioned, and late-arriving funds to a closed workspace. Not refundable: credited USD, below-minimum dust under `min_refund_atomic` *(policy)*. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
+| Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. |
+| Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup keys keep prior versions. |
 | Retention | Deposits, transitions, settlements, audit: 7 years *(policy)*, append-only. |
-| Runbooks before pilot | operator key compromise, provider disagreement, price outage, stuck settlement, `422` payload mismatch, restore, treasury change, gas refill, rejected funds at treasury. |
+| Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
+| Runbooks before pilot | operator key compromise, provider disagreement, price outage, stuck settlement, `422` payload mismatch, restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
 
 ## 16. Observability and tests
 
@@ -423,7 +449,8 @@ pre-settlement snapshot with `GET`-first adoption. Conformance suite against Pha
 
 **Phase 0 (two weeks)**: contract audit and deterministic deployment on Sepolia and mainnet;
 finance Safe verified on each chain; two RPC providers; object storage; treasury; policy
-numbers.
+numbers; compliance determination of region, Travel Rule, and KYT timing; refund policy
+signed off by finance.
 
 **Phase 1, capped pilot**: full pipeline including flush and quote-first deposits, on Sepolia
 then mainnet with a per-deposit `max`, small lock-exposure caps, product-side caps, and
@@ -434,12 +461,51 @@ deposit recovered after restart and provider interruption; credit only after two
 finality; duplicates and
 concurrency yield one ledger mutation; outages only delay; balances flush and `Flushed`
 events match; reconciliation repairs the two safe cases and alerts on the rest; restore issues
-no duplicate; every deposit has a full evidence timeline; runbooks exercised once.
+no duplicate; every deposit has a full evidence timeline; support lookup and `nudge` used on a
+real case; one refund executed end to end; the daily finance report delivered; runbooks
+exercised once.
 
-**Phase 2, GA**: bounds and lock-exposure caps raised; KYT adapter if compliance requires;
-dashboards; optional pre-finality "seen" notification for the waiting screen.
+**Phase 2, GA**: bounds and lock-exposure caps raised; KYT adapter and compliance case flow;
+dashboards; CSV and accounting exports; webhook replay and delivery logs; notification
+preferences; reconciliation exception queue with sign-off; localization; optional
+pre-finality "seen" notification for the waiting screen.
 
 **Phase 3**: Base PHA and USDC routes through chain and route files; same addresses on both
 chains.
 
 Issue #2 is split along Phase 0 and 1; the Phala Cloud endpoint is filed in the monorepo.
+
+## 18. Product feature map
+
+Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** finance, **C** compliance.
+
+| Feature | Owner | Pilot | GA | Later |
+|---|---|---|---|---|
+| Quote-first checkout: spread and fee disclosure, exact amount, EIP-681 QR, countdown, resume by `lock_ref`, cancel, re-quote | S+P | ✓ | | |
+| Underpayment shortfall and top-up re-quote; overpayment handling and refund entry | S+P | ✓ | | |
+| Persistent address as advanced option with indicative rate | S+P | ✓ | | |
+| Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
+| Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |
+| Pre-finality "seen" notification | S | | ✓ | |
+| Deposit history with filters and pagination; receipt per deposit | S+P | ✓ | | |
+| CSV export; accounting and cost-basis export; valuation evidence bundle | S+F | | ✓ | |
+| Notifications on credited, rejected, refunded, lock expired; preferences and history | P | ✓ (basic) | ✓ | |
+| Support lookup by hash, address, lock ref, workspace, order; case owner and response target | S+P | ✓ | | |
+| Manual `nudge` of a deposit; audited | S | ✓ | | |
+| Refund policy and treasury refund workflow (request → approve → Safe → record → notify) | S+F+P | ✓ | | |
+| Limits page: caps, remaining, reset time; allowlist and limit-increase requests | S+P | ✓ | | |
+| Workspace roles for deposit, history, export, refund request | P | ✓ | | |
+| Post-credit view: balance, debt settled, service resumed; low-balance prompt to prefilled quote | P | ✓ | | |
+| Promotion eligibility display and interplay rules | P | ✓ | | |
+| Workspace closure and late-funds handling | S+P+F | ✓ | | |
+| Daily finance report; treasury, exposure and PnL dashboards | S+F | ✓ (report) | ✓ | |
+| Reconciliation exception queue with sign-off | S+F | | ✓ | |
+| Sanctions screening; KYT adapter and compliance case flow; region and Travel Rule determination | S+C | ✓ (screening, determination) | ✓ (KYT, cases) | |
+| Record request and privacy procedure | C | | ✓ | |
+| Pause scopes with customer-facing effect; status page and incident communications | S+P | ✓ | | |
+| Localization, currency and time display | P | | ✓ | |
+| SDK with signing helper, idempotent client, examples; versioning policy; sandbox | S | ✓ | | |
+| Webhook delivery log, test send, replay | S | CLI | ✓ | |
+| Multi-product tenancy administration; self-serve product onboarding | S | | | ✓ |
+| Sender address book and source whitelisting | S+P | | | ✓ |
+| Built-in token purchase, withdrawal, trading account | — | | | never |
