@@ -57,17 +57,24 @@ services:
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
     image: crypto-topup-service:local
-    command: ["topup", "run"]
+    command:
+      - topup
+      - run
+      - --bind
+      - 0.0.0.0:8080
+      - --route
+      - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
       DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
-      MIGRATE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+      TOPUP_ADMIN_KID: local-admin/v1
+      TOPUP_ADMIN_PUBLIC_KEY: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
       TOPUP_CHAINS_DIR: /etc/topup/chains
       TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - dstack_socket:/var/run
       - ../config/chains:/etc/topup/chains:ro
-      - ../config/routes:/etc/topup/routes:ro
+      - ${TOPUP_LOCAL_ROUTES_DIR:-../config/routes}:/etc/topup/routes:ro
     ports:
       - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
     healthcheck:
