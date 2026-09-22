@@ -6,19 +6,17 @@ use super::repository;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::header::HOST;
-use axum::http::{HeaderMap, Method, Uri};
+use axum::http::{HeaderMap, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, VerifyingKey};
-use sfv::{BareItem, Dictionary, FieldType as _, List, ListEntry, Parser, Version};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::VerifyingKey;
+use topup_adapters::http_signature::{self, SignedMessage};
 
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
-const REQUIRED_SIGNATURE_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-digest"];
-const IDEMPOTENCY_COMPONENT: &str = "idempotency-key";
+const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
 /// A configured RFC 9421 ed25519 verification key.
 #[derive(Clone, Debug)]
@@ -102,184 +100,38 @@ async fn verify_request(
     request: &mut Request,
     key: &VerificationKey,
 ) -> Result<VerifiedSignature, ()> {
-    verify_request_at(request, key, Utc::now().timestamp()).await
-}
-
-async fn verify_request_at(
-    request: &mut Request,
-    key: &VerificationKey,
-    now: i64,
-) -> Result<VerifiedSignature, ()> {
     let body = std::mem::replace(request.body_mut(), Body::empty());
     let bytes = to_bytes(body, MAX_SIGNED_BODY_BYTES)
         .await
         .map_err(|_| ())?;
     *request.body_mut() = Body::from(bytes.clone());
 
-    let digest_value = header_value(request.headers(), "content-digest")?;
-    verify_content_digest(digest_value, &bytes)?;
-
-    let signature_inputs = parse_dictionary(header_value(request.headers(), "signature-input")?)?;
-    let signatures = parse_dictionary(header_value(request.headers(), "signature")?)?;
     let target_uri = target_uri(request.uri(), request.headers())?;
-    let idempotency_key = request
-        .headers()
-        .get(IDEMPOTENCY_COMPONENT)
-        .map(|value| value.to_str().map(str::trim).map_err(|_| ()))
+    let headers = request.headers();
+    let idempotency_key = headers
+        .get(IDEMPOTENCY_HEADER)
+        .map(|value| value.to_str().map_err(|_| ()))
         .transpose()?;
-
-    for (label, entry) in &signature_inputs {
-        let Ok(parsed) = parse_signature_input_entry(entry) else {
-            continue;
-        };
-        if parsed.covers_idempotency_key != idempotency_key.is_some() {
-            continue;
-        }
-        if parsed.keyid != key.kid || now.abs_diff(parsed.created) > 300 {
-            continue;
-        }
-        let Some(signature_bytes) = signature_bytes(signatures.get(label.as_str())) else {
-            continue;
-        };
-        let Ok(signature) = Signature::from_slice(signature_bytes) else {
-            continue;
-        };
-        let base = signature_base(
-            request.method(),
-            &target_uri,
-            digest_value,
+    let verified = http_signature::verify(
+        &SignedMessage {
+            method: request.method().as_str(),
+            target_uri: &target_uri,
+            content_digest: header_value(headers, "content-digest")?,
             idempotency_key,
-            &parsed.parameters,
-        );
-        if key.key.verify_strict(base.as_bytes(), &signature).is_ok() {
-            return Ok(VerifiedSignature {
-                kid: parsed.keyid,
-                signature_hash: Sha256::digest(signature_bytes).into(),
-                created: DateTime::from_timestamp(parsed.created, 0).ok_or(())?,
-            });
-        }
-    }
-    Err(())
-}
-
-fn verify_content_digest(value: &str, body: &[u8]) -> Result<(), ()> {
-    let encoded = value
-        .strip_prefix("sha-256=:")
-        .and_then(|value| value.strip_suffix(':'))
-        .ok_or(())?;
-    let supplied = STANDARD.decode(encoded).map_err(|_| ())?;
-    let expected: [u8; 32] = Sha256::digest(body).into();
-    if supplied.as_slice() == expected {
-        Ok(())
-    } else {
-        Err(())
-    }
-}
-
-struct ParsedSignatureInput {
-    created: i64,
-    keyid: String,
-    parameters: String,
-    covers_idempotency_key: bool,
-}
-
-fn parse_dictionary(value: &str) -> Result<Dictionary, ()> {
-    Parser::new(value)
-        .with_version(Version::Rfc8941)
-        .parse()
-        .map_err(|_| ())
-}
-
-fn parse_signature_input_entry(entry: &ListEntry) -> Result<ParsedSignatureInput, ()> {
-    let ListEntry::InnerList(inner_list) = entry else {
-        return Err(());
-    };
-    if !matches!(inner_list.items.len(), 3 | 4) {
-        return Err(());
-    }
-    for (item, expected) in inner_list
-        .items
-        .iter()
-        .take(REQUIRED_SIGNATURE_COMPONENTS.len())
-        .zip(REQUIRED_SIGNATURE_COMPONENTS)
-    {
-        if !item.params.is_empty() {
-            return Err(());
-        }
-        let BareItem::String(component) = &item.bare_item else {
-            return Err(());
-        };
-        if component.as_str() != expected {
-            return Err(());
-        }
-    }
-    let covers_idempotency_key = if inner_list.items.len() == 4 {
-        let item = inner_list.items.get(3).ok_or(())?;
-        if !item.params.is_empty() {
-            return Err(());
-        }
-        matches!(&item.bare_item, BareItem::String(component) if component.as_str() == IDEMPOTENCY_COMPONENT)
-    } else {
-        false
-    };
-    if inner_list.items.len() == 4 && !covers_idempotency_key {
-        return Err(());
-    }
-
-    let created = match inner_list.params.get("created") {
-        Some(BareItem::Integer(created)) => (*created).into(),
-        _ => return Err(()),
-    };
-    let keyid = match inner_list.params.get("keyid") {
-        Some(BareItem::String(keyid)) if !keyid.as_str().is_empty() => keyid.as_str().to_owned(),
-        _ => return Err(()),
-    };
-    match inner_list.params.get("alg") {
-        None => {}
-        Some(BareItem::String(algorithm)) if algorithm.as_str() == "ed25519" => {}
-        Some(_) => return Err(()),
-    }
-
-    let parameters = List::from([entry.clone()]).serialize().ok_or(())?;
-    Ok(ParsedSignatureInput {
-        created,
-        keyid,
-        parameters,
-        covers_idempotency_key,
+            signature_input: header_value(headers, "signature-input")?,
+            signature: header_value(headers, "signature")?,
+            body: &bytes,
+        },
+        &key.kid,
+        &key.key,
+        Utc::now().timestamp(),
+    )
+    .map_err(|_| ())?;
+    Ok(VerifiedSignature {
+        kid: verified.keyid,
+        signature_hash: verified.signature_hash,
+        created: DateTime::from_timestamp(verified.created, 0).ok_or(())?,
     })
-}
-
-fn signature_bytes(entry: Option<&ListEntry>) -> Option<&[u8]> {
-    let ListEntry::Item(item) = entry? else {
-        return None;
-    };
-    if !item.params.is_empty() {
-        return None;
-    }
-    let BareItem::ByteSequence(bytes) = &item.bare_item else {
-        return None;
-    };
-    Some(bytes)
-}
-
-fn signature_base(
-    method: &Method,
-    target_uri: &str,
-    content_digest: &str,
-    idempotency_key: Option<&str>,
-    parameters: &str,
-) -> String {
-    let mut base = format!(
-        "\"@method\": {}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}",
-        method.as_str()
-    );
-    if let Some(idempotency_key) = idempotency_key {
-        base.push_str("\n\"idempotency-key\": ");
-        base.push_str(idempotency_key);
-    }
-    base.push_str("\n\"@signature-params\": ");
-    base.push_str(parameters);
-    base
 }
 
 fn target_uri(uri: &Uri, headers: &HeaderMap) -> Result<String, ()> {
@@ -354,30 +206,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn signature_input_requires_the_exact_covered_components() -> Result<(), ()> {
-        let valid = parse_dictionary(
-            "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1;keyid=\"product/v1\"",
-        )?;
-        assert!(parse_signature_input_entry(valid.get("sig1").ok_or(())?).is_ok());
-
-        let with_idempotency = parse_dictionary(
-            "sig1=(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=1;keyid=\"settlement/v1\"",
-        )?;
-        let parsed = parse_signature_input_entry(with_idempotency.get("sig1").ok_or(())?)?;
-        assert!(parsed.covers_idempotency_key);
-
-        let missing =
-            parse_dictionary("sig1=(\"@method\" \"@target-uri\");created=1;keyid=\"product/v1\"")?;
-        assert!(parse_signature_input_entry(missing.get("sig1").ok_or(())?).is_err());
-
-        let unexpected = parse_dictionary(
-            "sig1=(\"@method\" \"@target-uri\" \"content-digest\" \"x-extra\");created=1;keyid=\"product/v1\"",
-        )?;
-        assert!(parse_signature_input_entry(unexpected.get("sig1").ok_or(())?).is_err());
-        Ok(())
-    }
-
     #[tokio::test]
     async fn settlement_client_signature_verifies_without_network() -> Result<(), Box<dyn Error>> {
         let signing_key = SigningKey::from_bytes(&[11; 32]);
@@ -416,9 +244,27 @@ mod tests {
         Ok(())
     }
 
-    /// Requests signed by the Python SDK (`sdk/python/tests/vectors.py`) verify here unchanged.
-    #[tokio::test]
-    async fn python_sdk_signatures_verify() -> Result<(), Box<dyn Error>> {
+    fn signed_message<'a>(
+        vector: &'a serde_json::Value,
+        target_uri: &'a str,
+        body: &'a [u8],
+    ) -> SignedMessage<'a> {
+        let header = |name: &str| vector["headers"][name].as_str();
+        SignedMessage {
+            method: vector["method"].as_str().unwrap_or_default(),
+            target_uri,
+            content_digest: header("content-digest").unwrap_or_default(),
+            idempotency_key: header("idempotency-key"),
+            signature_input: header("signature-input").unwrap_or_default(),
+            signature: header("signature").unwrap_or_default(),
+            body,
+        }
+    }
+
+    /// Requests signed by the Python SDK (`sdk/python/tests/vectors.py`) verify with the shared
+    /// verifier, and this module rebuilds the same `@target-uri` from their `Host` and target.
+    #[test]
+    fn python_sdk_signatures_verify() -> Result<(), Box<dyn Error>> {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/rfc9421-python-signer.json"
         ))?;
@@ -426,6 +272,7 @@ mod tests {
             fixture["keyid"].as_str().ok_or("keyid")?.to_owned(),
             fixture["public_key"].as_str().ok_or("public_key")?,
         )?;
+        let other_key = SigningKey::from_bytes(&[9; 32]).verifying_key();
         let created = fixture["created"].as_i64().ok_or("created")?;
         let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
         assert_eq!(vectors.len(), 5);
@@ -440,43 +287,35 @@ mod tests {
 
         for vector in vectors {
             let name = vector["name"].as_str().ok_or("name")?;
-            let body = vector["body"].as_str().ok_or("body")?;
-            let request = |body: &str| -> Result<Request, Box<dyn Error>> {
-                let mut builder = Request::builder()
-                    .method(vector["method"].as_str().ok_or("method")?)
-                    .uri(vector["target"].as_str().ok_or("target")?);
-                for (header, value) in vector["headers"].as_object().ok_or("headers")? {
-                    builder = builder.header(header, value.as_str().ok_or("header value")?);
-                }
-                Ok(builder.body(Body::from(body.to_owned()))?)
-            };
+            let mut headers = HeaderMap::new();
+            let host = vector["headers"]["host"].as_str().ok_or("host")?;
+            headers.insert(HOST, host.parse()?);
+            let target: Uri = vector["target"].as_str().ok_or("target")?.parse()?;
+            let target_uri = target_uri(&target, &headers).map_err(|()| "target URI")?;
+            assert_eq!(
+                Some(target_uri.as_str()),
+                vector["target_uri"].as_str(),
+                "{name}"
+            );
+            let body = vector["body"].as_str().ok_or("body")?.as_bytes();
+            let message = |body| signed_message(vector, &target_uri, body);
 
-            let verified = verify_request_at(&mut request(body)?, &key, created + 300)
-                .await
-                .map_err(|()| format!("{name}: Python signature must verify"))?;
-            assert_eq!(verified.kid, "sdk-vector/v1", "{name}");
-            assert_eq!(verified.created.timestamp(), created, "{name}");
+            let verified =
+                http_signature::verify(&message(body), &key.kid, &key.key, created + 300)
+                    .map_err(|_| format!("{name}: Python signature must verify"))?;
+            assert_eq!(verified.keyid, "sdk-vector/v1", "{name}");
+            assert_eq!(verified.created, created, "{name}");
 
             assert!(
-                verify_request_at(&mut request(body)?, &key, created + 301)
-                    .await
-                    .is_err(),
+                http_signature::verify(&message(body), &key.kid, &key.key, created + 301).is_err(),
                 "{name}: stale signature must fail"
             );
             assert!(
-                verify_request_at(&mut request(&format!("{body} "))?, &key, created)
-                    .await
-                    .is_err(),
+                http_signature::verify(&message(b"altered"), &key.kid, &key.key, created).is_err(),
                 "{name}: altered body must fail"
             );
-            let other_key = VerificationKey::from_base64(
-                key.kid.clone(),
-                &STANDARD.encode(SigningKey::from_bytes(&[9; 32]).verifying_key().as_bytes()),
-            )?;
             assert!(
-                verify_request_at(&mut request(body)?, &other_key, created)
-                    .await
-                    .is_err(),
+                http_signature::verify(&message(body), &key.kid, &other_key, created).is_err(),
                 "{name}: wrong key must fail"
             );
         }

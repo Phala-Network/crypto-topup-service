@@ -35,7 +35,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
-sfv.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 topup-adapters = { path = "../adapters" }
@@ -51,6 +50,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
+sfv.workspace = true
 tower.workspace = true
 
 [lints.rust]

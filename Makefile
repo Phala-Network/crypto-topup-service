@@ -1,8 +1,12 @@
-.PHONY: build test lint image up down smoke infra-smoke service-smoke verify-image deploy-check \
-	runbook-check sdk-check sdk-generate sandbox-local
+.PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image \
+	deploy-check runbook-check sdk-check sdk-generate sandbox-local
 
 build:
 	cargo build --workspace --locked
+
+# The runtime binary alone, as the image builds it, so no tool-only feature is unified into it.
+build-topup:
+	cargo build --release --locked -p topup
 
 test:
 	cargo test --workspace --locked
