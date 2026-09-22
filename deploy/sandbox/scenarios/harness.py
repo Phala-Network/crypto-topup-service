@@ -109,7 +109,15 @@ class Context:
 
     def lock(self, team: str, amount_minor: int) -> tuple[str, RateLockResponse]:
         lock_ref = f"lock-{uuid.uuid4().hex[:12]}"
-        return lock_ref, self.client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
+        lock = reference.create_quote(
+            self.config,
+            self.client,
+            self.ledger,
+            team,
+            lock_ref=lock_ref,
+            amount_minor=amount_minor,
+        )
+        return lock_ref, lock
 
     def pay(self, to: str, amount_atomic: int, token: str | None = None) -> str:
         tx_hash = self.payer.mint_and_transfer(token or self.config.token, to, amount_atomic)

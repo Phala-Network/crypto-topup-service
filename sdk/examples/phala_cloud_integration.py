@@ -50,6 +50,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from topup_client.models import RateLockResponse
 from topup_sdk import (
     RequestSigner,
     SignatureError,
@@ -539,13 +540,21 @@ class SettlementService:
         return None
 
     def _team_address(self, team_id: str, to: str, evidence: dict[str, Any]) -> bool:
-        """`to` must be an address this product computed itself for the account."""
+        """`to` must be an address this product computed itself for the account.
+
+        Payments that do not consume a lock (late, wrong amount) carry `lock_ref: null`, so the
+        product records every quote address it computes, not just persistent ones.
+        """
+        if self.ledger.address_owner(to) != team_id:
+            return False
         lock_ref = evidence.get("lock_ref")
-        if isinstance(lock_ref, str):
-            salt = lock_salt(self.config.product_slug, team_id, lock_ref)
-            expected = forwarder_address(self.config.factory, self.config.implementation, salt)
-            return same_address(expected, to)
-        return self.ledger.address_owner(to) == team_id
+        if lock_ref is None:
+            return True
+        if not isinstance(lock_ref, str):
+            return False
+        salt = lock_salt(self.config.product_slug, team_id, lock_ref)
+        expected = forwarder_address(self.config.factory, self.config.implementation, salt)
+        return same_address(expected, to)
 
     def _commit(self, key: str, payload: dict[str, Any], refusal: str | None) -> Answer:
         team_id = None if refusal == "unknown_account" else str(payload["account_id"])
@@ -768,6 +777,26 @@ def register_team(
     return address.address
 
 
+def create_quote(
+    config: SandboxConfig,
+    client: TopupClient,
+    ledger: ProductLedger,
+    team: str,
+    *,
+    lock_ref: str,
+    amount_minor: int,
+) -> RateLockResponse:
+    """Creates a quote-first lock and records its address after recomputing it."""
+    lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
+    salt = lock_salt(config.product_slug, team, lock_ref)
+    if not same_address(
+        forwarder_address(config.factory, config.implementation, salt), lock.address
+    ):
+        raise RuntimeError("rate-lock address does not match the product's computation")
+    ledger.record_address(lock.address, team, lock_ref=lock_ref)
+    return lock
+
+
 def wait_for_deposit(
     client: TopupClient, team: str, address: str, states: set[str], timeout: float
 ) -> Any:
@@ -799,12 +828,7 @@ def run_example(config: SandboxConfig) -> None:
             LOG.info("registered workspace %s", team)
 
             lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
-            lock = client.create_rate_lock(team, lock_ref, amount_minor=2500)
-            salt = lock_salt(config.product_slug, team, lock_ref)
-            if not same_address(
-                forwarder_address(config.factory, config.implementation, salt), lock.address
-            ):
-                raise RuntimeError("rate-lock address does not match the product's computation")
+            lock = create_quote(config, client, ledger, team, lock_ref=lock_ref, amount_minor=2500)
             LOG.info(
                 "quote: pay %s atomic to %s before %s for %s minor (%s)",
                 lock.amount_atomic,
