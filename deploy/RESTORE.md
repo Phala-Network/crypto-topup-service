@@ -161,13 +161,13 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
    ```
 
 3. Choose a base backup by incident time. Listing is selection only. Read its version metadata and
-   fetch it into a new empty PostgreSQL volume; this fetch is the decryption check:
+   fetch it into a new empty PostgreSQL volume; this fetch is the decryption check. The `restore`
+   service runs its argument with `/bin/sh -eu -c`, so pass each command as one quoted argument:
 
    ```sh
-   docker compose run --rm --no-deps restore wal-g backup-list --json
+   docker compose run --rm --no-deps restore 'wal-g backup-list --json'
    export BACKUP_NAME=base_000000010000000000000003
-   docker compose run --rm --no-deps restore \
-     wal-g st cat "key-versions/base/$BACKUP_NAME.json"
+   docker compose run --rm --no-deps restore "wal-g st cat key-versions/base/$BACKUP_NAME.json"
    docker compose run --rm --no-deps -e BACKUP_NAME restore '
      test -z "$(ls -A "$PGDATA")"
      walg-backup-fetch "$PGDATA" "$BACKUP_NAME"

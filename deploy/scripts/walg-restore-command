@@ -22,7 +22,7 @@ trap cleanup EXIT INT TERM
 
 if ! "$walg" st get "key-versions/wal/$wal_name.json" "$tmp" \
     --no-decompress --no-decrypt >/dev/null 2>&1; then
-    if ! "$walg" st check >/dev/null 2>&1; then
+    if ! "$walg" st check read >/dev/null 2>&1; then
         echo "WAL metadata storage is unavailable" >&2
         exit 126
     fi

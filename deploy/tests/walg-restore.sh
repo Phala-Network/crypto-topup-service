@@ -31,7 +31,14 @@ case "$1:$2" in
         destination=$4
         cp "$FAKE_STORE/$source" "$destination"
         ;;
-    st:check) exit "${FAKE_ST_CHECK_STATUS:-0}" ;;
+    st:check)
+        # A bare `st check` only prints help and exits 0; only `read` probes storage.
+        if [ "${3:-}" != read ]; then
+            echo "fake wal-g: st check requires a subcommand" >&2
+            exit 70
+        fi
+        exit "${FAKE_ST_CHECK_STATUS:-0}"
+        ;;
     backup-push:*) ;;
     backup-list:*)
         printf '[{"backup_name":"base_000000010000000000000001","start_time":"2026-09-22T00:00:00Z"}]\n'
@@ -91,7 +98,18 @@ else
     test "$?" -eq 126
 fi
 
-rm -f "$tmp/store/key-versions/wal/$wal.json" "$tmp/store/key-versions/current.json"
+# A segment past the end of archived WAL has no metadata: readable storage falls back to
+# current.json and WAL-G's 74 ends recovery normally.
+rm -f "$tmp/store/key-versions/wal/$wal.json"
+if FAKE_WAL_FETCH_STATUS=74 walg-restore-command "$wal" "$tmp/past-end"; then
+    echo "WAL past the archive end unexpectedly succeeded" >&2
+    exit 1
+else
+    test "$?" -eq 1
+fi
+grep -F 'ARGS=st check read' "$tmp/wal-g.log" >/dev/null
+
+rm -f "$tmp/store/key-versions/current.json"
 if FAKE_ST_CHECK_STATUS=2 walg-restore-command "$wal" "$tmp/unavailable"; then
     echo "metadata storage failure unexpectedly succeeded" >&2
     exit 1

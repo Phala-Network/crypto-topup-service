@@ -94,13 +94,22 @@ wal_object_visible() {
 wal_object_uploaded_epoch() {
     line=$(dc exec -T backup wal-g st ls wal_005/ | grep -F " $1.")
     set -- $line
+    test "$#" -ge 7 || {
+        echo "WAL object listing has no upload time for $1" >&2
+        return 1
+    }
     date -u -d "$3 $4" +%s.%3N
 }
 
 # PostgreSQL creates <segment>.ready when the segment closes; the rename to .done keeps its mtime.
 wal_closed_epoch() {
-    psql_value "SELECT extract(epoch FROM modification)::numeric(20,3) FROM pg_ls_archive_statusdir() \
-        WHERE name IN ('$1.ready', '$1.done')"
+    closed=$(psql_value "SELECT extract(epoch FROM modification)::numeric(20,3) \
+        FROM pg_ls_archive_statusdir() WHERE name IN ('$1.ready', '$1.done')")
+    test -n "$closed" || {
+        echo "archive status for $1 is gone; a checkpoint removed it before timing" >&2
+        return 1
+    }
+    printf '%s\n' "$closed"
 }
 
 pending_wals() {
@@ -226,6 +235,27 @@ INSERT INTO restore_drill_marker(mode) VALUES ('base');
 SQL
 }
 
+# Runs the base-backup selection commands exactly as deploy/RESTORE.md step 3 writes them.
+check_runbook_selection_commands() {
+    BACKUP_NAME=$1
+    dc run --rm --no-deps restore 'wal-g backup-list --json' |
+        jq -e --arg name "$BACKUP_NAME" 'any(.[]; .backup_name == $name)' >/dev/null || {
+        echo "runbook backup-list command did not list $BACKUP_NAME" >&2
+        return 1
+    }
+    dc run --rm --no-deps restore "wal-g st cat key-versions/base/$BACKUP_NAME.json" |
+        jq -e --arg name "$BACKUP_NAME" '.kind == "base" and .object == $name
+            and .key_version == 1' >/dev/null || {
+        echo "runbook base metadata command did not return version 1 for $BACKUP_NAME" >&2
+        return 1
+    }
+}
+
+# Full object listing with modification times, to prove a drill instance wrote nothing.
+storage_listing() {
+    dc run --rm --no-deps restore 'wal-g st ls -r' | sort
+}
+
 test_restore_failures_are_fatal() {
     wal_name=$1
     expected_version=$2
@@ -302,6 +332,11 @@ exercise_key_rotation() {
     rotation_v2_wals=$*
     upload_pending_wal 1 "$rotation_v1_wal"
     test "$(manifest_version "$rotation_v1_wal")" -eq 1
+    # Positive control: the listing used below must see the segment that was just archived.
+    wal_object_visible "$rotation_v1_wal" >/dev/null || {
+        echo "WAL object listing did not show archived segment $rotation_v1_wal" >&2
+        return 1
+    }
     for wal_name in $rotation_v2_wals; do
         if wal_manifest_visible "$wal_name" >/dev/null 2>&1 || \
             wal_object_visible "$wal_name" >/dev/null 2>&1; then
@@ -350,6 +385,7 @@ case "$backup_name" in
     base_*) ;;
     *) echo "could not determine WAL-G base backup name" >&2; exit 1 ;;
 esac
+check_runbook_selection_commands "$backup_name"
 
 if [ "$mode" = controlled ]; then
     exercise_key_rotation
