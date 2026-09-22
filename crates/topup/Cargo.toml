@@ -12,11 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 alloy-primitives.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 serde-saphyr.workspace = true
 topup-core = { path = "../core" }
 tracing.workspace = true
