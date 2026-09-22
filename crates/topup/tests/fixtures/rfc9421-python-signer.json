@@ -59,6 +59,19 @@
         "signature": "sig1=:6y4pEL51xT29H2GEW0H1aYt13tm0ukK4Ax3e7dF0f1UNPwTuywNeJy1Ob7G6dV35AhCoUN40AF55kAivcFJTAw==:"
       },
       "body": ""
+    },
+    {
+      "name": "nonce_parameter",
+      "method": "POST",
+      "target": "/v1/products/sdk-vector/accounts/workspace-42/deposit-address",
+      "target_uri": "http://127.0.0.1:18080/v1/products/sdk-vector/accounts/workspace-42/deposit-address",
+      "headers": {
+        "host": "127.0.0.1:18080",
+        "content-digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+        "signature-input": "sig1=(\"@method\" \"@target-uri\" \"content-digest\");created=1790000000;keyid=\"sdk-vector/v1\";alg=\"ed25519\";nonce=\"p3Ul4Lz1G9w2QWrZ0bN8xA\"",
+        "signature": "sig1=:Y8X/Rg1tIUbvwUdye6kmLLItTxpxlhvr5mvlOLYBhvi2aOr35WXOQS9Gq/XFSzgZ66QzHFnUKtyM7fvGlv3sCA==:"
+      },
+      "body": ""
     }
   ]
 }

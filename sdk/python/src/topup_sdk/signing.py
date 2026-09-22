@@ -2,17 +2,17 @@
 
 The profile covers `@method`, `@target-uri`, and `content-digest` (SHA-256), plus
 `idempotency-key` whenever that header is present. Parameters are `created` (Unix seconds,
-accepted within five minutes) and `keyid`, with an optional `alg="ed25519"`. Every request is
-signed afresh, and the service accepts each signature once. Because ed25519 is deterministic,
-an identical request signed twice in the same second would repeat its signature, so a signer
-never reuses a `created` value for the same method, URI, digest, and idempotency key.
+accepted within five minutes) and `keyid`, with an optional `alg="ed25519"` and a random
+`nonce`. Every request is signed afresh, and the service accepts each signature once. Because
+ed25519 is deterministic, an identical request signed twice in the same second would otherwise
+repeat its signature; the nonce keeps every signature unique while `created` stays the clock.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import threading
+import secrets
 import time
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
@@ -40,7 +40,12 @@ def content_digest(body: bytes) -> str:
 
 
 def signature_params(
-    keyid: str, created: int, *, cover_idempotency_key: bool, include_alg: bool = True
+    keyid: str,
+    created: int,
+    *,
+    cover_idempotency_key: bool,
+    include_alg: bool = True,
+    nonce: str | None = None,
 ) -> str:
     """Serializes the `@signature-params` inner list as an RFC 8941 structured field."""
     components = [*COVERED_COMPONENTS]
@@ -49,10 +54,17 @@ def signature_params(
     parameters: dict[str, object] = {"created": created, "keyid": keyid}
     if include_alg:
         parameters["alg"] = "ed25519"
+    if nonce is not None:
+        parameters["nonce"] = nonce
     try:
         return _sf_serialize([([(component, {}) for component in components], parameters)])
     except ValueError as error:
-        raise ValueError("keyid must be printable ASCII") from error
+        raise ValueError("keyid and nonce must be printable ASCII") from error
+
+
+def new_nonce() -> str:
+    """Returns 128 random bits as URL-safe base64, a valid structured-field string."""
+    return secrets.token_urlsafe(16)
 
 
 def signature_base(
@@ -83,6 +95,7 @@ class RequestSigner:
         private_key: Ed25519PrivateKey,
         *,
         include_alg: bool = True,
+        include_nonce: bool = True,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if not keyid:
@@ -90,9 +103,8 @@ class RequestSigner:
         self.keyid = keyid
         self._private_key = private_key
         self._include_alg = include_alg
+        self._include_nonce = include_nonce
         self._clock = clock
-        self._last_created: dict[bytes, int] = {}
-        self._lock = threading.Lock()
 
     @classmethod
     def from_seed(
@@ -101,13 +113,20 @@ class RequestSigner:
         seed: bytes,
         *,
         include_alg: bool = True,
+        include_nonce: bool = True,
         clock: Callable[[], float] = time.time,
     ) -> RequestSigner:
         """Creates a signer from a raw 32-byte ed25519 seed."""
         if len(seed) != 32:
             raise ValueError("ed25519 seed must contain exactly 32 bytes")
         private_key = Ed25519PrivateKey.from_private_bytes(seed)
-        return cls(keyid, private_key, include_alg=include_alg, clock=clock)
+        return cls(
+            keyid,
+            private_key,
+            include_alg=include_alg,
+            include_nonce=include_nonce,
+            clock=clock,
+        )
 
     @classmethod
     def from_seed_file(cls, keyid: str, path: str | Path) -> RequestSigner:
@@ -127,21 +146,27 @@ class RequestSigner:
         *,
         idempotency_key: str | None = None,
         created: int | None = None,
+        nonce: str | None = None,
     ) -> dict[str, str]:
         """Returns the `Content-Digest`, `Signature-Input`, and `Signature` headers.
 
         `target_uri` is the absolute URI exactly as the verifier reconstructs it:
         `scheme://host[:port]/path?query`, using the `Host` header the request carries.
         `idempotency_key` is the raw `Idempotency-Key` header value when one is sent.
+        `created` defaults to the clock and `nonce` to a fresh random value; pass them only to
+        reproduce fixed test vectors.
         """
         digest = content_digest(body)
         if created is None:
-            created = self._next_created(method, target_uri, digest, idempotency_key)
+            created = int(self._clock())
+        if nonce is None and self._include_nonce:
+            nonce = new_nonce()
         params = signature_params(
             self.keyid,
             created,
             cover_idempotency_key=idempotency_key is not None,
             include_alg=self._include_alg,
+            nonce=nonce,
         )
         base = signature_base(method, target_uri, digest, idempotency_key, params)
         signature = self._private_key.sign(base)
@@ -150,23 +175,6 @@ class RequestSigner:
             "signature-input": f"{SIGNATURE_LABEL}={params}",
             "signature": _sf_serialize({SIGNATURE_LABEL: (signature, {})}),
         }
-
-    def _next_created(
-        self, method: str, target_uri: str, digest: str, idempotency_key: str | None
-    ) -> int:
-        now = int(self._clock())
-        request_key = hashlib.sha256(
-            "\n".join((method.upper(), target_uri, digest, idempotency_key or "")).encode()
-        ).digest()
-        with self._lock:
-            created = max(now, self._last_created.get(request_key, now - 1) + 1)
-            self._last_created[request_key] = created
-            if len(self._last_created) > 1024:
-                horizon = now - MAX_CLOCK_SKEW_SECONDS
-                self._last_created = {
-                    key: value for key, value in self._last_created.items() if value >= horizon
-                }
-        return created
 
 
 class SigningAuth(httpx.Auth):
@@ -255,6 +263,8 @@ def verify_request(
         if type(created) is not int or abs(now - created) > MAX_CLOCK_SKEW_SECONDS:
             continue
         if params.get("keyid") != keyid or params.get("alg", "ed25519") != "ed25519":
+            continue
+        if "nonce" in params and type(params["nonce"]) is not str:
             continue
         signature, signature_params_ = signatures.get(label, (None, {}))
         if not isinstance(signature, bytes) or signature_params_:

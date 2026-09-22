@@ -60,6 +60,16 @@ CASES: list[dict[str, Any]] = [
         "idempotency_key": None,
         "include_alg": False,
     },
+    {
+        "name": "nonce_parameter",
+        "method": "POST",
+        "path": "/v1/products/sdk-vector/accounts/workspace-42/deposit-address",
+        "params": {},
+        "body": None,
+        "idempotency_key": None,
+        "include_alg": True,
+        "nonce": "p3Ul4Lz1G9w2QWrZ0bN8xA",
+    },
 ]
 
 
@@ -68,7 +78,7 @@ def build_vectors() -> dict[str, Any]:
     vectors = []
     for case in CASES:
         signer = RequestSigner.from_seed(
-            KEYID, SEED, include_alg=case["include_alg"], clock=lambda: CREATED
+            KEYID, SEED, include_alg=case["include_alg"], include_nonce=False
         )
         headers = {}
         if case["idempotency_key"] is not None:
@@ -85,6 +95,8 @@ def build_vectors() -> dict[str, Any]:
                 target_uri(request),
                 request.content,
                 idempotency_key=request.headers.get("idempotency-key"),
+                created=CREATED,
+                nonce=case.get("nonce"),
             )
         )
         vectors.append(

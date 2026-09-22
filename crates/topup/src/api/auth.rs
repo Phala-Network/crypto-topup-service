@@ -428,7 +428,13 @@ mod tests {
         )?;
         let created = fixture["created"].as_i64().ok_or("created")?;
         let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
-        assert_eq!(vectors.len(), 4);
+        assert_eq!(vectors.len(), 5);
+        assert!(
+            vectors.iter().any(|vector| vector["headers"]["signature-input"]
+                .as_str()
+                .is_some_and(|input| input.contains(";nonce=\""))),
+            "the fixture must cover the nonce parameter"
+        );
 
         for vector in vectors {
             let name = vector["name"].as_str().ok_or("name")?;

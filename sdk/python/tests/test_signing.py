@@ -108,6 +108,36 @@ def test_keyid_is_serialized_as_an_escaped_structured_field_string() -> None:
         signature_params("clé", 1, cover_idempotency_key=False)
 
 
+def test_identical_requests_get_unique_signatures_without_clock_drift() -> None:
+    signer = RequestSigner.from_seed(vectors.KEYID, vectors.SEED, clock=lambda: vectors.CREATED)
+    signed = [
+        signer.sign("GET", "http://service.test/v1/products/acme/deposits", b"")
+        for _ in range(1000)
+    ]
+    # Faster than one identical request per second: `created` stays at the clock and the
+    # random nonce keeps every signature distinct, so none is rejected as a replay.
+    assert all(f";created={vectors.CREATED};" in headers["signature-input"] for headers in signed)
+    assert len({headers["signature-input"] for headers in signed}) == len(signed)
+    assert len({headers["signature"] for headers in signed}) == len(signed)
+    for headers in signed[:3]:
+        verify_request(
+            method="GET",
+            target_uri="http://service.test/v1/products/acme/deposits",
+            headers=headers,
+            body=b"",
+            public_key=SIGNER_KEY,
+            keyid=vectors.KEYID,
+            require_idempotency_key=False,
+            now=vectors.CREATED,
+        )
+
+
+def test_nonce_must_be_a_structured_field_string() -> None:
+    signer = RequestSigner.from_seed(vectors.KEYID, vectors.SEED)
+    with pytest.raises(ValueError, match="printable ASCII"):
+        signer.sign("GET", "http://service.test/", b"", nonce="\u00e9")
+
+
 def test_seed_must_be_32_bytes() -> None:
     with pytest.raises(ValueError, match="32 bytes"):
         RequestSigner.from_seed("x", b"short")
