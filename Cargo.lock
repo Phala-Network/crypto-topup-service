@@ -3975,6 +3975,10 @@ name = "topup"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hex",
+ "serde_json",
+ "topup-adapters",
+ "topup-core",
  "tracing",
  "tracing-subscriber",
 ]
