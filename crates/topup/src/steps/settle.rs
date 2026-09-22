@@ -650,24 +650,19 @@ async fn settlement_paused(
     account_scopes: &[String],
     product_scopes: &[String],
 ) -> Result<bool, sqlx::Error> {
-    if has_settlement_scope(account_scopes) || has_settlement_scope(product_scopes) {
-        return Ok(true);
-    }
     let Some(route) = deposit.route.as_deref() else {
-        return Ok(false);
+        return Ok(crate::pause::PauseScopeSources::from_codes(
+            account_scopes,
+            product_scopes,
+            &[],
+        )?
+        .contains(topup_core::screening::PauseScope::Settlement));
     };
-    let route_scopes = sqlx::query_scalar::<_, Vec<String>>(
-        "SELECT paused_scopes FROM route_pauses WHERE route = $1",
+    let route_scopes = crate::pause::route_pause_scopes(pool, route).await?;
+    Ok(
+        crate::pause::PauseScopeSources::from_codes(account_scopes, product_scopes, &route_scopes)?
+            .contains(topup_core::screening::PauseScope::Settlement),
     )
-    .bind(route)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or_default();
-    Ok(has_settlement_scope(&route_scopes))
-}
-
-fn has_settlement_scope(scopes: &[String]) -> bool {
-    scopes.iter().any(|scope| scope == "settlement")
 }
 
 fn terminal_evidence(
