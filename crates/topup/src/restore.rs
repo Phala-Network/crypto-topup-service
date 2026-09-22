@@ -16,8 +16,8 @@ const HEARTBEAT_SAMPLING_SECONDS: i32 = 60;
 pub struct RestoreExpectations {
     /// Last heartbeat known committed on the source immediately before destruction.
     pub expected_heartbeat_at: DateTime<Utc>,
-    /// Source WAL insert location recorded at the same point.
-    pub expected_lsn: String,
+    /// Source WAL location logged with that heartbeat; `None` is a declared incident exception.
+    pub expected_lsn: Option<String>,
 }
 
 /// Restore validation report. `incomplete` is a hard pre-resume failure.
@@ -35,10 +35,13 @@ pub struct RestoreReport {
     pub last_replay_lsn: Option<String>,
     /// Latest replayed or current WAL location.
     pub latest_applied_lsn: String,
-    /// Externally recorded source WAL location.
-    pub expected_lsn: String,
+    /// Externally recorded source WAL location, when one was available.
+    pub expected_lsn: Option<String>,
     /// WAL bytes between the external source point and the restored replay point.
-    pub wal_bytes_behind: i64,
+    pub wal_bytes_behind: Option<i64>,
+    /// `heartbeat_and_lsn`, or `heartbeat_only` when no source LSN was supplied and the RPO rests
+    /// on the heartbeat timestamp alone.
+    pub rpo_basis: &'static str,
     /// Externally recorded last committed source heartbeat.
     pub expected_heartbeat_at: DateTime<Utc>,
     /// Newest heartbeat present after restore.
@@ -84,10 +87,11 @@ pub async fn check(
         "SELECT pg_is_in_recovery() AS in_recovery, \
          pg_last_wal_replay_lsn()::text AS last_replay_lsn, \
          COALESCE(pg_last_wal_replay_lsn(), pg_current_wal_lsn())::text AS latest_applied_lsn, \
-         $1::pg_lsn::text AS expected_lsn, \
-         GREATEST(pg_wal_lsn_diff($1::pg_lsn, \
-             COALESCE(pg_last_wal_replay_lsn(), pg_current_wal_lsn())), 0)::bigint \
-             AS wal_bytes_behind",
+         $1::text::pg_lsn::text AS expected_lsn, \
+         CASE WHEN $1::text IS NULL THEN NULL \
+             ELSE GREATEST(pg_wal_lsn_diff($1::text::pg_lsn, \
+                 COALESCE(pg_last_wal_replay_lsn(), pg_current_wal_lsn())), 0)::bigint \
+         END AS wal_bytes_behind",
     )
     .bind(&expectations.expected_lsn)
     .fetch_one(pool)
@@ -105,10 +109,10 @@ pub async fn check(
     let latest_applied_lsn: String = wal
         .try_get("latest_applied_lsn")
         .map_err(|_| "latest applied WAL LSN is unavailable".to_owned())?;
-    let expected_lsn: String = wal
+    let expected_lsn: Option<String> = wal
         .try_get("expected_lsn")
         .map_err(|_| "expected WAL LSN is invalid".to_owned())?;
-    let wal_bytes_behind: i64 = wal
+    let wal_bytes_behind: Option<i64> = wal
         .try_get("wal_bytes_behind")
         .map_err(|_| "WAL distance is invalid".to_owned())?;
 
@@ -197,6 +201,11 @@ pub async fn check(
         latest_applied_lsn,
         expected_lsn,
         wal_bytes_behind,
+        rpo_basis: if expectations.expected_lsn.is_some() {
+            "heartbeat_and_lsn"
+        } else {
+            "heartbeat_only"
+        },
         expected_heartbeat_at: expectations.expected_heartbeat_at,
         restored_heartbeat_at,
         measured_rpo_seconds,

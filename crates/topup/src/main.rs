@@ -144,9 +144,10 @@ struct RestoreCheckArgs {
     /// Last source heartbeat committed before the recorded failure point.
     #[arg(long, value_name = "RFC3339")]
     expected_heartbeat_at: DateTime<Utc>,
-    /// Source WAL insert location recorded at the same failure point.
+    /// Source WAL location from the same heartbeat log line. Omit only as a declared incident
+    /// exception; RPO is then proven by the heartbeat timestamp alone and flagged in the report.
     #[arg(long, value_name = "PG_LSN")]
-    expected_lsn: String,
+    expected_lsn: Option<String>,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
@@ -313,6 +314,7 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
                         heartbeat_id = record.id,
                         recorded_at = %record.recorded_at,
                         rpo_seconds = record.rpo_seconds,
+                        wal_lsn = %record.wal_lsn,
                         "restore heartbeat recorded"
                     ),
                     Err(_) => {

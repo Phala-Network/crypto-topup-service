@@ -137,16 +137,21 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
 
 ## Restore the database
 
-1. Record the source failure point outside the destroyed PostgreSQL volume. Use the last committed
-   heartbeat timestamp and source WAL insert LSN from incident monitoring:
+1. Record the source failure point outside the destroyed PostgreSQL volume. The `heartbeat` service
+   logs `restore heartbeat recorded` once per minute with `recorded_at` and `wal_lsn` (the source
+   WAL location read after that heartbeat committed). Take both from the last such line in the
+   retained service logs:
 
    ```sh
    export EXPECTED_HEARTBEAT_AT=2026-09-22T14:35:18.172465Z
    export EXPECTED_LSN=0/5000000
    ```
 
-   If either value is unavailable, the RPO cannot be proven. Continue only as an explicitly declared
-   incident exception and keep service traffic stopped.
+   Without a heartbeat timestamp the RPO cannot be proven: continue only as an explicitly declared
+   incident exception and keep service traffic stopped. If only the LSN is missing, omit
+   `--expected-lsn` in step 6 and record the exception in the incident; the report then shows
+   `"rpo_basis":"heartbeat_only"` and `"wal_bytes_behind":null`, so the RPO rests on the heartbeat
+   timestamp alone.
 
 2. Configure the current and retained key versions, start only the key service, and verify metadata,
    never contents:

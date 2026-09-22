@@ -191,8 +191,7 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
 
             let lookup = Arc::new(RestoreLookup::default());
             let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
-            let expectations =
-                restore_expectations(&context.owner_pool, heartbeat.recorded_at).await?;
+            let expectations = restore_expectations(&heartbeat);
             let report = restore::check(&context.owner_pool, &expectations, &reconciler)
                 .await
                 .map_err(anyhow::Error::msg)?;
@@ -204,6 +203,9 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
                 .context("embedded migrations")?;
             ensure!(report.latest_migration == latest);
             ensure!(report.measured_rpo_seconds == 0);
+            ensure!(report.rpo_basis == "heartbeat_and_lsn");
+            ensure!(report.wal_bytes_behind == Some(0));
+            ensure!(report.expected_lsn.as_deref() == Some(heartbeat.wal_lsn.as_str()));
             ensure!(report.row_counts.get("heartbeat") == Some(&1));
             ensure!(report.post_restore_reconciliation.status == "complete");
             ensure!(
@@ -214,6 +216,59 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
                     .any(|finding| finding.incomplete)
             );
             ensure!(lookup.requested_keys.lock().await.is_empty());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restore_check_without_a_source_lsn_flags_heartbeat_only_rpo() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let heartbeat = heartbeat::record(&context.app_pool).await?;
+            let lookup = Arc::new(RestoreLookup::default());
+            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let expectations = restore::RestoreExpectations {
+                expected_heartbeat_at: heartbeat.recorded_at,
+                expected_lsn: None,
+            };
+            let report = restore::check(&context.owner_pool, &expectations, &reconciler)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            ensure!(report.status == "ok");
+            ensure!(report.rpo_basis == "heartbeat_only");
+            ensure!(report.expected_lsn.is_none());
+            ensure!(report.wal_bytes_behind.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn application_role_can_only_append_heartbeats() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let heartbeat = heartbeat::record(&context.app_pool).await?;
+            ensure!(heartbeat.wal_lsn.contains('/'));
+            let update = sqlx::query("UPDATE heartbeat SET recorded_at = now() WHERE id = $1")
+                .bind(heartbeat.id)
+                .execute(&context.app_pool)
+                .await
+                .err();
+            assert_sqlstate(update, "42501")?;
+            let delete = sqlx::query("DELETE FROM heartbeat WHERE id = $1")
+                .bind(heartbeat.id)
+                .execute(&context.app_pool)
+                .await
+                .err();
+            assert_sqlstate(delete, "42501")?;
+            let truncate = sqlx::query("TRUNCATE heartbeat")
+                .execute(&context.app_pool)
+                .await
+                .err();
+            assert_sqlstate(truncate, "42501")?;
             Ok(())
         })
     })
@@ -336,8 +391,7 @@ async fn restore_check_runs_the_post_restore_reconciliation_gate() -> Result<()>
                 },
             );
             let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
-            let expectations =
-                restore_expectations(&context.owner_pool, heartbeat.recorded_at).await?;
+            let expectations = restore_expectations(&heartbeat);
 
             let report = restore::check(&context.owner_pool, &expectations, &reconciler)
                 .await
@@ -1243,17 +1297,12 @@ async fn insert_restore_settlement(
     Ok((deposit_id, key, payload))
 }
 
-async fn restore_expectations(
-    pool: &PgPool,
-    expected_heartbeat_at: chrono::DateTime<Utc>,
-) -> Result<restore::RestoreExpectations> {
-    let expected_lsn: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
-        .fetch_one(pool)
-        .await?;
-    Ok(restore::RestoreExpectations {
-        expected_heartbeat_at,
-        expected_lsn,
-    })
+/// Failure point exactly as an operator reads it from the last heartbeat log line.
+fn restore_expectations(heartbeat: &heartbeat::Heartbeat) -> restore::RestoreExpectations {
+    restore::RestoreExpectations {
+        expected_heartbeat_at: heartbeat.recorded_at,
+        expected_lsn: Some(heartbeat.wal_lsn.clone()),
+    }
 }
 
 async fn insert_lock_address(pool: &PgPool, account_id: Uuid, number: u8) -> Result<Uuid> {
