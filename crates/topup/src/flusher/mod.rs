@@ -13,7 +13,7 @@ use std::fmt::{self, Display, Formatter};
 use topup_core::SignerError;
 
 pub use chain::AlloyChainClient;
-pub use engine::{Flusher, RunResult};
+pub use engine::{Flusher, OperatorRole, RunResult};
 pub use planner::{GasRatioInput, Planner, gas_ratio_allowed};
 pub use sweep::SweepStep;
 pub use types::{

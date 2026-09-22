@@ -1,6 +1,8 @@
 //! Scheduled flusher runtime wiring for the unified service process.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use croner::Cron;
 use sqlx::PgPool;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::pricing::native::CoinMetricsUsdClient;
 use topup_adapters::signer::actor::SignerHandle;
@@ -17,8 +19,8 @@ use topup_core::money::ScaledPrice;
 use topup_core::route::RouteFile;
 
 use super::{
-    AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, Planner, PriceError,
-    PriceSource,
+    AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
+    PriceError, PriceSource,
 };
 
 /// One configured chain/token flusher task.
@@ -31,8 +33,28 @@ pub struct FlusherTask {
 }
 
 impl FlusherTask {
+    /// Creates a task whose schedule and maintenance interval come from the route's chain policy.
+    pub fn new(route: RouteFile, planner: Planner, flusher: Flusher) -> Result<Self, String> {
+        let schedule = Cron::from_str(&route.chain.flush.schedule)
+            .map_err(|error| format!("invalid flush schedule for `{}`: {error}", route.route))?;
+        let maintenance_interval = Duration::from_secs(route.chain.flush.maintenance_interval_s);
+        Ok(Self {
+            route,
+            planner,
+            flusher,
+            schedule,
+            maintenance_interval,
+        })
+    }
+
     /// Runs startup recovery, scheduled planning, and periodic lifecycle maintenance.
+    ///
+    /// Returns without flushing when the configured operator does not hold `OPERATOR_ROLE` on the
+    /// factory, so an operator-key version is only used after the admin Safe has granted it.
     pub async fn run(self, cancellation: CancellationToken) {
+        if !self.operator_authorized(&cancellation).await {
+            return;
+        }
         if let Err(error) = self.flusher.maintain_sent(&self.route).await {
             tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
         }
@@ -76,14 +98,71 @@ impl FlusherTask {
             }
         }
     }
+
+    async fn operator_authorized(&self, cancellation: &CancellationToken) -> bool {
+        let chain_id = self.route.chain.chain_id;
+        let route = self.route.route.as_str();
+        let operator_key_version = self.route.chain.operator_key_version;
+        let factory = self.route.chain.contracts.forwarder_factory;
+        loop {
+            match self.flusher.operator_role(&self.route).await {
+                Ok(OperatorRole {
+                    operator,
+                    granted: true,
+                }) => {
+                    tracing::info!(
+                        chain_id,
+                        route,
+                        operator_key_version,
+                        %operator,
+                        %factory,
+                        "flusher operator holds OPERATOR_ROLE"
+                    );
+                    return true;
+                }
+                Ok(OperatorRole {
+                    operator,
+                    granted: false,
+                }) => {
+                    tracing::error!(
+                        chain_id,
+                        route,
+                        operator_key_version,
+                        %operator,
+                        %factory,
+                        "flusher not started: the configured operator does not hold \
+                         OPERATOR_ROLE on the factory; grant it from the admin Safe and restart"
+                    );
+                    return false;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        chain_id,
+                        route,
+                        operator_key_version,
+                        "flusher operator role check failed; retrying"
+                    );
+                }
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return false,
+                () = sleep(self.maintenance_interval) => {}
+            }
+        }
+    }
 }
 
 /// Builds one task for the newest attested version of each chain/token route.
+///
+/// Each task signs with the operator key version from its route's chain configuration;
+/// `operator_signer` starts one signer per distinct version.
 pub fn configure_tasks(
     pool: PgPool,
     routes: &[RouteFile],
-    signer: SignerHandle,
+    mut operator_signer: impl FnMut(NonZeroU32) -> io::Result<SignerHandle>,
 ) -> Result<Vec<FlusherTask>, String> {
+    let mut signers = BTreeMap::new();
     let mut latest = BTreeMap::new();
     for route in routes {
         latest
@@ -109,6 +188,20 @@ pub fn configure_tasks(
                 route.route
             )
         })?;
+        let version = route
+            .chain
+            .operator_key_version()
+            .map_err(|error| error.to_string())?;
+        let signer = match signers.get(&version) {
+            Some(signer) => SignerHandle::clone(signer),
+            None => {
+                let signer = operator_signer(version).map_err(|error| {
+                    format!("failed to start the operator/v{version} signer: {error}")
+                })?;
+                signers.insert(version, signer.clone());
+                signer
+            }
+        };
         let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
         let batch_size = usize::try_from(route.chain.flush.balance_batch_size)
             .map_err(|_| "flush balance batch size exceeds usize".to_owned())?;
@@ -133,17 +226,8 @@ pub fn configure_tasks(
             gas_limit_bps: route.chain.flush.gas_limit_bps,
             recovery_scan_blocks: route.chain.flush.recovery_scan_blocks,
         };
-        let flusher = Flusher::new(pool.clone(), chain, signer.clone(), alerts, policy);
-        let schedule = Cron::from_str(&route.chain.flush.schedule)
-            .map_err(|error| format!("invalid flush schedule for `{}`: {error}", route.route))?;
-        let maintenance_interval = Duration::from_secs(route.chain.flush.maintenance_interval_s);
-        tasks.push(FlusherTask {
-            route,
-            planner,
-            flusher,
-            schedule,
-            maintenance_interval,
-        });
+        let flusher = Flusher::new(pool.clone(), chain, signer, alerts, policy);
+        tasks.push(FlusherTask::new(route, planner, flusher)?);
     }
     Ok(tasks)
 }

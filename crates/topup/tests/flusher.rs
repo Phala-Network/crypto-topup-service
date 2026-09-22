@@ -5,7 +5,7 @@
 use std::env;
 use std::future::Future;
 use std::net::TcpListener;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
@@ -20,19 +20,22 @@ use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use tokio_util::sync::CancellationToken;
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
     AlertSink, AlloyChainClient, ChainClient, ChainError, ChainReceipt, FeeQuote, FlushAlert,
-    Flusher, FlusherPolicy, NonceReceiptSearch, Planner, PriceError, PriceSource, RunResult,
+    Flusher, FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError, PriceSource,
+    RunResult,
 };
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
-use topup_core::SecretKey32;
 use topup_core::address::forwarder_address;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, Bps, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
+use topup_core::{SecretKey32, Signer as _};
 use url::Url;
 use uuid::Uuid;
 
@@ -196,6 +199,14 @@ impl ChainClient for PlannerChain {
     ) -> Result<u64, ChainError> {
         self.record_call();
         Ok(100_000)
+    }
+
+    async fn has_operator_role(
+        &self,
+        _factory: Address,
+        _operator: Address,
+    ) -> Result<bool, ChainError> {
+        Err(ChainError::rpc("not used by the planner"))
     }
 
     async fn pending_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
@@ -827,6 +838,195 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
     .await
 }
 
+#[tokio::test]
+async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let anvil = Anvil::start()?;
+            let root = repository_root();
+            let factory = deploy(
+                &root,
+                &anvil.rpc_url,
+                "src/ForwarderFactory.sol:ForwarderFactory",
+                &[ADMIN_ADDRESS, TREASURY],
+            )?;
+            let token = deploy(
+                &root,
+                &anvil.rpc_url,
+                "test/mocks/MockTokens.sol:MockERC20",
+                &[],
+            )?;
+            let implementation =
+                cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
+            let seeded = seed_addresses(&database.pool, factory, implementation).await?;
+            let mint = |address: Address| {
+                cast_send(
+                    &anvil.rpc_url,
+                    token,
+                    ADMIN_KEY,
+                    "mint(address,uint256)",
+                    &[&format!("{address:#x}"), TOKEN_AMOUNT],
+                )
+            };
+            let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
+            let alerts = Arc::new(Alerts::default());
+            let components = |signer: &SignerHandle| {
+                (
+                    Planner::new(
+                        database.pool.clone(),
+                        chain.clone(),
+                        signer.clone(),
+                        Arc::new(FixedPrice),
+                        alerts.clone(),
+                    ),
+                    Flusher::new(
+                        database.pool.clone(),
+                        chain.clone(),
+                        signer.clone(),
+                        alerts.clone(),
+                        FlusherPolicy::default(),
+                    ),
+                )
+            };
+            let refuses_to_start = |route: &RouteFile, signer: &SignerHandle| {
+                let (planner, flusher) = components(signer);
+                let task = FlusherTask::new(route.clone(), planner, flusher);
+                async move {
+                    let task = task.map_err(anyhow::Error::msg)?;
+                    tokio::time::timeout(
+                        StdDuration::from_secs(10),
+                        task.run(CancellationToken::new()),
+                    )
+                    .await
+                    .context("flusher task must stop when the operator lacks the role")
+                }
+            };
+
+            let route_v1 = test_route(factory, token)?;
+            ensure!(route_v1.chain.operator_key_version()? == NonZeroU32::MIN);
+            let (signer_v1, operator_v1) = versioned_signer(&route_v1).await?;
+            let mut route_v2 = route_v1.clone();
+            route_v2.version = 2;
+            route_v2.chain.operator_key_version = 2;
+            let (signer_v2, operator_v2) = versioned_signer(&route_v2).await?;
+            ensure!(operator_v1 != operator_v2);
+            for operator in [operator_v1, operator_v2] {
+                cast_rpc(
+                    &anvil.rpc_url,
+                    "anvil_setBalance",
+                    &[&format!("{operator:#x}"), "0x56bc75e2d63100000"],
+                )?;
+            }
+            let (planner_v1, flusher_v1) = components(&signer_v1);
+            let (planner_v2, flusher_v2) = components(&signer_v2);
+
+            ensure!(
+                flusher_v1.operator_role(&route_v1).await?
+                    == OperatorRole {
+                        operator: operator_v1,
+                        granted: false
+                    }
+            );
+            refuses_to_start(&route_v1, &signer_v1).await?;
+            grant_operator(
+                &anvil.rpc_url,
+                factory,
+                &format!("{operator_v1:#x}"),
+                ADMIN_KEY,
+            )?;
+            ensure!(flusher_v1.operator_role(&route_v1).await?.granted);
+
+            mint(seeded[0].physical)?;
+            let first = planner_v1.plan(&route_v1).await?.context("plan v1 flush")?;
+            ensure!(flusher_v1.send_next(&route_v1).await? == RunResult::Sent { flush_id: first });
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher_v1.maintain_sent(&route_v1).await?
+                    == Some(RunResult::Confirmed { flush_id: first })
+            );
+            mint(seeded[0].physical)?;
+            let stale = planner_v1
+                .plan(&route_v1)
+                .await?
+                .context("plan unsigned v1 flush")?;
+            let binding = |id: Uuid| async move {
+                let row = sqlx::query(
+                    "SELECT operator, nonce::text AS nonce, status::text AS status \
+                     FROM flushes WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await?;
+                Ok::<_, anyhow::Error>((
+                    row.try_get::<String, _>("operator")?,
+                    row.try_get::<String, _>("nonce")?,
+                    row.try_get::<String, _>("status")?,
+                ))
+            };
+            let v1_binding = (
+                format!("{operator_v1:#x}"),
+                "1".to_owned(),
+                "planned".to_owned(),
+            );
+            ensure!(binding(stale).await? == v1_binding);
+
+            // Deploying operator/v2 before the admin Safe grants it leaves the plan untouched.
+            ensure!(!flusher_v2.operator_role(&route_v2).await?.granted);
+            refuses_to_start(&route_v2, &signer_v2).await?;
+            ensure!(binding(stale).await? == v1_binding);
+
+            grant_operator(
+                &anvil.rpc_url,
+                factory,
+                &format!("{operator_v2:#x}"),
+                ADMIN_KEY,
+            )?;
+            ensure!(
+                flusher_v2.operator_role(&route_v2).await?
+                    == OperatorRole {
+                        operator: operator_v2,
+                        granted: true
+                    }
+            );
+            ensure!(planner_v2.plan(&route_v2).await? == Some(stale));
+            ensure!(
+                binding(stale).await?
+                    == (
+                        format!("{operator_v2:#x}"),
+                        "0".to_owned(),
+                        "planned".to_owned()
+                    )
+            );
+            ensure!(flusher_v2.send_next(&route_v2).await? == RunResult::Sent { flush_id: stale });
+            finalize(&anvil.rpc_url)?;
+            ensure!(
+                flusher_v2.maintain_sent(&route_v2).await?
+                    == Some(RunResult::Confirmed { flush_id: stale })
+            );
+            ensure!(chain.confirmed_nonce(operator_v2).await? == 1);
+            ensure!(chain.confirmed_nonce(operator_v1).await? == 1);
+            let flushed: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM flushed WHERE flush_id = $1")
+                    .bind(stale)
+                    .fetch_one(&database.pool)
+                    .await?;
+            ensure!(flushed == 1);
+
+            revoke_operator(
+                &anvil.rpc_url,
+                factory,
+                &format!("{operator_v1:#x}"),
+                ADMIN_KEY,
+            )?;
+            ensure!(!flusher_v1.operator_role(&route_v1).await?.granted);
+            refuses_to_start(&route_v1, &signer_v1).await?;
+            ensure!(flusher_v2.operator_role(&route_v2).await?.granted);
+            Ok(())
+        })
+    })
+    .await
+}
+
 async fn with_database<F>(test: F) -> Result<()>
 where
     F: for<'a> FnOnce(&'a Database) -> TestFuture<'a>,
@@ -936,12 +1136,31 @@ fn grant_operator(
     operator: &str,
     private_key: &str,
 ) -> Result<()> {
+    set_operator_role(rpc_url, factory, operator, private_key, "grantRole")
+}
+
+fn revoke_operator(
+    rpc_url: &str,
+    factory: Address,
+    operator: &str,
+    private_key: &str,
+) -> Result<()> {
+    set_operator_role(rpc_url, factory, operator, private_key, "revokeRole")
+}
+
+fn set_operator_role(
+    rpc_url: &str,
+    factory: Address,
+    operator: &str,
+    private_key: &str,
+    function: &str,
+) -> Result<()> {
     let role = cast_call_text(rpc_url, factory, "OPERATOR_ROLE()(bytes32)", &[])?;
     cast_send(
         rpc_url,
         factory,
         private_key,
-        "grantRole(bytes32,address)",
+        &format!("{function}(bytes32,address)"),
         &[role.trim(), operator],
     )
 }
@@ -1007,6 +1226,18 @@ fn signer_handle(key: &str) -> Result<SignerHandle> {
         StdDuration::from_secs(5),
     )
     .map_err(Into::into)
+}
+
+/// Mirrors `topup run`: one signer per attested operator key version, derived by domain.
+async fn versioned_signer(route: &RouteFile) -> Result<(SignerHandle, Address)> {
+    let version = route.chain.operator_key_version()?;
+    let handle = SignerHandle::spawn(
+        DevSigner::derive(&SecretKey32::new([0x5e; 32]), version),
+        NonZeroUsize::new(8).context("queue is non-zero")?,
+        StdDuration::from_secs(5),
+    )?;
+    let address = handle.operator_address().await?;
+    Ok((handle, address))
 }
 
 fn test_route(factory: Address, token: Address) -> Result<RouteFile> {

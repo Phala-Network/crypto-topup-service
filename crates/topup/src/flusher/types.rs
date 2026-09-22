@@ -75,6 +75,13 @@ pub trait ChainClient: Send + Sync {
         token: Address,
     ) -> Result<u64, ChainError>;
 
+    /// Reports whether `operator` holds `OPERATOR_ROLE` on the factory at the latest block.
+    async fn has_operator_role(
+        &self,
+        factory: Address,
+        operator: Address,
+    ) -> Result<bool, ChainError>;
+
     /// Returns the pending nonce for an operator.
     async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError>;
 

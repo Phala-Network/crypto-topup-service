@@ -243,6 +243,12 @@ npx --yes phala@1.1.22 ssh "$CVM_ID" -- \
   topup attest --nonce '$NONCE'"
 ```
 
+The output also reports `operator_keyid` and `operator_address` for `--operator-key-version`
+(default 1). dstack derives keys from the application identity rather than the compose hash, so
+before rotating the operator key, run the command in the current deployment with the next version
+to learn the address the admin Safe must grant `OPERATOR_ROLE` before `operator_key_version` is
+bumped in the attested chain configuration.
+
 **HUMAN-ONLY, verifier approval required:** verify the platform certificate/quote and TCB in the
 Phala Trust Center or official dstack verification flow, replay the RTMR event log, confirm the
 attested compose hash, and bind the fresh nonce to the returned `settlement/v1` public key.
