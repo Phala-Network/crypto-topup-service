@@ -2,13 +2,17 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::time::Duration;
 
+use dstack_sdk::DstackClient;
 use sha2::{Digest, Sha256};
+use tokio::time::timeout;
 use topup_core::{Ed25519PublicKey, SETTLEMENT_KEY_DOMAIN};
 
-use crate::signer::dstack::{DerivedKey, run_dstack};
+use crate::signer::dstack::{DerivedKey, KeyAlgorithm};
+use crate::signer::settlement_public_key;
 
-const ED25519_ALGORITHM: &str = "ed25519";
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// dstack identity metadata returned alongside an attestation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,7 +43,7 @@ pub struct AttestationBundle {
 pub enum AttestationError {
     /// The settlement key returned by dstack was malformed.
     InvalidSettlementKey,
-    /// The dstack attestation or information call failed.
+    /// The dstack attestation or information call failed or timed out.
     DstackUnavailable,
 }
 
@@ -65,66 +69,94 @@ pub fn report_data(nonce: &[u8], settlement_public_key: &Ed25519PublicKey) -> [u
 }
 
 /// Collects a settlement-key attestation from dstack v1.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DstackAttestor {
     endpoint: Option<String>,
+    timeout: Duration,
+}
+
+impl Default for DstackAttestor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DstackAttestor {
-    /// Uses the dstack socket selected by the SDK.
+    /// Uses the dstack socket selected by the SDK and a ten-second call timeout.
     #[must_use]
     pub const fn new() -> Self {
-        Self { endpoint: None }
+        Self {
+            endpoint: None,
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
 
-    /// Uses an explicit dstack or simulator endpoint.
+    /// Uses the dstack socket selected by the SDK and the provided call timeout.
+    #[must_use]
+    pub const fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            endpoint: None,
+            timeout,
+        }
+    }
+
+    /// Uses an explicit dstack or simulator endpoint and a ten-second call timeout.
     #[must_use]
     pub fn with_endpoint(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: Some(endpoint.into()),
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+
+    /// Uses an explicit endpoint and timeout for every dstack SDK call.
+    #[must_use]
+    pub fn with_endpoint_and_timeout(endpoint: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            endpoint: Some(endpoint.into()),
+            timeout,
         }
     }
 
     /// Derives the settlement key, binds it to `nonce`, and returns dstack evidence.
-    pub fn attest(&self, nonce: &[u8]) -> Result<AttestationBundle, AttestationError> {
-        let nonce = nonce.to_vec();
-        run_dstack(
-            self.endpoint.clone(),
-            AttestationError::DstackUnavailable,
-            move |client| async move {
-                let key_response = client
-                    .get_key(SETTLEMENT_KEY_DOMAIN, ED25519_ALGORITHM)
-                    .await
-                    .map_err(|_| AttestationError::DstackUnavailable)?;
-                let key = DerivedKey::from_response(key_response.key, key_response.public_key)
-                    .map_err(|_| AttestationError::InvalidSettlementKey)?;
-                let settlement_public_key = super::signer::settlement_public_key(&key.secret);
-                if settlement_public_key.0 != key.public_key.as_slice() {
-                    return Err(AttestationError::InvalidSettlementKey);
-                }
-                let report_data = report_data(&nonce, &settlement_public_key);
-                let response = client
-                    .attest(report_data.to_vec(), false)
-                    .await
-                    .map_err(|_| AttestationError::DstackUnavailable)?;
-                let info = client
-                    .info()
-                    .await
-                    .map_err(|_| AttestationError::DstackUnavailable)?;
-                drop(key);
-
-                Ok(AttestationBundle {
-                    settlement_public_key,
-                    report_data,
-                    quote: response.attestation,
-                    info: AttestationInfo {
-                        app_id: info.app_id,
-                        compose_hash: info.compose_hash,
-                        app_compose: (!info.app_compose.is_empty()).then_some(info.app_compose),
-                    },
-                })
-            },
+    pub async fn attest(&self, nonce: &[u8]) -> Result<AttestationBundle, AttestationError> {
+        let client = DstackClient::new(self.endpoint.as_deref());
+        let key_response = timeout(
+            self.timeout,
+            client.get_key(SETTLEMENT_KEY_DOMAIN, KeyAlgorithm::Ed25519.as_str()),
         )
+        .await
+        .map_err(|_| AttestationError::DstackUnavailable)?
+        .map_err(|_| AttestationError::DstackUnavailable)?;
+        let key = DerivedKey::from_response(
+            key_response.key,
+            key_response.public_key,
+            KeyAlgorithm::Ed25519,
+        )
+        .map_err(|_| AttestationError::InvalidSettlementKey)?;
+        let settlement_public_key = settlement_public_key(&key.secret);
+        drop(key);
+
+        let report_data = report_data(nonce, &settlement_public_key);
+        let response = timeout(self.timeout, client.attest(report_data.to_vec(), false))
+            .await
+            .map_err(|_| AttestationError::DstackUnavailable)?
+            .map_err(|_| AttestationError::DstackUnavailable)?;
+        let info = timeout(self.timeout, client.info())
+            .await
+            .map_err(|_| AttestationError::DstackUnavailable)?
+            .map_err(|_| AttestationError::DstackUnavailable)?;
+
+        Ok(AttestationBundle {
+            settlement_public_key,
+            report_data,
+            quote: response.attestation,
+            info: AttestationInfo {
+                app_id: info.app_id,
+                compose_hash: info.compose_hash,
+                app_compose: (!info.app_compose.is_empty()).then_some(info.app_compose),
+            },
+        })
     }
 }
 

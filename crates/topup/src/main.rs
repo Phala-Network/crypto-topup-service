@@ -55,7 +55,8 @@ enum RouteCommand {
     },
 }
 
-fn main() -> ExitCode {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     if let Err(error) = tracing_subscriber::fmt()
         .json()
         .with_target(false)
@@ -73,7 +74,7 @@ fn main() -> ExitCode {
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
-        TopupCommand::Attest(args) => attest(&args),
+        TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::RestoreCheck => Err("restore-check is not implemented"),
     };
 
@@ -86,26 +87,38 @@ fn main() -> ExitCode {
     }
 }
 
-fn attest(args: &AttestArgs) -> Result<(), &'static str> {
-    let nonce = hex::decode(&args.nonce).map_err(|_| "nonce must be valid hexadecimal")?;
+async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
+    let nonce = parse_nonce(&args.nonce)?;
 
     #[cfg(feature = "dev-signer")]
     if args.dev {
         let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
         let public_key = signer
             .settlement_public_key()
+            .await
             .map_err(|_| "development settlement key is invalid")?;
         return print_attestation(&public_key.0, &report_data(&nonce, &public_key), &[]);
     }
 
     let evidence = DstackAttestor::new()
         .attest(&nonce)
+        .await
         .map_err(|_| "failed to collect dstack attestation")?;
     print_attestation(
         &evidence.settlement_public_key.0,
         &evidence.report_data,
         &evidence.quote,
     )
+}
+
+fn parse_nonce(value: &str) -> Result<Vec<u8>, &'static str> {
+    if value.is_empty() {
+        return Err("nonce must be non-empty hexadecimal");
+    }
+    if value.len() > 64 {
+        return Err("nonce must be at most 32 bytes (64 hexadecimal characters)");
+    }
+    hex::decode(value).map_err(|_| "nonce must be valid hexadecimal")
 }
 
 fn print_attestation(
@@ -149,5 +162,27 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
             eprintln!("route file `{}` is invalid: {error}", file.display());
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nonce;
+
+    #[test]
+    fn nonce_policy_accepts_one_through_thirty_two_bytes() {
+        assert_eq!(parse_nonce("00"), Ok(vec![0]));
+        assert_eq!(parse_nonce(&"ab".repeat(32)), Ok(vec![0xab; 32]));
+    }
+
+    #[test]
+    fn nonce_policy_rejects_empty_oversized_and_invalid_values() {
+        assert_eq!(parse_nonce(""), Err("nonce must be non-empty hexadecimal"));
+        assert_eq!(
+            parse_nonce(&"ab".repeat(33)),
+            Err("nonce must be at most 32 bytes (64 hexadecimal characters)")
+        );
+        assert_eq!(parse_nonce("0"), Err("nonce must be valid hexadecimal"));
+        assert_eq!(parse_nonce("zz"), Err("nonce must be valid hexadecimal"));
     }
 }

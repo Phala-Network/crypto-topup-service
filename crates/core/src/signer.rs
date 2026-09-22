@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use alloy_primitives::{Address, Bytes, U256};
 use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox};
 
@@ -26,16 +27,23 @@ impl SecretKey32 {
         Self(secret)
     }
 
+    /// Copies exactly 32 bytes directly into protected storage.
+    #[must_use]
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut secret: SecretBox<[u8; 32]> = SecretBox::default();
+        secret.expose_secret_mut().copy_from_slice(bytes);
+        Some(Self(secret))
+    }
+
     /// Exposes the secret to a cryptographic implementation.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8; 32] {
         self.0.expose_secret()
     }
 }
-
-/// A 20-byte EVM account address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EvmAddress(pub [u8; 20]);
 
 /// A raw ed25519 public key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,11 +61,11 @@ pub struct TxRequest {
     /// Sender account nonce.
     pub nonce: u64,
     /// Recipient address.
-    pub to: EvmAddress,
-    /// Value in wei, encoded as a big-endian unsigned 256-bit integer.
-    pub value: [u8; 32],
+    pub to: Address,
+    /// Value in wei.
+    pub value: U256,
     /// Contract call data.
-    pub data: Vec<u8>,
+    pub data: Bytes,
     /// Maximum gas units.
     pub gas_limit: u64,
     /// Maximum total fee per gas unit.
@@ -70,7 +78,7 @@ pub struct TxRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedTx {
     /// Raw signed transaction bytes.
-    pub raw_signed_bytes: Vec<u8>,
+    pub raw_signed_bytes: Bytes,
 }
 
 /// A signer boundary failure safe to expose to service callers.
@@ -98,18 +106,22 @@ impl Display for SignerError {
 impl Error for SignerError {}
 
 /// Signs operator transactions and product settlement payloads.
-pub trait Signer {
+///
+/// Implementors are safe to move and share across service tasks. The returned futures are not
+/// required to be `Send` because the pinned dstack Unix transport does not provide `Send` futures.
+#[allow(async_fn_in_trait)]
+pub trait Signer: Send + Sync {
     /// Signs an EIP-1559 operator transaction.
-    fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError>;
+    async fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError>;
 
     /// Signs settlement payload bytes with ed25519.
-    fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError>;
+    async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError>;
 
     /// Returns the current operator address.
-    fn operator_address(&self) -> Result<EvmAddress, SignerError>;
+    async fn operator_address(&self) -> Result<Address, SignerError>;
 
     /// Returns the current settlement public key.
-    fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError>;
+    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError>;
 }
 
 #[cfg(test)]
@@ -126,5 +138,16 @@ mod tests {
     fn secret_key_can_only_be_read_explicitly() {
         let key = SecretKey32::new([7; 32]);
         assert_eq!(key.expose_secret(), &[7; 32]);
+    }
+
+    #[test]
+    fn secret_key_slice_constructor_enforces_length() {
+        assert!(SecretKey32::from_slice(&[7; 31]).is_none());
+        assert_eq!(
+            SecretKey32::from_slice(&[7; 32])
+                .expect("32 bytes are valid")
+                .expose_secret(),
+            &[7; 32]
+        );
     }
 }

@@ -22,6 +22,6 @@ pub mod route;
 mod signer;
 
 pub use signer::{
-    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, EvmAddress, OPERATOR_KEY_DOMAIN,
+    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, OPERATOR_KEY_DOMAIN,
     SETTLEMENT_KEY_DOMAIN, SecretKey32, SignedTx, Signer, SignerError, TxRequest,
 };
