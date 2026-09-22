@@ -825,7 +825,10 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .context("configured route report")?;
         ensure!(route["route"] == "phala-cloud-ethereum-pha-usd");
         ensure!(route["treasury_balance_atomic"].is_null());
-        ensure!(route["treasury_balance_note"].as_str().context("treasury note")?.contains("C7"));
+        ensure!(route["treasury_balance_note"]
+            .as_str()
+            .context("treasury note")?
+            .contains("not configured"));
         ensure!(route["unflushed_balance_atomic"] == "300");
         ensure!(route["open_rate_lock_exposure_atomic"] == "50");
         ensure!(route["exposure_minor"].is_null());
@@ -837,7 +840,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(route["pnl_minor_reason"]
             .as_str()
             .context("PnL reason")?
-            .contains("C7"));
+            .contains("valuation inputs"));
         ensure!(route["rejected_holds_atomic"] == "100");
         ensure!(route["deposits_by_state"]["rejected"] == 1);
         ensure!(route["deposits_by_state"]["credited"] == 1);

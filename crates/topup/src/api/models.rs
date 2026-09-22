@@ -323,9 +323,9 @@ pub struct RouteDailyReport {
     pub chain_id: u64,
     /// Route asset contract.
     pub asset_contract: String,
-    /// Treasury balance in atomic units; unavailable until C7 exposes a chain balance reader.
+    /// Latest treasury token balance in atomic units, when the chain read succeeds.
     pub treasury_balance_atomic: Option<String>,
-    /// Explicit reason the treasury balance is unavailable.
+    /// Balance source or explicit reason the treasury balance is unavailable.
     pub treasury_balance_note: String,
     /// Sum of deposits not linked to a confirmed flush.
     pub unflushed_balance_atomic: String,

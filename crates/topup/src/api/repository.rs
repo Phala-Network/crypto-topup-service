@@ -1181,16 +1181,14 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         chain_id: route.chain.chain_id,
         asset_contract: format!("{:#x}", route.asset.contract),
         treasury_balance_atomic: None,
-        treasury_balance_note:
-            "TODO(C7): treasury balance requires the flusher chain balance reader".to_owned(),
+        treasury_balance_note: "treasury balance has not been observed".to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         exposure_minor: None,
         exposure_minor_reason: "TODO(C10): rate locks do not yet persist destination exposure"
             .to_owned(),
         pnl_minor: None,
-        pnl_minor_reason: "TODO(C7): route PnL requires treasury balances and valuation inputs"
-            .to_owned(),
+        pnl_minor_reason: "route PnL requires treasury valuation inputs".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
         deposits_by_state: zero_counts(&[
             "detected",
@@ -1219,9 +1217,7 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
         chain_id,
         asset_contract,
         treasury_balance_atomic: None,
-        treasury_balance_note:
-            "TODO(C7): unrouted asset treasury balance requires the flusher chain balance reader"
-                .to_owned(),
+        treasury_balance_note: "unrouted assets do not have an RPC route configuration".to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         exposure_minor: None,

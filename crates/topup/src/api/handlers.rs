@@ -1,6 +1,7 @@
 //! Typed API handlers for the routes in architecture §12.
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
@@ -13,6 +14,7 @@ use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
 use crate::db::{Account, Product};
+use crate::flusher::{AlloyChainClient, ChainClient};
 
 use super::AppState;
 use super::attestation::AttestationError;
@@ -496,9 +498,80 @@ pub(crate) async fn record_refund(
 pub(crate) async fn daily_report(
     State(state): State<AppState>,
 ) -> ApiResult<Json<DailyReportResponse>> {
-    Ok(Json(
-        repository::daily_report(&state.pool, &state.routes, chrono::Utc::now()).await?,
-    ))
+    let mut report =
+        repository::daily_report(&state.pool, &state.routes, chrono::Utc::now()).await?;
+    populate_treasury_balances(&state.routes, &mut report).await;
+    Ok(Json(report))
+}
+
+async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyReportResponse) {
+    for route_report in &mut report.routes {
+        let Some(route) = routes
+            .iter()
+            .filter(|route| route.route == route_report.route)
+            .max_by_key(|route| route.version)
+        else {
+            continue;
+        };
+        let Some(provider) = route.chain.rpc_providers.first() else {
+            route_report.treasury_balance_note =
+                "treasury balance unavailable: route has no RPC provider".to_owned();
+            continue;
+        };
+        let environment = rpc_environment_name(provider);
+        let Ok(url) = std::env::var(&environment) else {
+            route_report.treasury_balance_note =
+                format!("treasury balance unavailable: {environment} is not configured");
+            continue;
+        };
+        let Ok(batch_size) = usize::try_from(route.chain.flush.balance_batch_size) else {
+            route_report.treasury_balance_note =
+                "treasury balance unavailable: configured batch size is invalid".to_owned();
+            continue;
+        };
+        let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
+        let Ok(client) = AlloyChainClient::connect_http_with_policy(&url, timeout, batch_size)
+        else {
+            route_report.treasury_balance_note =
+                "treasury balance unavailable: RPC client configuration is invalid".to_owned();
+            continue;
+        };
+        match client
+            .token_balances(route.asset.contract, &[route.chain.contracts.treasury])
+            .await
+        {
+            Ok(balances) => match balances.into_iter().next() {
+                Some(balance) => {
+                    route_report.treasury_balance_atomic = Some(balance.to_string());
+                    route_report.treasury_balance_note =
+                        "latest on-chain ERC-20 treasury balance".to_owned();
+                }
+                None => {
+                    route_report.treasury_balance_note =
+                        "treasury balance unavailable: RPC returned no balance".to_owned();
+                }
+            },
+            Err(error) => {
+                tracing::warn!(route = %route.route, %error, "daily report treasury balance read failed");
+                route_report.treasury_balance_note =
+                    "treasury balance unavailable: RPC read failed".to_owned();
+            }
+        }
+    }
+}
+
+fn rpc_environment_name(provider_id: &str) -> String {
+    let normalized = provider_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 async fn deposit_address(

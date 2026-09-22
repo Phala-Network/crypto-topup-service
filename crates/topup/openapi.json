@@ -2218,11 +2218,11 @@
               "string",
               "null"
             ],
-            "description": "Treasury balance in atomic units; unavailable until C7 exposes a chain balance reader."
+            "description": "Latest treasury token balance in atomic units, when the chain read succeeds."
           },
           "treasury_balance_note": {
             "type": "string",
-            "description": "Explicit reason the treasury balance is unavailable."
+            "description": "Balance source or explicit reason the treasury balance is unavailable."
           },
           "unflushed_balance_atomic": {
             "type": "string",
