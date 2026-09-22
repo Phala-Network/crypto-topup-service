@@ -475,8 +475,10 @@ where
     let mut retry_attempt = 0_u32;
     let mut last_success = std::time::Instant::now();
     let mut last_progress = (0_u64, 0_u64);
+    let instance = chain_id.to_string();
+    crate::observability::register_scanner(chain_id);
     loop {
-        crate::observability::heartbeat("scanner");
+        crate::observability::heartbeat("scanner", instance.clone());
         let result = tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
             result = scan() => result,
@@ -485,6 +487,9 @@ where
             Ok(stats) => {
                 retry_attempt = 0;
                 last_success = std::time::Instant::now();
+                let made_progress = stats.cursor > last_progress.1
+                    || stats.inserted > 0
+                    || stats.backfilled_addresses > 0;
                 last_progress = (stats.finalized, stats.cursor);
                 crate::observability::record_scanner_lag(
                     chain_id,
@@ -492,6 +497,10 @@ where
                     stats.cursor,
                     0,
                 );
+                crate::observability::record_scanner_success(chain_id);
+                if made_progress {
+                    crate::observability::progress("scanner", instance.clone());
+                }
                 tracing::info!(
                     chain_id,
                     cursor = stats.cursor,
@@ -527,6 +536,7 @@ where
                 return Err(error);
             }
         };
+        crate::observability::waiting("scanner", instance.clone(), delay);
         tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
             () = sleep(delay) => {}
@@ -549,6 +559,7 @@ fn record_committed(
         metrics::counter!(
             "topup_unsupported_inflows_total",
             "chain" => chain_id.to_string(),
+            "producer_enabled" => "true",
         )
         .increment(committed.unsupported_inserted);
     }

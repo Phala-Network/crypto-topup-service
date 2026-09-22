@@ -10,7 +10,7 @@ pub fn deposit_step_span(deposit: &Deposit) -> Span {
     tracing::info_span!(
         "pump.step",
         deposit_id = %deposit.id,
-        chain = deposit.chain_id,
+        chain_id = deposit.chain_id,
         state = ?deposit.state,
         attempt = deposit.attempt,
         route,
@@ -22,7 +22,7 @@ pub fn deposit_step_span(deposit: &Deposit) -> Span {
 pub fn scanner_window_span(chain: u64, from_block: u64, to_block: u64) -> Span {
     tracing::info_span!(
         "scanner.window",
-        chain,
+        chain_id = chain,
         from_block,
         to_block,
         deposit_id = field::Empty,
@@ -38,7 +38,7 @@ pub fn outbox_delivery_span(event_id: uuid::Uuid, payload: &Value, attempt: i32)
         .get("deposit_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let chain = payload.get("chain").and_then(Value::as_u64);
+    let chain_id = payload.get("chain_id").and_then(Value::as_u64);
     let state = payload
         .get("state")
         .and_then(Value::as_str)
@@ -51,7 +51,7 @@ pub fn outbox_delivery_span(event_id: uuid::Uuid, payload: &Value, attempt: i32)
         "outbox.delivery",
         event_id = %event_id,
         deposit_id,
-        chain = ?chain,
+        chain_id = ?chain_id,
         state,
         attempt,
         route,
@@ -63,7 +63,7 @@ pub fn outbox_delivery_span(event_id: uuid::Uuid, payload: &Value, attempt: i32)
 pub fn flush_action_span(chain: u64, route: &str, attempt: u32) -> Span {
     tracing::info_span!(
         "flush.action",
-        chain,
+        chain_id = chain,
         route,
         attempt,
         deposit_id = field::Empty,
@@ -123,7 +123,7 @@ mod tests {
         assert!(logs_contain(
             "deposit_id=018f47f0-a9b2-7c31-8fa5-776a08f65201"
         ));
-        assert!(logs_contain("chain=1"));
+        assert!(logs_contain("chain_id=1"));
         assert!(logs_contain("state=Confirmed"));
         assert!(logs_contain("attempt=3"));
         assert!(logs_contain("route=\"route-a\""));

@@ -158,15 +158,26 @@ where
     }
 
     /// Polls until shutdown, retaining failed events for unlimited retries.
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(&self, shutdown: watch::Receiver<bool>) {
+        self.run_with_instance("0".to_owned(), shutdown).await;
+    }
+
+    /// Polls one named delivery worker until shutdown.
+    pub async fn run_with_instance(&self, instance: String, mut shutdown: watch::Receiver<bool>) {
+        crate::observability::register_loop("outbox", instance.clone());
         loop {
             if *shutdown.borrow() {
                 return;
             }
-            crate::observability::heartbeat("outbox");
+            crate::observability::heartbeat("outbox", instance.clone());
 
             let should_pause = match self.run_once().await {
-                Ok(claimed) => claimed == 0,
+                Ok(claimed) => {
+                    if claimed > 0 {
+                        crate::observability::progress("outbox", instance.clone());
+                    }
+                    claimed == 0
+                }
                 Err(error) => {
                     tracing::error!(%error, "outbox delivery poll failed");
                     true
@@ -174,6 +185,11 @@ where
             };
 
             if should_pause {
+                crate::observability::waiting(
+                    "outbox",
+                    instance.clone(),
+                    self.config.poll_interval,
+                );
                 tokio::select! {
                     () = sleep(self.config.poll_interval) => {}
                     changed = shutdown.changed() => {

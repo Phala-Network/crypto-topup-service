@@ -274,22 +274,41 @@ impl Pump {
 
     /// Runs until cancellation, finishing an already claimed step before stopping.
     pub async fn run(&self, cancellation: CancellationToken) {
+        self.run_with_instance("0".to_owned(), cancellation).await;
+    }
+
+    /// Runs one named worker until cancellation.
+    pub async fn run_with_instance(&self, instance: String, cancellation: CancellationToken) {
+        crate::observability::register_loop("pump", instance.clone());
         loop {
             if cancellation.is_cancelled() {
                 return;
             }
-            crate::observability::heartbeat("pump");
+            crate::observability::heartbeat("pump", instance.clone());
 
             match self.run_once().await {
                 Ok(RunOnceResult::Idle) => {
+                    crate::observability::waiting(
+                        "pump",
+                        instance.clone(),
+                        self.config.idle_poll_interval,
+                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}
                     }
                 }
-                Ok(RunOnceResult::Applied { .. } | RunOnceResult::Stale { .. }) => {}
+                Ok(RunOnceResult::Applied { .. }) => {
+                    crate::observability::progress("pump", instance.clone());
+                }
+                Ok(RunOnceResult::Stale { .. }) => {}
                 Err(error) => {
                     tracing::error!(%error, "deposit pump iteration failed");
+                    crate::observability::waiting(
+                        "pump",
+                        instance.clone(),
+                        self.config.idle_poll_interval,
+                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}
@@ -379,7 +398,7 @@ impl Pump {
             ApplyTransitionResult::Applied => {
                 tracing::info!(
                     deposit_id = %deposit.id,
-                    chain = deposit.chain_id,
+                    chain_id = deposit.chain_id,
                     state = ?deposit.state,
                     attempt,
                     "deposit step persisted"

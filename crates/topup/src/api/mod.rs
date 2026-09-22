@@ -118,7 +118,6 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let (router, openapi) = documented.with_state(state).split_for_parts();
     let document = Arc::new(openapi.clone());
     let router = router
-        .route("/metrics", get(crate::observability::metrics_response))
         .route("/openapi.json", get(serve_openapi))
         .layer(middleware::from_fn(crate::observability::request_context))
         .layer(Extension(document));
@@ -202,8 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_endpoint_is_unauthenticated_and_exposes_registered_names() {
-        crate::observability::init().expect("metrics recorder installs");
+    async fn public_router_does_not_expose_metrics() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
             .expect("lazy pool URL is valid");
@@ -227,15 +225,11 @@ mod tests {
                     .expect("request builds"),
             )
             .await
-            .expect("metrics request succeeds");
-        assert_eq!(response.status(), StatusCode::OK);
+            .expect("public request succeeds");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(response.headers().contains_key("x-request-id"));
-        let body = to_bytes(response.into_body(), usize::MAX)
+        let _ = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("metrics body reads");
-        let body = String::from_utf8(body.to_vec()).expect("metrics are UTF-8");
-        assert!(body.contains("topup_scanner_lag_blocks"));
-        assert!(body.contains("topup_reconciliation_mismatches_total"));
-        assert!(body.contains("topup_loop_heartbeat_unixtime_seconds"));
+            .expect("response body reads");
     }
 }

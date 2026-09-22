@@ -17,6 +17,15 @@ impl Redacted {
     pub fn expose(&self) -> &Url {
         &self.0
     }
+
+    /// Wraps an HTTP client error without formatting its potentially credentialed URL.
+    #[must_use]
+    pub fn request_error<'a>(&'a self, error: &'a reqwest::Error) -> RedactedRequestError<'a> {
+        RedactedRequestError {
+            provider: self,
+            error,
+        }
+    }
 }
 
 impl Display for Redacted {
@@ -31,8 +40,49 @@ impl Debug for Redacted {
     }
 }
 
+/// A provider request failure whose formatting cannot reveal the request URL.
+pub struct RedactedRequestError<'a> {
+    provider: &'a Redacted,
+    error: &'a reqwest::Error,
+}
+
+impl Display for RedactedRequestError<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let category = if self.error.is_timeout() {
+            "timeout"
+        } else if self.error.is_connect() {
+            "connect"
+        } else if self.error.is_status() {
+            "status"
+        } else if self.error.is_request() {
+            "request"
+        } else if self.error.is_body() {
+            "body"
+        } else if self.error.is_decode() {
+            "decode"
+        } else {
+            "transport"
+        };
+        write!(
+            formatter,
+            "request to {} failed ({category})",
+            self.provider
+        )
+    }
+}
+
+impl Debug for RedactedRequestError<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, formatter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tracing_test::traced_test;
+
     use super::Redacted;
 
     #[test]
@@ -45,5 +95,37 @@ mod tests {
         assert_eq!(message, "provider [REDACTED URL] failed: [REDACTED URL]");
         assert!(!message.contains(secret));
         assert!(!message.contains("user"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn failing_rpc_request_does_not_log_url_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("request connects");
+            drop(stream);
+        });
+        let secret = "rpc-secret-token";
+        let value = format!("http://user:{secret}@{address}/rpc?api_key={secret}");
+        let provider = Redacted::parse(&value).expect("valid credentialed URL");
+        let error = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("HTTP client builds")
+            .get(provider.expose().clone())
+            .send()
+            .await
+            .expect_err("closed listener fails the RPC request");
+        server.await.expect("local listener task joins");
+
+        tracing::error!(error = %provider.request_error(&error), "provider RPC request failed");
+
+        assert!(logs_contain("provider RPC request failed"));
+        assert!(logs_contain("[REDACTED URL]"));
+        assert!(!logs_contain(secret));
+        assert!(!logs_contain("api_key"));
     }
 }

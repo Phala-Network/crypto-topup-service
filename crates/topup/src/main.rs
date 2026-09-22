@@ -61,6 +61,9 @@ struct RunArgs {
     /// API socket address; defaults to the deployment port on all interfaces.
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind: std::net::SocketAddr,
+    /// Monitoring socket address; keep this listener off the public gateway.
+    #[arg(long, default_value = "127.0.0.1:9464")]
+    metrics_bind: std::net::SocketAddr,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
@@ -298,6 +301,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let metrics_listener = match tokio::net::TcpListener::bind(args.metrics_bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(%error, bind = %args.metrics_bind, "failed to bind metrics listener");
+            return ExitCode::FAILURE;
+        }
+    };
     let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
     {
         Ok(step) => step,
@@ -349,6 +359,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             .await
     });
     tracing::info!(bind = %args.bind, "API listening");
+    let metrics_cancellation = cancellation.child_token();
+    let mut metrics_server_task = tokio::spawn(async move {
+        axum::serve(metrics_listener, topup::observability::metrics_router())
+            .with_graceful_shutdown(metrics_cancellation.cancelled_owned())
+            .await
+    });
+    tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
     let scanner_cancellation = cancellation.child_token();
@@ -361,7 +378,9 @@ async fn run(args: &RunArgs) -> ExitCode {
         let worker_cancellation = cancellation.child_token();
         pump_tasks.push(tokio::spawn(async move {
             tracing::info!(worker, "deposit pump started");
-            worker_pump.run(worker_cancellation).await;
+            worker_pump
+                .run_with_instance(worker.to_string(), worker_cancellation)
+                .await;
         }));
     }
     let metrics = Arc::new(PumpMetrics::default());
@@ -376,10 +395,15 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
     });
-    let metrics_cancellation = cancellation.child_token();
+    let database_metrics_cancellation = cancellation.child_token();
     let metrics_pool = pool.clone();
-    let metrics_task = tokio::spawn(async move {
-        topup::observability::collect_database_metrics(metrics_pool, metrics_cancellation).await;
+    let database_metrics_task = tokio::spawn(async move {
+        topup::observability::collect_database_metrics(metrics_pool, database_metrics_cancellation)
+            .await;
+    });
+    let backup_metrics_cancellation = cancellation.child_token();
+    let backup_metrics_task = tokio::spawn(async move {
+        topup::observability::collect_backup_metrics(backup_metrics_cancellation).await;
     });
 
     tracing::info!(
@@ -389,6 +413,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     );
     let mut clean_shutdown = true;
     let mut api_finished = false;
+    let mut metrics_server_finished = false;
     let mut scanner_finished = false;
     tokio::select! {
         signal = wait_for_shutdown_signal() => {
@@ -412,6 +437,15 @@ async fn run(args: &RunArgs) -> ExitCode {
                 Ok(Ok(())) => tracing::error!("scanner stopped before shutdown"),
                 Ok(Err(error)) => tracing::error!(%error, "scanner task failed"),
                 Err(error) => tracing::error!(%error, "scanner task failed to join"),
+            }
+            clean_shutdown = false;
+        }
+        result = &mut metrics_server_task => {
+            metrics_server_finished = true;
+            match result {
+                Ok(Ok(())) => tracing::error!("metrics server stopped before shutdown"),
+                Ok(Err(error)) => tracing::error!(%error, "metrics server failed"),
+                Err(error) => tracing::error!(%error, "metrics server task failed"),
             }
             clean_shutdown = false;
         }
@@ -445,6 +479,19 @@ async fn run(args: &RunArgs) -> ExitCode {
             }
         }
     }
+    if !metrics_server_finished {
+        match metrics_server_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "metrics server failed during shutdown");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::error!(%error, "metrics server task failed during shutdown");
+                clean_shutdown = false;
+            }
+        }
+    }
     for task in pump_tasks {
         if let Err(error) = task.await {
             tracing::error!(%error, "deposit pump task failed during shutdown");
@@ -455,8 +502,12 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!(%error, "age alert task failed during shutdown");
         clean_shutdown = false;
     }
-    if let Err(error) = metrics_task.await {
-        tracing::error!(%error, "observability collector task failed during shutdown");
+    if let Err(error) = database_metrics_task.await {
+        tracing::error!(%error, "database metrics collector task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if let Err(error) = backup_metrics_task.await {
+        tracing::error!(%error, "backup metrics collector task failed during shutdown");
         clean_shutdown = false;
     }
     pool.close().await;

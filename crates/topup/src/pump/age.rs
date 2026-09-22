@@ -252,6 +252,7 @@ impl AgeAlerter {
                 "state" => state,
                 "route" => route.clone(),
                 "route_version" => version.clone(),
+                "producer_enabled" => "true",
             )
             .set(age.max(0) as f64);
             metrics::gauge!(
@@ -259,6 +260,7 @@ impl AgeAlerter {
                 "state" => state,
                 "route" => route,
                 "route_version" => version,
+                "producer_enabled" => "true",
             )
             .set(threshold as f64);
         }

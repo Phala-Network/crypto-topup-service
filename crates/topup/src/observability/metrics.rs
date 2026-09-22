@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::Router;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use metrics::{counter, describe_counter, describe_gauge, gauge};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sqlx::{PgPool, Row};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -64,6 +66,10 @@ pub fn register_metrics() {
         "topup_scanner_lag_seconds",
         "Seconds since the scanner last completed a successful pass"
     );
+    describe_gauge!(
+        "topup_scanner_last_success_unixtime_seconds",
+        "Unix time of the scanner's most recent successful pass"
+    );
     describe_gauge!("topup_deposits", "Current deposits grouped by state");
     describe_gauge!(
         "topup_deposit_state_age_seconds",
@@ -114,6 +120,10 @@ pub fn register_metrics() {
         "topup_backup_age_seconds",
         "Age of the last successful WAL-G base backup marker"
     );
+    describe_gauge!(
+        "topup_backup_last_success_unixtime_seconds",
+        "Unix timestamp stored by the most recent successful WAL-G operation"
+    );
     describe_counter!(
         "topup_reconciliation_mismatches_total",
         "Reconciliation mismatches grouped by check"
@@ -122,36 +132,57 @@ pub fn register_metrics() {
         "topup_loop_heartbeat_unixtime_seconds",
         "Unix time of the most recent loop iteration"
     );
+    describe_gauge!(
+        "topup_loop_progress_unixtime_seconds",
+        "Unix time when a loop most recently completed useful work"
+    );
+    describe_gauge!(
+        "topup_loop_wait_until_unixtime_seconds",
+        "Unix time until which a loop is intentionally waiting"
+    );
+    describe_gauge!(
+        "topup_loop_expected",
+        "Whether a loop instance is expected to emit heartbeats"
+    );
     describe_counter!(
         "topup_unsupported_inflows_total",
         "Finalized unsupported-asset inflows observed by the scanner"
     );
 
-    // C4/C6/C7/C8 consume these stable names when their producers merge. Their pending-labelled
+    // C4/C7/C8 consume these stable names when their producers merge. Their pending-labelled
     // zero series keep dashboards and alert expressions reviewable without inventing fake data.
-    gauge!("topup_scanner_lag_blocks", "chain" => "pending").set(0);
-    gauge!("topup_scanner_lag_seconds", "chain" => "pending").set(0);
+    gauge!("topup_scanner_lag_blocks", "chain" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_scanner_lag_seconds", "chain" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_scanner_last_success_unixtime_seconds", "chain" => "pending", "producer_enabled" => "false").set(0);
     for state in DEPOSIT_STATES {
-        gauge!("topup_deposits", "state" => state).set(0);
+        gauge!("topup_deposits", "state" => state, "producer_enabled" => "true").set(0);
     }
-    gauge!("topup_deposit_state_age_seconds", "state" => "pending", "route" => "pending", "route_version" => "0").set(0);
-    gauge!("topup_deposit_state_age_policy_seconds", "state" => "pending", "route" => "pending", "route_version" => "0").set(0);
-    counter!("topup_provider_disagreements_total", "chain" => "pending").absolute(0);
-    gauge!("topup_price_deviation_basis_points", "route" => "pending").set(0);
-    gauge!("topup_fx_deviation_basis_points", "route" => "pending").set(0);
-    counter!("topup_settlement_outcomes_total", "outcome" => "pending").absolute(0);
-    gauge!("topup_outbox_backlog").set(0);
-    gauge!("topup_outbox_oldest_age_seconds").set(0);
-    gauge!("topup_unflushed_balance_atomic", "route" => "pending").set(0);
-    gauge!("topup_operator_gas_balance_wei", "chain" => "pending").set(0);
-    gauge!("topup_open_lock_exposure_minor", "scope" => "pending", "id" => "pending").set(0);
-    gauge!("topup_open_lock_exposure_cap_minor", "scope" => "pending", "id" => "pending").set(0);
-    gauge!("topup_backup_age_seconds").set(f64::INFINITY);
-    counter!("topup_reconciliation_mismatches_total", "check" => "pending").absolute(0);
-    counter!("topup_unsupported_inflows_total", "chain" => "pending").absolute(0);
+    gauge!("topup_deposit_state_age_seconds", "state" => "pending", "route" => "pending", "route_version" => "0", "producer_enabled" => "false").set(0);
+    gauge!("topup_deposit_state_age_policy_seconds", "state" => "pending", "route" => "pending", "route_version" => "0", "producer_enabled" => "false").set(0);
+    counter!("topup_provider_disagreements_total", "chain" => "pending", "producer_enabled" => "false").absolute(0);
+    gauge!("topup_price_deviation_basis_points", "route" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_fx_deviation_basis_points", "route" => "pending", "producer_enabled" => "false")
+        .set(0);
+    counter!("topup_settlement_outcomes_total", "outcome" => "pending", "producer_enabled" => "false").absolute(0);
+    gauge!("topup_outbox_backlog", "producer_enabled" => "true").set(0);
+    gauge!("topup_outbox_oldest_age_seconds", "producer_enabled" => "true").set(0);
+    gauge!("topup_unflushed_balance_atomic", "route" => "pending", "producer_enabled" => "false")
+        .set(0);
+    gauge!("topup_operator_gas_balance_wei", "chain" => "pending", "producer_enabled" => "false")
+        .set(0);
+    gauge!("topup_open_lock_exposure_minor", "scope" => "pending", "id" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_open_lock_exposure_cap_minor", "scope" => "pending", "id" => "pending", "producer_enabled" => "false").set(0);
+    gauge!("topup_backup_age_seconds", "producer_enabled" => "false").set(0);
+    gauge!("topup_backup_last_success_unixtime_seconds", "producer_enabled" => "true").set(0);
+    counter!("topup_reconciliation_mismatches_total", "check" => "pending", "producer_enabled" => "false").absolute(0);
+    counter!("topup_unsupported_inflows_total", "chain" => "pending", "producer_enabled" => "false").absolute(0);
     for loop_name in ["pump", "scanner", "outbox", "flusher", "reconciler"] {
-        gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name).set(0);
+        gauge!("topup_loop_expected", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
+        gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => "pending", "producer_enabled" => "false").set(0);
     }
+    gauge!("topup_loop_expected", "loop" => "metrics", "instance" => "pending", "producer_enabled" => "false").set(0);
 }
 
 /// Renders the process metrics in Prometheus text exposition format.
@@ -167,50 +198,118 @@ pub async fn metrics_response() -> Response {
     response
 }
 
-/// Records that a named service loop completed or attempted one iteration.
-pub fn heartbeat(loop_name: &'static str) {
-    gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name)
+/// Builds the unauthenticated router served only on the monitoring listener.
+pub fn metrics_router() -> Router {
+    Router::new().route("/metrics", get(metrics_response))
+}
+
+/// Registers one expected loop instance before its task starts.
+pub fn register_loop(loop_name: &'static str, instance: impl Into<String>) {
+    let instance = instance.into();
+    gauge!("topup_loop_expected", "loop" => loop_name, "instance" => instance.clone(), "producer_enabled" => "true").set(1);
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance, "producer_enabled" => "true").set(0);
+}
+
+/// Records that a named service loop began one iteration.
+pub fn heartbeat(loop_name: &'static str, instance: impl Into<String>) {
+    let instance = instance.into();
+    gauge!("topup_loop_heartbeat_unixtime_seconds", "loop" => loop_name, "instance" => instance.clone(), "producer_enabled" => "true")
         .set(metric_value(unix_now()));
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance, "producer_enabled" => "true").set(0);
+}
+
+/// Records that a loop instance completed useful work.
+pub fn progress(loop_name: &'static str, instance: impl Into<String>) {
+    gauge!("topup_loop_progress_unixtime_seconds", "loop" => loop_name, "instance" => instance.into(), "producer_enabled" => "true")
+        .set(metric_value(unix_now()));
+}
+
+/// Records an intentional wait so stopped-loop alerts allow the full delay.
+pub fn waiting(loop_name: &'static str, instance: impl Into<String>, delay: Duration) {
+    gauge!("topup_loop_wait_until_unixtime_seconds", "loop" => loop_name, "instance" => instance.into(), "producer_enabled" => "true")
+        .set(metric_value(unix_now().saturating_add(delay.as_secs())));
 }
 
 /// Updates scanner lag after one pass.
 pub fn record_scanner_lag(chain: u64, finalized: u64, cursor: u64, seconds: u64) {
     let chain = chain.to_string();
-    gauge!("topup_scanner_lag_blocks", "chain" => chain.clone())
+    gauge!("topup_scanner_lag_blocks", "chain" => chain.clone(), "producer_enabled" => "true")
         .set(metric_value(finalized.saturating_sub(cursor)));
-    gauge!("topup_scanner_lag_seconds", "chain" => chain).set(metric_value(seconds));
+    gauge!("topup_scanner_lag_seconds", "chain" => chain, "producer_enabled" => "true")
+        .set(metric_value(seconds));
 }
 
-/// Periodically refreshes metrics sourced from PostgreSQL and the backup marker file.
+/// Registers a configured scanner before its first provider request.
+pub fn register_scanner(chain: u64) {
+    let chain = chain.to_string();
+    register_loop("scanner", chain.clone());
+    gauge!("topup_scanner_lag_blocks", "chain" => chain.clone(), "producer_enabled" => "true")
+        .set(0);
+    gauge!("topup_scanner_lag_seconds", "chain" => chain.clone(), "producer_enabled" => "true")
+        .set(0);
+    gauge!("topup_scanner_last_success_unixtime_seconds", "chain" => chain, "producer_enabled" => "true")
+        .set(0);
+}
+
+/// Records the timestamp of a successful scanner pass.
+pub fn record_scanner_success(chain: u64) {
+    gauge!("topup_scanner_last_success_unixtime_seconds", "chain" => chain.to_string(), "producer_enabled" => "true")
+        .set(metric_value(unix_now()));
+}
+
+/// Periodically refreshes metrics sourced from PostgreSQL.
 pub async fn collect_database_metrics(pool: PgPool, cancellation: CancellationToken) {
-    let marker = std::env::var_os("TOPUP_BACKUP_TIMESTAMP_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BACKUP_TIMESTAMP_FILE));
-    let mut ticker = interval(COLLECTION_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let instance = "database";
+    register_loop("metrics", instance);
     loop {
+        heartbeat("metrics", instance);
+        if let Err(error) = collect_database_once(&pool).await {
+            tracing::error!(%error, "observability database metric collection failed");
+        } else {
+            progress("metrics", instance);
+        }
+        waiting("metrics", instance, COLLECTION_INTERVAL);
         tokio::select! {
             () = cancellation.cancelled() => return,
-            _ = ticker.tick() => {
-                if let Err(error) = collect_once(&pool, &marker).await {
-                    tracing::error!(%error, "observability metric collection failed");
-                }
-            }
+            () = sleep(COLLECTION_INTERVAL) => {}
         }
     }
 }
 
-async fn collect_once(pool: &PgPool, marker: &Path) -> Result<(), sqlx::Error> {
+/// Periodically reads the WAL-G success marker independently of PostgreSQL.
+pub async fn collect_backup_metrics(cancellation: CancellationToken) {
+    let marker = std::env::var_os("TOPUP_BACKUP_TIMESTAMP_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BACKUP_TIMESTAMP_FILE));
+    let instance = "backup";
+    register_loop("metrics", instance);
+    loop {
+        heartbeat("metrics", instance);
+        let timestamp = backup_timestamp(&marker).unwrap_or_default();
+        gauge!("topup_backup_last_success_unixtime_seconds", "producer_enabled" => "true")
+            .set(metric_value(timestamp));
+        if timestamp > 0 {
+            progress("metrics", instance);
+        }
+        waiting("metrics", instance, COLLECTION_INTERVAL);
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = sleep(COLLECTION_INTERVAL) => {}
+        }
+    }
+}
+
+async fn collect_database_once(pool: &PgPool) -> Result<(), sqlx::Error> {
     let rows = sqlx::query("SELECT state, count(*)::bigint AS count FROM deposits GROUP BY state")
         .fetch_all(pool)
         .await?;
     for state in DEPOSIT_STATES {
-        gauge!("topup_deposits", "state" => state).set(0);
+        gauge!("topup_deposits", "state" => state, "producer_enabled" => "true").set(0);
     }
     for row in rows {
         let state: String = row.try_get("state")?;
         let count: i64 = row.try_get("count")?;
-        gauge!("topup_deposits", "state" => state)
+        gauge!("topup_deposits", "state" => state, "producer_enabled" => "true")
             .set(metric_value(u64::try_from(count).unwrap_or_default()));
     }
 
@@ -229,7 +328,8 @@ async fn collect_once(pool: &PgPool, marker: &Path) -> Result<(), sqlx::Error> {
         let route: String = row.try_get("route")?;
         let amount: String = row.try_get("amount")?;
         let amount = amount.parse::<f64>().unwrap_or(f64::INFINITY);
-        gauge!("topup_unflushed_balance_atomic", "route" => route).set(amount);
+        gauge!("topup_unflushed_balance_atomic", "route" => route, "producer_enabled" => "true")
+            .set(amount);
     }
 
     let outbox = sqlx::query(
@@ -244,20 +344,17 @@ async fn collect_once(pool: &PgPool, marker: &Path) -> Result<(), sqlx::Error> {
     .await?;
     let backlog: i64 = outbox.try_get("count")?;
     let oldest_age: f64 = outbox.try_get("age")?;
-    gauge!("topup_outbox_backlog").set(metric_value(u64::try_from(backlog).unwrap_or_default()));
-    gauge!("topup_outbox_oldest_age_seconds").set(oldest_age.max(0.0));
-    gauge!("topup_backup_age_seconds").set(backup_age(marker));
+    gauge!("topup_outbox_backlog", "producer_enabled" => "true")
+        .set(metric_value(u64::try_from(backlog).unwrap_or_default()));
+    gauge!("topup_outbox_oldest_age_seconds", "producer_enabled" => "true")
+        .set(oldest_age.max(0.0));
     Ok(())
 }
 
-fn backup_age(path: &Path) -> f64 {
-    let timestamp = std::fs::read_to_string(path)
+fn backup_timestamp(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path)
         .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    match timestamp {
-        Some(timestamp) => unix_now().saturating_sub(timestamp) as f64,
-        None => f64::INFINITY,
-    }
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn unix_now() -> u64 {
@@ -273,9 +370,12 @@ fn metric_value(value: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use metrics_exporter_prometheus::PrometheusBuilder;
+    use tower::ServiceExt as _;
 
-    use super::register_metrics;
+    use super::{init, metrics_router, register_metrics};
 
     #[test]
     fn registered_contract_contains_every_metric_name() {
@@ -286,6 +386,7 @@ mod tests {
         for name in [
             "topup_scanner_lag_blocks",
             "topup_scanner_lag_seconds",
+            "topup_scanner_last_success_unixtime_seconds",
             "topup_deposits",
             "topup_deposit_state_age_seconds",
             "topup_provider_disagreements_total",
@@ -298,10 +399,36 @@ mod tests {
             "topup_operator_gas_balance_wei",
             "topup_open_lock_exposure_minor",
             "topup_backup_age_seconds",
+            "topup_backup_last_success_unixtime_seconds",
             "topup_reconciliation_mismatches_total",
             "topup_loop_heartbeat_unixtime_seconds",
+            "topup_loop_progress_unixtime_seconds",
+            "topup_loop_wait_until_unixtime_seconds",
+            "topup_loop_expected",
         ] {
             assert!(rendered.contains(name), "missing {name}\n{rendered}");
         }
+    }
+
+    #[tokio::test]
+    async fn monitoring_router_exposes_registered_metric_names() {
+        init().expect("metrics recorder installs");
+        let response = metrics_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body reads");
+        let body = String::from_utf8(body.to_vec()).expect("metrics are UTF-8");
+        assert!(body.contains("topup_scanner_lag_blocks"));
+        assert!(body.contains("topup_reconciliation_mismatches_total"));
+        assert!(body.contains("topup_loop_heartbeat_unixtime_seconds"));
     }
 }

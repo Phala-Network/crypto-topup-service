@@ -313,7 +313,7 @@ impl SettleStep {
 #[async_trait]
 impl Step for SettleStep {
     async fn run(&self, deposit: &db::Deposit) -> StepResult {
-        match self.run_inner(deposit).await {
+        let result = match self.run_inner(deposit).await {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(deposit_id = %deposit.id, %error, "settlement step failed");
@@ -324,7 +324,30 @@ impl Step for SettleStep {
                     json!({"outcome": "retry", "error": error.code()}),
                 )
             }
-        }
+        };
+        let outcome = match result.outcome {
+            StepOutcome::Advance | StepOutcome::AdoptProductAnswer { credited: true } => "accepted",
+            StepOutcome::Reject(_) | StepOutcome::AdoptProductAnswer { credited: false } => {
+                "rejected"
+            }
+            StepOutcome::Retry { .. } => "retry",
+            StepOutcome::Wait {
+                reason: WaitReason::ProductProcessing,
+            } => "processing",
+            StepOutcome::Wait {
+                reason: WaitReason::Paused,
+            } => "paused",
+            StepOutcome::Wait {
+                reason: WaitReason::FlushNotConfirmed,
+            } => "waiting",
+        };
+        metrics::counter!(
+            "topup_settlement_outcomes_total",
+            "outcome" => outcome,
+            "producer_enabled" => "true",
+        )
+        .increment(1);
+        result
     }
 }
 
