@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        TopupCommand::Run => not_implemented("run"),
+        TopupCommand::Run => return run().await,
         TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
@@ -62,6 +62,32 @@ async fn main() -> ExitCode {
     }
 
     ExitCode::FAILURE
+}
+
+async fn run() -> ExitCode {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("DATABASE_URL is required for run");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to connect to database");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = topup::scanner::run_from_env(pool).await {
+        tracing::error!(%error, "scanner stopped");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 async fn migrate() -> ExitCode {
