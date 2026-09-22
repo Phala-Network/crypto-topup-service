@@ -29,24 +29,43 @@ therefore produces a new factory address and requires a new route version.
 - A funded deployment EOA. Keep `PRIVATE_KEY` only in the operator's environment or secret manager.
 - The Finance Safe deployed at the same address on every target chain with the same owners and
   threshold.
-- Finance approval of the Safe implementation/version and its proxy runtime code hash.
+- Finance approval of the Safe version: its proxy runtime code hash, singleton address, and
+  singleton runtime code hash.
 
 Before deployment, replace the intentionally unconfigured values in
-`deploy/contracts/safe-expectations.json` with the approved Safe address, owners, threshold, and
-allowed Safe proxy runtime code hash. Set `configured` to `true`. Owners are compared as a set;
-threshold and bytecode hash must match exactly. This file contains no secrets.
+`deploy/contracts/safe-expectations.json` and set `configured` to `true`. This file contains no
+secrets and is the single source of truth for the factory constructor inputs:
 
-Verify the Safe independently on every chain:
+- `networks`: every target network name and its chain id. Sepolia and mainnet are prefilled.
+- `admin` and `treasury`: the factory `DEFAULT_ADMIN_ROLE` holder and the forwarder treasury.
+  Each must match exactly one entry in `safes`; they may be the same Safe.
+- `safes[]`: for each approved Safe, its `address`, `owners`, `threshold`, allowed
+  `proxy_code_hashes`, `singleton`, and `singleton_code_hash`.
+
+`verify-safe.sh` checks each Safe on every target: the RPC's `eth_chainId` equals the committed
+chain id for the target network, the address has code (an EOA is rejected), the proxy runtime code
+hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton, the
+singleton's runtime code hash matches, owners match as a set, and the threshold matches exactly.
+The singleton check matters because every Safe proxy has the same runtime code; only slot 0
+decides which implementation answers `getOwners()` and `getThreshold()` and executes transactions.
+
+Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects the expected chain id and the optional
+label distinguishes providers in the report. Verify the Safes independently on every chain:
 
 ```sh
 deploy/contracts/verify-safe.sh \
-  --rpc sepolia-a="$SEPOLIA_RPC_A" \
-  --rpc sepolia-b="$SEPOLIA_RPC_B" \
-  --rpc mainnet-a="$MAINNET_RPC_A" \
-  --rpc mainnet-b="$MAINNET_RPC_B"
+  --rpc sepolia/a="$SEPOLIA_RPC_A" \
+  --rpc sepolia/b="$SEPOLIA_RPC_B" \
+  --rpc mainnet/a="$MAINNET_RPC_A" \
+  --rpc mainnet/b="$MAINNET_RPC_B"
 ```
 
 Do not deploy if any Safe check is false.
+
+`deploy-factory.sh` and `verify-deployment.sh` share one parameter validation: `ADMIN` and
+`TREASURY` from the environment must equal `admin` and `treasury` in the expectations file, and
+both Safes must pass every check above on each target. Any inconsistency stops the script before
+it simulates, broadcasts, or derives the reference deployment.
 
 ## Reproducible build
 
@@ -91,8 +110,9 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-Use the Finance Safe as both factory admin and treasury unless an approved deployment record names
-different Safe addresses. **HUMAN-ONLY:** after the Safe checks pass:
+Use the Finance Safe as both factory admin and treasury unless the committed expectations name
+different approved Safes. `ADMIN` and `TREASURY` must match those entries. **HUMAN-ONLY:** after the
+Safe checks pass:
 
 ```sh
 export ADMIN="$FINANCE_SAFE"
@@ -101,12 +121,12 @@ read -rsp "Deployment private key: " PRIVATE_KEY && printf '\n'
 export PRIVATE_KEY
 
 deploy/contracts/deploy-proxy.sh --rpc-url "$SEPOLIA_RPC_A"
-deploy/contracts/deploy-factory.sh --rpc-url "$SEPOLIA_RPC_A" --dry-run
-deploy/contracts/deploy-factory.sh --rpc-url "$SEPOLIA_RPC_A" --broadcast
+deploy/contracts/deploy-factory.sh --rpc sepolia/a="$SEPOLIA_RPC_A" --dry-run
+deploy/contracts/deploy-factory.sh --rpc sepolia/a="$SEPOLIA_RPC_A" --broadcast
 
 deploy/contracts/verify-deployment.sh \
-  --rpc sepolia-a="$SEPOLIA_RPC_A" \
-  --rpc sepolia-b="$SEPOLIA_RPC_B" \
+  --rpc sepolia/a="$SEPOLIA_RPC_A" \
+  --rpc sepolia/b="$SEPOLIA_RPC_B" \
   > sepolia-contract-verification.json
 jq -e '.passed == true' sepolia-contract-verification.json
 ```
@@ -127,18 +147,20 @@ read -rsp "Deployment private key: " PRIVATE_KEY && printf '\n'
 export PRIVATE_KEY
 
 deploy/contracts/deploy-proxy.sh --rpc-url "$MAINNET_RPC_A"
-deploy/contracts/deploy-factory.sh --rpc-url "$MAINNET_RPC_A" --dry-run
-deploy/contracts/deploy-factory.sh --rpc-url "$MAINNET_RPC_A" --broadcast
+deploy/contracts/deploy-factory.sh --rpc mainnet/a="$MAINNET_RPC_A" --dry-run
+deploy/contracts/deploy-factory.sh --rpc mainnet/a="$MAINNET_RPC_A" --broadcast
 
 deploy/contracts/verify-deployment.sh \
-  --rpc mainnet-a="$MAINNET_RPC_A" \
-  --rpc mainnet-b="$MAINNET_RPC_B" \
+  --rpc mainnet/a="$MAINNET_RPC_A" \
+  --rpc mainnet/b="$MAINNET_RPC_B" \
   > mainnet-contract-verification.json
 jq -e '.passed == true' mainnet-contract-verification.json
 ```
 
-Compare the Sepolia and mainnet JSON reports. Factory, implementation, every sample forwarder,
-constructor inputs, and runtime code hashes must be identical.
+Each report entry records the target, network, expected chain id, and the chain id the RPC
+returned; a mismatch fails verification. Compare the Sepolia and mainnet JSON reports. Factory,
+implementation, every sample forwarder, constructor inputs, and runtime code hashes must be
+identical.
 
 ## Route and compose update
 
