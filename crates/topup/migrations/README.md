@@ -12,3 +12,8 @@ in place as defense in depth against accidental owner-side mutation.
 Operational tables grant `SELECT`, `INSERT`, `UPDATE`, and `DELETE` to `topup_app`; no application
 table grants `TRUNCATE`. Default privileges apply the same operational grant shape to future tables,
 and migrations adding future append-only tables must narrow those grants in the same migration.
+
+The scanner migration adds `addresses.created_block` and `addresses.backfilled`. Existing address
+insertion APIs default `created_block` to zero, which is conservative: the first scanner pass checks
+the full available chain history once before setting `backfilled` in the same transaction as the
+observed deposits.

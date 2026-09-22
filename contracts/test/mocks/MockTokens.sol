@@ -15,6 +15,14 @@ contract MockERC20 is ERC20 {
     }
 }
 
+contract MockERC721Transfer {
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+
+    function mint(address to, uint256 tokenId) external {
+        emit Transfer(address(0), to, tokenId);
+    }
+}
+
 contract FeeOnTransferToken is ERC20 {
     uint256 private constant FEE_DENOMINATOR = 10;
 
