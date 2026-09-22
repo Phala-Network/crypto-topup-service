@@ -75,6 +75,13 @@ pub trait ChainClient: Send + Sync {
         token: Address,
     ) -> Result<u64, ChainError>;
 
+    /// Reports whether `operator` holds `OPERATOR_ROLE` on the factory at the latest block.
+    async fn has_operator_role(
+        &self,
+        factory: Address,
+        operator: Address,
+    ) -> Result<bool, ChainError>;
+
     /// Returns the pending nonce for an operator.
     async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError>;
 
@@ -164,6 +171,17 @@ pub enum FlushAlert {
         address_id: Uuid,
         /// Human-readable exclusion reason.
         reason: String,
+    },
+    /// The configured operator lacks `OPERATOR_ROLE`, so no new flush is planned or sent.
+    OperatorRoleMissing {
+        /// Chain whose flusher is waiting.
+        chain_id: u64,
+        /// Forwarder factory that was checked.
+        factory: Address,
+        /// Configured operator address.
+        operator: Address,
+        /// Attested operator key derivation version.
+        operator_key_version: u32,
     },
     /// A replacement could not satisfy the required bump below the configured cap.
     FeeCapReached {

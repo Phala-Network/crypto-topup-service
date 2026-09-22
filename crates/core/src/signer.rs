@@ -2,13 +2,21 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::num::NonZeroU32;
 
 use alloy_primitives::{Address, Bytes, U256};
 use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox};
 
-/// Domain used to derive the transaction-signing key.
-pub const OPERATOR_KEY_DOMAIN: &str = "operator/v1";
+/// Returns the domain used to derive the transaction-signing key at `version`.
+///
+/// The version comes from the attested chain configuration, so rotating the operator key is a new
+/// configuration version rather than a runtime change.
+#[must_use]
+pub fn operator_key_domain(version: NonZeroU32) -> String {
+    format!("operator/v{version}")
+}
+
 /// Domain used to derive the settlement-signing key.
 pub const SETTLEMENT_KEY_DOMAIN: &str = "settlement/v1";
 /// Domain used to derive the backup-encryption key.
@@ -130,9 +138,20 @@ mod tests {
 
     use static_assertions::assert_not_impl_any;
 
-    use super::SecretKey32;
+    use std::num::NonZeroU32;
+
+    use super::{SecretKey32, operator_key_domain};
 
     assert_not_impl_any!(SecretKey32: Debug, Display, serde::Serialize);
+
+    #[test]
+    fn operator_key_domain_carries_the_configured_version() {
+        assert_eq!(operator_key_domain(NonZeroU32::MIN), "operator/v1");
+        assert_eq!(
+            operator_key_domain(NonZeroU32::new(2).expect("two is non-zero")),
+            "operator/v2"
+        );
+    }
 
     #[test]
     fn secret_key_can_only_be_read_explicitly() {
