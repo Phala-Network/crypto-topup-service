@@ -152,7 +152,7 @@ impl SettlementClient {
         signer: SignerHandle,
         request_timeout: Duration,
     ) -> Result<Self, SettlementClientError> {
-        Self::new_with_keyid(
+        Self::build(
             endpoint,
             signer,
             request_timeout,
@@ -161,7 +161,21 @@ impl SettlementClient {
     }
 
     /// Creates a client with an explicitly pinned settlement key identifier.
+    ///
+    /// Only the conformance suite needs a non-default `keyid`, to prove that products reject
+    /// a valid signature under the wrong key identifier.
+    #[cfg(any(test, feature = "conformance"))]
+    #[doc(hidden)]
     pub fn new_with_keyid(
+        endpoint: &str,
+        signer: SignerHandle,
+        request_timeout: Duration,
+        keyid: String,
+    ) -> Result<Self, SettlementClientError> {
+        Self::build(endpoint, signer, request_timeout, keyid)
+    }
+
+    fn build(
         endpoint: &str,
         signer: SignerHandle,
         request_timeout: Duration,
@@ -244,8 +258,14 @@ impl SettlementClient {
         &self,
         request: &SettlementRequest,
     ) -> Result<Request, SettlementClientError> {
-        self.signed_post_request_at(request, unix_timestamp()?, true)
-            .await
+        self.signed_post(
+            request,
+            SigningOptions {
+                created: unix_timestamp()?,
+                cover_idempotency_key: true,
+            },
+        )
+        .await
     }
 
     /// Builds a signed POST at a caller-supplied time and coverage profile.
@@ -253,11 +273,28 @@ impl SettlementClient {
     /// Normal callers should use [`Self::signed_post_request`]. This entry point exists so the
     /// conformance suite can produce expired signatures and signatures which deliberately omit
     /// `idempotency-key` without maintaining a second signing implementation.
+    #[cfg(any(test, feature = "conformance"))]
+    #[doc(hidden)]
     pub async fn signed_post_request_at(
         &self,
         request: &SettlementRequest,
         created: i64,
         cover_idempotency_key: bool,
+    ) -> Result<Request, SettlementClientError> {
+        self.signed_post(
+            request,
+            SigningOptions {
+                created,
+                cover_idempotency_key,
+            },
+        )
+        .await
+    }
+
+    async fn signed_post(
+        &self,
+        request: &SettlementRequest,
+        options: SigningOptions,
     ) -> Result<Request, SettlementClientError> {
         let body =
             serde_json::to_vec(&request.payload).map_err(|_| SettlementClientError::Encode)?;
@@ -267,10 +304,7 @@ impl SettlementClient {
             &request.idempotency_key,
             body,
             true,
-            SigningOptions {
-                created,
-                cover_idempotency_key,
-            },
+            options,
         )
         .await
     }

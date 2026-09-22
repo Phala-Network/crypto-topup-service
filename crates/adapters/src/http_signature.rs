@@ -285,6 +285,38 @@ mod tests {
         "\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\"";
 
     #[test]
+    fn signature_input_requires_the_exact_covered_components() {
+        let parse = |input: &str| {
+            let dictionary = parse_dictionary(input).expect("valid structured field");
+            let entry = dictionary.get("sig1").expect("sig1 member");
+            parse_signature_input_entry(entry).map(|parsed| parsed.covers_idempotency_key)
+        };
+        let parameters = ";created=1;keyid=\"product/v1\"";
+        assert_eq!(
+            parse(&format!(
+                "sig1=(\"@method\" \"@target-uri\" \"content-digest\"){parameters}"
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            parse(&format!("sig1=({SETTLEMENT_COMPONENTS}){parameters}")),
+            Ok(true)
+        );
+        for rejected in [
+            "(\"@method\" \"@target-uri\")",
+            "(\"@method\" \"@target-uri\" \"content-digest\" \"x-extra\")",
+            "(\"@method\";req \"@target-uri\" \"content-digest\")",
+            "(\"@method\" \"@target-uri\" \"content-digest\";sf \"idempotency-key\")",
+        ] {
+            assert_eq!(
+                parse(&format!("sig1={rejected}{parameters}")),
+                Err(VerificationFailed),
+                "{rejected} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn accepts_the_settlement_client_profile() {
         let signed = sign(
             "sig1",
