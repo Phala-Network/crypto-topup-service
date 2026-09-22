@@ -1,8 +1,11 @@
 //! In-memory signer for local development and tests.
 
+use std::num::NonZeroU32;
+
 use sha2::{Digest as _, Sha256};
 use topup_core::{
-    Ed25519PublicKey, Ed25519Signature, SecretKey32, SignedTx, Signer, SignerError, TxRequest,
+    Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32, SignedTx, Signer,
+    SignerError, TxRequest, operator_key_domain,
 };
 
 use super::{operator_address, settlement_public_key, sign_operator_tx, sign_settlement};
@@ -30,6 +33,26 @@ impl DevSigner {
         let bytes: [u8; 32] = digest.into();
         SecretKey32::new(bytes)
     }
+
+    /// Derives development keys from `seed` with the same domains as the dstack signer.
+    ///
+    /// Each key is `SHA-256(seed || domain)`: the operator key uses
+    /// `operator/v{operator_key_version}` and the settlement key `settlement/v1`. This mirrors the
+    /// domain separation only; it is not dstack's key derivation.
+    #[must_use]
+    pub fn derive(seed: &SecretKey32, operator_key_version: NonZeroU32) -> Self {
+        Self::new(
+            derive_key(seed, &operator_key_domain(operator_key_version)),
+            derive_key(seed, SETTLEMENT_KEY_DOMAIN),
+        )
+    }
+}
+
+fn derive_key(seed: &SecretKey32, domain: &str) -> SecretKey32 {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.expose_secret());
+    hasher.update(domain.as_bytes());
+    SecretKey32::new(hasher.finalize().into())
 }
 
 impl Signer for DevSigner {
@@ -56,6 +79,9 @@ mod tests {
     use alloy_eips::eip2718::{Decodable2718, Typed2718 as _};
     use alloy_primitives::{Address, Bytes, TxKind, U256};
     use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+    use std::num::NonZeroU32;
+
+    use sha2::{Digest as _, Sha256};
     use topup_core::{SecretKey32, Signer as _, TxRequest};
 
     use super::DevSigner;
@@ -86,6 +112,38 @@ mod tests {
             max_fee_per_gas: 30_000_000_000,
             max_priority_fee_per_gas: 2_000_000_000,
         }
+    }
+
+    #[tokio::test]
+    async fn derived_operator_key_follows_the_version_domain() {
+        let seed = SecretKey32::new([5; 32]);
+        let v1 = DevSigner::derive(&seed, NonZeroU32::MIN);
+        let v2 = DevSigner::derive(&seed, NonZeroU32::new(2).expect("two is non-zero"));
+        let expected = |domain: &str| {
+            let mut hasher = Sha256::new();
+            hasher.update([5; 32]);
+            hasher.update(domain.as_bytes());
+            DevSigner::new(
+                SecretKey32::new(hasher.finalize().into()),
+                SecretKey32::new([0; 32]),
+            )
+        };
+
+        let v1_operator = v1.operator_address().await.expect("v1 key is valid");
+        let v2_operator = v2.operator_address().await.expect("v2 key is valid");
+        assert_ne!(v1_operator, v2_operator);
+        assert_eq!(
+            Some(v1_operator),
+            expected("operator/v1").operator_address().await.ok()
+        );
+        assert_eq!(
+            Some(v2_operator),
+            expected("operator/v2").operator_address().await.ok()
+        );
+        assert_eq!(
+            v1.settlement_public_key().await,
+            v2.settlement_public_key().await
+        );
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ chain:                             # one chain file per chain; shown inline here
   name: ethereum-mainnet
   finality: finalized              # reviewed rule; two RPC providers must agree
   rpc_providers: [alchemy, quicknode]
+  operator_key_version: 1          # derives operator/v1; bump only after granting the new operator OPERATOR_ROLE
   contracts:                       # deployed via the deterministic deployment proxy, same on every chain
     forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory
     implementation:    "0x0000000000000000000000000000000000000000" # set to factory.implementation()

@@ -124,13 +124,15 @@ fn dev_attestation_prints_the_required_json_shape() {
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
     let object = value.as_object().expect("attestation should be an object");
 
-    assert_eq!(object.len(), 6);
+    assert_eq!(object.len(), 8);
     assert_eq!(value["keyid"], "settlement/v1");
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
     assert_eq!(value["app_id"], "");
     assert_eq!(value["compose_hash"], "");
+    assert_eq!(value["operator_keyid"], "operator/v1");
+    assert_eq!(value["operator_address"].as_str().map(str::len), Some(42));
 }
 
 #[cfg(feature = "dev-signer")]
@@ -154,6 +156,40 @@ fn development_backup_key_is_written_without_printing_it() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&key));
     std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+}
+
+#[cfg(feature = "dev-signer")]
+#[test]
+fn dev_attestation_reports_the_requested_operator_key_version() {
+    let attest = |version: &str| {
+        let output = topup(&[
+            "attest",
+            "--nonce",
+            "00",
+            "--dev",
+            "--operator-key-version",
+            version,
+        ]);
+        assert!(output.status.success(), "version {version} should attest");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("attestation should be JSON")
+    };
+    let v1 = attest("1");
+    let v2 = attest("2");
+
+    assert_eq!(v2["operator_keyid"], "operator/v2");
+    assert_ne!(v1["operator_address"], v2["operator_address"]);
+    assert_eq!(v1["settlement_pubkey"], v2["settlement_pubkey"]);
+
+    let zero = topup(&[
+        "attest",
+        "--nonce",
+        "00",
+        "--dev",
+        "--operator-key-version",
+        "0",
+    ]);
+    assert!(!zero.status.success());
 }
 
 #[test]

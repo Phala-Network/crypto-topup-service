@@ -66,6 +66,7 @@ Until it merges, route the metric or symptom to the same runbook.
 | `TopupLoopStopped{loop="pump"}` | [Stuck settlement](stuck-settlement.md) |
 | `TopupUnsupportedInflows`, rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
 | Unauthorized operator transaction, consumed nonce without receipt | [Operator key compromise](operator-key-compromise.md) |
+| `OperatorRoleMissing` flusher alert, `flusher paused: the configured operator does not hold OPERATOR_ROLE` log | [Operator key compromise](operator-key-compromise.md): expected after an emergency revoke until the next key version is deployed; otherwise the new version was deployed before its grant |
 | Database loss or restore drill | [Restore](restore.md) |
 | Approved treasury migration | [Treasury change](treasury-change.md) |
 | Approved refund ready for Safe execution | [Refund execution](refund-execution.md) |
@@ -78,11 +79,6 @@ Until it merges, route the metric or symptom to the same runbook.
   flush on its chain until the pause is lifted, and no supported command voids that plan. Runbooks
   pause before a plan exists for targeted stops and keep the Finance Safe `OPERATOR_ROLE` revocation
   as the hard chain-wide stop.
-- [#60](https://github.com/Phala-Network/crypto-topup-service/issues/60) (open
-  [PR #74](https://github.com/Phala-Network/crypto-topup-service/pull/74)): there is no CLI/config
-  path to derive or select `operator/v2`, so a replacement operator cannot be brought into service.
-  Until then, stopping the service halts crediting on every route, so the compromise runbook pauses
-  `flush` and stops the service only for a suspected CVM compromise.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
 - [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`
@@ -99,7 +95,7 @@ for any runbook until #56 merges.
 
 | Runbook | Local status | G2 exercised once |
 |---|---|---|
-| Operator key compromise | Blocked on #60 and Finance Safe execution | [ ] |
+| Operator key compromise | Partial: key-version rotation, role gate, and revoke while running covered by the Anvil integration test; Finance Safe execution is human-only | [ ] |
 | Provider disagreement | Partial: sanctions truth table; chain-evidence fixture missing | [ ] |
 | Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
 | Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |

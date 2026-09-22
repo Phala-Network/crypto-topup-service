@@ -2,9 +2,8 @@
 
 Date: 2026-09-22.
 
-Status: blocked on operator/v2 support in
-[#60](https://github.com/Phala-Network/crypto-topup-service/issues/60) and human Finance Safe
-execution. The role commands and the stop check were rehearsed locally.
+Status: partial. The role commands, the stop check, and the service side of a key-version rotation
+ran locally; Finance Safe execution is human-only.
 
 G2 exercised once: [ ]
 
@@ -32,5 +31,21 @@ hasRole B after revoke: false
 
 The runbook's no-new-`sent` flush check ran as `wp_d5_app` and produced an empty difference.
 Stale-plan re-binding to a new operator and its `flush.plan_operator_rebound` audit row are covered
-by the [flush exercise](flush-reverted-or-bisected.md) integration test. Starting the service with a
-replacement operator key is impossible until #60 lands, so the provisioning half is blocked.
+by the [flush exercise](flush-reverted-or-bisected.md) integration test.
+
+The provisioning half ran against the local dstack simulator and in the Anvil/PostgreSQL test
+`anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans`
+(`crates/topup/tests/flusher.rs`). `topup attest --operator-key-version` reported distinct
+operator addresses for versions 1 and 2 with the same settlement key:
+
+```text
+{"keyid":"settlement/v1","operator_keyid":"operator/v1","operator_address":"0x5d1eea53869175644122b0e5b76417178eecdf14"}
+{"keyid":"settlement/v1","operator_keyid":"operator/v2","operator_address":"0x0ef4d450a6d3e3c4b4ca7f0c3985134cf852b6cb"}
+```
+
+The test runs the flusher task with `operator_key_version: 2` before and after the grant:
+- Without the role, the task plans and sends nothing and raises `OperatorRoleMissing` every
+  interval.
+- After the grant, the stale v1 plan is re-bound to the v2 operator at nonce 0, then sent and
+  confirmed by the running task.
+- Revoking a role while its task runs leaves the queued plan unsent.

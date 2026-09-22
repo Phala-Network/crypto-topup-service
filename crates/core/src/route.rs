@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroU32;
 
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,7 @@ impl RouteFile {
             "screening.sanctions_oracle",
             self.screening.sanctions_oracle,
         )?;
+        self.chain.operator_key_version()?;
         validate_decimals("asset.decimals", self.asset.decimals)?;
         validate_decimals("destination.unit_decimals", self.destination.unit_decimals)?;
         validate_bps(
@@ -190,10 +192,21 @@ pub struct ChainConfig {
     pub finality: String,
     /// Independent RPC provider identifiers.
     pub rpc_providers: Vec<String>,
+    /// Derivation version of the operator key, selecting the `operator/v{n}` signer domain.
+    pub operator_key_version: u32,
     /// Forwarder contract addresses.
     pub contracts: ChainContracts,
     /// Flush scheduling and gas policy.
     pub flush: FlushConfig,
+}
+
+impl ChainConfig {
+    /// Returns the operator key derivation version, which must be at least one.
+    pub fn operator_key_version(&self) -> Result<NonZeroU32, RouteError> {
+        NonZeroU32::new(self.operator_key_version).ok_or_else(|| {
+            RouteError::validation("chain.operator_key_version", "must be at least 1")
+        })
+    }
 }
 
 /// Contract addresses required for deterministic deposits.

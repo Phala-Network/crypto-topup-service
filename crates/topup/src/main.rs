@@ -3,7 +3,7 @@
 mod route;
 
 use std::collections::BTreeSet;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -29,10 +29,10 @@ use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
-use topup_core::SETTLEMENT_KEY_DOMAIN;
-use topup_core::route::RouteFile;
 #[cfg(feature = "dev-signer")]
-use topup_core::{SecretKey32, Signer as _};
+use topup_core::SecretKey32;
+use topup_core::route::RouteFile;
+use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -112,6 +112,9 @@ struct ReconcileArgs {
 struct AttestArgs {
     #[arg(long, value_name = "HEX")]
     nonce: String,
+    /// Operator key derivation version to report, as set by the chain's `operator_key_version`.
+    #[arg(long, value_name = "N", default_value_t = NonZeroU32::MIN)]
+    operator_key_version: NonZeroU32,
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
@@ -416,20 +419,27 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
 
 async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
     let nonce = parse_nonce(&args.nonce)?;
+    let version = args.operator_key_version;
 
     #[cfg(feature = "dev-signer")]
     if args.dev {
-        let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
+        let signer = DevSigner::derive(&SecretKey32::new([1; 32]), version);
         let public_key = signer
             .settlement_public_key()
             .await
             .map_err(|_| "development settlement key is invalid")?;
+        let operator = signer
+            .operator_address()
+            .await
+            .map_err(|_| "development operator key is invalid")?;
         return print_attestation(
             &public_key.0,
             &report_data(&nonce, &public_key),
             &[],
             &[],
             &[],
+            version,
+            operator,
         );
     }
 
@@ -437,12 +447,19 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
         .attest(&nonce)
         .await
         .map_err(|_| "failed to collect dstack attestation")?;
+    let operator = DstackSigner::new()
+        .with_operator_key_version(version)
+        .operator_address()
+        .await
+        .map_err(|_| "failed to derive the dstack operator key")?;
     print_attestation(
         &evidence.settlement_public_key.0,
         &evidence.report_data,
         &evidence.quote,
         &evidence.info.app_id,
         &evidence.info.compose_hash,
+        version,
+        operator,
     )
 }
 
@@ -462,6 +479,8 @@ fn print_attestation(
     quote: &[u8],
     app_id: &[u8],
     compose_hash: &[u8],
+    operator_key_version: NonZeroU32,
+    operator: alloy_primitives::Address,
 ) -> Result<(), &'static str> {
     let output = json!({
         "keyid": SETTLEMENT_KEY_DOMAIN,
@@ -470,6 +489,8 @@ fn print_attestation(
         "quote": hex::encode(quote),
         "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
         "compose_hash": if compose_hash.is_empty() { String::new() } else { format!("0x{}", hex::encode(compose_hash)) },
+        "operator_keyid": operator_key_domain(operator_key_version),
+        "operator_address": format!("{operator:#x}"),
     });
     let encoded = serde_json::to_string(&output).map_err(|_| "failed to encode attestation")?;
     println!("{encoded}");
@@ -616,7 +637,13 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let flusher_tasks =
-        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, signer.clone()) {
+        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
+            SignerHandle::spawn(
+                DstackSigner::new().with_operator_key_version(version),
+                NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
+                Duration::from_secs(15),
+            )
+        }) {
             Ok(tasks) => tasks,
             Err(error) => {
                 tracing::error!(%error, "invalid flusher runtime configuration");
