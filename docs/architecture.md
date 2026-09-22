@@ -148,7 +148,8 @@ accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (produ
 addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
               UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
-rate_locks    address_id PK, route, amount_atomic, price_scaled, expires_at, consumed_by (deposit_id) UNIQUE
+rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
+              consumed_by (deposit_id) UNIQUE
 cursors       chain_id PK, scanned_block
 deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
               address_id, account_id, route, route_version, asset_contract, from_address, amount_atomic,
@@ -214,11 +215,13 @@ flush time. Each chain's finality rule is declared in its chain file (Ethereum: 
 a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the finality observation
-and the price is always current at fetch time. Spot: primary Coin Metrics `ReferenceRateUSD`
-(1-minute), check Binance `PHAUSDT` × Kraken `USDT/USD`; each observation aged ≤ `max_age`
-*(policy)* at fetch; `|primary − check| / primary ≤ max_deviation_bps / 10 000`; FX within
-`max_fx_deviation_bps`; the primary is used. Any failure retries the whole step. Stablecoin
-routes use fixed `1.0` with the reference rate as a depeg guard.
+and the price is always current at fetch time. Every route's pricing configuration declares
+`mode: spot | stablecoin`; the service never infers the mode from an asset symbol. Spot: primary
+Coin Metrics `ReferenceRateUSD` (1-minute), check Binance `PHAUSDT` × Kraken `USDT/USD`; each
+observation aged ≤ `max_age` *(policy)* at fetch; `|primary − check| / primary ≤
+max_deviation_bps / 10 000`; FX within `max_fx_deviation_bps`; the primary is used. Any failure
+retries the whole step. Stablecoin routes use fixed `1.0` with the primary reference rate as a
+depeg guard; check and FX observations are not required for that mode.
 
 **Screening** is direct sanctions-list screening plus per-deposit bounds. KYT is a separate
 adapter that compliance may require before GA.
