@@ -588,11 +588,11 @@ fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
                 .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    validate_route_versions(&routes)?;
+    validate_route_set(&routes)?;
     Ok(routes)
 }
 
-fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
+fn validate_route_set(routes: &[RouteFile]) -> Result<(), String> {
     let mut versions = std::collections::BTreeSet::new();
     for route in routes {
         if !versions.insert((route.route.as_str(), route.version)) {
@@ -601,6 +601,18 @@ fn validate_route_versions(routes: &[RouteFile]) -> Result<(), String> {
                 route.route, route.version
             ));
         }
+    }
+    // Rate-lock exposure counters sum credit across routes, so every quote-first route must
+    // count credit in the same destination minor unit.
+    let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
+    if let Some(first) = lock_routes.next()
+        && let Some(other) = lock_routes
+            .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
+    {
+        return Err(format!(
+            "rate-lock routes `{}` and `{}` use different destination.unit_decimals; exposure caps require one unit",
+            first.route, other.route
+        ));
     }
     Ok(())
 }
@@ -719,7 +731,7 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nonce, validate_route_versions};
+    use super::{parse_nonce, validate_route_set};
     use topup_core::route::RouteFile;
 
     #[test]
@@ -747,10 +759,30 @@ mod tests {
         let mut newer = route.clone();
         newer.version = route.version + 1;
 
-        assert_eq!(validate_route_versions(&[route.clone(), newer]), Ok(()));
+        assert_eq!(validate_route_set(&[route.clone(), newer]), Ok(()));
         assert_eq!(
-            validate_route_versions(&[route.clone(), route]),
+            validate_route_set(&[route.clone(), route]),
             Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
         );
+    }
+
+    #[test]
+    fn route_loading_requires_one_unit_for_rate_lock_exposure() {
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let mut other = route.clone();
+        other.route = "other-route".to_owned();
+        other.destination.unit_decimals = route.destination.unit_decimals + 1;
+
+        assert_eq!(
+            validate_route_set(&[route.clone(), other.clone()]),
+            Err(format!(
+                "rate-lock routes `{}` and `other-route` use different destination.unit_decimals; exposure caps require one unit",
+                route.route
+            ))
+        );
+        other.rate_lock.enabled = false;
+        assert_eq!(validate_route_set(&[route, other]), Ok(()));
     }
 }
