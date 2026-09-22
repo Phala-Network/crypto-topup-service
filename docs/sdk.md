@@ -26,18 +26,25 @@ Product requests are signed with RFC 9421 HTTP Message Signatures using ed25519:
   `"idempotency-key"` only when that header is sent;
 - `Content-Digest: sha-256=:<base64>:` over the exact body bytes, also for empty bodies;
 - parameters `created` (Unix seconds, accepted within five minutes of the service clock) and
-  `keyid`, optionally `alg="ed25519"`, serialized as RFC 8941 structured fields;
+  `keyid`, optionally `alg="ed25519"` and `nonce`, serialized as RFC 8941 structured fields;
 - `@target-uri` is `scheme://host[:port]/path?query` exactly as sent, using the `Host` header.
 
-Each signature is accepted once. Because ed25519 signatures are deterministic, the SDK never
-reuses a `created` value for an identical request, and it retries `409 signature_replayed` with
-a new signature. `crates/topup/tests/fixtures/rfc9421-python-signer.json` holds requests signed
-by the Python SDK; the Rust verifier test in `crates/topup/src/api/auth.rs` verifies them, and
-the Python tests require the signer to reproduce them byte for byte.
+Each signature is accepted once. Because ed25519 signatures are deterministic, two identical
+requests signed in the same second would carry the same signature, so the SDK adds a random
+128-bit `nonce` to every signature and keeps `created` at the clock; it still retries
+`409 signature_replayed` with a new signature. The verifier covers every parameter through the
+serialized `@signature-params`, so the nonce needs no server support.
+`crates/topup/tests/fixtures/rfc9421-python-signer.json` holds requests signed by the Python SDK,
+one with a nonce; the Rust verifier test in `crates/topup/src/api/auth.rs` verifies them, and the
+Python tests require the signer to reproduce them byte for byte.
 
 The same profile, with `idempotency-key` always covered and `keyid = settlement/v1`, signs the
-service's settlement requests to products; `topup_sdk.verify_request` verifies them. Webhooks use
-the Standard Webhooks asymmetric `v1a` scheme with the same settlement key;
+service's settlement requests to products; `topup_sdk.verify_request` verifies them against the
+receiver's configured public URL. `crates/adapters/tests/fixtures/rfc9421-rust-settlement.json`
+holds a POST and a `GET` by key signed by the service's `SettlementClient`; a Rust test keeps it
+current and the Python tests verify it.
+
+Webhooks use the Standard Webhooks asymmetric `v1a` scheme with the same settlement key;
 `topup_sdk.verify_webhook` verifies them. Pin the settlement key only after verifying the
 attestation (`GET /v1/attestation`, section 14 of the architecture).
 

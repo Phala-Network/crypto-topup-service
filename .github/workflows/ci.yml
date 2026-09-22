@@ -185,6 +185,19 @@ jobs:
           --tag crypto-topup-service:ci .
       - name: Smoke test runtime image
         run: docker run --rm crypto-topup-service:ci topup --help
+      - name: Validate the sandbox route template
+        run: |
+          route="$RUNNER_TEMP/sandbox-route.yaml"
+          FORWARDER_FACTORY=0x0000000000000000000000000000000000000000 \
+          IMPLEMENTATION=0x0000000000000000000000000000000000000000 \
+          TREASURY=0x0000000000000000000000000000000000000000 \
+          TEST_TOKEN=0x1111111111111111111111111111111111111111 \
+          SANCTIONS_ORACLE=0x2222222222222222222222222222222222222222 \
+          PRODUCT_SLUG=ci-check PRODUCT_KID=ci-check/v1 \
+          SETTLEMENT_URL=https://product.invalid/settlements \
+            deploy/sandbox/render-route.sh >"$route"
+          docker run --rm -v "$route:/route.yaml:ro" crypto-topup-service:ci \
+            topup route validate --template /route.yaml
 
   deployment:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
