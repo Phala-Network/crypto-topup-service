@@ -16,8 +16,8 @@ use sqlx::{Executor, PgPool, Row};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use topup::db::{
-    self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
-    SettlementIntent,
+    self, AddressKind, LockConsumption, NewAccount, NewAddress, NewDeposit, NewProduct,
+    OutboxEvent, SettlementIntent, StoredValuation, TransitionEffects,
 };
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, PumpMetrics, RunOnceResult, Step,
@@ -25,7 +25,7 @@ use topup::pump::{
 };
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
-use topup_core::money::AtomicAmount;
+use topup_core::money::{AtomicAmount, MinorAmount};
 use topup_core::route::RouteFile;
 use url::Url;
 use uuid::Uuid;
@@ -361,6 +361,18 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     payload: json!({"deposit_id": id}),
                     next_attempt_at: Utc::now(),
                 }],
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 12_345_678,
+                        price_source: "spot".to_owned(),
+                        credit_minor: MinorAmount::new(1_234),
+                        quote: json!({"primary": {"source": "test"}}),
+                    }),
+                    settlement_adoption: None,
+                    lock_consumption: None,
+                },
             };
             let pump = test_pump(
                 &context.app_pool,
@@ -383,6 +395,94 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 .await?
                 .try_get(0)?;
             ensure!(event_count == 1);
+            let stored = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("deposit")?;
+            ensure!(stored.state == DepositState::Confirmed);
+            ensure!(stored.price_scaled == Some(12_345_678));
+            ensure!(stored.price_source.as_deref() == Some("spot"));
+            ensure!(stored.credit_minor == Some(MinorAmount::new(1_234)));
+            ensure!(stored.quote == Some(json!({"primary": {"source": "test"}})));
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 14).await?;
+            let first_id = insert_deposit(&context.app_pool, seed, 14).await?;
+            let second_id = insert_deposit(&context.app_pool, seed, 15).await?;
+            sqlx::query(
+                r#"
+                INSERT INTO rate_locks (
+                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
+                )
+                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
+                        now() + interval '15 minutes')
+                "#,
+            )
+            .bind(seed.address_id)
+            .execute(&context.app_pool)
+            .await?;
+            let result = StepResult {
+                outcome: StepOutcome::Advance,
+                evidence: json!({"price_source": "lock"}),
+                events: Vec::new(),
+                effects: TransitionEffects {
+                    canonical_evidence: None,
+                    valuation: Some(StoredValuation {
+                        valuation_at: Utc::now(),
+                        price_scaled: 9_000_000,
+                        price_source: "lock".to_owned(),
+                        credit_minor: MinorAmount::new(777),
+                        quote: json!({"lock": true}),
+                    }),
+                    settlement_adoption: None,
+                    lock_consumption: Some(LockConsumption {
+                        address_id: seed.address_id,
+                    }),
+                },
+            };
+            let pump = test_pump(
+                &context.app_pool,
+                result_steps(result),
+                PumpConfig::default(),
+                0,
+            )?;
+            let (first, second) = tokio::join!(pump.run_once(), pump.run_once());
+            let results = [first?, second?];
+            ensure!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, RunOnceResult::Applied { .. }))
+                    .count()
+                    == 1
+            );
+            ensure!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, RunOnceResult::Contended { .. }))
+                    .count()
+                    == 1
+            );
+            let consumed_by: Uuid =
+                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(&context.app_pool)
+                    .await?;
+            ensure!(consumed_by == first_id || consumed_by == second_id);
+            let confirmed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM deposits WHERE id IN ($1, $2) AND state = 'confirmed'",
+            )
+            .bind(first_id)
+            .bind(second_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(confirmed == 1);
             Ok(())
         })
     })
