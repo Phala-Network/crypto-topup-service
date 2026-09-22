@@ -8,9 +8,11 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_core::Signer;
 use topup_core::money::{AtomicAmount, Bps, ScaledPrice};
 use topup_core::route::RouteFile;
+use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
 use crate::db;
+use crate::pause::{self, PauseScopeSources};
 
 use super::types::{
     AlertSink, ChainClient, FlushAlert, FlushCallBinding, FlushEvidence, PlannedAddress,
@@ -78,11 +80,27 @@ impl Planner {
         .collect::<std::collections::BTreeSet<_>>();
         excluded
             .extend(crate::reconciler::blocked_addresses(&self.pool, route.chain.chain_id).await?);
-        let addresses = db::list_chain_addresses(&self.pool, route.chain.chain_id)
-            .await?
-            .into_iter()
-            .filter(|address| !excluded.contains(&address.id))
-            .collect::<Vec<_>>();
+        let route_scopes = pause::route_pause_scopes(&self.pool, &route.route).await?;
+        let addresses =
+            db::list_chain_addresses_with_pause_scopes(&self.pool, route.chain.chain_id)
+                .await?
+                .into_iter()
+                .filter_map(|scoped| {
+                    let paused = PauseScopeSources::from_codes(
+                        &scoped.account_scopes,
+                        &scoped.product_scopes,
+                        &route_scopes,
+                    )
+                    .map(|scopes| scopes.contains(PauseScope::Flush));
+                    match paused {
+                        Ok(false) if !excluded.contains(&scoped.address.id) => {
+                            Some(Ok(scoped.address))
+                        }
+                        Ok(_) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .collect::<Result<Vec<_>, sqlx::Error>>()?;
         if addresses.is_empty() {
             return Ok(None);
         }
