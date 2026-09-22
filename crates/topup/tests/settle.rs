@@ -706,6 +706,12 @@ async fn payload_mismatch_is_alert_retry_and_is_never_resent() -> Result<()> {
             ensure!(evidence["alert_level"] == "alert");
             ensure!(api.posts.lock().await.len() == 1);
             ensure!(settlement(&context.app_pool, id).await?.0 == "sent");
+            ensure!(
+                db::get_settlement(&context.app_pool, id)
+                    .await?
+                    .context("settlement must exist")?
+                    .resend_forbidden
+            );
             sqlx::query(
                 "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
             )
@@ -715,6 +721,63 @@ async fn payload_mismatch_is_alert_retry_and_is_never_resent() -> Result<()> {
             worker.run_once().await?;
             ensure!(api.posts.lock().await.len() == 1);
             ensure!(api.gets.load(Ordering::SeqCst) == 2);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn payload_mismatch_guard_survives_unknown_and_missing_gets() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let api = MockSettlementApi::with_sequences(
+                vec![MockOutcome::Answer(SettlementAnswer::PayloadMismatch422)],
+                vec![
+                    MockOutcome::Answer(SettlementAnswer::Unknown {
+                        status: 500,
+                        body: "product failure".to_owned(),
+                    }),
+                    MockOutcome::Failure,
+                    MockOutcome::Failure,
+                ],
+            );
+            let id = seed_cleared(&context.app_pool, 14).await?;
+            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+
+            worker.run_once().await?;
+            ensure!(api.posts.lock().await.len() == 1);
+            ensure!(api.gets.load(Ordering::SeqCst) == 1);
+            let stored = db::get_settlement(&context.app_pool, id)
+                .await?
+                .context("settlement must exist")?;
+            ensure!(stored.resend_forbidden);
+            ensure!(stored.receipt.context("receipt")?["status"] == "unknown");
+
+            for expected_gets in [2, 3] {
+                sqlx::query(
+                    "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
+                )
+                .bind(id)
+                .execute(&context.app_pool)
+                .await?;
+                worker.run_once().await?;
+                ensure!(api.posts.lock().await.len() == 1);
+                ensure!(api.gets.load(Ordering::SeqCst) == expected_gets);
+                let evidence: Value = sqlx::query_scalar(
+                    "SELECT evidence FROM transitions WHERE deposit_id = $1 ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(id)
+                .fetch_one(&context.app_pool)
+                .await?;
+                ensure!(evidence["alert_level"] == "alert");
+            }
+            ensure!(
+                db::get_settlement(&context.app_pool, id)
+                    .await?
+                    .context("settlement must exist")?
+                    .resend_forbidden
+            );
             Ok(())
         })
     })

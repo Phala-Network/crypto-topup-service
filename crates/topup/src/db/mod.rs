@@ -34,8 +34,9 @@ pub use products::{
 };
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
 pub use settlements::{
-    Settlement, SettlementIntent, SettlementStatus, get_settlement, mark_accepted, mark_rejected,
-    mark_sent, mark_sent_with_receipt, upsert_intent, upsert_intent_in,
+    Settlement, SettlementIntent, SettlementStatus, get_settlement, mark_accepted,
+    mark_payload_mismatch, mark_rejected, mark_sent, mark_sent_with_receipt, upsert_intent,
+    upsert_intent_in,
 };
 
 /// Embedded SQL migrations for the service database.

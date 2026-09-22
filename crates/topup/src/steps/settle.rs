@@ -131,14 +131,15 @@ impl SettleStep {
                         .apply_answer(deposit, account.product_id, &account.external_id, answer)
                         .await;
                 }
-                Ok(None) if settlement.receipt.as_ref().is_some_and(is_payload_mismatch) => {
-                    return Ok(invariant_result("settlement_payload_mismatch"));
-                }
                 Ok(None) => {}
                 Err(error) => {
                     return Ok(transport_result("settlement_get_failed", &error));
                 }
             }
+        }
+
+        if settlement.resend_forbidden {
+            return Ok(invariant_result("settlement_payload_mismatch"));
         }
 
         if settlement_paused(
@@ -161,12 +162,7 @@ impl SettleStep {
 
         match client.post(&request).await {
             Ok(SettlementAnswer::PayloadMismatch422) => {
-                db::mark_sent_with_receipt(
-                    &self.pool,
-                    deposit.id,
-                    &json!({"status": "payload_mismatch"}),
-                )
-                .await?;
+                db::mark_payload_mismatch(&self.pool, deposit.id).await?;
                 match client.get_by_key(&settlement.key).await {
                     Ok(Some(answer)) => {
                         self.apply_answer(deposit, account.product_id, &account.external_id, answer)
@@ -288,12 +284,7 @@ impl SettleStep {
                 })
             }
             SettlementAnswer::PayloadMismatch422 => {
-                db::mark_sent_with_receipt(
-                    &self.pool,
-                    deposit.id,
-                    &json!({"status": "payload_mismatch"}),
-                )
-                .await?;
+                db::mark_payload_mismatch(&self.pool, deposit.id).await?;
                 Ok(invariant_result("settlement_payload_mismatch"))
             }
             SettlementAnswer::Unknown { status, body } => {
@@ -577,10 +568,6 @@ fn transport_result(error: &str, source: &SettlementClientError) -> StepResult {
         StepOutcome::Retry { error: kind },
         json!({"outcome": "retry", "error": error}),
     )
-}
-
-fn is_payload_mismatch(receipt: &Value) -> bool {
-    receipt.get("status").and_then(Value::as_str) == Some("payload_mismatch")
 }
 
 fn terminal_answer(

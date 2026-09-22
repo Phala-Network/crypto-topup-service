@@ -47,6 +47,8 @@ pub struct Settlement {
     pub destination_tx_id: Option<String>,
     /// Stored product response.
     pub receipt: Option<Value>,
+    /// Whether a payload mismatch permanently forbids another POST.
+    pub resend_forbidden: bool,
     /// Most recent send time.
     pub sent_at: Option<DateTime<Utc>>,
 }
@@ -73,6 +75,7 @@ struct SettlementRecord {
     status: String,
     destination_tx_id: Option<String>,
     receipt: Option<Value>,
+    resend_forbidden: bool,
     sent_at: Option<DateTime<Utc>>,
 }
 
@@ -88,6 +91,7 @@ impl TryFrom<SettlementRecord> for Settlement {
             status: SettlementStatus::parse(&record.status)?,
             destination_tx_id: record.destination_tx_id,
             receipt: record.receipt,
+            resend_forbidden: record.resend_forbidden,
             sent_at: record.sent_at,
         })
     }
@@ -101,7 +105,7 @@ pub async fn get_settlement(
     let record = sqlx::query_as::<_, SettlementRecord>(
         r#"
         SELECT deposit_id, product_id, key, payload, status,
-               destination_tx_id, receipt, sent_at
+               destination_tx_id, receipt, resend_forbidden, sent_at
         FROM settlements
         WHERE deposit_id = $1
         "#,
@@ -134,7 +138,8 @@ pub async fn upsert_intent_in(
         INSERT INTO settlements (deposit_id, product_id, key, payload, status)
         VALUES ($1, $2, $3, $4, 'intent')
         ON CONFLICT (deposit_id) DO UPDATE SET deposit_id = EXCLUDED.deposit_id
-        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt, sent_at
+        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt,
+                  resend_forbidden, sent_at
         "#,
         intent.deposit_id,
         intent.product_id,
@@ -158,6 +163,29 @@ pub async fn mark_sent_with_receipt(
     receipt: &Value,
 ) -> Result<Settlement, sqlx::Error> {
     update_outcome(pool, deposit_id, "sent", None, Some(receipt), true).await
+}
+
+/// Permanently forbids another POST after the product reports a payload mismatch.
+pub async fn mark_payload_mismatch(
+    pool: &PgPool,
+    deposit_id: Uuid,
+) -> Result<Settlement, sqlx::Error> {
+    let record = sqlx::query_as::<_, SettlementRecord>(
+        r#"
+        UPDATE settlements
+        SET status = 'sent',
+            receipt = '{"status":"payload_mismatch"}'::jsonb,
+            resend_forbidden = true,
+            sent_at = now()
+        WHERE deposit_id = $1
+        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt,
+                  resend_forbidden, sent_at
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_one(pool)
+    .await?;
+    record.try_into()
 }
 
 /// Stores the product's accepted answer.
@@ -203,7 +231,8 @@ async fn update_outcome(
             receipt = COALESCE($4, receipt),
             sent_at = CASE WHEN $5 THEN now() ELSE sent_at END
         WHERE deposit_id = $1
-        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt, sent_at
+        RETURNING deposit_id, product_id, key, payload, status, destination_tx_id, receipt,
+                  resend_forbidden, sent_at
         "#,
     )
     .bind(deposit_id)
