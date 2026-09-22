@@ -57,6 +57,12 @@ The `topup-core` dependency policy test reads `cargo metadata` and rejects runti
 the initial scaffold. Future pure dependencies must be reviewed and the policy test narrowed to an
 explicit I/O denylist before they are added; `tokio` and I/O frameworks never belong in `core`.
 
+Route YAML is parsed at the `topup` I/O boundary with exactly pinned `serde-saphyr`, selected for
+its maintained, panic-resistant, unsafe-free implementation. The archived `serde_yaml`, deprecated
+`serde_yml`, and newer single-owner `noyalib` were considered but not selected. The temporary
+`RUSTSEC-2024-0436` exception covers `alloy-primitives 1.7.3 -> paste 1.0.15` at compile time only
+and must be removed as soon as an Alloy upgrade drops `paste`.
+
 ## Reproducible build baseline
 
 Always build release artifacts with the committed lockfile. Set `SOURCE_DATE_EPOCH` to the source

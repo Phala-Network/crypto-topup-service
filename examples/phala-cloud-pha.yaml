@@ -8,8 +8,8 @@ chain:                             # one chain file per chain; shown inline here
   finality: finalized              # reviewed rule; two RPC providers must agree
   rpc_providers: [alchemy, quicknode]
   contracts:                       # deployed via the deterministic deployment proxy, same on every chain
-    forwarder_factory: "0x0000000000000000000000000000000000000000"
-    treasury:          "0x0000000000000000000000000000000000000000"   # finance Safe, immutable in the implementation
+    forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory
+    treasury:          "0x0000000000000000000000000000000000000000" # set to the finance Safe at deployment
   flush:
     schedule: "0 */6 * * *"
     max_gas_ratio_bps: 200         # an address's share of batch gas ≤ 2% of its value

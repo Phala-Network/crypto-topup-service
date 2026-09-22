@@ -3,6 +3,9 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "alloy-primitives 1.7.3 -> paste 1.0.15; compile-time only and no patched alloy release is available" },
+]
 
 [licenses]
 confidence-threshold = 0.8
@@ -15,6 +18,7 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "Zlib",
 ]
 
 [bans]
