@@ -24,7 +24,7 @@ pub struct DeliveryConfig {
     pub batch_size: u32,
     /// Complete HTTP request timeout, including reading the response body.
     pub request_timeout: Duration,
-    /// Reservation duration; this must exceed the request timeout.
+    /// Reservation duration; this must exceed the whole batch request timeout.
     pub claim_lease: Duration,
     /// Delay between empty polls or database failures.
     pub poll_interval: Duration,
@@ -37,7 +37,7 @@ pub struct DeliveryConfig {
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
-            batch_size: 16,
+            batch_size: 8,
             request_timeout: Duration::from_secs(20),
             claim_lease: Duration::from_secs(5 * 60),
             poll_interval: Duration::from_secs(1),
@@ -209,7 +209,7 @@ where
                 .fetch_one(&mut *connection)
                 .await?;
         if !locked {
-            release_claim(&mut connection, &event).await?;
+            release_claim(&mut connection, &event, self.config.poll_interval).await?;
             return Ok(());
         }
 
@@ -333,14 +333,8 @@ where
         };
 
         let status = response.status();
-        let response_body = response.bytes().await;
-        let (body, body_error) = match response_body {
-            Ok(bytes) => (
-                Some(truncate_body(&bytes, self.config.response_body_limit)),
-                None,
-            ),
-            Err(_) => (None, Some("response_body_read")),
-        };
+        let (body, body_error) =
+            read_response_body(response, self.config.response_body_limit).await;
 
         if status.is_success() {
             let stored = response_value(Some(status.as_u16()), body, body_error);
@@ -369,14 +363,24 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
     if config.batch_size == 0 {
         return Err(DeliveryError::InvalidConfig("batch_size must be positive"));
     }
+    if config.batch_size > 100 {
+        return Err(DeliveryError::InvalidConfig(
+            "batch_size must not exceed 100",
+        ));
+    }
     if config.request_timeout.is_zero() {
         return Err(DeliveryError::InvalidConfig(
             "request_timeout must be positive",
         ));
     }
-    if config.claim_lease <= config.request_timeout {
+    let Some(batch_timeout) = config.request_timeout.checked_mul(config.batch_size) else {
         return Err(DeliveryError::InvalidConfig(
-            "claim_lease must exceed request_timeout",
+            "batch request timeout is too large",
+        ));
+    };
+    if config.claim_lease <= batch_timeout {
+        return Err(DeliveryError::InvalidConfig(
+            "claim_lease must exceed the whole batch request timeout",
         ));
     }
     if config.claim_lease.as_secs() > MAX_POSTGRES_INTERVAL_SECONDS {
@@ -438,16 +442,19 @@ fn product_id(payload: &Value) -> Result<Uuid, &'static str> {
 async fn release_claim(
     connection: &mut PgConnection,
     event: &ClaimedEvent,
+    poll_interval: Duration,
 ) -> Result<(), sqlx::Error> {
+    let delay_seconds = i32::try_from(poll_interval.as_secs().max(1)).unwrap_or(i32::MAX);
     sqlx::query(
         r#"
         UPDATE outbox
-        SET next_attempt_at = now()
+        SET next_attempt_at = now() + make_interval(secs => $3)
         WHERE id = $1 AND delivered_at IS NULL AND next_attempt_at = $2
         "#,
     )
     .bind(event.id)
     .bind(event.claim_until)
+    .bind(delay_seconds)
     .execute(connection)
     .await?;
     Ok(())
@@ -521,9 +528,22 @@ fn response_value(status: Option<u16>, body: Option<String>, error: Option<&str>
     })
 }
 
-fn truncate_body(body: &[u8], limit: usize) -> String {
-    let end = body.len().min(limit);
-    String::from_utf8_lossy(&body[..end]).into_owned()
+async fn read_response_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> (Option<String>, Option<&'static str>) {
+    let mut retained = Vec::with_capacity(limit.min(4 * 1024));
+    while retained.len() < limit {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return (None, Some("response_body_read")),
+        };
+        let remaining = limit.saturating_sub(retained.len());
+        let take = remaining.min(chunk.len());
+        retained.extend_from_slice(&chunk[..take]);
+    }
+    (Some(String::from_utf8_lossy(&retained).into_owned()), None)
 }
 
 fn request_error_code(error: &reqwest::Error) -> &'static str {

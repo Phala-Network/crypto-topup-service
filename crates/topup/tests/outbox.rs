@@ -126,7 +126,7 @@ async fn reference_webhook(
     State(state): State<ReceiverState>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> (StatusCode, &'static str) {
     let id = match verify_standard_webhook(
         &state.verifying_key,
         &headers,
@@ -134,10 +134,10 @@ async fn reference_webhook(
         Utc::now().timestamp(),
     ) {
         Ok(id) => id,
-        Err(()) => return StatusCode::BAD_REQUEST,
+        Err(()) => return (StatusCode::BAD_REQUEST, "invalid signature"),
     };
     let Ok(body) = serde_json::from_slice(&body) else {
-        return StatusCode::BAD_REQUEST;
+        return (StatusCode::BAD_REQUEST, "invalid JSON");
     };
     if !state.delay.is_zero() {
         sleep(state.delay).await;
@@ -147,7 +147,7 @@ async fn reference_webhook(
         .lock()
         .await
         .push(ReceivedWebhook { id, body });
-    state.status
+    (state.status, "receiver-response-body")
 }
 
 fn verify_standard_webhook(
@@ -399,6 +399,7 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
     ensure!(row.try_get::<i32, _>("attempts")? == 0);
     let response: Value = row.try_get("response")?;
     ensure!(response["status"] == 200);
+    ensure!(response["body"] == "receiver-respons");
     ensure!(receiver.count().await == 1);
     let envelope = receiver
         .first_body()
