@@ -113,7 +113,8 @@ impl NoopStepSet {
     }
 }
 
-struct NoopStep;
+/// Placeholder step that leaves a deposit waiting without external effects.
+pub struct NoopStep;
 
 #[async_trait]
 impl Step for NoopStep {

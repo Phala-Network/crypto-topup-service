@@ -10,6 +10,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+alloy = { version = "=1.0.41", default-features = false, features = ["provider-http", "reqwest-rustls-tls", "rpc-types", "sol-types"] }
 alloy-consensus = { version = "=1.0.41", default-features = false, features = ["k256", "std"] }
 alloy-eips = { version = "=1.0.41", default-features = false, features = ["std"] }
 alloy-primitives = { version = "=1.7.3", default-features = false, features = ["std", "serde"] }
@@ -38,6 +39,7 @@ tokio = { version = "=1.47.1", features = ["macros", "net", "rt", "rt-multi-thre
 tokio-util = { version = "=0.7.16", features = ["rt"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["json"] }
+url = "=2.5.7"
 uuid = { version = "=1.26.1", features = ["serde", "v4", "v5"] }
 zeroize = "=1.9.0"
 
