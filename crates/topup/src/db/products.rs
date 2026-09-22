@@ -20,7 +20,7 @@ pub struct Product {
     pub paused_scopes: Vec<String>,
 }
 
-/// Values used to create or replace mutable product fields.
+/// Values used to create a product.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewProduct {
     /// Stable product identifier.
@@ -71,27 +71,22 @@ pub async fn get_product(pool: &PgPool, id: Uuid) -> Result<Option<Product>, sql
     .await
 }
 
-/// Replaces a product's mutable fields and returns the updated row when present.
-pub async fn update_product(
+/// Replaces a product's runtime pause scopes and returns the updated row when present.
+pub async fn set_product_paused_scopes(
     pool: &PgPool,
-    product: &NewProduct,
+    id: Uuid,
+    paused_scopes: &[String],
 ) -> Result<Option<Product>, sqlx::Error> {
     sqlx::query_as!(
         Product,
         r#"
         UPDATE products
-        SET slug = $2, settlement_url = $3, webhook_url = $4, pubkey = $5, kid = $6,
-            paused_scopes = $7
+        SET paused_scopes = $2
         WHERE id = $1
         RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes
         "#,
-        product.id,
-        product.slug,
-        product.settlement_url,
-        product.webhook_url,
-        product.pubkey,
-        product.kid,
-        &product.paused_scopes
+        id,
+        paused_scopes
     )
     .fetch_optional(pool)
     .await

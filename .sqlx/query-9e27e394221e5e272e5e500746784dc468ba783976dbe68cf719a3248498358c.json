@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE accounts\n        SET product_id = $2, external_id = $3, paused_scopes = $4\n        WHERE id = $1\n        RETURNING id, product_id, external_id, paused_scopes\n        ",
+  "query": "\n        UPDATE accounts\n        SET paused_scopes = $2\n        WHERE id = $1\n        RETURNING id, product_id, external_id, paused_scopes\n        ",
   "describe": {
     "columns": [
       {
@@ -27,8 +27,6 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid",
-        "Text",
         "TextArray"
       ]
     },
@@ -39,5 +37,5 @@
       false
     ]
   },
-  "hash": "dfe0bd231d87fa4a2e5718b1f112e6baa251ee5e7171ccf6b71b4c719e10033f"
+  "hash": "9e27e394221e5e272e5e500746784dc468ba783976dbe68cf719a3248498358c"
 }

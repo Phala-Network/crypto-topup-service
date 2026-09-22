@@ -39,6 +39,15 @@ balance, debt, entitlements, and billing policy.
 - [First route profile](examples/phala-cloud-pha.yaml)
 - [Delivery plan](docs/plan.md) — lanes, work packages, gates, agent rules; no dates
 
+## Database roles
+
+Runtime commands use `DATABASE_URL`, whose login role must be a member of the migration-created
+`topup_app` NOLOGIN role. The application role has operational CRUD privileges but no `TRUNCATE`,
+and append-only `transitions` and `audit` permit only `SELECT` and `INSERT`.
+
+`topup migrate` uses only `MIGRATE_DATABASE_URL`. It must identify the trusted database owner with
+permission to create roles and schema objects; the command never falls back to the application URL.
+
 ## Status
 
 Design v5 is under review. Implementation has not started. Production policy values are set by

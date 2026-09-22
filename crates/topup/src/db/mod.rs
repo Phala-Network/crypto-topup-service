@@ -8,12 +8,13 @@ mod flushes;
 mod outbox;
 mod products;
 mod settlements;
+mod types;
 
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 pub use accounts::{
-    Account, NewAccount, create_account, delete_account, get_account, update_account,
+    Account, NewAccount, create_account, delete_account, get_account, set_account_paused_scopes,
 };
 pub use addresses::{
     Address, AddressKind, NewAddress, find_active_persistent, find_address_by_chain, get_address,
@@ -22,12 +23,12 @@ pub use addresses::{
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
-    TransitionUpdate, apply_transition, claim_deposit, insert_deposit,
+    TransitionUpdate, apply_transition, claim_deposit, get_deposit, insert_deposit,
 };
 pub use flushes::{FlushedEvent, NewFlush, insert_flush, insert_flushed};
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
 pub use products::{
-    NewProduct, Product, create_product, delete_product, get_product, update_product,
+    NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,
 };
 pub use settlements::{Settlement, SettlementIntent, upsert_intent};
 

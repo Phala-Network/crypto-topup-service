@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE products\n        SET slug = $2, settlement_url = $3, webhook_url = $4, pubkey = $5, kid = $6,\n            paused_scopes = $7\n        WHERE id = $1\n        RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes\n        ",
+  "query": "\n        UPDATE products\n        SET paused_scopes = $2\n        WHERE id = $1\n        RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes\n        ",
   "describe": {
     "columns": [
       {
@@ -42,11 +42,6 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
         "TextArray"
       ]
     },
@@ -60,5 +55,5 @@
       false
     ]
   },
-  "hash": "aba64a294b9e6bcbcacc638b9aa33f4d7ccb998e96f22848413288258b592e30"
+  "hash": "596ac7d7e069d2a01d53540e54a3c025169a6cfab32891d2df50dc5d402ae05d"
 }

@@ -1,6 +1,9 @@
+use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use super::types::{address_hex, b256_hex, parse_address, parse_b256, to_i64, to_u64};
 
 /// The derivation purpose of a deposit address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,17 +41,17 @@ pub struct Address {
     /// Owning account identifier.
     pub account_id: Uuid,
     /// EVM chain identifier.
-    pub chain_id: i64,
+    pub chain_id: u64,
     /// Address derivation purpose.
     pub kind: AddressKind,
     /// Persistent address version, or zero for locks.
-    pub version: i64,
+    pub version: u64,
     /// Product lock reference for lock addresses.
     pub lock_ref: Option<String>,
-    /// CREATE2 salt as a normalized string.
-    pub salt: String,
+    /// CREATE2 salt.
+    pub salt: B256,
     /// Physical chain address.
-    pub address: String,
+    pub address: EvmAddress,
     /// Retirement time for rotated persistent addresses.
     pub retired_at: Option<DateTime<Utc>>,
 }
@@ -61,17 +64,17 @@ pub struct NewAddress {
     /// Owning account identifier.
     pub account_id: Uuid,
     /// EVM chain identifier.
-    pub chain_id: i64,
+    pub chain_id: u64,
     /// Address derivation purpose.
     pub kind: AddressKind,
     /// Persistent address version, or zero for locks.
-    pub version: i64,
+    pub version: u64,
     /// Product lock reference for lock addresses.
     pub lock_ref: Option<String>,
-    /// CREATE2 salt as a normalized string.
-    pub salt: String,
+    /// CREATE2 salt.
+    pub salt: B256,
     /// Physical chain address.
-    pub address: String,
+    pub address: EvmAddress,
     /// Retirement time for rotated persistent addresses.
     pub retired_at: Option<DateTime<Utc>>,
 }
@@ -96,12 +99,12 @@ impl TryFrom<AddressRecord> for Address {
         Ok(Self {
             id: record.id,
             account_id: record.account_id,
-            chain_id: record.chain_id,
+            chain_id: to_u64(record.chain_id, "addresses.chain_id")?,
             kind: AddressKind::parse(&record.kind)?,
-            version: record.version,
+            version: to_u64(record.version, "addresses.version")?,
             lock_ref: record.lock_ref,
-            salt: record.salt,
-            address: record.address,
+            salt: parse_b256(&record.salt)?,
+            address: parse_address(&record.address)?,
             retired_at: record.retired_at,
         })
     }
@@ -110,6 +113,10 @@ impl TryFrom<AddressRecord> for Address {
 /// Inserts an address.
 pub async fn insert_address(pool: &PgPool, address: &NewAddress) -> Result<Address, sqlx::Error> {
     let kind = address.kind.code();
+    let chain_id = to_i64(address.chain_id, "addresses.chain_id")?;
+    let version = to_i64(address.version, "addresses.version")?;
+    let salt = b256_hex(address.salt);
+    let physical_address = address_hex(address.address);
     let record = sqlx::query_as!(
         AddressRecord,
         r#"
@@ -120,12 +127,12 @@ pub async fn insert_address(pool: &PgPool, address: &NewAddress) -> Result<Addre
         "#,
         address.id,
         address.account_id,
-        address.chain_id,
+        chain_id,
         kind,
-        address.version,
+        version,
         address.lock_ref,
-        address.salt,
-        address.address,
+        salt,
+        physical_address,
         address.retired_at
     )
     .fetch_one(pool)
@@ -148,9 +155,11 @@ pub async fn get_address(pool: &PgPool, id: Uuid) -> Result<Option<Address>, sql
 /// Finds an address by its chain and physical address.
 pub async fn find_address_by_chain(
     pool: &PgPool,
-    chain_id: i64,
-    address: &str,
+    chain_id: u64,
+    address: EvmAddress,
 ) -> Result<Option<Address>, sqlx::Error> {
+    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
+    let address = address_hex(address);
     let record = sqlx::query_as!(
         AddressRecord,
         "SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at FROM addresses WHERE chain_id = $1 AND address = $2",
@@ -166,8 +175,9 @@ pub async fn find_address_by_chain(
 pub async fn find_active_persistent(
     pool: &PgPool,
     account_id: Uuid,
-    chain_id: i64,
+    chain_id: u64,
 ) -> Result<Option<Address>, sqlx::Error> {
+    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
     let record = sqlx::query_as!(
         AddressRecord,
         r#"

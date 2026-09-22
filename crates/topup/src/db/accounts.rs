@@ -14,7 +14,7 @@ pub struct Account {
     pub paused_scopes: Vec<String>,
 }
 
-/// Values used to create or replace mutable account fields.
+/// Values used to create an account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewAccount {
     /// Stable account identifier.
@@ -56,23 +56,22 @@ pub async fn get_account(pool: &PgPool, id: Uuid) -> Result<Option<Account>, sql
     .await
 }
 
-/// Replaces an account's mutable fields and returns the updated row when present.
-pub async fn update_account(
+/// Replaces an account's runtime pause scopes and returns the updated row when present.
+pub async fn set_account_paused_scopes(
     pool: &PgPool,
-    account: &NewAccount,
+    id: Uuid,
+    paused_scopes: &[String],
 ) -> Result<Option<Account>, sqlx::Error> {
     sqlx::query_as!(
         Account,
         r#"
         UPDATE accounts
-        SET product_id = $2, external_id = $3, paused_scopes = $4
+        SET paused_scopes = $2
         WHERE id = $1
         RETURNING id, product_id, external_id, paused_scopes
         "#,
-        account.id,
-        account.product_id,
-        account.external_id,
-        &account.paused_scopes
+        id,
+        paused_scopes
     )
     .fetch_optional(pool)
     .await
