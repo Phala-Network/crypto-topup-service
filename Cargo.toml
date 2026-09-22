@@ -10,10 +10,13 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-alloy-consensus = { version = "=1.0.32", default-features = false, features = ["std"] }
-alloy-eips = { version = "=1.0.32", default-features = false, features = ["std"] }
+alloy-consensus = { version = "=1.0.41", default-features = false, features = ["k256", "std"] }
+alloy-eips = { version = "=1.0.41", default-features = false, features = ["std"] }
 alloy-primitives = { version = "=1.4.1", default-features = false, features = ["std"] }
-alloy-signer-local = { version = "=1.0.32", default-features = false }
+alloy-serde = { version = "=1.0.41", default-features = false }
+alloy-signer = { version = "=1.0.41", default-features = false }
+alloy-signer-local = { version = "=1.0.41", default-features = false }
+alloy-tx-macros = { version = "=1.0.41", default-features = false }
 clap = { version = "4.5.48", features = ["derive"] }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "zeroize"] }
 hex = "=0.4.3"
