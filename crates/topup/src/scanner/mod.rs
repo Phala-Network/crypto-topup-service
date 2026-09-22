@@ -11,6 +11,7 @@ use alloy_primitives::Address;
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmChain, MAX_ADDRESSES_PER_REQUEST, MAX_BLOCKS_PER_REQUEST,
     TransferLog,
@@ -181,10 +182,10 @@ impl ScanStats {
 pub fn load_route_files(paths: &[PathBuf]) -> Result<Vec<ChainRoutes>, ScannerError> {
     if paths.is_empty() {
         return Err(ScannerError::Configuration(
-            "TOPUP_ROUTE_FILES must contain at least one path".to_owned(),
+            "at least one route file is required".to_owned(),
         ));
     }
-    let mut chains = BTreeMap::<u64, ChainRoutes>::new();
+    let mut routes = Vec::with_capacity(paths.len());
     for path in paths {
         let yaml = std::fs::read_to_string(path)?;
         let route: RouteFile = serde_saphyr::from_str(&yaml).map_err(|error| {
@@ -199,11 +200,30 @@ pub fn load_route_files(paths: &[PathBuf]) -> Result<Vec<ChainRoutes>, ScannerEr
                 path.display()
             ))
         })?;
+        routes.push(route);
+    }
+    configure_routes(&routes)
+}
+
+/// Selects the highest supplied route version for each chain and asset.
+pub fn configure_routes(routes: &[RouteFile]) -> Result<Vec<ChainRoutes>, ScannerError> {
+    if routes.is_empty() {
+        return Err(ScannerError::Configuration(
+            "at least one route is required".to_owned(),
+        ));
+    }
+    let mut chains = BTreeMap::<u64, ChainRoutes>::new();
+    for route in routes {
+        route.validate().map_err(|error| {
+            ScannerError::Configuration(format!(
+                "route `{}` version {} failed validation: {error}",
+                route.route, route.version
+            ))
+        })?;
         if route.chain.finality != "finalized" {
             return Err(ScannerError::Configuration(format!(
-                "route file `{}` uses unsupported finality rule `{}`",
-                path.display(),
-                route.chain.finality
+                "route `{}` version {} uses unsupported finality rule `{}`",
+                route.route, route.version, route.chain.finality
             )));
         }
 
@@ -212,27 +232,30 @@ pub fn load_route_files(paths: &[PathBuf]) -> Result<Vec<ChainRoutes>, ScannerEr
             chain: route.chain.clone(),
             routes: BTreeMap::new(),
         });
-        if chain_routes.chain != route.chain {
-            return Err(ScannerError::Configuration(format!(
-                "route file `{}` disagrees with another chain {chain_id} configuration",
-                path.display()
-            )));
-        }
-        if chain_routes
-            .routes
-            .insert(
-                route.asset.contract,
-                RouteSelection {
-                    name: route.route,
-                    version: route.version,
-                },
-            )
-            .is_some()
+        if chain_routes.chain.finality != route.chain.finality
+            || chain_routes.chain.rpc_providers != route.chain.rpc_providers
         {
             return Err(ScannerError::Configuration(format!(
-                "multiple active routes select chain {chain_id} asset {:#x}",
-                route.asset.contract
+                "route `{}` version {} disagrees with another chain {chain_id} scanner configuration",
+                route.route, route.version
             )));
+        }
+        let selection = RouteSelection {
+            name: route.route.clone(),
+            version: route.version,
+        };
+        match chain_routes.routes.get_mut(&route.asset.contract) {
+            Some(current) if current.name != selection.name => {
+                return Err(ScannerError::Configuration(format!(
+                    "routes `{}` and `{}` both select chain {chain_id} asset {:#x}",
+                    current.name, selection.name, route.asset.contract
+                )));
+            }
+            Some(current) if selection.version > current.version => *current = selection,
+            Some(_) => {}
+            None => {
+                chain_routes.routes.insert(route.asset.contract, selection);
+            }
         }
     }
     Ok(chains.into_values().collect())
@@ -316,10 +339,12 @@ pub async fn scan_once<R: ChainReader>(
     Ok(stats)
 }
 
-/// Runs every configured chain scanner until one task fails.
-pub async fn run_from_env(pool: PgPool) -> Result<(), ScannerError> {
-    let paths = route_paths_from_env()?;
-    let chains = load_route_files(&paths)?;
+/// Runs every configured chain scanner until cancellation or all chains stop.
+pub async fn run(
+    pool: PgPool,
+    chains: Vec<ChainRoutes>,
+    cancellation: CancellationToken,
+) -> Result<(), ScannerError> {
     let poll_interval = poll_interval_from_env()?;
     let mut tasks = JoinSet::new();
     for routes in chains {
@@ -334,7 +359,17 @@ pub async fn run_from_env(pool: PgPool) -> Result<(), ScannerError> {
         })?;
         let reader = EvmChain::new(&rpc_url)?;
         let chain_pool = pool.clone();
-        tasks.spawn(async move { run_chain(chain_pool, reader, routes, poll_interval).await });
+        let chain_cancellation = cancellation.child_token();
+        tasks.spawn(async move {
+            run_chain(
+                chain_pool,
+                reader,
+                routes,
+                poll_interval,
+                chain_cancellation,
+            )
+            .await
+        });
     }
 
     if tasks.is_empty() {
@@ -342,22 +377,44 @@ pub async fn run_from_env(pool: PgPool) -> Result<(), ScannerError> {
             "no chain scanners were configured".to_owned(),
         ));
     }
+    let mut first_error = None;
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Err(error)) => tracing::error!(
-                error_category = error.category(),
-                "chain scanner task stopped"
-            ),
-            Err(error) => tracing::error!(
-                error = %error,
-                "chain scanner task failed to join"
-            ),
-            Ok(Ok(())) => tracing::error!("chain scanner task exited unexpectedly"),
+            Ok(Err(error)) => {
+                tracing::error!(
+                    error_category = error.category(),
+                    "chain scanner task stopped"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "chain scanner task failed to join");
+                if first_error.is_none() {
+                    first_error = Some(ScannerError::Task(error.to_string()));
+                }
+            }
+            Ok(Ok(())) if cancellation.is_cancelled() => {}
+            Ok(Ok(())) => {
+                tracing::error!("chain scanner task exited unexpectedly");
+                if first_error.is_none() {
+                    first_error = Some(ScannerError::Task(
+                        "chain scanner exited unexpectedly".to_owned(),
+                    ));
+                }
+            }
         }
     }
-    Err(ScannerError::Task(
-        "all chain scanner tasks stopped".to_owned(),
-    ))
+    if let Some(error) = first_error {
+        Err(error)
+    } else if cancellation.is_cancelled() {
+        Ok(())
+    } else {
+        Err(ScannerError::Task(
+            "all chain scanner tasks stopped".to_owned(),
+        ))
+    }
 }
 
 async fn run_chain(
@@ -365,11 +422,13 @@ async fn run_chain(
     reader: EvmChain,
     routes: ChainRoutes,
     poll_interval: Duration,
+    cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
     let chain_id = routes.chain.chain_id;
     run_scan_loop(
         chain_id,
         poll_interval,
+        cancellation,
         || scan_once(&pool, &reader, &routes),
         tokio::time::sleep,
         retry_jitter,
@@ -380,6 +439,7 @@ async fn run_chain(
 async fn run_scan_loop<Scan, ScanFuture, Sleep, SleepFuture, Jitter>(
     chain_id: u64,
     poll_interval: Duration,
+    cancellation: CancellationToken,
     mut scan: Scan,
     mut sleep: Sleep,
     mut jitter: Jitter,
@@ -393,7 +453,11 @@ where
 {
     let mut retry_attempt = 0_u32;
     loop {
-        match scan().await {
+        let result = tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            result = scan() => result,
+        };
+        let delay = match result {
             Ok(stats) => {
                 retry_attempt = 0;
                 tracing::info!(
@@ -403,7 +467,7 @@ where
                     backfilled_addresses = stats.backfilled_addresses,
                     "finalized chain scan committed"
                 );
-                sleep(poll_interval).await;
+                poll_interval
             }
             Err(error) if error.is_retryable() => {
                 let delay = backoff(retry_attempt, jitter());
@@ -414,7 +478,7 @@ where
                     retry_after_seconds = delay.as_secs(),
                     "finalized chain scan failed transiently"
                 );
-                sleep(delay).await;
+                delay
             }
             Err(error) => {
                 tracing::error!(
@@ -424,6 +488,10 @@ where
                 );
                 return Err(error);
             }
+        };
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = sleep(delay) => {}
         }
     }
 }
@@ -431,18 +499,6 @@ where
 fn retry_jitter() -> u64 {
     let value = Uuid::new_v4().as_u128() & u128::from(u64::MAX);
     u64::try_from(value).unwrap_or_default()
-}
-
-fn route_paths_from_env() -> Result<Vec<PathBuf>, ScannerError> {
-    let raw = std::env::var_os("TOPUP_ROUTE_FILES")
-        .ok_or_else(|| ScannerError::Configuration("TOPUP_ROUTE_FILES is required".to_owned()))?;
-    let paths = std::env::split_paths(&raw).collect::<Vec<_>>();
-    if paths.is_empty() || paths.iter().any(|path| path.as_os_str().is_empty()) {
-        return Err(ScannerError::Configuration(
-            "TOPUP_ROUTE_FILES contains an empty path".to_owned(),
-        ));
-    }
-    Ok(paths)
 }
 
 fn poll_interval_from_env() -> Result<Duration, ScannerError> {
@@ -587,6 +643,7 @@ mod tests {
         let error = run_scan_loop(
             1,
             Duration::from_secs(15),
+            CancellationToken::new(),
             || {
                 future::ready(
                     results
@@ -614,6 +671,21 @@ mod tests {
             vec![Duration::ZERO, Duration::from_secs(15)]
         );
         assert!(results.lock().expect("results lock").is_empty());
+    }
+
+    #[test]
+    fn highest_route_version_is_current_for_an_asset() {
+        let token = Address::from([7_u8; 20]);
+        let mut older = test_route_file(token);
+        older.version = 1;
+        let mut newer = older.clone();
+        newer.version = 2;
+
+        let chains = configure_routes(&[newer, older]).expect("versioned routes");
+        let chain = chains.first().expect("one chain");
+        let selected = chain.routes.get(&token).expect("selected route");
+
+        assert_eq!(selected.version, 2);
     }
 
     #[test]
@@ -647,11 +719,7 @@ mod tests {
     }
 
     fn test_routes(token: Address) -> ChainRoutes {
-        let yaml = include_str!("../../tests/fixtures/phala-cloud-pha.yaml").replace(
-            "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
-            &format!("{token:#x}"),
-        );
-        let route: RouteFile = serde_saphyr::from_str(&yaml).expect("route fixture");
+        let route = test_route_file(token);
         ChainRoutes {
             chain: route.chain,
             routes: BTreeMap::from([(
@@ -662,5 +730,13 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    fn test_route_file(token: Address) -> RouteFile {
+        let yaml = include_str!("../../tests/fixtures/phala-cloud-pha.yaml").replace(
+            "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
+            &format!("{token:#x}"),
+        );
+        serde_saphyr::from_str(&yaml).expect("route fixture")
     }
 }

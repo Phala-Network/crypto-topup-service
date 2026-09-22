@@ -50,10 +50,12 @@ permission to create roles and schema objects; the command never falls back to t
 
 ## Scanner configuration
 
-`topup run` reads `DATABASE_URL` and a platform path list in `TOPUP_ROUTE_FILES`. Provider ids in
-each route file resolve to `TOPUP_RPC_<ID>_URL` after uppercasing and replacing non-alphanumeric
-characters with underscores; the first provider is provider A for finalized scanning. The scanner
-poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to 15 seconds.
+`topup run` reads `DATABASE_URL` and accepts each enabled route version through a repeated
+`--route FILE` option. Provider ids in each route file resolve to `TOPUP_RPC_<ID>_URL` after
+uppercasing and replacing non-alphanumeric characters with underscores; the first provider is
+provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
+route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to
+15 seconds.
 
 ## Status
 
