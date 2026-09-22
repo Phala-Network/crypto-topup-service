@@ -19,6 +19,8 @@ pub struct AccountResponse {
     pub id: Uuid,
     /// Product-owned account identifier.
     pub external_id: String,
+    /// Workspace lifecycle state.
+    pub status: String,
     /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
 }
@@ -80,6 +82,8 @@ pub struct DepositLookupQuery {
     pub address: Option<String>,
     /// Product lock reference.
     pub lock_ref: Option<String>,
+    /// Opaque `(created_at, id)` cursor returned by the previous support page.
+    pub cursor: Option<String>,
 }
 
 /// Product-visible deposit facts.
@@ -123,6 +127,42 @@ pub struct DepositResponse {
     pub created_at: DateTime<Utc>,
     /// Last processing update time.
     pub updated_at: DateTime<Utc>,
+}
+
+/// One immutable state transition in a support timeline.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositTransitionResponse {
+    /// Timeline row identifier.
+    pub id: Uuid,
+    /// State before the transition attempt.
+    pub from_state: String,
+    /// State after the transition attempt.
+    pub to_state: String,
+    /// Retry attempt recorded for this transition.
+    pub attempt: i32,
+    /// Durable transition evidence.
+    pub evidence: serde_json::Value,
+    /// Transition creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Deposit facts with the full immutable transition timeline.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct SupportDepositResponse {
+    /// Product-visible deposit facts.
+    #[serde(flatten)]
+    pub deposit: DepositResponse,
+    /// Transitions in ascending creation order.
+    pub timeline: Vec<DepositTransitionResponse>,
+}
+
+/// A support lookup page with timelines.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct SupportDepositsResponse {
+    /// Matching deposits in descending creation order.
+    pub deposits: Vec<SupportDepositResponse>,
+    /// Cursor for the next page, or `null` when exhausted.
+    pub next_cursor: Option<String>,
 }
 
 /// A page of deposits.
@@ -237,7 +277,7 @@ pub struct RefundRequest {
 /// Administrative refund record body owned by C12.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct RecordRefundRequest {
-    /// Confirmed treasury transaction hash.
+    /// Treasury transaction hash to verify at finalized.
     pub tx_hash: String,
 }
 
@@ -274,6 +314,45 @@ pub struct AdminRefundResponse {
     pub status: String,
     /// Recorded treasury transaction hash, when present.
     pub tx_hash: Option<String>,
+    /// Most recent confirmation evidence, when checked.
+    pub confirmation_evidence: Option<serde_json::Value>,
+}
+
+/// Per-route daily finance report produced by C12.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RouteDailyReport {
+    /// Stable route name.
+    pub route: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Route asset contract.
+    pub asset_contract: String,
+    /// Latest treasury token balance in atomic units, when the chain read succeeds.
+    pub treasury_balance_atomic: Option<String>,
+    /// Balance source or explicit reason the treasury balance is unavailable.
+    pub treasury_balance_note: String,
+    /// Sum of deposits not linked to a confirmed flush.
+    pub unflushed_balance_atomic: String,
+    /// Sum of unconsumed rate-lock token amounts.
+    pub open_rate_lock_exposure_atomic: String,
+    /// Open lock exposure in destination minor units, when available.
+    pub exposure_minor: Option<String>,
+    /// Reason destination exposure is unavailable.
+    pub exposure_minor_reason: String,
+    /// Route PnL in destination minor units, when available.
+    pub pnl_minor: Option<String>,
+    /// Reason route PnL is unavailable.
+    pub pnl_minor_reason: String,
+    /// Rejected token amount still held after confirmed refunds.
+    pub rejected_holds_atomic: String,
+    /// Deposit counts keyed by state.
+    pub deposits_by_state: std::collections::BTreeMap<String, u64>,
+    /// Settlement counts keyed by status.
+    pub settlements_by_status: std::collections::BTreeMap<String, u64>,
+    /// Refund counts keyed by status.
+    pub refunds_by_status: std::collections::BTreeMap<String, u64>,
+    /// Maximum age in seconds keyed by current deposit state.
+    pub age_in_state_max_seconds: std::collections::BTreeMap<String, u64>,
 }
 
 /// Daily finance report produced by C12.
@@ -281,18 +360,8 @@ pub struct AdminRefundResponse {
 pub struct DailyReportResponse {
     /// Report snapshot time.
     pub generated_at: DateTime<Utc>,
-    /// Treasury balances keyed by asset, encoded as decimal strings.
-    pub treasury: std::collections::BTreeMap<String, String>,
-    /// Unflushed balances keyed by asset, encoded as decimal strings.
-    pub unflushed: std::collections::BTreeMap<String, String>,
-    /// Count of open rate locks.
-    pub open_locks: u64,
-    /// Count of rejected deposits still held.
-    pub rejected_holds: u64,
-    /// Open exposure in destination minor units.
-    pub exposure_minor: String,
-    /// PnL versus recorded valuation in destination minor units.
-    pub pnl_minor: String,
+    /// SQL-computed metrics for each configured route.
+    pub routes: Vec<RouteDailyReport>,
 }
 
 /// Administrative route pause response.

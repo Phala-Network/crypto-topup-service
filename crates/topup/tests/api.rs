@@ -708,7 +708,7 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
         ),
         (
             "/v1/products/{p}/deposits",
-            &["tx_hash", "address", "lock_ref"][..],
+            &["tx_hash", "address", "lock_ref", "cursor"][..],
         ),
     ];
     for (path, expected_names) in cases {

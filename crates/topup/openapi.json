@@ -34,7 +34,7 @@
               }
             }
           },
-          "501": {
+          "404": {
             "description": "",
             "content": {
               "application/json": {
@@ -80,7 +80,7 @@
               }
             }
           },
-          "501": {
+          "404": {
             "description": "",
             "content": {
               "application/json": {
@@ -136,7 +136,27 @@
               }
             }
           },
-          "501": {
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
             "description": "",
             "content": {
               "application/json": {
@@ -167,16 +187,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DailyReportResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1234,6 +1244,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque `(created_at, id)` cursor returned by the previous support page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1242,7 +1261,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DepositsResponse"
+                  "$ref": "#/components/schemas/SupportDepositsResponse"
                 }
               }
             }
@@ -1365,6 +1384,16 @@
               }
             }
           },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "",
             "content": {
@@ -1375,7 +1404,17 @@
               }
             }
           },
-          "501": {
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "423": {
             "description": "",
             "content": {
               "application/json": {
@@ -1402,6 +1441,7 @@
         "required": [
           "id",
           "external_id",
+          "status",
           "paused_scopes"
         ],
         "properties": {
@@ -1420,6 +1460,10 @@
               "type": "string"
             },
             "description": "Active account-level pause scopes."
+          },
+          "status": {
+            "type": "string",
+            "description": "Workspace lifecycle state."
           }
         }
       },
@@ -1431,6 +1475,9 @@
           "status"
         ],
         "properties": {
+          "confirmation_evidence": {
+            "description": "Most recent confirmation evidence, when checked."
+          },
           "id": {
             "type": "string",
             "format": "uuid",
@@ -1527,58 +1574,20 @@
         "description": "Daily finance report produced by C12.",
         "required": [
           "generated_at",
-          "treasury",
-          "unflushed",
-          "open_locks",
-          "rejected_holds",
-          "exposure_minor",
-          "pnl_minor"
+          "routes"
         ],
         "properties": {
-          "exposure_minor": {
-            "type": "string",
-            "description": "Open exposure in destination minor units."
-          },
           "generated_at": {
             "type": "string",
             "format": "date-time",
             "description": "Report snapshot time."
           },
-          "open_locks": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Count of open rate locks.",
-            "minimum": 0
-          },
-          "pnl_minor": {
-            "type": "string",
-            "description": "PnL versus recorded valuation in destination minor units."
-          },
-          "rejected_holds": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Count of rejected deposits still held.",
-            "minimum": 0
-          },
-          "treasury": {
-            "type": "object",
-            "description": "Treasury balances keyed by asset, encoded as decimal strings.",
-            "additionalProperties": {
-              "type": "string"
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteDailyReport"
             },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "unflushed": {
-            "type": "object",
-            "description": "Unflushed balances keyed by asset, encoded as decimal strings.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
+            "description": "SQL-computed metrics for each configured route."
           }
         }
       },
@@ -1742,6 +1751,46 @@
             ],
             "format": "date-time",
             "description": "Valuation observation time."
+          }
+        }
+      },
+      "DepositTransitionResponse": {
+        "type": "object",
+        "description": "One immutable state transition in a support timeline.",
+        "required": [
+          "id",
+          "from_state",
+          "to_state",
+          "attempt",
+          "evidence",
+          "created_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Retry attempt recorded for this transition."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Transition creation time."
+          },
+          "evidence": {
+            "description": "Durable transition evidence."
+          },
+          "from_state": {
+            "type": "string",
+            "description": "State before the transition attempt."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Timeline row identifier."
+          },
+          "to_state": {
+            "type": "string",
+            "description": "State after the transition attempt."
           }
         }
       },
@@ -2040,7 +2089,7 @@
         "properties": {
           "tx_hash": {
             "type": "string",
-            "description": "Confirmed treasury transaction hash."
+            "description": "Treasury transaction hash to verify at finalized."
           }
         }
       },
@@ -2125,6 +2174,134 @@
           }
         }
       },
+      "RouteDailyReport": {
+        "type": "object",
+        "description": "Per-route daily finance report produced by C12.",
+        "required": [
+          "route",
+          "chain_id",
+          "asset_contract",
+          "treasury_balance_note",
+          "unflushed_balance_atomic",
+          "open_rate_lock_exposure_atomic",
+          "exposure_minor_reason",
+          "pnl_minor_reason",
+          "rejected_holds_atomic",
+          "deposits_by_state",
+          "settlements_by_status",
+          "refunds_by_status",
+          "age_in_state_max_seconds"
+        ],
+        "properties": {
+          "age_in_state_max_seconds": {
+            "type": "object",
+            "description": "Maximum age in seconds keyed by current deposit state.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "asset_contract": {
+            "type": "string",
+            "description": "Route asset contract."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "deposits_by_state": {
+            "type": "object",
+            "description": "Deposit counts keyed by state.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "exposure_minor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Open lock exposure in destination minor units, when available."
+          },
+          "exposure_minor_reason": {
+            "type": "string",
+            "description": "Reason destination exposure is unavailable."
+          },
+          "open_rate_lock_exposure_atomic": {
+            "type": "string",
+            "description": "Sum of unconsumed rate-lock token amounts."
+          },
+          "pnl_minor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Route PnL in destination minor units, when available."
+          },
+          "pnl_minor_reason": {
+            "type": "string",
+            "description": "Reason route PnL is unavailable."
+          },
+          "refunds_by_status": {
+            "type": "object",
+            "description": "Refund counts keyed by status.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "rejected_holds_atomic": {
+            "type": "string",
+            "description": "Rejected token amount still held after confirmed refunds."
+          },
+          "route": {
+            "type": "string",
+            "description": "Stable route name."
+          },
+          "settlements_by_status": {
+            "type": "object",
+            "description": "Settlement counts keyed by status.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "treasury_balance_atomic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Latest treasury token balance in atomic units, when the chain read succeeds."
+          },
+          "treasury_balance_note": {
+            "type": "string",
+            "description": "Balance source or explicit reason the treasury balance is unavailable."
+          },
+          "unflushed_balance_atomic": {
+            "type": "string",
+            "description": "Sum of deposits not linked to a confirmed flush."
+          }
+        }
+      },
       "RoutePauseResponse": {
         "type": "object",
         "description": "Administrative route pause response.",
@@ -2143,6 +2320,53 @@
           "route": {
             "type": "string",
             "description": "Route name."
+          }
+        }
+      },
+      "SupportDepositResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DepositResponse",
+            "description": "Product-visible deposit facts."
+          },
+          {
+            "type": "object",
+            "required": [
+              "timeline"
+            ],
+            "properties": {
+              "timeline": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DepositTransitionResponse"
+                },
+                "description": "Transitions in ascending creation order."
+              }
+            }
+          }
+        ],
+        "description": "Deposit facts with the full immutable transition timeline."
+      },
+      "SupportDepositsResponse": {
+        "type": "object",
+        "description": "A support lookup page with timelines.",
+        "required": [
+          "deposits"
+        ],
+        "properties": {
+          "deposits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupportDepositResponse"
+            },
+            "description": "Matching deposits in descending creation order."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, or `null` when exhausted."
           }
         }
       }

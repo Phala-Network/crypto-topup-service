@@ -33,6 +33,7 @@ asset:
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
   min_flush_atomic: "20000000000000000000000"        # 20,000 PHA on-chain balance
+  min_refund_atomic: "20000000000000000000"           # 20 PHA refundable dust floor
 
 destination:
   product: phala-cloud
