@@ -45,8 +45,6 @@ pub enum RejectReason {
     Sanctioned,
     /// The deposited amount is outside the configured bounds.
     OutOfBounds,
-    /// Settlement is paused for the account.
-    AccountPaused,
     /// The product rejected the settlement request.
     ProductRefused,
 }
@@ -61,7 +59,6 @@ impl RejectReason {
             Self::OutOfRange => "out_of_range",
             Self::Sanctioned => "sanctioned",
             Self::OutOfBounds => "out_of_bounds",
-            Self::AccountPaused => "account_paused",
             Self::ProductRefused => "product_refused",
         }
     }
@@ -79,6 +76,8 @@ pub enum RetryError {
 /// The expected condition that keeps a step in its current state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaitReason {
+    /// Settlement is paused for the account or product.
+    Paused,
     /// The product is still processing the settlement.
     ProductProcessing,
     /// No confirmed flush after the deposit has been observed yet.
@@ -137,15 +136,19 @@ pub enum StepOutcomeKind {
 }
 
 /// The effect that applying an outcome has on the state machine.
+///
+/// The pump owns the per-state retry counter. A retry counts a failed retry,
+/// a wait leaves the counter unchanged, and advancing resets it to zero. Core
+/// validates the transition but does not maintain that counter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransitionKind {
-    /// The deposit advanced to a later progress state.
+    /// The deposit advanced to a later progress state; the pump resets attempt to zero.
     Advanced,
     /// The deposit entered the rejected terminal state.
     Rejected,
-    /// The deposit stayed in place for a retry.
+    /// The deposit stayed in place after a failure; the pump increments attempt.
     Retry,
-    /// The deposit stayed in place while waiting.
+    /// The deposit stayed in place while waiting; the pump leaves attempt unchanged.
     Wait,
 }
 
@@ -273,6 +276,9 @@ mod tests {
     const WAIT: StepOutcome = StepOutcome::Wait {
         reason: WaitReason::FlushNotConfirmed,
     };
+    const PAUSED_WAIT: StepOutcome = StepOutcome::Wait {
+        reason: WaitReason::Paused,
+    };
     const ADOPT_CREDITED: StepOutcome = StepOutcome::AdoptProductAnswer { credited: true };
 
     #[derive(Clone, Copy)]
@@ -298,6 +304,7 @@ mod tests {
             (Confirmed, &REJECT, Valid(Rejected, Kind::Rejected)),
             (Confirmed, &RETRY, Valid(Confirmed, Kind::Retry)),
             (Confirmed, &WAIT, Valid(Confirmed, Kind::Wait)),
+            (Confirmed, &PAUSED_WAIT, Valid(Confirmed, Kind::Wait)),
             (
                 Confirmed,
                 &ADOPT_CREDITED,
@@ -378,6 +385,26 @@ mod tests {
     }
 
     #[test]
+    fn paused_deposit_waits_then_advances_after_resume() {
+        assert_eq!(
+            next(DepositState::Confirmed, &PAUSED_WAIT),
+            Ok(Transition {
+                from: DepositState::Confirmed,
+                to: DepositState::Confirmed,
+                kind: TransitionKind::Wait,
+            })
+        );
+        assert_eq!(
+            next(DepositState::Confirmed, &StepOutcome::Advance),
+            Ok(Transition {
+                from: DepositState::Confirmed,
+                to: DepositState::Cleared,
+                kind: TransitionKind::Advanced,
+            })
+        );
+    }
+
+    #[test]
     fn terminal_predicate_matches_terminal_states() {
         assert!(!DepositState::Detected.is_terminal());
         assert!(!DepositState::Confirmed.is_terminal());
@@ -403,7 +430,6 @@ mod tests {
             (RejectReason::OutOfRange, "out_of_range"),
             (RejectReason::Sanctioned, "sanctioned"),
             (RejectReason::OutOfBounds, "out_of_bounds"),
-            (RejectReason::AccountPaused, "account_paused"),
             (RejectReason::ProductRefused, "product_refused"),
         ];
 
@@ -417,6 +443,7 @@ mod tests {
             assert_eq!(serde_json::to_string(&reason)?, encoded);
             assert_eq!(serde_json::from_str::<RejectReason>(&encoded)?, reason);
         }
+        assert!(serde_json::from_str::<RejectReason>("\"account_paused\"").is_err());
 
         Ok(())
     }
