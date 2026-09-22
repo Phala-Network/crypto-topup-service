@@ -47,6 +47,8 @@ pub struct StepResult {
     pub evidence: Value,
     /// Outbox events committed in the same transaction as the transition.
     pub events: Vec<OutboxEvent>,
+    /// Additional database writes committed atomically with the transition.
+    pub effects: db::TransitionEffects,
 }
 
 impl StepResult {
@@ -57,6 +59,12 @@ impl StepResult {
             outcome,
             evidence,
             events: Vec::new(),
+            effects: db::TransitionEffects {
+                canonical_evidence: None,
+                valuation: None,
+                settlement_adoption: None,
+                lock_consumption: None,
+            },
         }
     }
 }
@@ -249,6 +257,11 @@ pub enum RunOnceResult {
         /// Deposit whose result was discarded.
         deposit_id: Uuid,
     },
+    /// A selected single-use rate lock was consumed by another deposit.
+    Contended {
+        /// Deposit that must be re-run at spot pricing.
+        deposit_id: Uuid,
+    },
 }
 
 /// A worker that claims and advances one durable deposit at a time.
@@ -299,7 +312,11 @@ impl Pump {
                         () = sleep(self.config.idle_poll_interval) => {}
                     }
                 }
-                Ok(RunOnceResult::Applied { .. } | RunOnceResult::Stale { .. }) => {}
+                Ok(
+                    RunOnceResult::Applied { .. }
+                    | RunOnceResult::Stale { .. }
+                    | RunOnceResult::Contended { .. },
+                ) => {}
                 Err(error) => {
                     tracing::error!(%error, "deposit pump iteration failed");
                     tokio::select! {
@@ -381,14 +398,17 @@ impl Pump {
             deposit.state,
             lease_token,
             update,
-            &result.evidence,
-            &result.events,
+            db::TransitionWrites {
+                evidence: &result.evidence,
+                effects: &result.effects,
+                outbox_events: &result.events,
+            },
         )
         .await?;
-        transaction.commit().await?;
 
         match applied {
             ApplyTransitionResult::Applied => {
+                transaction.commit().await?;
                 tracing::info!(
                     deposit_id = %deposit.id,
                     chain = deposit.chain_id,
@@ -399,12 +419,22 @@ impl Pump {
                 Ok(RunOnceResult::Applied { deposit_id })
             }
             ApplyTransitionResult::Stale => {
+                transaction.commit().await?;
                 tracing::debug!(
                     deposit_id = %deposit.id,
                     state = ?deposit.state,
                     "discarded stale deposit step result"
                 );
                 Ok(RunOnceResult::Stale { deposit_id })
+            }
+            ApplyTransitionResult::LockUnavailable => {
+                transaction.rollback().await?;
+                db::release_deposit_lease(&self.pool, deposit.id, lease_token).await?;
+                tracing::info!(
+                    deposit_id = %deposit.id,
+                    "rate lock was consumed concurrently; deposit will retry at spot"
+                );
+                Ok(RunOnceResult::Contended { deposit_id })
             }
         }
     }

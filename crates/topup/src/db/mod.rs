@@ -23,9 +23,10 @@ pub use addresses::{
 };
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
-    ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
-    TransitionUpdate, adopt_settlement_pricing, apply_transition, claim_deposit, get_deposit,
-    insert_deposit,
+    ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
+    LockConsumption, NewDeposit, OutboxEvent, SettlementAdoption, StoredValuation,
+    TransitionEffects, TransitionUpdate, TransitionWrites, adopt_settlement_pricing,
+    apply_transition, claim_deposit, get_deposit, insert_deposit, release_deposit_lease,
 };
 pub use flushes::{
     Flush, FlushStatus, FlushedEvent, NewFlush, confirm_flush, get_flush, get_flush_locked,

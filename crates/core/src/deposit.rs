@@ -69,6 +69,10 @@ impl RejectReason {
 pub enum RetryError {
     /// An external dependency or other transient operation failed.
     Transient,
+    /// Independent RPC providers did not agree on finalized evidence.
+    RpcDisagreement,
+    /// Required price observations were unavailable or invalid.
+    PriceUnavailable,
     /// The two sanctions checks did not produce a conclusive clear result.
     SanctionsInconclusive,
     /// Stored or returned data violated an invariant and requires attention.
@@ -78,6 +82,8 @@ pub enum RetryError {
 /// The expected condition that keeps a step in its current state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaitReason {
+    /// At least one provider has not finalized the deposit block yet.
+    Finality,
     /// Settlement is paused for the account or product.
     Paused,
     /// The product is still processing the settlement.

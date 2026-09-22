@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
 };
+use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
 use topup::steps::screen::ScreenStep;
 use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
@@ -315,6 +316,16 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let product_lookup =
+        SettlementProductLookup::new(pool.clone(), signer.clone(), Duration::from_secs(30));
+    let confirm_step =
+        match ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(product_lookup)) {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::error!(%error, "invalid confirm-step configuration");
+                return ExitCode::FAILURE;
+            }
+        };
     let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
     {
         Ok(step) => step,
@@ -325,6 +336,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     };
     let steps = Arc::new(
         NoopStepSet::build()
+            .with_detected(Box::new(confirm_step))
             .with_confirmed(Box::new(screen_step))
             .with_cleared(Box::new(SettleStep::new(
                 pool.clone(),
@@ -333,7 +345,6 @@ async fn run(args: &RunArgs) -> ExitCode {
             )))
             .with_credited(Box::new(topup::flusher::SweepStep)),
     );
-    tracing::warn!("placeholder step remains active in detected state");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
