@@ -127,9 +127,41 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build image
-        run: docker build --tag crypto-topup-service:ci .
+        run: >-
+          docker build
+          --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          --tag crypto-topup-service:ci .
       - name: Smoke test runtime image
-        run: docker run --rm crypto-topup-service:ci --help
+        run: docker run --rm crypto-topup-service:ci topup --help
+
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate compose files
+        run: |
+          deploy/validate-compose.sh
+          docker compose -f deploy/local/docker-compose.yml config >/dev/null
+      - name: Validate deployment scripts and app compose
+        run: |
+          for file in deploy/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
+            case "$(head -n 1 "$file")" in
+              *bash) bash -n "$file" ;;
+              *) sh -n "$file" ;;
+            esac
+          done
+          jq empty deploy/app-compose.example.json
+          deploy/tests/walg-cron.sh
+          deploy/tests/render-compose.sh
+          TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+          POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+            deploy/render-app-compose.sh deploy/staging.env.example | jq -e \
+              '.docker_compose_file | contains("@sha256:1111111111111111111111111111111111111111111111111111111111111111")' \
+              >/dev/null
+      - name: Build postgres-walg image
+        run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
+      - name: Check WAL-G runtime
+        run: docker run --rm postgres-walg:ci wal-g --version
 
   contracts:
     runs-on: ubuntu-latest

@@ -94,15 +94,18 @@ impl StepSet {
         }
     }
 
-    /// Creates a registry with a real detected step and placeholders for later work packages.
+    /// Replaces the step registered for `detected` deposits.
     #[must_use]
-    pub fn with_detected(detected: Box<dyn Step>) -> Self {
-        Self::new(
-            detected,
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-        )
+    pub fn with_detected(mut self, detected: Box<dyn Step>) -> Self {
+        self.detected = detected;
+        self
+    }
+
+    /// Replaces the step registered for `confirmed` deposits.
+    #[must_use]
+    pub fn with_confirmed(mut self, confirmed: Box<dyn Step>) -> Self {
+        self.confirmed = confirmed;
+        self
     }
 
     fn get(&self, state: DepositState) -> Option<&dyn Step> {
@@ -132,7 +135,8 @@ impl NoopStepSet {
     }
 }
 
-struct NoopStep;
+/// Placeholder step that leaves a deposit waiting without external effects.
+pub struct NoopStep;
 
 #[async_trait]
 impl Step for NoopStep {

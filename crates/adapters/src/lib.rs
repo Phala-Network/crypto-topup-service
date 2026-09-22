@@ -18,4 +18,5 @@ mod dev_feature_guard;
 pub mod attestation;
 pub mod chain;
 pub mod pricing;
+pub mod risk;
 pub mod signer;

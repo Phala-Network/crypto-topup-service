@@ -14,11 +14,15 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
-use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, PumpMetrics, StepSet};
+use topup::pump::{
+    AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
+};
 use topup::steps::confirm::{ConfirmStep, NoStoredProductAnswers};
+use topup::steps::screen::ScreenStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
+use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::SETTLEMENT_KEY_DOMAIN;
@@ -296,7 +300,19 @@ async fn run(args: &RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let steps = Arc::new(StepSet::with_detected(Box::new(confirm_step)));
+    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
+    {
+        Ok(step) => step,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure screening step");
+            return ExitCode::FAILURE;
+        }
+    };
+    let steps = Arc::new(
+        NoopStepSet::build()
+            .with_detected(Box::new(confirm_step))
+            .with_confirmed(Box::new(screen_step)),
+    );
     tracing::warn!(
         "C6 product GET adapter is not merged; confirm lookup currently reports unknown keys"
     );

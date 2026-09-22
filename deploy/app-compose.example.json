@@ -1,0 +1,30 @@
+{
+  "allowed_envs": [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_ENDPOINT",
+    "AWS_REGION",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "BINANCE_API_KEY",
+    "COINMETRICS_API_KEY",
+    "DATABASE_URL",
+    "KRAKEN_API_KEY",
+    "MIGRATE_DATABASE_URL",
+    "POSTGRES_PASSWORD",
+    "RPC_PROVIDER_A_API_KEY",
+    "RPC_PROVIDER_B_API_KEY",
+    "TOPUP_ADMIN_KID",
+    "TOPUP_ADMIN_PUBLIC_KEY",
+    "TOPUP_APP_PASSWORD",
+    "TOPUP_RPC_PROVIDER_A_URL",
+    "TOPUP_RPC_PROVIDER_B_URL",
+    "WALG_S3_PREFIX"
+  ],
+  "docker_compose_file": "",
+  "name": "",
+  "public_logs": false,
+  "public_sysinfo": false,
+  "public_tcbinfo": true,
+  "secure_time": true,
+  "storage_fs": "ext4"
+}

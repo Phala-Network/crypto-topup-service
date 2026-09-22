@@ -17,7 +17,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
-use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepSet};
+use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
 use topup::scanner::{load_route_files, scan_once};
 use topup::steps::confirm::{ConfirmStep, NoStoredProductAnswers};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
@@ -690,7 +690,7 @@ async fn run_confirm_scenario(
     );
     let pump = Pump::new(
         database.app_pool.clone(),
-        Arc::new(StepSet::with_detected(Box::new(confirm))),
+        Arc::new(NoopStepSet::build().with_detected(Box::new(confirm))),
         PumpConfig::default(),
     )?;
     let confirmed_id: Uuid = sqlx::query_scalar("SELECT id FROM deposits LIMIT 1")

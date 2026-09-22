@@ -1,0 +1,11 @@
+chain_id: 11155111
+name: ethereum-sepolia
+finality: finalized
+rpc_providers: [provider-a, provider-b]
+contracts:
+  forwarder_factory: "0x0000000000000000000000000000000000000000"
+  implementation: "0x0000000000000000000000000000000000000000"
+  treasury: "0x0000000000000000000000000000000000000000"
+flush:
+  schedule: "0 */6 * * *"
+  max_gas_ratio_bps: 200

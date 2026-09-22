@@ -1,3 +1,4 @@
-//! Durable deposit state-machine steps.
+//! Concrete deposit state-machine steps.
 
 pub mod confirm;
+pub mod screen;
