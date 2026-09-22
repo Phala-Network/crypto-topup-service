@@ -1038,21 +1038,50 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     ),
                 )
             };
-            let refuses_to_start = |route: &RouteFile, signer: &SignerHandle| {
+            let spawn_task = |route: &RouteFile, signer: &SignerHandle| {
                 let (planner, flusher) = components(signer);
-                let task = FlusherTask::new(route.clone(), planner, flusher);
-                async move {
-                    let task = task.map_err(anyhow::Error::msg)?;
-                    tokio::time::timeout(
-                        StdDuration::from_secs(10),
-                        task.run(CancellationToken::new()),
-                    )
+                let cancellation = CancellationToken::new();
+                let task = FlusherTask::new(route.clone(), planner, flusher, alerts.clone())
+                    .map_err(anyhow::Error::msg)?;
+                let handle = tokio::spawn(task.run(cancellation.clone()));
+                Ok::<_, anyhow::Error>((handle, cancellation))
+            };
+            let role_alerts = |operator: Address| {
+                alerts
+                    .0
+                    .lock()
+                    .expect("alert mutex is available")
+                    .iter()
+                    .filter(|alert| {
+                        matches!(alert, FlushAlert::OperatorRoleMissing { operator: alerted, .. } if *alerted == operator)
+                    })
+                    .count()
+            };
+            let stop = |(handle, cancellation): (tokio::task::JoinHandle<()>, CancellationToken)| async move {
+                ensure!(!handle.is_finished(), "flusher task must keep running");
+                cancellation.cancel();
+                tokio::time::timeout(StdDuration::from_secs(10), handle)
                     .await
-                    .context("flusher task must stop when the operator lacks the role")
+                    .context("flusher task must stop when cancelled")??;
+                Ok::<_, anyhow::Error>(())
+            };
+            // A missing role must not end the task: it re-checks and alerts at every interval.
+            let waits_for_role = |route: &RouteFile, signer: &SignerHandle, operator: Address| {
+                let task = spawn_task(route, signer);
+                let before = role_alerts(operator);
+                async move {
+                    let task = task?;
+                    tokio::time::sleep(StdDuration::from_millis(3_500)).await;
+                    ensure!(
+                        role_alerts(operator) >= before + 3,
+                        "missing role must be re-checked and alerted"
+                    );
+                    Ok::<_, anyhow::Error>(task)
                 }
             };
 
-            let route_v1 = test_route(factory, token)?;
+            let mut route_v1 = test_route(factory, token)?;
+            route_v1.chain.flush.maintenance_interval_s = 1;
             ensure!(route_v1.chain.operator_key_version()? == NonZeroU32::MIN);
             let (signer_v1, operator_v1) = versioned_signer(&route_v1).await?;
             let mut route_v2 = route_v1.clone();
@@ -1077,7 +1106,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                         granted: false
                     }
             );
-            refuses_to_start(&route_v1, &signer_v1).await?;
+            stop(waits_for_role(&route_v1, &signer_v1, operator_v1).await?).await?;
             grant_operator(
                 &anvil.rpc_url,
                 factory,
@@ -1113,6 +1142,18 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     row.try_get::<String, _>("status")?,
                 ))
             };
+            let wait_for_status = |id: Uuid, status: &'static str| {
+                let binding = &binding;
+                async move {
+                    for _ in 0..100 {
+                        if binding(id).await?.2 == status {
+                            return Ok(());
+                        }
+                        tokio::time::sleep(StdDuration::from_millis(100)).await;
+                    }
+                    bail!("flush {id} did not become {status}")
+                }
+            };
             let v1_binding = (
                 format!("{operator_v1:#x}"),
                 "1".to_owned(),
@@ -1120,11 +1161,12 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             );
             ensure!(binding(stale).await? == v1_binding);
 
-            // Deploying operator/v2 before the admin Safe grants it leaves the plan untouched.
+            // operator/v2 deployed before the admin Safe grants it waits and leaves the plan alone.
             ensure!(!flusher_v2.operator_role(&route_v2).await?.granted);
-            refuses_to_start(&route_v2, &signer_v2).await?;
+            let task_v2 = waits_for_role(&route_v2, &signer_v2, operator_v2).await?;
             ensure!(binding(stale).await? == v1_binding);
 
+            // The running v2 task picks up the grant without a restart and flushes by itself.
             grant_operator(
                 &anvil.rpc_url,
                 factory,
@@ -1139,20 +1181,12 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     }
             );
             ensure!(planner_v2.plan(&route_v2).await? == Some(stale));
-            ensure!(
-                binding(stale).await?
-                    == (
-                        format!("{operator_v2:#x}"),
-                        "0".to_owned(),
-                        "planned".to_owned()
-                    )
-            );
-            ensure!(flusher_v2.send_next(&route_v2).await? == RunResult::Sent { flush_id: stale });
+            let (rebound_operator, rebound_nonce, _) = binding(stale).await?;
+            ensure!(rebound_operator == format!("{operator_v2:#x}") && rebound_nonce == "0");
+            wait_for_status(stale, "sent").await?;
             finalize(&anvil.rpc_url)?;
-            ensure!(
-                flusher_v2.maintain_sent(&route_v2).await?
-                    == Some(RunResult::Confirmed { flush_id: stale })
-            );
+            wait_for_status(stale, "confirmed").await?;
+            stop(task_v2).await?;
             ensure!(chain.confirmed_nonce(operator_v2).await? == 1);
             ensure!(chain.confirmed_nonce(operator_v1).await? == 1);
             let flushed: i64 =
@@ -1162,6 +1196,12 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     .await?;
             ensure!(flushed == 1);
 
+            // After revocation a v1 task neither sends its own plan nor stops.
+            mint(seeded[0].physical)?;
+            let orphan = planner_v1
+                .plan(&route_v1)
+                .await?
+                .context("plan before revoking v1")?;
             revoke_operator(
                 &anvil.rpc_url,
                 factory,
@@ -1169,7 +1209,15 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                 ADMIN_KEY,
             )?;
             ensure!(!flusher_v1.operator_role(&route_v1).await?.granted);
-            refuses_to_start(&route_v1, &signer_v1).await?;
+            stop(waits_for_role(&route_v1, &signer_v1, operator_v1).await?).await?;
+            ensure!(
+                binding(orphan).await?
+                    == (
+                        format!("{operator_v1:#x}"),
+                        "1".to_owned(),
+                        "planned".to_owned()
+                    )
+            );
             ensure!(flusher_v2.operator_role(&route_v2).await?.granted);
             Ok(())
         })

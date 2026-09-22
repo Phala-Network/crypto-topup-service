@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use croner::Cron;
 use sqlx::PgPool;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::pricing::native::CoinMetricsUsdClient;
 use topup_adapters::signer::actor::SignerHandle;
@@ -28,13 +28,19 @@ pub struct FlusherTask {
     route: RouteFile,
     planner: Planner,
     flusher: Flusher,
+    alerts: Arc<dyn AlertSink>,
     schedule: Cron,
     maintenance_interval: Duration,
 }
 
 impl FlusherTask {
     /// Creates a task whose schedule and maintenance interval come from the route's chain policy.
-    pub fn new(route: RouteFile, planner: Planner, flusher: Flusher) -> Result<Self, String> {
+    pub fn new(
+        route: RouteFile,
+        planner: Planner,
+        flusher: Flusher,
+        alerts: Arc<dyn AlertSink>,
+    ) -> Result<Self, String> {
         let schedule = Cron::from_str(&route.chain.flush.schedule)
             .map_err(|error| format!("invalid flush schedule for `{}`: {error}", route.route))?;
         let maintenance_interval = Duration::from_secs(route.chain.flush.maintenance_interval_s);
@@ -42,6 +48,7 @@ impl FlusherTask {
             route,
             planner,
             flusher,
+            alerts,
             schedule,
             maintenance_interval,
         })
@@ -49,12 +56,12 @@ impl FlusherTask {
 
     /// Runs startup recovery, scheduled planning, and periodic lifecycle maintenance.
     ///
-    /// Returns without flushing when the configured operator does not hold `OPERATOR_ROLE` on the
-    /// factory, so an operator-key version is only used after the admin Safe has granted it.
+    /// New flushes are planned and sent only while the configured operator holds
+    /// `OPERATOR_ROLE` on the factory, so an operator-key version is used only after the admin
+    /// Safe has granted it. Without the role, the task re-checks at the maintenance interval and
+    /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
-        if !self.operator_authorized(&cancellation).await {
-            return;
-        }
+        let mut authorized = self.operator_authorized(false).await;
         if let Err(error) = self.flusher.maintain_sent(&self.route).await {
             tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
         }
@@ -71,20 +78,31 @@ impl FlusherTask {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
-                    if let Err(error) = self.flusher.run_once(&self.route).await {
+                    if !authorized {
+                        authorized = self.operator_authorized(false).await;
+                    }
+                    let result = if authorized {
+                        self.flusher.run_once(&self.route).await.map(drop)
+                    } else {
+                        self.flusher.maintain_sent(&self.route).await.map(drop)
+                    };
+                    if let Err(error) = result {
                         tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
                     }
                 }
                 () = sleep_until(next_plan) => {
-                    match self.planner.plan(&self.route).await {
-                        Ok(flush_id) => {
-                            tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
-                            if let Err(error) = self.flusher.run_once(&self.route).await {
-                                tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                    authorized = self.operator_authorized(authorized).await;
+                    if authorized {
+                        match self.planner.plan(&self.route).await {
+                            Ok(flush_id) => {
+                                tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
+                                if let Err(error) = self.flusher.run_once(&self.route).await {
+                                    tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                }
                             }
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, route = %self.route.route, "flush planning failed");
+                            Err(error) => {
+                                tracing::error!(%error, route = %self.route.route, "flush planning failed");
+                            }
                         }
                     }
                     next_plan = match next_deadline(&self.schedule) {
@@ -99,17 +117,18 @@ impl FlusherTask {
         }
     }
 
-    async fn operator_authorized(&self, cancellation: &CancellationToken) -> bool {
+    /// Checks `OPERATOR_ROLE`, keeping `current` when the check itself fails.
+    async fn operator_authorized(&self, current: bool) -> bool {
         let chain_id = self.route.chain.chain_id;
         let route = self.route.route.as_str();
         let operator_key_version = self.route.chain.operator_key_version;
         let factory = self.route.chain.contracts.forwarder_factory;
-        loop {
-            match self.flusher.operator_role(&self.route).await {
-                Ok(OperatorRole {
-                    operator,
-                    granted: true,
-                }) => {
+        match self.flusher.operator_role(&self.route).await {
+            Ok(OperatorRole {
+                operator,
+                granted: true,
+            }) => {
+                if !current {
                     tracing::info!(
                         chain_id,
                         route,
@@ -118,36 +137,39 @@ impl FlusherTask {
                         %factory,
                         "flusher operator holds OPERATOR_ROLE"
                     );
-                    return true;
                 }
-                Ok(OperatorRole {
-                    operator,
-                    granted: false,
-                }) => {
-                    tracing::error!(
-                        chain_id,
-                        route,
-                        operator_key_version,
-                        %operator,
-                        %factory,
-                        "flusher not started: the configured operator does not hold \
-                         OPERATOR_ROLE on the factory; grant it from the admin Safe and restart"
-                    );
-                    return false;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        chain_id,
-                        route,
-                        operator_key_version,
-                        "flusher operator role check failed; retrying"
-                    );
-                }
+                true
             }
-            tokio::select! {
-                () = cancellation.cancelled() => return false,
-                () = sleep(self.maintenance_interval) => {}
+            Ok(OperatorRole {
+                operator,
+                granted: false,
+            }) => {
+                tracing::error!(
+                    chain_id,
+                    route,
+                    operator_key_version,
+                    %operator,
+                    %factory,
+                    "flusher paused: the configured operator does not hold OPERATOR_ROLE on the \
+                     factory; grant it from the admin Safe"
+                );
+                self.alerts.emit(FlushAlert::OperatorRoleMissing {
+                    chain_id,
+                    factory,
+                    operator,
+                    operator_key_version,
+                });
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    chain_id,
+                    route,
+                    operator_key_version,
+                    "flusher operator role check failed"
+                );
+                current
             }
         }
     }
@@ -162,20 +184,10 @@ pub fn configure_tasks(
     routes: &[RouteFile],
     mut operator_signer: impl FnMut(NonZeroU32) -> io::Result<SignerHandle>,
 ) -> Result<Vec<FlusherTask>, String> {
+    let latest = latest_routes(routes)?;
     let mut signers = BTreeMap::new();
-    let mut latest = BTreeMap::new();
-    for route in routes {
-        latest
-            .entry((route.chain.chain_id, route.asset.contract))
-            .and_modify(|current: &mut RouteFile| {
-                if route.version > current.version {
-                    *current = route.clone();
-                }
-            })
-            .or_insert_with(|| route.clone());
-    }
     let mut tasks = Vec::with_capacity(latest.len());
-    for route in latest.into_values() {
+    for route in latest {
         let provider = route
             .chain
             .rpc_providers
@@ -226,10 +238,40 @@ pub fn configure_tasks(
             gas_limit_bps: route.chain.flush.gas_limit_bps,
             recovery_scan_blocks: route.chain.flush.recovery_scan_blocks,
         };
-        let flusher = Flusher::new(pool.clone(), chain, signer, alerts, policy);
-        tasks.push(FlusherTask::new(route, planner, flusher)?);
+        let flusher = Flusher::new(pool.clone(), chain, signer, alerts.clone(), policy);
+        tasks.push(FlusherTask::new(route, planner, flusher, alerts)?);
     }
     Ok(tasks)
+}
+
+/// Selects the newest route version per chain/token and requires one operator key per chain.
+fn latest_routes(routes: &[RouteFile]) -> Result<Vec<RouteFile>, String> {
+    let mut latest = BTreeMap::new();
+    for route in routes {
+        latest
+            .entry((route.chain.chain_id, route.asset.contract))
+            .and_modify(|current: &mut RouteFile| {
+                if route.version > current.version {
+                    *current = route.clone();
+                }
+            })
+            .or_insert_with(|| route.clone());
+    }
+    let mut versions = BTreeMap::new();
+    for route in latest.values() {
+        let chain_id = route.chain.chain_id;
+        let version = route.chain.operator_key_version;
+        if let Some((other, other_version)) = versions.insert(chain_id, (&route.route, version))
+            && other_version != version
+        {
+            return Err(format!(
+                "current routes `{other}` and `{}` on chain {chain_id} use operator key versions \
+                 {other_version} and {version}; they must share one operator_key_version",
+                route.route
+            ));
+        }
+    }
+    Ok(latest.into_values().collect())
 }
 
 struct CoinMetricsPriceSource(CoinMetricsUsdClient);
@@ -275,4 +317,49 @@ fn provider_environment_name(provider_id: &str) -> String {
         })
         .collect::<String>();
     format!("TOPUP_RPC_{normalized}_URL")
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Address;
+    use topup_core::route::RouteFile;
+
+    use super::latest_routes;
+
+    fn route(name: &str, version: u64, token: u8, operator_key_version: u32) -> RouteFile {
+        let mut route: RouteFile =
+            serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("fixture route parses");
+        route.route = name.to_owned();
+        route.version = version;
+        route.asset.contract = Address::from([token; 20]);
+        route.chain.operator_key_version = operator_key_version;
+        route
+    }
+
+    #[test]
+    fn current_routes_on_one_chain_must_share_the_operator_key_version() {
+        let rotated = latest_routes(&[
+            route("a", 1, 1, 1),
+            route("a", 2, 1, 2),
+            route("b", 1, 2, 2),
+        ])
+        .expect("historical versions may keep the previous operator key");
+        assert_eq!(
+            rotated
+                .iter()
+                .map(|route| (route.route.as_str(), route.version))
+                .collect::<Vec<_>>(),
+            [("a", 2), ("b", 1)]
+        );
+
+        let error = latest_routes(&[route("a", 2, 1, 2), route("b", 1, 2, 1)])
+            .expect_err("current routes on one chain must agree");
+        assert!(error.contains("operator_key_version"), "{error}");
+
+        let mut other_chain = route("b", 1, 2, 1);
+        other_chain.chain.chain_id = 10;
+        latest_routes(&[route("a", 2, 1, 2), other_chain])
+            .expect("different chains may rotate independently");
+    }
 }
