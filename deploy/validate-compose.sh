@@ -46,8 +46,11 @@ jq -e '
     .services["restore-check"].command == ["topup", "restore-check"]
     and (.services["restore-check"].environment | has("RESTORE_DATABASE_URL"))
     and (.services["restore-check"].volumes | any(.target == "/var/run/dstack.sock"))
+    and (.services["restore-check"].environment | has("TOPUP_RPC_PROVIDER_A_URL"))
+    and (.services["restore-check"].configs
+        | any(.target == "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"))
 ' "$rendered_tools" >/dev/null || {
-    echo "restore-check must use owner credentials and the dstack socket" >&2
+    echo "restore-check must use owner credentials, the dstack socket, and the attested route" >&2
     exit 1
 }
 

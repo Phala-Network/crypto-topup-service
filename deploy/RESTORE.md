@@ -189,23 +189,28 @@ steps using Phala Cloud credentials and the Finance Safe. Do not start `backup-k
 5. Require `pg_isready` and `SELECT NOT pg_is_in_recovery()` to return true. Keep the public service,
    heartbeat, and backup processes stopped.
 
-6. Run the dedicated signer-enabled service. It mounts the dstack socket and uses owner credentials;
-   every deposit in `cleared`, `credited`, or `swept`, plus deposits rejected by the product after
-   reaching `cleared`, is queried by signed product GET, including settlements already stored as
-   accepted or rejected:
+6. Run the dedicated signer-enabled service. **Run it only while `topup`, `heartbeat`, and `backup`
+   are stopped:** its post-restore reconciliation claims every deposit at or beyond `cleared` and
+   adopts product answers, which must not race the service's own settlement pumps. It mounts the
+   dstack socket, the attested route files, and uses owner credentials:
 
    ```sh
    docker compose run --rm --no-deps restore-check \
      topup restore-check \
      --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" \
-     --expected-lsn "$EXPECTED_LSN"
+     --expected-lsn "$EXPECTED_LSN" \
+     --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
    ```
 
    `status` must be `ok`. The check verifies migration checksums, WAL state and distance, externally
-   anchored RPO, table counts, product identity fields, authoritative pricing, settlement receipts,
-   deposit transitions, and outbox events. `processing`, not found, transport failure, protocol
-   failure, unsafe state reversal, or missing implementation is reported as `incomplete` and exits
-   nonzero. The product answer is authoritative; local payload equality is not required.
+   anchored RPO, and table counts, then runs the same library post-restore round as
+   `topup reconcile --once --post-restore` (architecture section 13): every deposit in `cleared`,
+   `credited`, or `swept`, plus deposits rejected by the product after reaching `cleared`, is queried
+   by signed product GET and the product answer is adopted. A product lookup that fails, is not
+   found, is still processing, fails identity verification, or would need an unsafe transition marks
+   the round `incomplete`, is listed in `failures`, and exits nonzero. The regular reconciliation
+   checks run in the same round; their findings and `failed_checks` (for example an unreachable
+   chain RPC) are reported as alerts but do not gate resume.
 
 7. Compare incident markers and expected row counts. Start `heartbeat` and `backup`, require a new
    WAL segment and its `key-versions/wal/<segment>.json` object, then start `topup` without ingress.
