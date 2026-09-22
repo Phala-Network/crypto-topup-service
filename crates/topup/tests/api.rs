@@ -74,6 +74,23 @@ async fn signature_verification_vectors() -> Result<()> {
 
         let response = app
             .clone()
+            .oneshot(signed_request_with_options(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": "with-idempotency"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    idempotency_key: Some("\"deposit:test\"".to_owned()),
+                    ..SignatureOptions::default()
+                },
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        let response = app
+            .clone()
             .oneshot(signed_request(
                 Method::POST,
                 &path,
