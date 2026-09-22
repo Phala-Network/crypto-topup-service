@@ -24,7 +24,8 @@ pub use addresses::{
 pub use audit::{AuditEntry, insert_audit};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, ClaimedDeposit, Deposit, NewDeposit, OutboxEvent,
-    TransitionUpdate, apply_transition, claim_deposit, get_deposit, insert_deposit,
+    TransitionUpdate, adopt_settlement_pricing, apply_transition, claim_deposit, get_deposit,
+    insert_deposit,
 };
 pub use flushes::{
     Flush, FlushStatus, FlushedEvent, NewFlush, confirm_flush, get_flush, get_flush_locked,
@@ -40,7 +41,11 @@ pub use products::{
     NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,
 };
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
-pub use settlements::{Settlement, SettlementIntent, upsert_intent};
+pub use settlements::{
+    Settlement, SettlementIntent, SettlementStatus, get_settlement, mark_accepted,
+    mark_payload_mismatch, mark_rejected, mark_sent, mark_sent_with_receipt, upsert_intent,
+    upsert_intent_in,
+};
 
 /// Embedded SQL migrations for the service database.
 pub static MIGRATOR: Migrator = sqlx::migrate!();

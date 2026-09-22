@@ -20,6 +20,7 @@ alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 alloy-tx-macros.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 dstack-sdk = { git = "https://github.com/Dstack-TEE/dstack", rev = "721df1b93fd93884224f2261c37dd86ca250432f", version = "=0.6.0" }
 ed25519-dalek.workspace = true
@@ -34,7 +35,10 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+anyhow = "=1.0.104"
+axum.workspace = true
 hex.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

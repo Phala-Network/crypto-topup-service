@@ -5118,7 +5118,10 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-tx-macros",
+ "anyhow",
  "async-trait",
+ "axum",
+ "base64 0.22.1",
  "chrono",
  "dstack-sdk",
  "ed25519-dalek",
@@ -5131,6 +5134,7 @@ dependencies = [
  "topup-core",
  "tracing",
  "url",
+ "uuid",
  "zeroize",
 ]
 

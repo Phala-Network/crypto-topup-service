@@ -18,6 +18,7 @@ use topup::pump::{
     AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
 };
 use topup::steps::screen::ScreenStep;
+use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
@@ -300,7 +301,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let flusher_tasks =
-        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, signer) {
+        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, signer.clone()) {
             Ok(tasks) => tasks,
             Err(error) => {
                 tracing::error!(%error, "invalid flusher runtime configuration");
@@ -325,9 +326,15 @@ async fn run(args: &RunArgs) -> ExitCode {
     let steps = Arc::new(
         NoopStepSet::builder()
             .with_confirmed(screen_step)
+            .with_cleared(SettleStep::new(
+                pool.clone(),
+                signer,
+                Duration::from_secs(30),
+            ))
             .with_credited(topup::flusher::SweepStep)
             .build(),
     );
+    tracing::warn!("placeholder step remains active in detected state");
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {

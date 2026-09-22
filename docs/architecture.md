@@ -159,7 +159,7 @@ deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_
               UNIQUE (chain_id, tx_hash, log_index)
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
 settlements   deposit_id PK, product_id, key, payload jsonb, status (intent|sent|accepted|rejected),
-              destination_tx_id, receipt jsonb, sent_at
+              destination_tx_id, receipt jsonb, resend_forbidden bool, sent_at
               UNIQUE (product_id, destination_tx_id) WHERE destination_tx_id IS NOT NULL
 flushes       id, chain_id, token, operator, nonce, tx_hash, block_number,
               status (planned|sent|confirmed|reverted), receipt jsonb
