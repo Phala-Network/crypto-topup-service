@@ -18,6 +18,7 @@ pub mod flusher;
 pub mod outbox;
 mod pause;
 pub mod pump;
+pub mod refunds;
 mod rpc_provider;
 pub mod scanner;
 pub mod steps;

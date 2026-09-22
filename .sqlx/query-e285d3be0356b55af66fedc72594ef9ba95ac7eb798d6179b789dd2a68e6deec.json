@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, product_id, external_id, paused_scopes FROM accounts WHERE id = $1",
+  "query": "\n        UPDATE accounts\n        SET paused_scopes = $2\n        WHERE id = $1\n        RETURNING id, product_id, external_id, status, paused_scopes\n        ",
   "describe": {
     "columns": [
       {
@@ -20,21 +20,28 @@
       },
       {
         "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
         "name": "paused_scopes",
         "type_info": "TextArray"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "TextArray"
       ]
     },
     "nullable": [
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "5d08de3fb113ed61c1ac3d3de0cdd5379c0c9b5283648e8ea933f32aa0358f09"
+  "hash": "e285d3be0356b55af66fedc72594ef9ba95ac7eb798d6179b789dd2a68e6deec"
 }
