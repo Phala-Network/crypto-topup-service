@@ -320,6 +320,10 @@ Product obligations, checked by the conformance suite:
    evidence and require `idempotency_key == "deposit:" + deposit_id`, so one chain event can
    never be credited under a second key.
 
+The suite (`docs/conformance.md`) also requires, in the product's test environment only, a
+ledger observation hook (`GET {settlement_url}/_conformance/ledger/{account_id}`) and a restart
+between requests, so single mutation and durability are observed rather than inferred.
+
 Phala Cloud: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code =
 'crypto-top-up'`, `provider_order_id = key`, partial unique index on `(team_id,
 provider_order_id)` for that flow), credit transaction tagged `funding_source =
