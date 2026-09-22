@@ -138,6 +138,8 @@ enum RouteCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // The default INFO ceiling is a redaction boundary: alloy's TRACE transport span records the
+    // raw provider URL, including credentials.
     if let Err(error) = tracing_subscriber::fmt()
         .json()
         .with_target(false)
