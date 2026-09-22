@@ -32,6 +32,7 @@ use topup_core::SETTLEMENT_KEY_DOMAIN;
 use topup_core::route::RouteFile;
 #[cfg(feature = "dev-signer")]
 use topup_core::{SecretKey32, Signer as _};
+use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -138,13 +139,7 @@ enum RouteCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // The default INFO ceiling is a redaction boundary: alloy's TRACE transport span records the
-    // raw provider URL, including credentials.
-    if let Err(error) = tracing_subscriber::fmt()
-        .json()
-        .with_target(false)
-        .try_init()
-    {
+    if let Err(error) = topup::observability::log_subscriber(std::io::stdout).try_init() {
         eprintln!("failed to initialize tracing: {error}");
         return ExitCode::FAILURE;
     }

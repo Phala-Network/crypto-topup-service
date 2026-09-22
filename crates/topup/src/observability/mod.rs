@@ -1,10 +1,12 @@
 //! Tracing conventions, secret redaction, and Prometheus metrics.
 
+mod logging;
 mod metrics;
 mod redaction;
 mod request;
 mod spans;
 
+pub use logging::log_subscriber;
 pub use metrics::{
     InitError, LockExposureCaps, clear_execution_deadline, collect_backup_metrics,
     collect_database_metrics, execution_deadline, heartbeat, init, metrics_response,

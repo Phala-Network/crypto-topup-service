@@ -77,8 +77,8 @@ mod tests {
             if !line.contains("[REDACTED URL]") || !line.contains("finalized head fetch") {
                 return Err(format!("adapter error was not redacted: {line}"));
             }
-            // The production subscriber is fixed at INFO. Alloy's TRACE transport span records
-            // the raw URL, so DEBUG/TRACE must never be enabled for provider clients.
+            // This capture enables every level; `log_subscriber` drops alloy's DEBUG transport
+            // span, which records the raw URL, so only production-visible levels are checked.
             let production_levels = [" INFO ", " WARN ", " ERROR "];
             if let Some(line) = lines.iter().find(|line| {
                 production_levels.iter().any(|level| line.contains(level))
