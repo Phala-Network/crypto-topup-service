@@ -19,6 +19,10 @@ This Foundry project implements the deterministic EIP-1167 deposit forwarders de
 3. Grant `OPERATOR_ROLE` to the service key and verify `implementation()`, the implementation's
    `treasury()` and `factory()`, and `addressOf()` against the route configuration.
 
+Deployment determinism depends on the compiler settings as well as constructor inputs. This
+project pins Solidity `0.8.24`, EVM target `cancun`, optimizer settings, and metadata settings in
+`foundry.toml`; deployments must use those checked-in settings so factory init code is identical.
+
 Changing the treasury requires a new factory and a new route version. There is no setter,
 owner, proxy upgrade, or per-clone mutable state.
 
@@ -27,7 +31,9 @@ owner, proxy upgrade, or per-clone mutable state.
 Each salt is deployed on demand and flushed in order. A failed forwarder reverts the entire
 batch with `ForwarderFlushFailed(salt, forwarder, reason)`. Atomic rollback avoids a partially
 successful batch with incomplete receipt processing; the operator can retry the batch with a
-fresh transaction as specified by the flusher recovery flow.
+fresh transaction as specified by the flusher recovery flow. If an address fails persistently,
+the C7 flusher bisects the batch to isolate that address and alerts operators without weakening
+the contract's atomic behavior.
 
 `Flushed.amount` is the ETH sent or the increase in the treasury's ERC-20 balance. Plain,
 verified ERC-20s are supported. Fee-on-transfer and rebasing tokens are unsupported; the test

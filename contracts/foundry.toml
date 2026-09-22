@@ -9,11 +9,12 @@ remappings = [
     "forge-std/=lib/forge-std/src/",
 ]
 solc_version = "0.8.24"
+evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 bytecode_hash = "none"
 cbor_metadata = false
-fs_permissions = [{ access = "write", path = "./test-vectors" }]
+fs_permissions = [{ access = "read-write", path = "./test-vectors" }]
 
 [fmt]
 ignore = ["lib/**"]
