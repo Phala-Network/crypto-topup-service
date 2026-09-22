@@ -7,9 +7,10 @@ root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-export CARGO_TARGET_DIR="$tmp/target"
-cargo build --locked -q -p topup --manifest-path "$root/Cargo.toml"
-topup="$CARGO_TARGET_DIR/debug/topup"
+# Reuse the workspace build cache so repeated runs only rebuild what changed.
+target_dir=${CARGO_TARGET_DIR:-$root/target}
+cargo build --locked -q -p topup --manifest-path "$root/Cargo.toml" --target-dir "$target_dir"
+topup="$target_dir/debug/topup"
 
 # Prints the subcommand names listed in the "Commands:" section of one help text.
 help_commands() {
