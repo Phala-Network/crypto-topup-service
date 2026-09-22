@@ -10,17 +10,22 @@ publish.workspace = true
 name = "topup"
 path = "src/main.rs"
 
+[features]
+dev-signer = ["topup-adapters/dev-signer"]
+
 [dependencies]
 alloy-primitives.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
+hex.workspace = true
+serde-saphyr.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+topup-adapters = { path = "../adapters" }
+topup-core = { path = "../core" }
 tokio.workspace = true
 tokio-util.workspace = true
-serde-saphyr.workspace = true
-topup-core = { path = "../core" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

@@ -4,7 +4,7 @@ all-features = true
 [advisories]
 yanked = "deny"
 ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "alloy-primitives 1.7.3 -> paste 1.0.15; compile-time only and no patched alloy release is available" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive Alloy dependency and the advisory has no safe upgrade" },
 ]
 
 [licenses]
@@ -14,6 +14,8 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "Unicode-3.0",
@@ -28,3 +30,4 @@ wildcards = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = ["https://github.com/Dstack-TEE/dstack"]
