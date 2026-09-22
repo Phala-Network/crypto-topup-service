@@ -32,13 +32,14 @@ key-versions/current.json
 key independently, so one recovery range may cross key rotations. Keep all listed `backup/vN`
 domains until the corresponding base backups and WAL have expired.
 
-WAL archive and recovery wrappers force `WALG_UPLOAD_CONCURRENCY=1`,
-`WALG_UPLOAD_DISK_CONCURRENCY=1`, `TOTAL_BG_UPLOADED_LIMIT=1`, and
-`WALG_DOWNLOAD_CONCURRENCY=1`. WAL-G otherwise uploads adjacent ready segments in background
-workers and prefetches adjacent segments during recovery. Serial operation guarantees that the WAL
-object and its version metadata are written by the same wrapper invocation and that every restored
-segment is fetched with the key selected from its own metadata. Do not relax these values without
-replacing the per-object metadata protocol.
+`walg-wal-push` sets `WALG_UPLOAD_CONCURRENCY=1` and `TOTAL_BG_UPLOADED_LIMIT=1` for `wal-push`.
+WAL-G otherwise starts a background uploader that archives adjacent `.ready` segments with
+`WALG_UPLOAD_CONCURRENCY - 1` workers, up to `TOTAL_BG_UPLOADED_LIMIT - 1` files, and those
+objects would have no key-version metadata. With either value at `1` the background uploader is
+disabled, so every WAL object is uploaded and annotated by its own `archive_command` call.
+`walg-restore-command` likewise sets `WALG_DOWNLOAD_CONCURRENCY=1` so `wal-fetch` never prefetches
+an adjacent segment with the wrong key. Base backups keep WAL-G's default concurrency. Do not relax
+the wrapper values without replacing the per-object metadata protocol.
 
 `wal-g backup-list` does not decrypt backup data. Never use it as a key test. A key is verified only
 by fetching the selected base backup into an empty volume and checking the extracted `PG_VERSION`.

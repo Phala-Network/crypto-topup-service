@@ -13,9 +13,8 @@ cat >"$tmp/bin/wal-g" <<'EOF'
 #!/bin/sh
 set -eu
 printf 'KEY=%s ARGS=%s\n' "${WALG_LIBSODIUM_KEY_PATH:-}" "$*" >>"$FAKE_LOG"
-printf 'CONCURRENCY upload=%s disk=%s download=%s background=%s\n' \
+printf 'CONCURRENCY upload=%s download=%s background=%s\n' \
     "${WALG_UPLOAD_CONCURRENCY:-}" \
-    "${WALG_UPLOAD_DISK_CONCURRENCY:-}" \
     "${WALG_DOWNLOAD_CONCURRENCY:-}" \
     "${TOTAL_BG_UPLOADED_LIMIT:-}" >>"$FAKE_LOG"
 case "$1:$2" in
@@ -70,13 +69,13 @@ jq -e '.key_version == 1 and .kind == "wal"' \
     "$tmp/store/key-versions/wal/$wal.json" >/dev/null
 grep -F "KEY=$tmp/keys/backup-v1.key ARGS=wal-push $tmp/$wal" \
     "$tmp/wal-g.log" >/dev/null
-grep -F 'CONCURRENCY upload=1 disk=1 download= background=1' \
+grep -F 'CONCURRENCY upload=1 download= background=1' \
     "$tmp/wal-g.log" >/dev/null
 
 FAKE_WAL_FETCH_STATUS=0 walg-restore-command "$wal" "$tmp/wal"
 grep -F "KEY=$tmp/keys/backup-v1.key ARGS=wal-fetch $wal $tmp/wal" \
     "$tmp/wal-g.log" >/dev/null
-grep -F 'CONCURRENCY upload= disk= download=1 background=' \
+grep -F 'CONCURRENCY upload= download=1 background=' \
     "$tmp/wal-g.log" >/dev/null
 
 if FAKE_WAL_FETCH_STATUS=74 walg-restore-command "$wal" "$tmp/missing"; then
