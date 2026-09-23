@@ -33,7 +33,9 @@ effective fallback route; the migration refuses to invent one.
 Migration `20260922000017_reconciliation` adds the append-only `reconciliation_findings` table,
 the `reconciliation_blocks` freeze table, and the reconciler's incremental scan cursors.
 `topup_app` can read and insert findings but cannot update, delete, or truncate them. It can insert
-and update blocks and cursors but cannot delete them, so only the database owner can lift a block.
+and update cursors but cannot delete them. Migration `20260922000019_reconciliation_blocks_insert_only`
+narrows blocks to read and insert: a repeated block is ignored, and an update could rewrite a block's
+scope or chain, so only the database owner can change or lift a block.
 
 A `chain` block written by the address-derivation check freezes that chain at runtime: pumps leave
 its deposits waiting, its scanner pauses, the flusher plans nothing, and address issuance and

@@ -104,7 +104,8 @@ struct ReconcileArgs {
     #[arg(long, required = true)]
     once: bool,
     /// Run the restore gate and fail while any deposit is incomplete. Run it only while the
-    /// service, heartbeat, and backup processes are stopped.
+    /// service, heartbeat, and backup processes are stopped; it refuses to start while a service
+    /// or reconcile process holds deposit leases.
     #[arg(long, requires = "once")]
     post_restore: bool,
     /// Validated route file; repeat for every enabled route version.
@@ -604,6 +605,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let _lease_owner = match topup::reconciler::hold_lease_owner_lock(&pool).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::error!(%error, "refusing to start deposit processing");
+            return ExitCode::FAILURE;
+        }
+    };
     let signer = match SignerHandle::spawn(
         DstackSigner::new(),
         NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
@@ -1057,7 +1065,16 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
     let result = if args.post_restore {
         topup::reconciler::post_restore_once(&reconciler).await
     } else {
-        reconciler.run_once().await
+        match topup::reconciler::hold_lease_owner_lock(&pool).await {
+            Ok(lease_owner) => {
+                let result = reconciler.run_once().await;
+                if let Err(error) = lease_owner.release().await {
+                    tracing::warn!(%error, "failed to release the lease-owner lock");
+                }
+                result
+            }
+            Err(error) => Err(error),
+        }
     };
     pool.close().await;
     match result {

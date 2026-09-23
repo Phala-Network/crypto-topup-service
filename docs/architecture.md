@@ -403,13 +403,13 @@ checklist:
 
 | Check | Action |
 |---|---|
-| Finalized transfer to our address with no deposit row | insert `detected` |
+| Finalized transfer to our address with no deposit row, in the range the scanner has committed | insert `detected` |
 | Settlement `sent` with no answer, any age | `GET` by key, adopt the answer |
 | `credit_minor` ≠ recomputation from stored inputs | alert, block flush |
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
-| Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow ≠ Σ `Flushed` events | alert |
+| Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
-| After a restore: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11) |
+| After a restore, with the service stopped: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11); refused while a service process is running |
 
 ## 14. Configuration and deployment
 
