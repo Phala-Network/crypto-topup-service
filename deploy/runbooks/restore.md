@@ -51,7 +51,8 @@ With PostgreSQL restored and `topup`, `heartbeat`, and `backup` still stopped, r
 check. It verifies migrations, WAL position, externally anchored RPO, and table counts, then runs
 the architecture section 13 restore gate from C8: it `GET`s the product for every deposit at or
 beyond `cleared`, adopts the product's answer, and exits non-zero while any settlement is
-incomplete:
+incomplete. The gate refuses to start with `lease_owner_lock_held` while `topup run` or
+`topup reconcile --once` is connected to the database; stop that process, then retry:
 
 ```sh
 docker compose -f deploy/docker-compose.staging.yml run --rm --no-deps restore-check topup restore-check --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" --expected-lsn "$EXPECTED_LSN" --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
