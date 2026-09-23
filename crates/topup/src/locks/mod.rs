@@ -106,20 +106,13 @@ pub struct ExposureAvailability {
 }
 
 impl RateLock {
-    /// Returns the visible status, treating an overdue open row as expired.
-    #[must_use]
-    pub fn visible_status(&self, now: DateTime<Utc>) -> RateLockStatus {
-        if self.status == RateLockStatus::Open && self.expires_at <= now {
-            RateLockStatus::Expired
-        } else {
-            self.status
-        }
-    }
-
     /// Returns whole seconds remaining in the payment window.
+    ///
+    /// A lock stays `open` after its window closes until the finalized chain passes `expires_at`
+    /// (§9), so a payment mined inside the window is never reported as expired.
     #[must_use]
     pub fn remaining_seconds(&self, now: DateTime<Utc>) -> u64 {
-        if self.visible_status(now) != RateLockStatus::Open {
+        if self.status != RateLockStatus::Open {
             return 0;
         }
         u64::try_from(self.expires_at.signed_duration_since(now).num_seconds()).unwrap_or_default()
@@ -196,6 +189,8 @@ pub enum RateLockError {
     NotFound,
     /// The lock can no longer be cancelled.
     NotOpen,
+    /// The lock is still open but its payment window has closed, so it cannot be cancelled.
+    WindowClosed,
     /// The lock address already received a deposit, so it cannot be cancelled.
     PendingPayment,
     /// A replay of an existing reference stated a different amount.
@@ -218,6 +213,7 @@ impl Display for RateLockError {
             Self::ExposureCap(scope) => write!(formatter, "{scope} exposure cap exceeded"),
             Self::NotFound => formatter.write_str("rate lock not found"),
             Self::NotOpen => formatter.write_str("rate lock is not open"),
+            Self::WindowClosed => formatter.write_str("payment window has closed"),
             Self::PendingPayment => {
                 formatter.write_str("rate lock address already received a payment")
             }
@@ -469,8 +465,13 @@ pub async fn cancel(
         transaction.commit().await?;
         return Ok(row);
     }
-    if row.status != RateLockStatus::Open || row.expires_at <= Utc::now() {
+    if row.status != RateLockStatus::Open {
         return Err(RateLockError::NotOpen);
+    }
+    // The lock stays `open` until chain-time expiry, but an in-window payment may still be
+    // finalizing, so cancellation ends with the payment window.
+    if row.expires_at <= Utc::now() {
+        return Err(RateLockError::WindowClosed);
     }
     // `FOR UPDATE` conflicts with the `KEY SHARE` lock a scanner deposit insert takes on its
     // address row, so an uncommitted deposit either commits first and is seen below, or waits
@@ -564,6 +565,11 @@ pub(crate) async fn consume(
 
 /// Expires one bounded batch and returns the number of rows closed.
 ///
+/// A lock expires by chain time, not wall-clock time: only once its chain's scanner has committed
+/// through a finalized block whose time is past `expires_at`, so every payment mined inside the
+/// window is already recorded, and only while no such payment still awaits the confirm step that
+/// may consume the lock. A stalled scanner therefore holds locks and their exposure open.
+///
 /// Exposure releases are aggregated per scope key and applied in sorted key order, the same order
 /// creation, cancellation, and consumption lock scope rows in, so a batch spanning several
 /// accounts cannot deadlock with them.
@@ -579,9 +585,17 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
         JOIN accounts AS account ON account.id = address.account_id
+        JOIN cursors AS cursor ON cursor.chain_id = address.chain_id
         WHERE rate_lock.status = 'open'
           AND rate_lock.consumed_by IS NULL
-          AND rate_lock.expires_at <= now()
+          AND rate_lock.expires_at < cursor.scanned_block_time
+          AND NOT EXISTS (
+              SELECT 1
+              FROM deposits AS deposit
+              WHERE deposit.address_id = rate_lock.address_id
+                AND deposit.state = 'detected'
+                AND deposit.block_time <= rate_lock.expires_at
+          )
         ORDER BY rate_lock.expires_at, rate_lock.address_id
         FOR UPDATE OF rate_lock SKIP LOCKED
         LIMIT $1

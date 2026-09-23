@@ -23,7 +23,7 @@ use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
-use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
+use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
@@ -528,7 +528,7 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
 }
 
 #[tokio::test]
-async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()> {
+async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 23).await?;
@@ -569,7 +569,15 @@ async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()
                     .await?;
             }
 
-            ensure!(topup::locks::expire_once(&context.app_pool).await? == 1);
+            // The scanner has committed through a finalized block past the window, and with it
+            // the in-window payment, which still awaits the confirm step.
+            sqlx::query(
+                "INSERT INTO cursors (chain_id, scanned_block, scanned_block_time) VALUES (1, 0, $1)",
+            )
+            .bind(Utc::now())
+            .execute(&context.app_pool)
+            .await?;
+            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
             let deposit = db::get_deposit(&context.app_pool, deposit_id)
                 .await?
                 .context("expiry-race deposit")?;
@@ -602,6 +610,13 @@ async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()
                     .fetch_all(&context.app_pool)
                     .await?;
             ensure!(exposure == ["0", "0", "0"]);
+            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
+            let expired_events: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
+            )
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(expired_events == 0);
             Ok(())
         })
     })
@@ -1154,11 +1169,14 @@ struct ConfirmChain {
 }
 
 impl ChainReader for ConfirmChain {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         if let Some(barrier) = &self.barrier {
             barrier.wait().await;
         }
-        Ok(u64::MAX)
+        Ok(FinalizedHead {
+            number: u64::MAX,
+            time: DateTime::UNIX_EPOCH,
+        })
     }
 
     async fn transfer_logs_to(

@@ -34,10 +34,14 @@ WITH caps(scope, cap_minor) AS (
 ), reserved AS (
   SELECT k.scope_key, sum(rl.credit_minor) AS reserved_minor,
          sum(rl.credit_minor) FILTER (WHERE rl.expires_at > now()) AS unexpired_minor,
-         count(*) FILTER (WHERE rl.expires_at <= now()) AS overdue_locks
+         count(*) FILTER (WHERE rl.expires_at < c.scanned_block_time AND NOT EXISTS (
+           SELECT 1 FROM deposits d
+           WHERE d.address_id = rl.address_id AND d.state = 'detected'
+             AND d.block_time <= rl.expires_at)) AS overdue_locks
   FROM rate_locks rl
   JOIN addresses ad ON ad.id = rl.address_id
   JOIN accounts a ON a.id = ad.account_id
+  LEFT JOIN cursors c ON c.chain_id = ad.chain_id
   CROSS JOIN LATERAL (VALUES ('account:' || a.id), ('product:' || a.product_id), ('global'))
     AS k(scope_key)
   WHERE rl.status = 'open' AND rl.consumed_by IS NULL AND rl.exposure_reserved
@@ -60,8 +64,10 @@ SQL
 ```
 
 `ledger_open_minor` is what C10 enforces. `open_reserved_minor` recomputes it from open, unconsumed,
-reserved locks and must be equal. `unexpired_minor` excludes locks already past `expires_at`; a
-non-zero `overdue_locks` count older than a few expiry scans means exposure is not being released.
+reserved locks and must be equal. `unexpired_minor` excludes locks whose payment window has closed;
+those keep their reservation until the finalized chain passes `expires_at`, about 15 minutes later
+(architecture §9). `overdue_locks` counts locks the expiry worker could already expire; a non-zero
+count older than a few expiry scans means exposure is not being released.
 
 If new quotes must stop for the whole route while the cause is investigated, pause `quotes`:
 

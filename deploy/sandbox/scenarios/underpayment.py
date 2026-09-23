@@ -2,7 +2,7 @@
 
 Expect: the deposit is credited at spot for what arrived, below the quoted credit, and the lock
 is not consumed. Once the address has received funds the lock can no longer be cancelled:
-`409 pending_payment` while the lock is still open, or `409` because it already expired (on
+`409 pending_payment` while the payment window is open, or `409` once the window has closed (on
 Sepolia finality outlasts the lock window).
 """
 
