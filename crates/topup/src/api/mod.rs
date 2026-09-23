@@ -24,7 +24,7 @@ use utoipa::openapi::{Info, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-pub use attestation::{AttestationError, AttestationFuture, Attestor, UnavailableAttestor};
+pub use attestation::{AttestationError, AttestationFuture, Attestor};
 pub use auth::VerificationKey;
 pub use topup_adapters::http_signature::PublicOrigin;
 
@@ -173,7 +173,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use tower::ServiceExt as _;
 
-    use super::{AppState, UnavailableAttestor, VerificationKey};
+    use super::{AppState, VerificationKey};
     use crate::db::Product;
     use topup_core::route::RouteFile;
     use uuid::Uuid;
@@ -199,7 +199,7 @@ mod tests {
             .expect("admin key is valid"),
             public_origin: super::PublicOrigin::parse("http://api.test")
                 .expect("test origin is valid"),
-            attestor: Arc::new(UnavailableAttestor),
+            attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
         };
         let product = Product {
@@ -237,7 +237,7 @@ mod tests {
             .expect("admin key is valid"),
             public_origin: super::PublicOrigin::parse("http://api.test")
                 .expect("test origin is valid"),
-            attestor: Arc::new(UnavailableAttestor),
+            attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
         };
         let response = super::router(state)

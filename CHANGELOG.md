@@ -5,8 +5,11 @@ webhook receivers must ignore unknown fields.
 
 ## Unreleased
 
-### API
+### HTTP API
 
+- Removed the unreachable `501` response from `/v1/attestation` and the `work_package` error field
+  from `openapi.json`; both belonged only to the pre-C11 placeholder, and production never
+  returned them (#90).
 - Rate locks carry an optional `payment` object, chosen by the lock consumption rule: the
   deposit that consumed the lock, otherwise the first payment that would consume it, otherwise
   the first payment. `status` is `"seen"` while it is above `finalized` (with `confirmations`

@@ -49,7 +49,7 @@ DELETE FROM reconciliation_blocks WHERE block_key = 'chain:<chain_id>';
 DELETE FROM reconciliation_blocks WHERE block_key = 'address:<address_id>';
 ```
 
-Migration `20260922000020_pending_transfers` adds the display-only `pending_transfers` table
+Migration `20260922000022_pending_transfers` adds the display-only `pending_transfers` table
 (`SELECT`, `INSERT`, `UPDATE`, `DELETE` for `topup_app`) written by the head scan and cleared by the
 finalized scanner's cursor advance, and `addresses.requested_at`, the last time the product issued
 or fetched a persistent address. Existing addresses get the migration time. Nothing that affects

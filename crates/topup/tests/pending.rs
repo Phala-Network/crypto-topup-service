@@ -19,11 +19,12 @@ use axum::http::{Method, StatusCode};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
-use topup::api::{AppState, PublicOrigin, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{NewAccount, NewProduct};
 use topup::locks::QuoteProvider;
 use topup::locks::pricing::ValidatedQuote;
 use topup::scanner::{configure_routes, head_scan_once, scan_once};
+use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::chain::evm::EvmChain;
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
@@ -91,7 +92,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         )
         .map_err(anyhow::Error::msg)?,
         public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
-        attestor: Arc::new(UnavailableAttestor),
+        attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(FixedQuote),
     })
     .0;

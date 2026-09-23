@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use alloy_primitives::Address;
@@ -25,9 +24,9 @@ use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::retry::backoff;
 use topup_core::route::{ChainConfig, RouteFile};
 use tracing::Instrument as _;
-use uuid::Uuid;
 
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
+use crate::jitter::{JitterSource as _, OsJitter};
 use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// Maximum inclusive block count scanned in one window.
@@ -38,8 +37,6 @@ pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
 pub enum ScannerError {
     /// A route file or environment value is invalid.
     Configuration(String),
-    /// A route file could not be read.
-    Io(std::io::Error),
     /// A chain read failed.
     Chain(ChainError),
     /// A database operation failed.
@@ -63,7 +60,6 @@ impl Display for ScannerError {
             Self::Configuration(message) => {
                 write!(formatter, "invalid scanner configuration: {message}")
             }
-            Self::Io(error) => write!(formatter, "failed to read scanner configuration: {error}"),
             Self::Chain(error) => Display::fmt(error, formatter),
             Self::Database(error) => Display::fmt(error, formatter),
             Self::FinalizedBehindCursor { cursor, finalized } => write!(
@@ -81,7 +77,6 @@ impl Display for ScannerError {
 impl Error for ScannerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
             Self::Chain(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::Configuration(_)
@@ -89,12 +84,6 @@ impl Error for ScannerError {
             | Self::UnknownRecipient(_)
             | Self::Task(_) => None,
         }
-    }
-}
-
-impl From<std::io::Error> for ScannerError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
     }
 }
 
@@ -128,7 +117,6 @@ impl ScannerError {
     fn category(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "configuration",
-            Self::Io(_) => "configuration_io",
             Self::Chain(ChainError::FinalizedHeadRegressed { .. }) => "finalized_regression",
             Self::Chain(ChainError::ProviderUnhealthy) => "provider_unhealthy",
             Self::Chain(_) => "chain_read",
@@ -186,33 +174,6 @@ impl ScanStats {
             .ok_or_else(|| ScannerError::Configuration("backfill count overflow".to_owned()))?;
         Ok(())
     }
-}
-
-/// Loads and validates route files, grouped by chain identifier.
-pub fn load_route_files(paths: &[PathBuf]) -> Result<Vec<ChainRoutes>, ScannerError> {
-    if paths.is_empty() {
-        return Err(ScannerError::Configuration(
-            "at least one route file is required".to_owned(),
-        ));
-    }
-    let mut routes = Vec::with_capacity(paths.len());
-    for path in paths {
-        let yaml = std::fs::read_to_string(path)?;
-        let route: RouteFile = serde_saphyr::from_str(&yaml).map_err(|error| {
-            ScannerError::Configuration(format!(
-                "route file `{}` is invalid YAML: {error}",
-                path.display()
-            ))
-        })?;
-        route.validate().map_err(|error| {
-            ScannerError::Configuration(format!(
-                "route file `{}` failed validation: {error}",
-                path.display()
-            ))
-        })?;
-        routes.push(route);
-    }
-    configure_routes(&routes)
 }
 
 /// Selects the highest supplied route version for each chain and asset.
@@ -481,7 +442,7 @@ async fn run_chain(
                 }
             }
         },
-        retry_jitter,
+        || OsJitter.next_u64(),
     );
     let head_scan = head::run_head_loop(
         &pool,
@@ -585,11 +546,6 @@ where
             () = sleep(delay) => {}
         }
     }
-}
-
-fn retry_jitter() -> u64 {
-    let value = Uuid::new_v4().as_u128() & u128::from(u64::MAX);
-    u64::try_from(value).unwrap_or_default()
 }
 
 fn record_committed(

@@ -12,8 +12,8 @@ mod tests {
     use tracing_test::traced_test;
 
     use crate::reconciler::{
-        CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationMetrics,
-        RpcReconciliationChain, SettlementLookup,
+        CheckName, Reconciler, ReconciliationChain, ReconciliationError, RpcReconciliationChain,
+        SettlementLookup,
     };
 
     use super::Redacted;
@@ -60,7 +60,6 @@ mod tests {
             vec![route],
             BTreeMap::from([(chain_id, Arc::new(chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(NoSettlement),
-            Arc::new(ReconciliationMetrics::default()),
         )
         .expect("reconciler configures");
 

@@ -13,7 +13,8 @@ use croner::Cron;
 use sqlx::PgPool;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until};
 use tokio_util::sync::CancellationToken;
-use topup_adapters::pricing::native::CoinMetricsUsdClient;
+use topup_adapters::pricing::PriceSource as _;
+use topup_adapters::pricing::coinmetrics::CoinMetrics;
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::money::ScaledPrice;
 use topup_core::route::RouteFile;
@@ -285,8 +286,7 @@ pub fn configure_tasks(
                 .map_err(|_| format!("failed to configure flusher provider {url}"))?
                 .with_provider(provider_label(provider, 0)),
         );
-        let prices: Arc<dyn PriceSource> =
-            Arc::new(CoinMetricsPriceSource(CoinMetricsUsdClient::new(timeout)?));
+        let prices: Arc<dyn PriceSource> = Arc::new(CoinMetricsPriceSource::for_route(&route)?);
         let alerts: Arc<dyn AlertSink> = Arc::new(TracingAlertSink);
         let planner = Planner::new(
             pool.clone(),
@@ -338,12 +338,42 @@ fn latest_routes(routes: &[RouteFile]) -> Result<Vec<RouteFile>, String> {
     Ok(latest.into_values().collect())
 }
 
-struct CoinMetricsPriceSource(CoinMetricsUsdClient);
+/// Coin Metrics `ReferenceRateUSD` sources for the route token and the chain's native gas asset.
+struct CoinMetricsPriceSource(BTreeMap<String, CoinMetrics>);
+
+impl CoinMetricsPriceSource {
+    fn for_route(route: &RouteFile) -> Result<Self, String> {
+        [
+            &route.pricing.primary.asset,
+            &route.chain.flush.native_price_asset,
+        ]
+        .into_iter()
+        .map(|asset| {
+            CoinMetrics::new(
+                asset.clone(),
+                "ReferenceRateUSD".to_owned(),
+                "1m".to_owned(),
+            )
+            .map(|source| (asset.clone(), source))
+            .map_err(|error| format!("failed to configure Coin Metrics for `{asset}`: {error}"))
+        })
+        .collect::<Result<_, _>>()
+        .map(Self)
+    }
+}
 
 #[async_trait]
 impl PriceSource for CoinMetricsPriceSource {
     async fn price_usd(&self, asset: &str) -> Result<ScaledPrice, PriceError> {
-        self.0.price_usd(asset).await.map_err(PriceError)
+        let source = self
+            .0
+            .get(asset)
+            .ok_or_else(|| PriceError(format!("no Coin Metrics source for `{asset}`")))?;
+        source
+            .observe()
+            .await
+            .map(|observation| observation.price)
+            .map_err(|error| PriceError(error.to_string()))
     }
 }
 
