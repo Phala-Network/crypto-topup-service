@@ -381,22 +381,6 @@ pub async fn upsert_flush_exclusion(
     Ok(())
 }
 
-/// Returns whether a chain and token already has a planned or sent flush.
-pub async fn has_open_flush(
-    pool: &PgPool,
-    chain_id: u64,
-    token: Address,
-) -> Result<bool, sqlx::Error> {
-    let chain_id = to_i64(chain_id, "flushes.chain_id")?;
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM flushes WHERE chain_id = $1 AND token = $2 AND status IN ('planned', 'sent'))",
-    )
-    .bind(chain_id)
-    .bind(address_hex(token))
-    .fetch_one(pool)
-    .await
-}
-
 /// Returns whether a chain and token already has a planned or sent flush in this transaction.
 pub async fn has_open_flush_locked(
     transaction: &mut Transaction<'_, Postgres>,
@@ -529,24 +513,6 @@ pub async fn mark_flush_sent(
     require_one(result.rows_affected(), "planned flush was not available")
 }
 
-/// Replaces the durable raw transaction and hash history while preserving the nonce.
-pub async fn store_flush_replacement(
-    transaction: &mut Transaction<'_, Postgres>,
-    id: Uuid,
-    tx_hash: B256,
-    receipt: &Value,
-) -> Result<(), sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE flushes SET tx_hash = $2, receipt = $3 WHERE id = $1 AND status = 'sent'",
-    )
-    .bind(id)
-    .bind(b256_hex(tx_hash))
-    .bind(receipt)
-    .execute(&mut **transaction)
-    .await?;
-    require_one(result.rows_affected(), "sent flush was not available")
-}
-
 /// Stores a replacement only if the caller still owns the observed current hash.
 pub async fn store_flush_replacement_cas(
     transaction: &mut Transaction<'_, Postgres>,
@@ -602,21 +568,6 @@ pub async fn list_flushes(pool: &PgPool, status: FlushStatus) -> Result<Vec<Flus
     rows.into_iter().map(parse_flush_row).collect()
 }
 
-/// Fetches one flush by identifier.
-pub async fn get_flush(pool: &PgPool, id: Uuid) -> Result<Option<Flush>, sqlx::Error> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, chain_id, token, operator, nonce::text AS nonce, tx_hash, block_number,
-               status, COALESCE(receipt, '{}'::jsonb) AS receipt
-        FROM flushes WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(parse_flush_row).transpose()
-}
-
 /// Locks and fetches one flush by identifier inside a caller-owned transaction.
 pub async fn get_flush_locked(
     transaction: &mut Transaction<'_, Postgres>,
@@ -634,30 +585,6 @@ pub async fn get_flush_locked(
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(parse_flush_row).transpose()
-}
-
-/// Marks a flush reverted and stores its finalized receipt evidence.
-pub async fn mark_flush_reverted(
-    pool: &PgPool,
-    id: Uuid,
-    block_number: u64,
-    receipt: &Value,
-) -> Result<(), sqlx::Error> {
-    let block_number = to_i64(block_number, "flushes.block_number")?;
-    let result = sqlx::query(
-        "UPDATE flushes SET status = 'reverted', block_number = $2, receipt = $3 WHERE id = $1 AND status = 'sent'",
-    )
-    .bind(id)
-    .bind(block_number)
-    .bind(receipt)
-    .execute(pool)
-    .await?;
-    if result.rows_affected() > 1 {
-        return Err(sqlx::Error::Protocol(
-            "flush update affected multiple rows".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 /// Marks a sent flush reverted inside a caller-owned transaction.

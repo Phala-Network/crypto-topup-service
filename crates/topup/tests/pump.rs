@@ -22,9 +22,9 @@ use topup::db::{
     self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
     SettlementIntent, StoredValuation, TransitionEffects,
 };
+use topup::jitter::JitterSource;
 use topup::pump::{
-    AgeAlertConfig, AgeAlerter, JitterSource, NoopStepSet, Pump, PumpConfig, PumpMetrics,
-    RunOnceResult, Step, StepResult, StepSet,
+    AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
@@ -1134,7 +1134,7 @@ fn loop_gauge(rendered: &str, kind: &str, loop_instance: &str) -> Result<f64> {
 }
 
 #[tokio::test]
-async fn age_alert_uses_route_threshold_and_increments_the_metric() -> Result<()> {
+async fn age_alert_uses_route_threshold_and_reminds_on_state_change() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 6).await?;
@@ -1150,23 +1150,16 @@ async fn age_alert_uses_route_threshold_and_increments_the_metric() -> Result<()
             route.alerts.stuck_after_s.detected = 1;
             route.alerts.stuck_after_s.confirmed = 1;
             let config = AgeAlertConfig::from_routes(&[route])?;
-            let metrics = Arc::new(PumpMetrics::default());
-            let alerter = AgeAlerter::new(
-                context.app_pool.clone(),
-                config,
-                Arc::clone(&metrics),
-                StdDuration::from_secs(60),
-            );
+            let alerter =
+                AgeAlerter::new(context.app_pool.clone(), config, StdDuration::from_secs(60));
             ensure!(alerter.scan_once().await? == 1);
             ensure!(alerter.scan_once().await? == 0);
-            ensure!(metrics.stuck_deposit_alerts() == 1);
 
             sqlx::query("UPDATE deposits SET state = 'confirmed' WHERE id = $1")
                 .bind(id)
                 .execute(&context.app_pool)
                 .await?;
             ensure!(alerter.scan_once().await? == 1);
-            ensure!(metrics.stuck_deposit_alerts() == 2);
             Ok(())
         })
     })
@@ -1381,7 +1374,10 @@ fn confirm_steps(
         Some(price("fx", 100_000_000)),
         product_lookup,
     );
-    NoopStepSet::build().with_detected(Box::new(confirm))
+    static_steps(StepOutcome::Wait {
+        reason: WaitReason::Paused,
+    })
+    .with_detected(Box::new(confirm))
 }
 
 fn confirmation_route() -> RouteFile {

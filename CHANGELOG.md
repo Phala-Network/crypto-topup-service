@@ -5,6 +5,12 @@ webhook receivers must ignore unknown fields.
 
 ## Unreleased
 
+### HTTP API
+
+- Removed the unreachable `501` response from `/v1/attestation` and the `work_package` error field
+  from `openapi.json`; both belonged only to the pre-C11 placeholder, and production never
+  returned them (#90).
+
 ### Webhooks
 
 - `deposit.credited` and `deposit.rejected` payloads now include `chain_id`, `state`

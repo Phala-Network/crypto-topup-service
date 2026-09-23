@@ -1,4 +1,4 @@
-//! Attestation boundary used until C11 is available on `main`.
+//! Attestation boundary between the API and the dstack attestor.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,8 +15,6 @@ pub type AttestationFuture<'a> =
 /// Failure to collect current attestation evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttestationError {
-    /// C11 has not yet supplied a runtime attestor.
-    NotConfigured,
     /// The configured attestation provider is temporarily unavailable.
     Unavailable,
 }
@@ -25,16 +23,6 @@ pub enum AttestationError {
 pub trait Attestor: Send + Sync {
     /// Collects attestation evidence for the decoded nonce bytes.
     fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a>;
-}
-
-/// Placeholder used until the C11 adapter is merged and wired into `topup run`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailableAttestor;
-
-impl Attestor for UnavailableAttestor {
-    fn attest<'a>(&'a self, _nonce: &'a [u8]) -> AttestationFuture<'a> {
-        Box::pin(async { Err(AttestationError::NotConfigured) })
-    }
 }
 
 impl Attestor for DstackAttestor {

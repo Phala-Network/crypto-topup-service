@@ -1165,8 +1165,9 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         exposure_minor: None,
-        exposure_minor_reason: "TODO(C10): rate locks do not yet persist destination exposure"
-            .to_owned(),
+        exposure_minor_reason:
+            "destination exposure is tracked per account, product, and global scope, not per route"
+                .to_owned(),
         pnl_minor: None,
         pnl_minor_reason: "route PnL requires treasury valuation inputs".to_owned(),
         rejected_holds_atomic: "0".to_owned(),

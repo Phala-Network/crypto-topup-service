@@ -2,9 +2,7 @@
 
 These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
 operations), C8 (reconciliation), C10 (rate locks), C7b (flush pause), and A2 (deterministic
-deployment) are on `main`.
-PR #56 (alerts) was still open when these commands were re-exercised on 2026-09-22. D3 backup and
-restore (#58) is covered by `deploy/RESTORE.md` and `deploy/local/restore-drill.sh`.
+deployment) are on `main`. D3 backup and restore (#58) is covered by `deploy/RESTORE.md` and `deploy/local/restore-drill.sh`.
 
 ## Required environment
 
@@ -48,10 +46,9 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 
 ## Alert and symptom index
 
-Alert names are from `deploy/alerts/prometheus-rules.yml` in PR #56, which is not yet on `main`.
-Until it merges, route the metric or symptom to the same runbook.
+Alert names are from `deploy/alerts/prometheus-rules.yml`.
 
-| Alert (PR #56) or symptom | Runbook |
+| Alert or symptom | Runbook |
 |---|---|
 | `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
@@ -77,18 +74,13 @@ Until it merges, route the metric or symptom to the same runbook.
 | User paid to their deposit address on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
 
-## Known gaps on main
-
-- Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
-  expiry worker, so that worker has no heartbeat alert yet.
-
 ## Exercise status
 
 Exercises ran against a task-scoped PostgreSQL 16 container and local Anvil, with real `topup` CLI
 invocations or the repository's PostgreSQL/Anvil integration tests. A box is checked only when the
 runbook's service-side procedure ran end to end with seeded, non-empty data. Human-only Safe,
 Compliance, and publication steps are never exercised locally, and alert firing is not evidence
-for any runbook until #56 merges.
+for any runbook.
 
 | Runbook | Local status | G2 exercised once |
 |---|---|---|
@@ -109,7 +101,7 @@ for any runbook until #56 merges.
 | Lock expiry worker failure | Partial: running service, injected ledger drift, owner repair while running; the in-service `topup reconcile --once` repair that replaced it is covered by the PostgreSQL integration tests only | [ ] |
 | Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
-| Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |
+| Backup age | Partial: D3 archiving and local restore drills available | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |
 | Wrong-network deposit | Not exercised; every recovery step is human-only Finance and deployer work | [ ] |
 | Route or chain retirement | Not exercised; the upgrade itself is human-only Safe work | [ ] |

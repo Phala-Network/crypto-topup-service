@@ -7,7 +7,6 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use alloy_primitives::{Address as EvmAddress, U256};
@@ -664,48 +663,18 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     Ok(count)
 }
 
-/// In-process counters for the expiry loop heartbeat and work performed.
-#[derive(Debug, Default)]
-pub struct ExpiryMetrics {
-    heartbeats: AtomicU64,
-    expired: AtomicU64,
-    failures: AtomicU64,
-}
-
-impl ExpiryMetrics {
-    /// Returns completed expiry scan attempts.
-    #[must_use]
-    pub fn heartbeats(&self) -> u64 {
-        self.heartbeats.load(Ordering::Relaxed)
-    }
-
-    /// Returns locks expired by this process.
-    #[must_use]
-    pub fn expired(&self) -> u64 {
-        self.expired.load(Ordering::Relaxed)
-    }
-
-    /// Returns failed expiry scans in this process.
-    #[must_use]
-    pub fn failures(&self) -> u64 {
-        self.failures.load(Ordering::Relaxed)
-    }
-}
-
 /// Periodically closes overdue locks and emits expiry events.
 pub struct ExpiryWorker {
     pool: PgPool,
-    metrics: Arc<ExpiryMetrics>,
     scan_interval: Duration,
 }
 
 impl ExpiryWorker {
     /// Creates an expiry worker.
     #[must_use]
-    pub const fn new(pool: PgPool, metrics: Arc<ExpiryMetrics>, scan_interval: Duration) -> Self {
+    pub const fn new(pool: PgPool, scan_interval: Duration) -> Self {
         Self {
             pool,
-            metrics,
             scan_interval,
         }
     }
@@ -721,15 +690,12 @@ impl ExpiryWorker {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticker.tick() => {
-                    self.metrics.heartbeats.fetch_add(1, Ordering::Relaxed);
                     crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
                     match expire_once(&self.pool).await {
-                        Ok(expired) => {
-                            self.metrics.expired.fetch_add(expired, Ordering::Relaxed);
+                        Ok(_) => {
                             crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
                         }
                         Err(error) => {
-                            self.metrics.failures.fetch_add(1, Ordering::Relaxed);
                             crate::observability::record_lock_expiry_failure();
                             tracing::error!(%error, "rate-lock expiry scan failed");
                         }

@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -131,65 +129,11 @@ impl ReconciliationReport {
     }
 }
 
-/// In-process counters mirrored to the §16 reconciliation metric and loop progress gauge.
-#[derive(Debug, Default)]
-pub struct ReconciliationMetrics {
-    missing_deposit: AtomicU64,
-    sent_settlement: AtomicU64,
-    credit_recomputation: AtomicU64,
-    missing_flush_link: AtomicU64,
-    custody_balance: AtomicU64,
-    address_derivation: AtomicU64,
-    post_restore_settlement: AtomicU64,
-    lock_exposure: AtomicU64,
-    last_heartbeat_unix: AtomicI64,
-}
+/// Prometheus metric name reserved by the architecture.
+pub(crate) const MISMATCH_METRIC: &str = "topup_reconciliation_mismatches_total";
 
-impl ReconciliationMetrics {
-    /// Prometheus metric name reserved by the architecture.
-    pub const MISMATCH_METRIC: &'static str = "topup_reconciliation_mismatches_total";
-
-    pub(crate) fn record_mismatch(&self, check: CheckName) {
-        let counter = match check {
-            CheckName::MissingDeposit => &self.missing_deposit,
-            CheckName::SentSettlement => &self.sent_settlement,
-            CheckName::CreditRecomputation => &self.credit_recomputation,
-            CheckName::MissingFlushLink => &self.missing_flush_link,
-            CheckName::CustodyBalance => &self.custody_balance,
-            CheckName::AddressDerivation => &self.address_derivation,
-            CheckName::PostRestoreSettlement => &self.post_restore_settlement,
-            CheckName::LockExposure => &self.lock_exposure,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-        metrics::counter!(Self::MISMATCH_METRIC, "check" => check.code(), "producer_enabled" => "true")
-            .increment(1);
-    }
-
-    pub(crate) fn heartbeat(&self) {
-        self.last_heartbeat_unix
-            .store(Utc::now().timestamp(), Ordering::Relaxed);
-        crate::observability::progress(super::LOOP_NAME, super::LOOP_INSTANCE);
-    }
-
-    /// Returns the mismatch count for one check in this process.
-    #[must_use]
-    pub fn mismatch_count(&self, check: CheckName) -> u64 {
-        let counter = match check {
-            CheckName::MissingDeposit => &self.missing_deposit,
-            CheckName::SentSettlement => &self.sent_settlement,
-            CheckName::CreditRecomputation => &self.credit_recomputation,
-            CheckName::MissingFlushLink => &self.missing_flush_link,
-            CheckName::CustodyBalance => &self.custody_balance,
-            CheckName::AddressDerivation => &self.address_derivation,
-            CheckName::PostRestoreSettlement => &self.post_restore_settlement,
-            CheckName::LockExposure => &self.lock_exposure,
-        };
-        counter.load(Ordering::Relaxed)
-    }
-
-    /// Returns the end of the last round in which every check completed, as a Unix timestamp.
-    #[must_use]
-    pub fn last_heartbeat_unix(&self) -> i64 {
-        self.last_heartbeat_unix.load(Ordering::Relaxed)
-    }
+/// Counts one first-seen reconciliation mismatch in the §16 metric.
+pub(crate) fn record_mismatch(check: CheckName) {
+    metrics::counter!(MISMATCH_METRIC, "check" => check.code(), "producer_enabled" => "true")
+        .increment(1);
 }

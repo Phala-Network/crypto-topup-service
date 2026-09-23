@@ -27,8 +27,9 @@ use uuid::Uuid;
 use crate::db::{
     self, ApplyTransitionError, ApplyTransitionResult, Deposit, OutboxEvent, TransitionUpdate,
 };
+use crate::jitter::{JitterSource, OsJitter};
 
-pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter, PumpMetrics};
+pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter};
 
 const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 
@@ -134,37 +135,6 @@ impl StepSet {
     }
 }
 
-/// Placeholder step registry used until the state-specific work packages land.
-pub struct NoopStepSet;
-
-impl NoopStepSet {
-    /// Builds a registry whose steps leave every deposit waiting.
-    #[must_use]
-    pub fn build() -> StepSet {
-        StepSet::new(
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-        )
-    }
-}
-
-/// Placeholder step that leaves a deposit waiting without external effects.
-pub struct NoopStep;
-
-#[async_trait]
-impl Step for NoopStep {
-    async fn run(&self, _deposit: &Deposit) -> StepResult {
-        StepResult::new(
-            StepOutcome::Wait {
-                reason: WaitReason::Paused,
-            },
-            json!({"outcome": "wait", "reason": "noop_step_set"}),
-        )
-    }
-}
-
 /// Runtime timing policy for one pump worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PumpConfig {
@@ -228,21 +198,6 @@ impl Display for PumpConfigError {
 
 impl Error for PumpConfigError {}
 
-/// Entropy source used by full-jitter retry scheduling.
-pub trait JitterSource: Send + Sync {
-    /// Returns one value spanning the complete `u64` range.
-    fn next_u64(&self) -> u64;
-}
-
-/// UUID-v4-backed jitter source used by production pumps.
-pub struct UuidJitter;
-
-impl JitterSource for UuidJitter {
-    fn next_u64(&self) -> u64 {
-        Uuid::new_v4().as_u64_pair().0
-    }
-}
-
 /// Result of one claim-and-process attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunOnceResult {
@@ -275,13 +230,13 @@ pub struct Pump {
 }
 
 impl Pump {
-    /// Creates a pump with UUID-v4 retry jitter.
+    /// Creates a pump with operating-system retry jitter.
     pub fn new(
         pool: PgPool,
         steps: Arc<StepSet>,
         config: PumpConfig,
     ) -> Result<Self, PumpConfigError> {
-        Self::with_jitter(pool, steps, config, Arc::new(UuidJitter))
+        Self::with_jitter(pool, steps, config, Arc::new(OsJitter))
     }
 
     /// Creates a pump with an explicit jitter source.

@@ -13,13 +13,12 @@ use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
-use topup::api::{AppState, PublicOrigin, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{NewAccount, NewProduct};
 use topup::locks::pricing::ValidatedQuote;
 use topup::locks::{self, QuoteProvider, RateLockError, RequestedAmount};
-use topup::reconciler::{
-    CheckName, Reconciler, ReconciliationError, ReconciliationMetrics, SettlementLookup,
-};
+use topup::reconciler::{CheckName, Reconciler, ReconciliationError, SettlementLookup};
+use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::pricing::Observation;
 use topup_adapters::settlement::http::SettlementAnswer;
 use topup_core::deposit::{DepositState, RejectReason};
@@ -83,7 +82,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             )
             .map_err(anyhow::Error::msg)?,
             public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
-            attestor: Arc::new(UnavailableAttestor),
+            attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(FixedQuote),
         })
         .0;
@@ -1063,34 +1062,36 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
             .await?;
         finalize_chain_past_now(&database.app_pool).await?;
 
-        let metrics = Arc::new(locks::ExpiryMetrics::default());
         let cancellation = tokio_util::sync::CancellationToken::new();
         let worker = locks::ExpiryWorker::new(
             database.app_pool.clone(),
-            Arc::clone(&metrics),
             std::time::Duration::from_millis(10),
         );
         let worker_cancellation = cancellation.clone();
         let running = tokio::spawn(async move { worker.run(worker_cancellation).await });
+        let failures = || {
+            handle
+                .render()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "topup_lock_expiry_failures_total{producer_enabled=\"true\"} ",
+                    )
+                    .and_then(|value| value.parse::<u64>().ok())
+                })
+                .unwrap_or(0)
+        };
         for _ in 0..400 {
-            if metrics.failures() >= 2 {
+            if failures() >= 2 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         ensure!(
-            metrics.failures() >= 2,
+            failures() >= 2,
             "expiry never failed on the drifted counter"
         );
-        ensure!(metrics.expired() == 0);
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "open");
-        let rendered = handle.render();
-        ensure!(
-            rendered.lines().any(|line| line
-                .starts_with("topup_lock_expiry_failures_total{producer_enabled=\"true\"}")
-                && !line.ends_with(" 0")),
-            "{rendered}"
-        );
 
         let repairs = locks::repair_exposure(&database.app_pool).await?;
         ensure!(
@@ -1105,14 +1106,14 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
             "{repairs:?}"
         );
         for _ in 0..400 {
-            if metrics.expired() == 1 {
+            if lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "expired" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         cancellation.cancel();
         running.await?;
-        ensure!(metrics.expired() == 1);
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "expired");
         ensure!(exposure(&database.app_pool, "global").await? == 0);
         ensure!(handle.render().contains(
             "topup_lock_exposure_drift_total{scope=\"global\",producer_enabled=\"true\"} 1"
@@ -1281,13 +1282,11 @@ async fn every_lock_exposure_repair_leaves_a_finding_and_an_audit_row() -> Resul
         create_lock(&database, &quotes, &product, &account, &route, "r-1").await?;
         let product_key = format!("product:{}", product.id);
 
-        let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Reconciler::with_dependencies(
             database.app_pool.clone(),
             vec![route],
             std::collections::BTreeMap::new(),
             Arc::new(NoSettlement),
-            Arc::clone(&metrics),
         )?;
         // The same drift twice: every repair must leave its own finding and audit row.
         for _ in 0..2 {

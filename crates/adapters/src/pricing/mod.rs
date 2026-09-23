@@ -5,7 +5,6 @@ mod decimal;
 pub mod binance;
 pub mod coinmetrics;
 pub mod kraken;
-pub mod native;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
