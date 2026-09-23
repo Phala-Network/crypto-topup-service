@@ -409,7 +409,7 @@ checklist:
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
-| After a restore, with the service stopped: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11); refused while a service process is running |
+| After a restore, with the service stopped: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11); refused while a service process is connected to this database; stopping the old instance remains the control |
 
 ## 14. Configuration and deployment
 

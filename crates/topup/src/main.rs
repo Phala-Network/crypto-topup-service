@@ -605,12 +605,9 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _lease_owner = match topup::reconciler::hold_lease_owner_lock(&pool).await {
+    let lease_owner = match wait_for_lease_owner_lock(&pool).await {
         Ok(lock) => lock,
-        Err(error) => {
-            tracing::error!(%error, "refusing to start deposit processing");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let signer = match SignerHandle::spawn(
         DstackSigner::new(),
@@ -855,7 +852,10 @@ async fn run(args: &RunArgs) -> ExitCode {
         scanners = scanner_count,
         "topup service started"
     );
+    let mut lease_owner_task =
+        tokio::spawn(lease_owner.watch(LEASE_OWNER_PING, cancellation.clone()));
     let mut clean_shutdown = true;
+    let mut lease_owner_finished = None;
     let mut api_finished = false;
     let mut metrics_server_finished = false;
     let mut scanner_finished = false;
@@ -910,6 +910,10 @@ async fn run(args: &RunArgs) -> ExitCode {
                 Err(error) => tracing::error!(%error, "refund confirmation task failed"),
             }
             clean_shutdown = false;
+        }
+        // The watch only finishes early when the lock connection fails; it is reported below.
+        result = &mut lease_owner_task => {
+            lease_owner_finished = Some(result);
         }
     }
     tracing::info!("shutdown requested; finishing in-flight service work");
@@ -993,6 +997,30 @@ async fn run(args: &RunArgs) -> ExitCode {
     for task in flusher_handles {
         if let Err(error) = task.await {
             tracing::error!(%error, "flusher task failed during shutdown");
+            clean_shutdown = false;
+        }
+    }
+    // Release the lease-owner lock only after every lease-holding task has stopped.
+    let lease_owner = match lease_owner_finished {
+        Some(result) => result,
+        None => lease_owner_task.await,
+    };
+    match lease_owner {
+        Ok(Ok(lock)) => {
+            if let Err(error) = lock.release().await {
+                tracing::error!(%error, "failed to release the lease-owner lock");
+                clean_shutdown = false;
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                %error,
+                "lease-owner lock connection failed; deposit processing was stopped"
+            );
+            clean_shutdown = false;
+        }
+        Err(error) => {
+            tracing::error!(%error, "lease-owner lock task failed");
             clean_shutdown = false;
         }
     }
@@ -1101,6 +1129,49 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             tracing::error!(%error, "reconciliation failed");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Interval between liveness pings on the lease-owner lock connection.
+const LEASE_OWNER_PING: Duration = Duration::from_secs(5);
+
+/// Takes the lease-owner lock, retrying with backoff while the post-restore gate holds it.
+///
+/// Waiting instead of exiting keeps a restart policy from crash-looping during a restore.
+async fn wait_for_lease_owner_lock(
+    pool: &sqlx::PgPool,
+) -> Result<topup::reconciler::LeaseOwnerLock, ExitCode> {
+    let mut delay = Duration::from_secs(1);
+    let shutdown = wait_for_shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        match topup::reconciler::hold_lease_owner_lock(pool).await {
+            Ok(lock) => return Ok(lock),
+            Err(topup::reconciler::ReconciliationError::LeaseOwnerLock(reason)) => {
+                tracing::warn!(
+                    reason,
+                    retry_in_s = delay.as_secs(),
+                    "waiting for the lease-owner lock before processing deposits"
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to take the lease-owner lock");
+                return Err(ExitCode::FAILURE);
+            }
+        }
+        tokio::select! {
+            signal = &mut shutdown => {
+                return Err(match signal {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to listen for shutdown signal");
+                        ExitCode::FAILURE
+                    }
+                });
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+        delay = delay.saturating_mul(2).min(Duration::from_secs(60));
     }
 }
 

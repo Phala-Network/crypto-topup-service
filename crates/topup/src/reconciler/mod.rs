@@ -521,10 +521,20 @@ impl Reconciler {
         let chain = Arc::clone(self.chain(chain_id)?);
         let finalized = self.finalized(heads, chain_id).await?;
         let Some(scanned) = db::get_cursor(&self.pool, chain_id).await? else {
+            tracing::warn!(
+                chain_id,
+                reason = "no_cursor",
+                "missing-deposit check skipped: the scanner has not committed a range"
+            );
             return Ok(());
         };
         let addresses = db::list_scan_addresses(&self.pool, chain_id).await?;
         let Some(through) = scanner_covered_through(finalized.min(scanned), &addresses) else {
+            tracing::warn!(
+                chain_id,
+                reason = "pending_backfill",
+                "missing-deposit check skipped: an address awaits its scanner backfill"
+            );
             return Ok(());
         };
         let mut cursor = store::deposit_cursor(&self.pool, chain_id).await?;

@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use serde_json::{Value, json};
 use sqlx::{Connection as _, PgConnection, PgPool, Row};
+use tokio::time::{MissedTickBehavior, interval};
+use tokio_util::sync::CancellationToken;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
@@ -270,6 +273,32 @@ pub struct LeaseOwnerLock {
 }
 
 impl LeaseOwnerLock {
+    /// Pings the lock connection every `every` until `shutdown` is cancelled.
+    ///
+    /// The lock lives only as long as its connection. When a ping fails the lock may already be
+    /// gone, so this cancels `shutdown` to stop the processes it guards and returns the error.
+    /// On cancellation it returns the still-held lock, so the caller can release it once those
+    /// processes have stopped.
+    pub async fn watch(
+        mut self,
+        every: Duration,
+        shutdown: CancellationToken,
+    ) -> Result<Self, ReconciliationError> {
+        let mut ticks = interval(every);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return Ok(self),
+                _ = ticks.tick() => {
+                    if let Err(error) = self.connection.ping().await {
+                        shutdown.cancel();
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+    }
+
     /// Releases the lock and closes its connection.
     pub async fn release(mut self) -> Result<(), ReconciliationError> {
         let unlock = if self.exclusive {

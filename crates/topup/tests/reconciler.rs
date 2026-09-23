@@ -589,6 +589,41 @@ async fn post_restore_refuses_to_preempt_a_running_lease_owner() -> Result<()> {
 }
 
 #[tokio::test]
+async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
+    with_database(|pool| async move {
+        let shutdown = CancellationToken::new();
+        let lock = hold_lease_owner_lock(&pool).await?;
+        let watch = tokio::spawn(lock.watch(StdDuration::from_millis(50), shutdown.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
+        let pump = Pump::new(
+            pool.clone(),
+            Arc::new(StepSet::new(step(), step(), step(), step())),
+            PumpConfig::default(),
+        )?;
+        let pump_shutdown = shutdown.child_token();
+        let pump_task = tokio::spawn(async move { pump.run(pump_shutdown).await });
+
+        let terminated: bool = sqlx::query_scalar(
+            r#"
+            SELECT pg_terminate_backend(pid) FROM pg_locks
+            WHERE locktype = 'advisory' AND mode = 'ShareLock'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            "#,
+        )
+        .fetch_one(&pool)
+        .await?;
+        ensure!(terminated);
+        let watched = tokio::time::timeout(StdDuration::from_secs(10), watch).await??;
+        ensure!(watched.is_err());
+        ensure!(shutdown.is_cancelled());
+        tokio::time::timeout(StdDuration::from_secs(10), pump_task).await??;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn post_restore_stays_incomplete_without_verified_product_truth() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
