@@ -897,6 +897,72 @@
         ]
       }
     },
+    "/v1/products/{p}/accounts/{ext}/pending-deposits": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "summary": "Transfers to the account's persistent addresses seen above the finalized head. These are not\ndeposits and have not been credited; once final they leave this list and appear under\n`deposits`, and a reorg can remove them.",
+        "operationId": "list_pending_deposits",
+        "parameters": [
+          {
+            "name": "p",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ext",
+            "in": "path",
+            "description": "Product-owned account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingDepositsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/products/{p}/accounts/{ext}/rate-locks": {
       "post": {
         "tags": [
@@ -1976,6 +2042,112 @@
           }
         }
       },
+      "PendingDepositResponse": {
+        "type": "object",
+        "description": "A transfer to a persistent address seen above the finalized head. It is not a deposit, has not\nbeen credited, and may disappear in a reorg; once final it appears under `deposits`.",
+        "required": [
+          "deposit_id",
+          "chain_id",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "block_time",
+          "confirmations",
+          "address",
+          "asset_contract",
+          "from_address",
+          "amount_atomic",
+          "supported",
+          "first_seen_at",
+          "estimated_final_at"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Receiving forwarder address."
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "Atomic token amount encoded as a decimal string."
+          },
+          "asset_contract": {
+            "type": "string",
+            "description": "Canonical token contract address."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block that contains the transfer.",
+            "minimum": 0
+          },
+          "block_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Block time."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Blocks on top of and including that block at the last head scan.",
+            "minimum": 0
+          },
+          "deposit_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Identifier the deposit will have once final."
+          },
+          "estimated_final_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Estimated finality time: block time plus 15 minutes."
+          },
+          "first_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "First time the service saw the transfer."
+          },
+          "from_address": {
+            "type": "string",
+            "description": "Canonical transfer sender address."
+          },
+          "log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfer log index.",
+            "minimum": 0
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "Whether a configured route accepts this token on this chain. Unsupported tokens are\nrecorded but not credited once final."
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Canonical transaction hash."
+          }
+        }
+      },
+      "PendingDepositsResponse": {
+        "type": "object",
+        "description": "Pending transfers to an account's persistent addresses.",
+        "required": [
+          "pending_deposits"
+        ],
+        "properties": {
+          "pending_deposits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingDepositResponse"
+            },
+            "description": "Pending transfers in block order."
+          }
+        }
+      },
       "PersistentSaltInputs": {
         "type": "object",
         "description": "Inputs needed to recompute a persistent CREATE2 address.",
@@ -1998,6 +2170,86 @@
             "format": "int64",
             "description": "Persistent address version.",
             "minimum": 0
+          }
+        }
+      },
+      "RateLockPayment": {
+        "type": "object",
+        "description": "The first payment observed at a rate-lock address.",
+        "required": [
+          "status",
+          "deposit_id",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "amount_atomic",
+          "asset_contract",
+          "supported",
+          "amount_within_tolerance",
+          "in_time"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": "string",
+            "description": "Atomic token amount encoded as a decimal string."
+          },
+          "amount_within_tolerance": {
+            "type": "boolean",
+            "description": "Whether the amount is the lock's asset within the lock tolerance."
+          },
+          "asset_contract": {
+            "type": "string",
+            "description": "Canonical token contract address."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block that contains the transfer.",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Blocks on top of and including that block at the last head scan; `seen` only.",
+            "minimum": 0
+          },
+          "deposit_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Identifier the deposit has, or will have once final."
+          },
+          "estimated_final_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Estimated finality time: block time plus 15 minutes; `seen` only."
+          },
+          "in_time": {
+            "type": "boolean",
+            "description": "Whether the block time is at or before `expires_at`."
+          },
+          "log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfer log index.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "`seen`: in a block above `finalized`, provisional and may still disappear in a reorg.\n`finalized`: recorded as a deposit; follow it by `deposit_id`. New values may be added."
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "Whether the token is the lock's route asset."
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Canonical transaction hash."
           }
         }
       },
@@ -2036,6 +2288,17 @@
             "type": "string",
             "format": "date-time",
             "description": "Lock expiry time."
+          },
+          "payment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RateLockPayment",
+                "description": "The first payment to the lock address, once one is seen on chain. Display only: while\n`status` is `seen` the payment is not final and nothing has been credited."
+              }
+            ]
           },
           "price_scaled": {
             "type": "string",

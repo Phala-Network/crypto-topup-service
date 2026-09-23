@@ -15,6 +15,7 @@ are added through route configuration and adapters.
 ```text
 product registers an account; user asks for a quote (or a persistent address)
   → service locks the price and computes a CREATE2 forwarder address (no key, nothing deployed)
+  → a display-only head scan shows the payment as "seen, N confirmations" within a block
   → scanner reads finalized blocks and records the transfer
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
@@ -55,7 +56,9 @@ permission to create roles and schema objects; the command never falls back to t
 uppercasing and replacing non-alphanumeric characters with underscores; the first provider is
 provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
 route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to
-15 seconds.
+15 seconds. A display-only head scan on provider A reads `[finalized + 1, latest]` every 12 seconds
+(or the poll interval, if shorter) for the pending view and wakes the finalized scan as soon as
+`finalized` advances; it never creates or changes a deposit.
 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
 address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as

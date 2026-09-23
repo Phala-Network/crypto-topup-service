@@ -407,7 +407,9 @@ fn lock_applies(amount: AtomicAmount, route: &RouteValuation<'_>, lock: &LockTer
         && amount_within_tolerance(amount, lock.amount, route.rate_lock.lock_tolerance_bps)
 }
 
-fn amount_within_tolerance(actual: AtomicAmount, locked: AtomicAmount, tolerance: Bps) -> bool {
+/// Whether `actual` is within `tolerance` of `locked`: `|actual − locked| × 10 000 ≤ locked × bps`.
+#[must_use]
+pub fn amount_within_tolerance(actual: AtomicAmount, locked: AtomicAmount, tolerance: Bps) -> bool {
     let difference = if actual >= locked {
         actual.checked_sub(locked)
     } else {

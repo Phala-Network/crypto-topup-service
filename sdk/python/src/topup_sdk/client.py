@@ -10,6 +10,10 @@ time:
 - `create_rate_lock`: idempotent on `lock_ref`; a replay with a different amount is a `409`.
 - `cancel_rate_lock`: cancelling a cancelled lock returns the same result.
 - `request_refund`: idempotent on `(deposit, to_address, amount)`.
+
+`list_pending_deposits` and `RateLockResponse.payment` report transfers seen before finality.
+They are display only: nothing is credited until the deposit is final and appears under
+`list_deposits`, and a reorg can remove a pending transfer.
 """
 
 from __future__ import annotations
@@ -31,7 +35,12 @@ from topup_client.api.addresses import (
     rotate_deposit_address,
 )
 from topup_client.api.attestation import get_attestation
-from topup_client.api.deposits import get_deposit, list_deposits, lookup_deposits
+from topup_client.api.deposits import (
+    get_deposit,
+    list_deposits,
+    list_pending_deposits,
+    lookup_deposits,
+)
 from topup_client.api.rate_locks import cancel_rate_lock, create_rate_lock, get_rate_lock
 from topup_client.api.refunds import request_refund
 from topup_client.models import (
@@ -44,6 +53,8 @@ from topup_client.models import (
     DepositsResponse,
     ErrorResponse,
     LimitsResponse,
+    PendingDepositResponse,
+    PendingDepositsResponse,
     RateLockResponse,
     RefundRequest,
     RefundResponse,
@@ -216,6 +227,19 @@ class TopupClient:
             if not isinstance(page.next_cursor, uuid.UUID):
                 return
             cursor = page.next_cursor
+
+    def list_pending_deposits(self, external_id: str) -> list[PendingDepositResponse]:
+        """Returns transfers to the account's persistent addresses seen before finality.
+
+        These are not deposits and have not been credited; show them as "received, waiting for
+        finality" and credit only from `list_deposits` or `deposit.credited`.
+        """
+        return self._call(
+            lambda: list_pending_deposits.sync_detailed(
+                self.product_slug, external_id, client=self._client
+            ),
+            PendingDepositsResponse,
+        ).pending_deposits
 
     def get_deposit(self, deposit_id: uuid.UUID) -> DepositResponse:
         """Returns one deposit owned by this product."""

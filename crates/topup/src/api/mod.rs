@@ -5,6 +5,7 @@ mod auth;
 mod error;
 mod handlers;
 pub mod models;
+mod pending;
 mod rate_locks;
 mod repository;
 
@@ -84,6 +85,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             rate_locks::cancel_rate_lock
         ))
         .routes(routes!(handlers::list_deposits))
+        .routes(routes!(pending::list_pending_deposits))
         .routes(routes!(handlers::get_deposit))
         .routes(routes!(handlers::lookup_deposits))
         .routes(routes!(handlers::get_limits))

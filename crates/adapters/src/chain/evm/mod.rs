@@ -199,6 +199,14 @@ impl EvmChain {
         self
     }
 
+    /// Returns the provider's current `latest` block number. Used only by the display-only head
+    /// scan; nothing that affects money reads above `finalized`.
+    pub async fn latest_head(&self) -> Result<u64, ChainError> {
+        self.provider.get_block_number().await.map_err(|error| {
+            ChainError::Transport(self.endpoint.rpc_error("latest head fetch", &error))
+        })
+    }
+
     async fn block_time(&self, block_number: u64) -> Result<DateTime<Utc>, ChainError> {
         let block = self
             .provider

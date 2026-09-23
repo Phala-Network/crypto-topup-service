@@ -7,6 +7,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from topup_client.models import RateLockPayment
 from topup_sdk import ApiError, RequestSigner, TopupClient, load_public_key, verify_request
 from topup_sdk.signing import target_uri
 
@@ -149,3 +150,74 @@ def test_list_deposits_follows_cursors() -> None:
     with _client(service) as client:
         deposits = list(client.list_deposits("ws 1", state="credited"))
     assert [deposit.log_index for deposit in deposits] == [1, 2]
+
+
+def test_list_pending_deposits_returns_provisional_transfers() -> None:
+    pending = {
+        "deposit_id": str(uuid.UUID(int=7)),
+        "chain_id": 11155111,
+        "tx_hash": "0x" + "ab" * 32,
+        "log_index": 3,
+        "block_number": 10,
+        "block_time": "2026-09-22T00:00:00Z",
+        "confirmations": 2,
+        "address": "0x" + "11" * 20,
+        "asset_contract": "0x" + "22" * 20,
+        "from_address": "0x" + "33" * 20,
+        "amount_atomic": "5",
+        "supported": False,
+        "first_seen_at": "2026-09-22T00:00:05Z",
+        "estimated_final_at": "2026-09-22T00:15:00Z",
+    }
+
+    def respond(request: httpx.Request, _: int) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.raw_path == b"/v1/products/acme/accounts/ws%201/pending-deposits"
+        return httpx.Response(200, json={"pending_deposits": [pending]})
+
+    with _client(FakeService(respond)) as client:
+        transfers = client.list_pending_deposits("ws 1")
+    assert [(item.confirmations, item.supported) for item in transfers] == [(2, False)]
+    assert transfers[0].estimated_final_at.minute == 15
+
+
+def test_rate_lock_payment_is_optional_and_parsed() -> None:
+    lock = {
+        "address": "0x" + "11" * 20,
+        "amount_atomic": "100",
+        "price_scaled": "10000000",
+        "credit_minor": "10",
+        "expires_at": "2026-09-22T00:30:00Z",
+        "status": "open",
+        "remaining_seconds": 60,
+        "eip681_uri": "ethereum:0x" + "22" * 20 + "@1/transfer",
+        "salt_inputs": {"product_slug": "acme", "external_id": "ws 1", "lock_ref": "c-1"},
+    }
+    payment = {
+        "status": "seen",
+        "deposit_id": str(uuid.UUID(int=8)),
+        "tx_hash": "0x" + "ab" * 32,
+        "log_index": 0,
+        "block_number": 10,
+        "confirmations": 1,
+        "amount_atomic": "100",
+        "asset_contract": "0x" + "22" * 20,
+        "supported": True,
+        "amount_within_tolerance": True,
+        "in_time": True,
+        "estimated_final_at": "2026-09-22T00:15:00Z",
+    }
+
+    def respond(_: httpx.Request, count: int) -> httpx.Response:
+        body = lock if count == 1 else {**lock, "payment": payment}
+        return httpx.Response(200, json=body)
+
+    with _client(FakeService(respond)) as client:
+        unpaid = client.get_rate_lock("ws 1", "c-1")
+        seen = client.get_rate_lock("ws 1", "c-1")
+    assert not isinstance(unpaid.payment, RateLockPayment)
+    assert isinstance(seen.payment, RateLockPayment)
+    assert seen.payment.status == "seen"
+    assert seen.payment.confirmations == 1
+    assert seen.payment.amount_within_tolerance
+    assert seen.payment.in_time

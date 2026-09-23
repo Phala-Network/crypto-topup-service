@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `TopupClient.list_pending_deposits` and the generated `list_pending_deposits` operation with
+  `PendingDepositResponse` and `PendingDepositsResponse`: transfers to persistent addresses seen
+  before finality. Display only; they are not credited.
+- `RateLockResponse.payment` (`RateLockPayment`): the lock's first payment, `seen` before finality
+  or `finalized` once it is a deposit.
+
 ### Changed
 
 - The service now rebuilds `@target-uri` from its configured public origin

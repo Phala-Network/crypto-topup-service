@@ -5,8 +5,9 @@ services:
   anvil:
     image: ghcr.io/foundry-rs/foundry:v1.8.3@sha256:2e4287278639262de76db72477301d5d3212fa1b1cce710d7d148750a46ce9e7
     entrypoint: ["anvil"]
-    # One-second blocks with `finalized` two blocks behind the head keep scenarios fast while
-    # still exercising the service's finality rule.
+    # One-second blocks with `finalized` eight blocks behind the head keep scenarios fast while
+    # still exercising the service's finality rule and leaving the head scan (every scanner poll,
+    # one second here) time to show a payment as `seen` before it is final.
     command:
       - --host
       - 0.0.0.0
@@ -17,7 +18,7 @@ services:
       - --block-time
       - "1"
       - --slots-in-an-epoch
-      - "1"
+      - "4"
     ports:
       - "127.0.0.1:${SANDBOX_ANVIL_PORT:-18545}:8545"
     healthcheck:

@@ -129,7 +129,8 @@ pub async fn list_scan_addresses(
     records.into_iter().map(TryInto::try_into).collect()
 }
 
-/// Commits deposits, backfill markers, and an optional cursor advance atomically.
+/// Commits deposits, backfill markers, and an optional cursor advance atomically. A cursor
+/// advance also deletes the display-only pending rows it now covers.
 ///
 /// A deposit born `rejected` (no route for its asset) never passes through a pump step, so its
 /// `deposit.rejected` event is written here, in the same transaction and only on first insert.
@@ -182,6 +183,7 @@ pub async fn commit_scan(
         .bind(scanned_block)
         .execute(&mut *transaction)
         .await?;
+        super::pending::delete_finalized_in(&mut transaction, chain_id, scanned_block).await?;
     }
 
     transaction.commit().await?;

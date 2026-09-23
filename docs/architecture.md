@@ -56,7 +56,9 @@ product owns (identity, balance, debt, entitlements, billing policy, welcome pro
 
 1. **Addresses have no keys and no service state.** Every address is a CREATE2 forwarder that
    can only pay the treasury, and every salt derives from identifiers the product holds.
-2. **Deposits are born final.** The scanner reads only blocks at or below `finalized`.
+2. **Deposits are born final.** The scanner reads only blocks at or below `finalized`. A
+   display-only head scan may show a transfer above `finalized` as pending; it never creates,
+   rejects, values, or credits anything.
 3. **Custody location is a chain fact, not a state.** A flush moves an address's whole
    balance to the treasury at log position `(block, log_index)`; a deposit is flushed iff a
    confirmed `Flushed` event on its address and token is later than the deposit's own log
@@ -151,6 +153,9 @@ addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_re
 rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
               consumed_by (deposit_id) UNIQUE
 cursors       chain_id PK, scanned_block
+pending_transfers  chain_id, tx_hash, log_index, block_number, block_hash, block_time, head_block,
+              address_id, asset_contract, from_address, amount_atomic, first_seen_at
+              PRIMARY KEY (chain_id, tx_hash, log_index)          -- display only (§8)
 deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
               address_id, account_id, route, route_version, asset_contract, from_address, amount_atomic,
               state, reason, attempt, next_attempt_at, lease_token, lease_until,
@@ -214,6 +219,20 @@ creation (the chain's committed cursor when the address is issued); retired and 
 stay in the filter. Native ETH is a balance check at
 flush time. Each chain's finality rule is declared in its chain file (Ethereum: `finalized`);
 a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
+
+**Head scan (display only)** per chain, on provider A, every 12 s (or the scanner poll interval
+if shorter): read `Transfer` logs to watched addresses in `[finalized + 1, latest]` and, in one
+transaction, upsert the rows seen into `pending_transfers` and delete rows in that range not seen
+this time (reorged, or no longer watched). The finalized scanner deletes rows at or below its
+cursor in the transaction that advances it, so a transfer moves from pending to deposit
+atomically. Watched: lock addresses whose lock is neither consumed nor cancelled, until one hour
+after `expires_at`, and persistent addresses; when persistent addresses exceed one 1 000-address
+request, only those issued or fetched by the product (`requested_at`: address issuance, `GET` of
+the address, or `GET …/pending-deposits`) in the last 24 hours. Pending rows never feed deposits,
+transitions, locks, exposure, settlement, or reconciliation; asset support, lock amount, and
+timeliness are computed when read, never stored. When the head scan sees `finalized` advance it
+wakes the finalized scanner, and a confirm step waiting for provider B's finality retries after
+12 s instead of the regular wait interval.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the finality observation
 and the price is always current at fetch time. Every route's pricing configuration declares
@@ -361,6 +380,7 @@ POST   /v1/products/{p}/accounts/{ext}/rate-locks                 single-use add
 GET    /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           resume a checkout page
 DELETE /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           cancel an unpaid lock; later payments credit at spot
 GET    /v1/products/{p}/accounts/{ext}/deposits?state&from&to&cursor
+GET    /v1/products/{p}/accounts/{ext}/pending-deposits           seen above finalized; not deposits
 GET    /v1/products/{p}/deposits/{id}
 GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
 GET    /v1/products/{p}/accounts/{ext}/limits                     caps, remaining, reset time
@@ -379,9 +399,22 @@ GET    /v1/admin/report/daily                 treasury, unflushed, open locks, r
 Signatures are single-use within the acceptance window. `rotate` is idempotent on
 `from_version`.
 
-Events (Standard Webhooks, signed with the settlement key): `deposit.confirmed`,
-`deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`. Events never
-change balances. Every `deposit.credited` and `deposit.rejected` payload carries `product_id`,
+Pending view (display only, §8). A rate lock carries an optional `payment`: the first payment to
+its address, `status: "seen"` while above `finalized` (with `confirmations`, `amount_within_tolerance`,
+`in_time`, `supported`, and `estimated_final_at`) and `"finalized"` once it is a deposit (then
+`deposit_id` locates it). `pending-deposits` lists the same view for the account's persistent
+addresses, separate from `deposits` so it is never mistaken for a credit. `estimated_final_at` is
+`block_time + 15 minutes`, the typical Ethereum delay to `finalized` (64 to 95 slots); it is an
+estimate. A seen transfer can disappear in a reorg; only `deposits` and `deposit.credited` reflect
+credit.
+
+Events (Standard Webhooks, signed with the settlement key): `deposit.pending`,
+`deposit.confirmed`, `deposit.credited`, `deposit.rejected`, `deposit.refunded`,
+`rate_lock.expired`. Events never change balances. `deposit.pending` is sent at most once per chain
+event when the head scan first sees a transfer to a watched address; its payload (`product_id`,
+`external_id`, `deposit_id`, `chain_id`, `tx_hash`, `log_index`, `block_number`, `address`,
+`product_lock_ref`, `asset_contract`, `from_address`, `amount_atomic`) is marked
+`provisional: true`: the transfer may still be reorged away, and no deposit exists yet. Every `deposit.credited` and `deposit.rejected` payload carries `product_id`,
 `deposit_id`, `chain_id`, `state` (`credited` or `rejected`), and `route` (null when no route
 was selected); `deposit.credited` adds the destination transaction and pricing fields, and
 `deposit.rejected` adds `reason` (plus `product_reason` for a product refusal). Payload changes
@@ -401,13 +434,14 @@ checklist:
 | Default flow | Quote first: amount input → locked price, exact token amount, single-use address, QR as an EIP-681 URI carrying token and amount, countdown to `expires_at`, and the rule for late or wrong-amount payments. |
 | Advanced flow | Persistent address behind an explicit "send any amount" option, with "valued at the rate when the deposit is final" and an indicative current rate. |
 | Warnings | Network name and chain id, full token contract, "only PHA on Ethereum", minimum deposit, and that below-minimum deposits are not credited. Never truncate addresses or hashes. |
-| Waiting | After payment the user sees "waiting for Ethereum finality, about 15 minutes" with a transaction-hash lookup and an explorer link; the service reports deposits only once final. |
+| Waiting | After payment the user sees "received, N confirmations, final around hh:mm" from the lock's `payment` (`status: "seen"`) or `pending-deposits`, with a transaction-hash lookup and an explorer link; it is not credited and may still disappear in a reorg. Deposits are reported only once final. |
+| UI state | `payment` absent → waiting for payment; `seen` → received, waiting for finality (`confirmations`, `estimated_final_at`; warn when `in_time` or `amount_within_tolerance` is false, or `supported` is false); `finalized` or a deposit → processing; `credited` → done. |
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
 | Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
 | Exceptions | Wrong asset, below minimum, or overpayment beyond tolerance: "contact support"; funds reach the treasury and finance may return them per the refund policy (§15). Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
-| Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`. |
+| Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`; optionally "payment received, waiting for finality" on `deposit.pending`. |
 | Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
 
 ## 13. Reconciliation
@@ -527,8 +561,7 @@ exercised once.
 
 **Phase 2, GA**: bounds and lock-exposure caps raised; KYT adapter and compliance case flow;
 dashboards; CSV and accounting exports; webhook replay and delivery logs; notification
-preferences; reconciliation exception queue with sign-off; localization; optional
-pre-finality "seen" notification for the waiting screen.
+preferences; reconciliation exception queue with sign-off; localization.
 
 **Phase 3**: Base PHA and USDC routes through chain and route files; same addresses on both
 chains.
@@ -546,7 +579,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Persistent address as advanced option with indicative rate | S+P | ✓ | | |
 | Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
 | Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |
-| Pre-finality "seen" notification | S | | ✓ | |
+| Pre-finality "seen" payment view and `deposit.pending` notification | S | ✓ | | |
 | Deposit history with filters and pagination; receipt per deposit | S+P | ✓ | | |
 | CSV export; accounting and cost-basis export; valuation evidence bundle | S+F | | ✓ | |
 | Notifications on credited, rejected, refunded, lock expired; preferences and history | P | ✓ (basic) | ✓ | |

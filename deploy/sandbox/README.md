@@ -31,7 +31,7 @@ deploy/sandbox/run-local.sh happy_path      # example, then selected scenarios
 ```
 
 The script builds the images, starts PostgreSQL, the dstack simulator, and an Anvil chain with
-Sepolia's chain id (one-second blocks, `finalized` two blocks behind), deploys the forwarder
+Sepolia's chain id (one-second blocks, `finalized` eight blocks behind), deploys the forwarder
 factory and the sandbox test contracts, creates a product key, renders and validates the route
 with a 45-second rate-lock window, issues the product, starts the service, runs
 `sdk/examples/phala_cloud_integration.py`, and then `scenarios/run.py`. The example and the
@@ -50,7 +50,7 @@ from the product API, the verified webhooks, and the product ledger of the refer
 
 | Scenario | Payment | Expected |
 |---|---|---|
-| `happy_path` | Exact locked amount, then a persistent-address payment | Both `credited`; lock valued at the lock price with exactly the quoted credit and `consumed`; persistent at spot; `deposit.confirmed` and `deposit.credited` delivered; one ledger credit each. |
+| `happy_path` | Exact locked amount, then a persistent-address payment | Before finality the lock shows `payment.status == "seen"` (in time, amount within tolerance) and the persistent payment is listed by `pending-deposits`; then both `credited`; lock valued at the lock price with exactly the quoted credit and `consumed`; persistent at spot; `deposit.confirmed` and `deposit.credited` delivered; one ledger credit each. |
 | `late_payment` | Exact locked amount after `rate_lock.expired` | `credited` at spot; lock stays `expired`. |
 | `underpayment` | 97% of the locked amount (tolerance is 1%) | `credited` at spot below the quote; lock not consumed; cancel is refused (`409 pending_payment` while the lock is open). |
 | `overpayment` | +0.5%, then +5% on a second lock | Within tolerance: lock price, exact quoted credit, `consumed`. Beyond: spot for the full amount, lock not consumed. |

@@ -8,10 +8,12 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
 from typing import cast
 import datetime
 
 if TYPE_CHECKING:
+    from ..models.rate_lock_payment import RateLockPayment
     from ..models.rate_lock_salt_inputs import RateLockSaltInputs
 
 
@@ -32,6 +34,7 @@ class RateLockResponse:
         remaining_seconds (int): Whole seconds remaining while the lock is open.
         salt_inputs (RateLockSaltInputs): Inputs needed to recompute a rate-lock CREATE2 address.
         status (str): Stable lifecycle status.
+        payment (None | RateLockPayment | Unset):
     """
 
     address: str
@@ -43,9 +46,11 @@ class RateLockResponse:
     remaining_seconds: int
     salt_inputs: RateLockSaltInputs
     status: str
+    payment: None | RateLockPayment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.rate_lock_payment import RateLockPayment  # noqa: PLC0415
         from ..models.rate_lock_salt_inputs import RateLockSaltInputs  # noqa: PLC0415
 
         address = self.address
@@ -66,6 +71,14 @@ class RateLockResponse:
 
         status = self.status
 
+        payment: dict[str, Any] | None | Unset
+        if isinstance(self.payment, Unset):
+            payment = UNSET
+        elif isinstance(self.payment, RateLockPayment):
+            payment = self.payment.to_dict()
+        else:
+            payment = self.payment
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -81,11 +94,14 @@ class RateLockResponse:
                 "status": status,
             }
         )
+        if payment is not UNSET:
+            field_dict["payment"] = payment
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.rate_lock_payment import RateLockPayment  # noqa: PLC0415
         from ..models.rate_lock_salt_inputs import RateLockSaltInputs  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -107,6 +123,23 @@ class RateLockResponse:
 
         status = d.pop("status")
 
+        def _parse_payment(data: object) -> None | RateLockPayment | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                payment_type_1 = RateLockPayment.from_dict(data)
+
+                return payment_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RateLockPayment | Unset, data)
+
+        payment = _parse_payment(d.pop("payment", UNSET))
+
         rate_lock_response = cls(
             address=address,
             amount_atomic=amount_atomic,
@@ -117,6 +150,7 @@ class RateLockResponse:
             remaining_seconds=remaining_seconds,
             salt_inputs=salt_inputs,
             status=status,
+            payment=payment,
         )
 
         rate_lock_response.additional_properties = d
