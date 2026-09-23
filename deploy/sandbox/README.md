@@ -73,7 +73,10 @@ Credential issuance is a human step on both sides.
    uv run --locked topup-sdk keygen --keyid acme/v1 --seed-out ~/acme-sandbox.seed
    ```
 
-   It prints `{"keyid": ..., "public_key": ...}`.
+   It prints `{"keyid": ..., "public_key": ...}`. Use this key only for the sandbox and create
+   a separate key for every other deployment: each deployment records used signatures in its
+   own database, so a request signed with a shared key could be replayed within the five-minute
+   freshness window against another deployment that shares the same public origin.
 2. Send the operator, through the agreed support channel: the product slug you want (lowercase
    letters, digits, and dashes), the printed key id and public key, and public HTTPS URLs for
    your settlement endpoint and webhook receiver. Never send the seed.

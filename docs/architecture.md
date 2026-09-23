@@ -342,7 +342,10 @@ salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the prod
 recompute any address without the service. The admin key can only pause and resume; each
 call writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
 (`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
-`X-Forwarded-*`, so signers sign the public URL they call.
+`X-Forwarded-*`, so signers sign the public URL they call. Each deployment (sandbox, staging,
+production) must pin a distinct product key: signature single-use is recorded per database, so a
+shared key would let a signed request be replayed within the freshness window against another
+deployment that shares its public origin (for example a replacement or restored instance).
 
 ```text
 POST   /v1/products/{p}/accounts

@@ -327,6 +327,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
             ("internal-host", "http://topup-internal:8080"),
             ("forwarded-proto", "https://api.test"),
             ("forwarded-host", "https://attacker.example"),
+            ("other-port", "http://api.test:8080"),
         ] {
             let response = app.clone().oneshot(request(external_id, origin)?).await?;
             ensure!(
@@ -334,6 +335,16 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
                 "a signature for {origin} must not verify"
             );
         }
+
+        // A signature for one path must not authorize a request to another route.
+        let mut tampered = request("tampered-path", TEST_ORIGIN)?;
+        *tampered.uri_mut() = format!(
+            "/v1/products/{}/accounts/tampered-path/deposit-address",
+            product.slug
+        )
+        .parse()?;
+        let response = app.clone().oneshot(tampered).await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
         Ok(())
     }
     .await;
