@@ -154,6 +154,7 @@ jobs:
           deploy/tests/walg-restore.sh
           deploy/tests/render-compose.sh
           deploy/tests/render-route.sh
+          deploy/tests/preflight.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
           TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
           POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
