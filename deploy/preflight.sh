@@ -3,10 +3,16 @@
 # read-only against remote systems: it never pushes, deploys, updates, or sends a transaction. It
 # reads the env file, the rendered compose, the images in their registry, the asset chain through
 # the env file's two RPC providers, and the Phala Cloud account the CLI is logged in to. Locally
-# it renders the compose, builds the contracts (verify-deployment.sh), and pulls the topup image.
+# it renders the compose, builds the contracts (verify-deployment.sh), and pulls both images.
 #
 # Usage: deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
-#          --workspace NAME --os-image NAME [--kms-contract ADDRESS] [--source COMPOSE] [--offline]
+#          --workspace NAME --os-image NAME [--kms base|phala] [--kms-contract ADDRESS] \
+#          [--source COMPOSE] [--offline]
+#
+# --kms base (default) also checks that the on-chain KMS contract allows a device and the OS image;
+# --kms phala (Phala Cloud's KMS, used for staging) has no contract to check. Images are pulled
+# anonymously (an empty Docker client config), because the CVM pulls them without credentials: a
+# private image fails here.
 #
 # --source is the unrendered compose the rendered file must come from (default
 # deploy/docker-compose.yml of this checkout). --offline runs only the local checks (env file,
@@ -30,10 +36,10 @@ optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
-        "[--kms-contract ADDRESS] [--source COMPOSE] [--offline]" >&2
+        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--offline]" >&2
     exit 64
 }
-env_file="" compose="" workspace="" os_image="" offline=0
+env_file="" compose="" workspace="" os_image="" kms=base offline=0
 source_compose="$REPO_ROOT/deploy/docker-compose.yml"
 kms_contract=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 while (($#)); do
@@ -42,6 +48,7 @@ while (($#)); do
         --compose) compose="${2:-}"; shift 2 ;;
         --workspace) workspace="${2:-}"; shift 2 ;;
         --os-image) os_image="${2:-}"; shift 2 ;;
+        --kms) kms="${2:-}"; shift 2 ;;
         --kms-contract) kms_contract="${2:-}"; shift 2 ;;
         --source) source_compose="${2:-}"; shift 2 ;;
         --offline) offline=1; shift ;;
@@ -50,6 +57,7 @@ while (($#)); do
 done
 [[ -f "$env_file" && -f "$compose" ]] || usage
 ((offline)) || [[ -n "$workspace" && -n "$os_image" ]] || usage
+[[ "$kms" == base || "$kms" == phala ]] || usage
 for command in docker jq; do
     require_command "$command"
 done
@@ -196,16 +204,21 @@ if ((offline)); then
     exit 0
 fi
 
-echo "== images"
+echo "== images (anonymous pull)"
+# `docker pull` of a digest always asks the registry, even when the daemon has the image cached;
+# an empty client config sends no credentials, as the CVM does.
+mkdir "$tmp/docker-anonymous"
 while IFS= read -r image; do
-    if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
-        ok "$image resolves"
+    if DOCKER_CONFIG="$tmp/docker-anonymous" docker pull --quiet --platform linux/amd64 "$image" \
+        >/dev/null 2>&1; then
+        ok "$image pulls anonymously"
     else
-        fail "$image does not resolve in its registry"
+        fail "$image cannot be pulled anonymously; make the package public"
     fi
 done <"$tmp/images"
 topup_image=$(jq -r '.services.topup.image' "$tmp/compose.json")
-if docker run --rm -i "$topup_image" topup route validate /dev/stdin <"$tmp/route.yaml" \
+if docker run --rm -i --pull never "$topup_image" topup route validate /dev/stdin \
+    <"$tmp/route.yaml" \
     >"$tmp/validate.out" 2>&1; then
     ok "topup route validate accepts the attested route"
 else
@@ -283,37 +296,38 @@ else
     current=$(jq -r '.team_name // empty' "$tmp/status.json" 2>/dev/null) || current=""
     fail "the CLI is not logged in to workspace '$workspace' (current: ${current:-not logged in})"
 fi
-if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
-    contract=$(jq -c --arg address "$(lower "$kms_contract")" \
-        '[.contracts[] | select((.contract_address | ascii_downcase) == $address)][0] // empty' \
-        "$tmp/kms.json")
-    if [[ -z "$contract" ]]; then
-        fail "KMS contract $kms_contract is not listed by 'kms base'"
-    else
-        jq -e '[.devices[] | select(.on_chain_allowed == true)] | length > 0' <<<"$contract" \
-            >/dev/null || fail "KMS contract $kms_contract has no allowed device"
-        if jq -e --arg image "$os_image" \
-            'any(.os_images[]; .name == $image and .on_chain_allowed == true)' <<<"$contract" \
-            >/dev/null; then
-            ok "OS image $os_image is allowed by KMS contract $kms_contract"
-            # The pinned dstack SDK needs the /v1 guest API of dstack 0.6 (deploy/README.md).
-            jq -e --arg image "$os_image" \
-                'any(.os_images[]; .name == $image and (.version | test("^v?0[.]6[.]")))' \
-                <<<"$contract" >/dev/null ||
-                fail "OS image $os_image is not a dstack 0.6 image"
+if [[ "$kms" == base ]]; then
+    if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
+        contract=$(jq -c --arg address "$(lower "$kms_contract")" \
+            '[.contracts[] | select((.contract_address | ascii_downcase) == $address)][0] // empty' \
+            "$tmp/kms.json")
+        if [[ -z "$contract" ]]; then
+            fail "KMS contract $kms_contract is not listed by 'kms base'"
         else
-            fail "OS image $os_image is not allowed by KMS contract $kms_contract; allowed:" \
-                "$(jq -r '[.os_images[] | select(.on_chain_allowed == true) | .name] | join(", ")' \
-                    <<<"$contract")"
+            jq -e '[.devices[] | select(.on_chain_allowed == true)] | length > 0' <<<"$contract" \
+                >/dev/null || fail "KMS contract $kms_contract has no allowed device"
+            if jq -e --arg image "$os_image" \
+                'any(.os_images[]; .name == $image and .on_chain_allowed == true)' <<<"$contract" \
+                >/dev/null; then
+                ok "OS image $os_image is allowed by KMS contract $kms_contract"
+            else
+                fail "OS image $os_image is not allowed by KMS contract $kms_contract; allowed:" \
+                    "$(jq -r '[.os_images[] | select(.on_chain_allowed == true) | .name] | join(", ")' \
+                        <<<"$contract")"
+            fi
         fi
+    else
+        fail "'kms base --json' failed"
     fi
-else
-    fail "'kms base --json' failed"
 fi
 if "${phala[@]}" os-images --prod --all --json >"$tmp/os-images.json" 2>/dev/null &&
     jq -e --arg image "$os_image" 'any(.items[]; .name == $image and .is_dev == false)' \
         "$tmp/os-images.json" >/dev/null; then
     ok "OS image $os_image is a production (non-dev) image"
+    # The pinned dstack SDK needs the /v1 guest API of dstack 0.6 (deploy/README.md).
+    jq -e --arg image "$os_image" \
+        'any(.items[]; .name == $image and (.version | test("^v?0[.]6[.]")))' \
+        "$tmp/os-images.json" >/dev/null || fail "OS image $os_image is not a dstack 0.6 image"
 else
     fail "OS image $os_image is not listed as a production image by 'os-images --prod'"
 fi

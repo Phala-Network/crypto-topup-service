@@ -1,0 +1,75 @@
+name: Verify contracts
+
+# Read-only: checks the approved Safe and the deployed factory on Sepolia through the two staging
+# RPC providers, and validates the committed staging route. No keys; the RPC URLs (which may carry
+# provider API keys) are Environment secrets and appear only as "sepolia/a" and "sepolia/b" in the
+# reports. The `staging` Environment admits only `main`, so this runs from `main`.
+
+on:
+  schedule:
+    # Daily, 04:41 UTC.
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-contracts
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
+
+jobs:
+  verify:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    environment: staging
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.3
+      - uses: ./.github/actions/rust
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-verify-contracts-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify the Safe and the factory deployment on both providers
+        env:
+          RPC_A: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL }}
+          RPC_B: ${{ secrets.TOPUP_RPC_PROVIDER_B_URL }}
+        run: |
+          [[ -n "$RPC_A" && -n "$RPC_B" ]] ||
+            { echo "::error::TOPUP_RPC_PROVIDER_A_URL and TOPUP_RPC_PROVIDER_B_URL must be set"; exit 1; }
+          mkdir -p reports
+          status=0
+          deploy/contracts/verify-safe.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
+            >reports/sepolia-safe-verification.json || status=1
+          ADMIN=$(jq -r .admin deploy/contracts/safe-expectations.json) \
+          TREASURY=$(jq -r .treasury deploy/contracts/safe-expectations.json) \
+            deploy/contracts/verify-deployment.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
+            >reports/sepolia-contract-verification.json || status=1
+          jq '{passed, chains: [.chains[] | {target, passed}]}' reports/*.json || true
+          exit "$status"
+
+      - name: Validate the committed staging route
+        run: cargo run --locked -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contract-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: warn
