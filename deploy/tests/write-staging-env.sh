@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # write-staging-env.sh writes exactly the staging.env.example names, refuses a missing required
-# name without printing any value, and accepts empty optional names.
+# name or a value the CLI's dotenv parser would alter without printing any value, and accepts empty
+# optional names.
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -51,5 +52,24 @@ if grep -q 'secret-value-of' "$tmp/out" "$tmp/partial"; then
     echo "write-staging-env.sh printed or wrote a value on failure" >&2
     exit 1
 fi
+
+# Quotes, backticks, and # are refused, naming only the variable.
+for bad in 'a#b' 'a"b' "a'b" 'a`b' $'a\nb'; do
+    : >"$tmp/bad"
+    if env -i PATH="$PATH" "${assignments[@]}" AWS_SECRET_ACCESS_KEY="secret-value-$bad" \
+        "$writer" "$tmp/bad" >"$tmp/out" 2>&1; then
+        echo "write-staging-env.sh accepted a value containing ${bad:1:1}" >&2
+        exit 1
+    fi
+    grep -q 'without quotes, backticks, or #: AWS_SECRET_ACCESS_KEY$' "$tmp/out" || {
+        echo "unexpected failure output:" >&2
+        cat "$tmp/out" >&2
+        exit 1
+    }
+    if grep -q 'secret-value' "$tmp/out" "$tmp/bad"; then
+        echo "write-staging-env.sh printed or wrote a value on failure" >&2
+        exit 1
+    fi
+done
 
 echo "write-staging-env.sh test passed"

@@ -18,6 +18,11 @@ concurrency:
   group: verify-contracts
   cancel-in-progress: false
 
+# `bash -eo pipefail` for every step, so a failing command in a pipeline fails the step.
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true

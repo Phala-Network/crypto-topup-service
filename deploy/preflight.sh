@@ -207,10 +207,13 @@ fi
 echo "== images (anonymous pull)"
 # `docker pull` of a digest always asks the registry, even when the daemon has the image cached;
 # an empty client config sends no credentials, as the CVM does.
+# The empty config also drops the current Docker context, so keep its daemon endpoint.
+docker_host=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)} ||
+    docker_host=""
 mkdir "$tmp/docker-anonymous"
 while IFS= read -r image; do
-    if DOCKER_CONFIG="$tmp/docker-anonymous" docker pull --quiet --platform linux/amd64 "$image" \
-        >/dev/null 2>&1; then
+    if DOCKER_HOST=${docker_host:-unix:///var/run/docker.sock} DOCKER_CONFIG="$tmp/docker-anonymous" \
+        docker pull --quiet --platform linux/amd64 "$image" >/dev/null 2>&1; then
         ok "$image pulls anonymously"
     else
         fail "$image cannot be pulled anonymously; make the package public"

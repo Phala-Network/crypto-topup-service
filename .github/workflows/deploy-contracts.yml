@@ -5,9 +5,10 @@ name: Deploy contracts (Sepolia)
 # constructor inputs come from the committed deploy/contracts/safe-expectations.json.
 #
 # Controls: dispatch needs write access, the job runs only from `main`, and the deployer key is the
-# `staging` Environment secret SEPOLIA_DEPLOYER_PRIVATE_KEY, passed to the scripts only through
-# the environment. Mainnet is not deployed from CI; it stays HUMAN-ONLY through the Finance Safe
-# process in deploy/CONTRACTS.md.
+# `staging` Environment secret SEPOLIA_DEPLOYER_PRIVATE_KEY. It reaches forge only through the
+# environment (the script reads it with vm.envUint), never as a command-line argument, so it is not
+# visible in the runner's process list. Mainnet is not deployed from CI; it stays HUMAN-ONLY
+# through the Finance Safe process in deploy/CONTRACTS.md.
 
 on:
   workflow_dispatch:
@@ -23,6 +24,11 @@ permissions:
 concurrency:
   group: deploy-contracts
   cancel-in-progress: false
+
+# `bash -eo pipefail` for every step, so a failing command in a pipeline fails the step.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   deploy:
@@ -83,3 +89,8 @@ jobs:
           path: |
             contracts/broadcast/DeployFactory.s.sol/11155111/
             reports/
+
+      # Forge's script cache holds this run's transaction data; nothing of it stays on the runner.
+      - name: Remove forge script state
+        if: always()
+        run: rm -rf contracts/cache/DeployFactory.s.sol contracts/broadcast/DeployFactory.s.sol

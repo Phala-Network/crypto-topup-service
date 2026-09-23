@@ -145,8 +145,10 @@ deploy/contracts/verify-deployment.sh \
 jq -e '.passed == true' sepolia-contract-verification.json
 ```
 
-The dry run and broadcast both pass `PRIVATE_KEY` to Foundry with the CLI `--private-key` option;
-the key is never written to a repository file. The Foundry script prints the predicted factory and
+The dry run and broadcast both hand `PRIVATE_KEY` to Foundry through the environment only:
+`DeployFactory.s.sol` reads it with `vm.envUint("PRIVATE_KEY")` and passes it to
+`vm.startBroadcast`, so the key is never a command-line argument (visible in the process list) and
+never written to a repository file. The Foundry script prints the predicted factory and
 implementation addresses before it sends. If the predicted factory already has code, it accepts
 only the exact runtime hashes derived from the local build and constructor arguments.
 

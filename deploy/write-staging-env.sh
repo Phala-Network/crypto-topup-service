@@ -6,8 +6,9 @@
 # Usage: deploy/write-staging-env.sh OUTPUT
 #
 # OUTPUT must already exist (create it with mktemp, mode 0600); it is overwritten. Every name must
-# be set and non-empty, except the ones preflight.sh allows to be empty. Values are never printed:
-# errors name only the variable.
+# be set and non-empty, except the ones preflight.sh allows to be empty. A value must be one line
+# without quotes, backticks, or `#`, which the Phala CLI's dotenv parser would strip or treat as a
+# comment. Values are never printed: errors name only the variable.
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -25,7 +26,7 @@ while IFS= read -r name; do
     value=${!name-}
     if [[ -z "$value" && "$optional_empty" != *" $name "* ]]; then
         missing+=("$name")
-    elif [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    elif [[ "$value" == *[$'\n\r"\'`#']* ]]; then
         invalid+=("$name")
     else
         lines+=("$name=$value")
@@ -36,7 +37,7 @@ if ((${#missing[@]})); then
     echo "missing or empty: ${missing[*]}" >&2
 fi
 if ((${#invalid[@]})); then
-    echo "values must be a single line: ${invalid[*]}" >&2
+    echo "values must be one line without quotes, backticks, or #: ${invalid[*]}" >&2
 fi
 ((${#missing[@]} + ${#invalid[@]} == 0)) || exit 1
 

@@ -47,6 +47,11 @@ concurrency:
   group: deploy-staging
   cancel-in-progress: false
 
+# `bash -eo pipefail` for every step, so a failing command in a pipeline fails the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -212,19 +217,31 @@ jobs:
             echo "| crypto-topup | \`$TOPUP_IMAGE\` |"
             echo "| postgres-walg | \`$POSTGRES_WALG_IMAGE\` |"
             echo "| OS image | \`$DSTACK_OS_IMAGE\` |"
+            echo
+            if [[ "$MODE" == provision ]]; then
+              # Written now, so a later failure still leaves the id for recovery (mode upgrade).
+              echo "Set the \`staging\` Environment variable \`STAGING_CVM_ID\` to \`$cvm_id\`;"
+              echo "later runs, including a retry after a failure below, use mode \`upgrade\`."
+              echo
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Wait for the CVM and the service
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
+          settled='.status == "running" and (.in_progress | not)'
           for _ in $(seq 60); do
             npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              [[ "$(jq -r '.status' "$WORK/cvm.json")" == running ]] && break
+              jq -e "$settled" "$WORK/cvm.json" >/dev/null && break
             sleep 15
           done
-          jq -e '.status == "running"' "$WORK/cvm.json" >/dev/null ||
+          jq -e "$settled" "$WORK/cvm.json" >/dev/null ||
             { echo "::error::CVM $CVM_ID is not running"; exit 1; }
+          # The hash the attestation must reach (step "Read back and verify the attested compose").
+          deployed_hash=$(jq -er '.compose_hash' "$WORK/cvm.json")
+          deployed_hash=${deployed_hash#0x}
+          echo "DEPLOYED_COMPOSE_HASH=${deployed_hash,,}" >>"$GITHUB_ENV"
           domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
           gateway_origin="https://${APP_ID#0x}-8080.$domain"
           echo "GATEWAY_ORIGIN=$gateway_origin" >>"$GITHUB_ENV"
@@ -249,46 +266,70 @@ jobs:
             echo "::error::the encrypted origin $TOPUP_PUBLIC_ORIGIN differs from the gateway $GATEWAY_ORIGIN"
             exit 1
           }
-          awk -v origin="$GATEWAY_ORIGIN" \
-            '/^TOPUP_PUBLIC_ORIGIN=/ { print "TOPUP_PUBLIC_ORIGIN=" origin; next } { print }' \
-            "$ENV_FILE" >"$ENV_FILE.new"
+          (
+            umask 077
+            awk -v origin="$GATEWAY_ORIGIN" \
+              '/^TOPUP_PUBLIC_ORIGIN=/ { print "TOPUP_PUBLIC_ORIGIN=" origin; next } { print }' \
+              "$ENV_FILE" >"$ENV_FILE.new"
+          )
           cat "$ENV_FILE.new" >"$ENV_FILE"
           rm -f "$ENV_FILE.new"
           deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" --offline
+          before=$(jq -c '.progress' "$WORK/cvm.json")
+          # CLI 1.1.22 returns as soon as the API answers `in_progress`; the restart follows.
           npx --yes phala@1.1.22 envs update "$CVM_ID" -e "$ENV_FILE"
           echo "TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN" >>"$GITHUB_ENV"
-          # The CVM restarts with the new value; wait until it serves again.
-          sleep 30
+          # First see the restart begin (not running, an operation in progress, or a new progress
+          # record), within 5 minutes; then wait up to 15 minutes for running and /healthz.
+          restarted=0
+          for _ in $(seq 60); do
+            if npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
+              jq -e --argjson before "$before" \
+                '.status != "running" or .in_progress or .progress != $before' \
+                "$WORK/cvm.json" >/dev/null; then
+              restarted=1
+              break
+            fi
+            sleep 5
+          done
+          ((restarted)) || { echo "::error::the CVM did not start the env update within 5 minutes"; exit 1; }
           for _ in $(seq 60); do
             npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              [[ "$(jq -r '.status' "$WORK/cvm.json")" == running ]] &&
+              jq -e '.status == "running" and (.in_progress | not)' "$WORK/cvm.json" >/dev/null &&
               curl -fsS --max-time 10 "$GATEWAY_ORIGIN/healthz" >/dev/null && exit 0
             sleep 15
           done
-          echo "::error::the service did not come back after the origin update"
+          echo "::error::the service did not come back within 15 minutes after the origin update"
           exit 1
 
       - name: Read back and verify the attested compose
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          for _ in $(seq 20); do
-            npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json >"$WORK/attestation.json" 2>/dev/null &&
-              jq -e '.compose_file | type == "string" and length > 0' "$WORK/attestation.json" >/dev/null &&
-              break
+          # After an upgrade the attestation can still describe the previous compose for a while;
+          # wait (up to 10 minutes) until it attests the compose hash just deployed.
+          attested=""
+          for _ in $(seq 40); do
+            if npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json >"$WORK/attestation.json" 2>/dev/null &&
+              jq -jer '.compose_file | select(type == "string" and length > 0)' \
+                "$WORK/attestation.json" >"$WORK/app-compose.json" 2>/dev/null; then
+              attested=$(deploy/compose-hash.sh "$WORK/app-compose.json" 2>/dev/null) || attested=""
+              [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] && break
+            fi
             sleep 15
           done
+          [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] || {
+            echo "::error::the attestation reports compose hash '${attested:-none}', not the deployed $DEPLOYED_COMPOSE_HASH"
+            exit 1
+          }
           npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json"
           deploy/verify-attested-compose.sh "$WORK/attestation.json" "$WORK/cvm.json" \
             "$WORK/docker-compose.staging.yml" 2>&1 | tee "$WORK/verification.txt"
           {
-            echo "| Compose hash | \`$(jq -r '.compose_hash' "$WORK/cvm.json")\` |"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Compose hash | \`0x$DEPLOYED_COMPOSE_HASH\` |"
             echo "| Public origin | $TOPUP_PUBLIC_ORIGIN |"
-            echo
-            if [[ "$MODE" == provision ]]; then
-              echo "Set the \`staging\` Environment variable \`STAGING_CVM_ID\` to \`$CVM_ID\`;"
-              echo "later runs use mode \`upgrade\`."
-            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
       # No secrets: the compose holds only variable references, and the CLI outputs hold ids,

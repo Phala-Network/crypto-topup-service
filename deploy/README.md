@@ -31,7 +31,9 @@ The `staging` Environment admits only the `main` branch, and the deploy jobs als
 `github.ref`. Starting a workflow needs write access to the repository. Required reviewers are not
 available for a private repository on the current GitHub plan, so there is **no approval gate**:
 dispatching Deploy staging or Deploy contracts is the decision, and the run's actor is the record.
-The credentials exist only as `staging` Environment secrets. The workflows have
+The credentials exist only as `staging` Environment secrets and reach the tools through
+environment variables, never command-line arguments (the Sepolia deployer key is read inside the
+forge script). The workflows have
 `permissions: contents: read`, pin every action by commit SHA, and serialize runs
 (`deploy-staging`, `deploy-contracts`) without cancelling one in progress.
 
@@ -98,6 +100,14 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
    `postgres_walg_image`. The run refuses `provision` while `STAGING_CVM_ID` is set.
 4. Set the `staging` variable `STAGING_CVM_ID` to the CVM id in the run summary. From then on use
    `mode: upgrade` with new digests.
+
+   **Recovery from a failed provision.** If the run fails after `phala deploy` created the CVM
+   (while waiting, setting the origin, or verifying the attestation), the summary already shows
+   the CVM id. Set `STAGING_CVM_ID` to it and re-run with `mode: upgrade` and the same digests.
+   The upgrade derives the real gateway origin, re-sends the compose and the complete env file,
+   and repeats the checks. Do not re-run `provision`, which would create a second CVM. If the run
+   failed before the CVM was created (no CVM id in the summary), fix the cause and re-run
+   `provision`.
 5. **HUMAN-ONLY, verifier:** complete [Attestation, ingress, and egress](#attestation-ingress-and-egress)
    (Trust Center quote verification, the nonce-bound settlement key, the egress restriction) before
    issuing product credentials.
@@ -119,11 +129,15 @@ Deploy staging, in order; any failure stops the run:
 6. `phala deploy` (CLI 1.1.22 via `npx`): a new CVM with `--kms phala --instance-type tdx.medium
    --fs ext4 --image "$DSTACK_OS_IMAGE" --no-dev-os --no-public-logs --no-public-sysinfo
    --public-tcbinfo --secure-time`, or an update with `--cvm-id "$STAGING_CVM_ID" --wait`;
-7. waits until the CVM is `running` and `/healthz` answers at the gateway URL;
+7. waits until the CVM is `running` with no operation in progress and `/healthz` answers at the
+   gateway URL, and records the CVM's compose hash;
 8. for a new CVM, writes the gateway URL into the env file as `TOPUP_PUBLIC_ORIGIN` and runs
-   `phala envs update` with the same name set (the compose hash is unchanged), then waits for
-   `/healthz` again; for an upgrade, fails if the encrypted origin differs from the gateway URL;
-9. reads back `cvms get` and `cvms attestation` and runs
+   `phala envs update` with the same name set (the compose hash is unchanged). That command
+   returns before the restart, so the workflow first waits (at most 5 minutes) to see the restart
+   begin, then (at most 15 minutes) for `running` and `/healthz`. For an upgrade, it fails if the
+   encrypted origin differs from the gateway URL;
+9. polls `cvms attestation` (at most 10 minutes) until the attested app-compose hashes to the
+   recorded compose hash, so an upgrade never checks the previous compose, then runs
    [verify-attested-compose.sh](verify-attested-compose.sh) against the rendered compose;
 10. records the CVM id, app id, compose hash, images, and origin in the job summary; uploads the
     rendered compose, `deploy.json`, `cvm.json`, `attestation.json`, and the verification output

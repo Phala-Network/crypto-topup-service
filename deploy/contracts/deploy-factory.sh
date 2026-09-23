@@ -37,10 +37,11 @@ rpc_url="$TARGET_RPC_URL"
 export EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$tmp")"
 export EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$tmp")"
 
+# DeployFactory.s.sol reads PRIVATE_KEY from the environment; it is never a forge argument.
+export PRIVATE_KEY
 args=(
     script/DeployFactory.s.sol:DeployFactory
     --rpc-url "$rpc_url"
-    --private-key "$PRIVATE_KEY"
 )
 if [[ "$mode" == "broadcast" ]]; then
     printf 'HUMAN-ONLY: broadcasting ForwarderFactory deployment\n' >&2
