@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 
+/// Recovery point objective in seconds (docs/architecture.md §14: RPO ≤ 1 min).
+pub const RPO_SECONDS: i32 = 60;
+
 /// Heartbeat row recorded for restore-point freshness checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Heartbeat {
@@ -10,7 +13,7 @@ pub struct Heartbeat {
     pub id: i64,
     /// Database clock time at insertion.
     pub recorded_at: DateTime<Utc>,
-    /// Maximum accepted recovery point age in seconds.
+    /// Maximum accepted recovery point age in seconds; always [`RPO_SECONDS`].
     pub rpo_seconds: i32,
     /// WAL write location read after the heartbeat committed, so it covers the heartbeat row.
     pub wal_lsn: String,
@@ -20,17 +23,16 @@ pub struct Heartbeat {
 ///
 /// The logged `recorded_at` and `wal_lsn` are the external failure point `restore-check` needs.
 pub async fn record(pool: &PgPool) -> Result<Heartbeat, sqlx::Error> {
-    let row =
-        sqlx::query("INSERT INTO heartbeat DEFAULT VALUES RETURNING id, recorded_at, rpo_seconds")
-            .fetch_one(pool)
-            .await?;
+    let row = sqlx::query("INSERT INTO heartbeat DEFAULT VALUES RETURNING id, recorded_at")
+        .fetch_one(pool)
+        .await?;
     let wal_lsn = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
         .fetch_one(pool)
         .await?;
     Ok(Heartbeat {
         id: row.try_get("id")?,
         recorded_at: row.try_get("recorded_at")?,
-        rpo_seconds: row.try_get("rpo_seconds")?,
+        rpo_seconds: RPO_SECONDS,
         wal_lsn,
     })
 }

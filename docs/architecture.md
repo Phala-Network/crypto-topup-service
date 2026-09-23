@@ -216,9 +216,9 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 from any contract in windows ≤ 2 000 blocks and ≤ 1 000 addresses; insert with
 `ON CONFLICT DO NOTHING`; advance the cursor after commit. New addresses backfill from
 creation (the chain's committed cursor when the address is issued); retired and lock addresses
-stay in the filter. Native ETH is a balance check at
-flush time. Each chain's finality rule is declared in the route's `chain` settings (Ethereum: `finalized`);
-a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
+stay in the filter. Native ETH is a balance check at flush time. Each chain's finality rule is
+declared in the route's `chain` settings (Ethereum: `finalized`); a chain is enabled only after
+its rule is reviewed. Later option: Helios as one provider.
 
 **Head scan (display only)** per chain, on provider A, every 12 s (or the scanner poll interval
 if shorter): read non-zero `Transfer` logs emitted by the chain's routed token contracts to
@@ -282,8 +282,8 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   never reported as expired. Exposure stays reserved until finality, about 15 minutes after
   `expires_at`, and longer while the scanner is stalled (`TopupScannerLag`). Until then the API
   shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
-  window has closed (`409 window_closed`). A lock whose address has received any deposit, even a rejected one, can no
-  longer be cancelled (`409 pending_payment`).
+  window has closed (`409 window_closed`). A lock whose address has received any deposit, even
+  a rejected one, can no longer be cancelled (`409 pending_payment`).
 - Exposure counters sum `credit_minor` across routes, so every rate-lock route must use the
   same `destination.unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to the persistent address" variant is deliberately not offered: matching
@@ -581,7 +581,7 @@ compose) and pin `(keyid, public key)`.
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. |
 | Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. Not refundable: credited USD, including an overpayment beyond tolerance (credited at spot for the full amount, §9), and below-minimum dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
-| Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. |
+| Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. Late funds are refundable because the product answers `rejected` for a closed workspace, recorded as `rejected(product_refused)` (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup keys keep prior versions. |

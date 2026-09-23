@@ -1,5 +1,0 @@
-DROP TABLE reconciliation_custody_cursors;
-DROP TABLE reconciliation_deposit_cursors;
-DROP TABLE reconciliation_blocks;
-DROP TRIGGER reconciliation_findings_append_only ON reconciliation_findings;
-DROP TABLE reconciliation_findings;

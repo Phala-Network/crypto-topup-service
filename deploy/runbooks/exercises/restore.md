@@ -4,7 +4,8 @@ Date: 2026-09-22.
 
 Commands changed after this exercise (#94): `reconcile` no longer takes `--once`, and
 `restore-check` pins its route in the compose entrypoint. The commands below are recorded as run;
-use the current [runbook](../restore.md).
+use the current [runbook](../restore.md). The migration history was later squashed into the single
+`20260922000000_initial_schema`; see the re-run of the migration-state query below.
 
 Status: partial. The C8 post-restore gate ran against seeded data before D3 landed. D3 (#58) now
 implements `topup restore-check` and `deploy/RESTORE.md`, and `deploy/local/restore-drill.sh`
@@ -36,6 +37,24 @@ BEGIN
  applied | failed
 ---------+--------
       15 |      0
+(1 row)
+
+COMMIT
+```
+
+After the pre-pilot squash, the same query ran as the application role on 2026-09-23 against a
+database freshly migrated by `topup migrate` (one `*.up.sql` file):
+
+```text
+BEGIN
+    version
+----------------
+ 20260922000000
+(1 row)
+
+ applied | failed
+---------+--------
+       1 |      0
 (1 row)
 
 COMMIT
