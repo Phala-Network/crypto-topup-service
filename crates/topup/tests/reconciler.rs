@@ -1209,7 +1209,7 @@ async fn scanned_through(pool: &PgPool, block: u64) -> Result<()> {
     Ok(())
 }
 
-async fn count(pool: &PgPool, query: &str) -> Result<i64> {
+async fn count(pool: &PgPool, query: &'static str) -> Result<i64> {
     Ok(sqlx::query_scalar(query).fetch_one(pool).await?)
 }
 

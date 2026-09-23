@@ -133,9 +133,9 @@ class RateLockResponse:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                payment_type_1 = RateLockPayment.from_dict(data)
+                payment_type_0 = RateLockPayment.from_dict(data)
 
-                return payment_type_1
+                return payment_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             return cast(None | RateLockPayment | Unset, data)

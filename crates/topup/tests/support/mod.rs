@@ -17,7 +17,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use sfv::{DictSerializer, Integer, KeyRef, ListSerializer, StringRef};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool};
+use sqlx::{AssertSqlSafe, Executor, PgPool};
 use url::Url;
 use uuid::Uuid;
 
@@ -91,7 +91,9 @@ impl TestDatabase {
         let app_role = format!("topup_test_app_{suffix}");
         let password = format!("test_{suffix}");
         admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
+            .execute(AssertSqlSafe(format!(
+                "CREATE DATABASE \"{database_name}\""
+            )))
             .await?;
 
         let mut owner_url = Url::parse(&owner_template)?;
@@ -104,10 +106,9 @@ impl TestDatabase {
         topup::db::migrate(&owner_pool).await?;
 
         admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
+            .execute(AssertSqlSafe(format!(
+                "CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app"
+            )))
             .await?;
         let mut app_url = Url::parse(&app_template)?;
         app_url
@@ -141,11 +142,14 @@ impl TestDatabase {
         self.app_pool.close().await;
         self.owner_pool.close().await;
         self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
+            .execute(AssertSqlSafe(format!(
+                "DROP DATABASE \"{}\" WITH (FORCE)",
+                self.database_name
+            )))
             .await
             .context("drop test database")?;
         self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
+            .execute(AssertSqlSafe(format!("DROP ROLE \"{}\"", self.app_role)))
             .await
             .context("drop test role")?;
         self.admin_pool.close().await;

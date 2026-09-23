@@ -35,9 +35,9 @@ type ApiResult<T> = Result<T, ApiError>;
     params(("p" = String, Path, description = "Product slug")),
     request_body = RegisterAccountRequest,
     responses(
-        (status = 200, body = AccountResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 401, body = ErrorResponse)
+        (status = 200, description = "OK", body = AccountResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "accounts"
@@ -62,10 +62,10 @@ pub(crate) async fn register_account(
         ("ext" = String, Path, description = "Product-owned account identifier")
     ),
     responses(
-        (status = 200, body = DepositAddressResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 423, body = ErrorResponse)
+        (status = 200, description = "OK", body = DepositAddressResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 423, description = "Locked", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -86,10 +86,10 @@ pub(crate) async fn get_deposit_address(
         ("ext" = String, Path, description = "Product-owned account identifier")
     ),
     responses(
-        (status = 200, body = DepositAddressResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 423, body = ErrorResponse)
+        (status = 200, description = "OK", body = DepositAddressResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 423, description = "Locked", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -111,11 +111,11 @@ pub(crate) async fn create_deposit_address(
     ),
     request_body = RotateDepositAddressRequest,
     responses(
-        (status = 200, body = DepositAddressResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 409, body = ErrorResponse),
-        (status = 423, body = ErrorResponse)
+        (status = 200, description = "OK", body = DepositAddressResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 409, description = "Conflict", body = ErrorResponse),
+        (status = 423, description = "Locked", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "addresses"
@@ -138,9 +138,9 @@ pub(crate) async fn rotate_deposit_address(
         DepositListQuery
     ),
     responses(
-        (status = 200, body = DepositsResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 200, description = "OK", body = DepositsResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "deposits"
@@ -163,8 +163,8 @@ pub(crate) async fn list_deposits(
     path = "/v1/products/{p}/deposits/{id}",
     params(("p" = String, Path), ("id" = Uuid, Path)),
     responses(
-        (status = 200, body = DepositResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 200, description = "OK", body = DepositResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "deposits"
@@ -185,8 +185,8 @@ pub(crate) async fn get_deposit(
     path = "/v1/products/{p}/deposits",
     params(("p" = String, Path), DepositLookupQuery),
     responses(
-        (status = 200, body = SupportDepositsResponse),
-        (status = 400, body = ErrorResponse)
+        (status = 200, description = "OK", body = SupportDepositsResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "deposits"
@@ -206,7 +206,7 @@ pub(crate) async fn lookup_deposits(
     get,
     path = "/v1/products/{p}/accounts/{ext}/limits",
     params(("p" = String, Path), ("ext" = String, Path)),
-    responses((status = 200, body = LimitsResponse), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = LimitsResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "accounts"
 )]
@@ -245,7 +245,7 @@ pub(crate) async fn get_limits(
     path = "/v1/products/{p}/accounts/{ext}/pause",
     params(("p" = String, Path), ("ext" = String, Path)),
     request_body = PauseRequest,
-    responses((status = 200, body = PauseResponse), (status = 400, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "pauses"
 )]
@@ -263,7 +263,7 @@ pub(crate) async fn pause_account(
     path = "/v1/products/{p}/accounts/{ext}/resume",
     params(("p" = String, Path), ("ext" = String, Path)),
     request_body = PauseRequest,
-    responses((status = 200, body = PauseResponse), (status = 400, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "pauses"
 )]
@@ -282,11 +282,11 @@ pub(crate) async fn resume_account(
     params(("p" = String, Path), ("id" = Uuid, Path)),
     request_body = RefundRequest,
     responses(
-        (status = 200, body = RefundResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 409, body = ErrorResponse),
-        (status = 423, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 200, description = "OK", body = RefundResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 409, description = "Conflict", body = ErrorResponse),
+        (status = 423, description = "Locked", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "refunds"
@@ -327,9 +327,9 @@ pub(crate) async fn request_refund(
     path = "/v1/attestation",
     params(AttestationQuery),
     responses(
-        (status = 200, body = AttestationResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 503, body = ErrorResponse)
+        (status = 200, description = "OK", body = AttestationResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 503, description = "Service Unavailable", body = ErrorResponse)
     ),
     tag = "attestation"
 )]
@@ -351,7 +351,7 @@ pub(crate) async fn get_attestation(
     path = "/v1/admin/routes/{r}/pause",
     params(("r" = String, Path)),
     request_body = PauseRequest,
-    responses((status = 200, body = RoutePauseResponse), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = RoutePauseResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
@@ -368,7 +368,7 @@ pub(crate) async fn pause_route(
     path = "/v1/admin/routes/{r}/resume",
     params(("r" = String, Path)),
     request_body = PauseRequest,
-    responses((status = 200, body = RoutePauseResponse), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = RoutePauseResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
@@ -384,7 +384,7 @@ pub(crate) async fn resume_route(
     post,
     path = "/v1/admin/deposits/{id}/nudge",
     params(("id" = Uuid, Path)),
-    responses((status = 200, body = NudgeResponse), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = NudgeResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
@@ -401,7 +401,7 @@ pub(crate) async fn nudge_deposit(
     post,
     path = "/v1/admin/refunds/{id}/approve",
     params(("id" = Uuid, Path)),
-    responses((status = 200, body = AdminRefundResponse), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "OK", body = AdminRefundResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
@@ -426,10 +426,10 @@ pub(crate) async fn approve_refund(
     params(("id" = Uuid, Path)),
     request_body = RecordRefundRequest,
     responses(
-        (status = 200, body = AdminRefundResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 409, body = ErrorResponse)
+        (status = 200, description = "OK", body = AdminRefundResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 409, description = "Conflict", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -449,7 +449,7 @@ pub(crate) async fn record_refund(
 #[utoipa::path(
     get,
     path = "/v1/admin/report/daily",
-    responses((status = 200, body = DailyReportResponse)),
+    responses((status = 200, description = "OK", body = DailyReportResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]

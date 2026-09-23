@@ -128,8 +128,8 @@ Rust stable, `#![forbid(unsafe_code)]`, release `overflow-checks = true`. `tokio
 `secrecy` + `zeroize`. The v1 Rust SDK is not yet published on crates.io: the published
 `dstack-sdk = 0.1.3` exposes the legacy API and cannot derive an ed25519 key. Until a v1
 release is published, use the official repository with both `version = "=0.6.0"` and
-`rev = "721df1b93fd93884224f2261c37dd86ca250432f"`; changing that revision requires a spec
-change. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
+`rev = "ad92cfeb4ab6960275498c31b66004b9bb1df068"` (the dstack `v0.6.0-rc5` release); changing
+that revision requires a spec change. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
 `unwrap_used`. `cargo-deny`, committed lockfile, reproducible distroless image by digest.
 Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
@@ -557,8 +557,8 @@ are fixed by §8 and §11, not configured.
 ```yaml
 services:
   topup:    { image: ghcr.io/phala-network/crypto-topup@sha256:…, command: ["topup", "run"] }
-  postgres: { image: ghcr.io/phala-network/postgres-walg@sha256:…,     # postgres:16 + WAL-G
-              volumes: [pgdata:/var/lib/postgresql/data],
+  postgres: { image: ghcr.io/phala-network/postgres-walg@sha256:…,     # postgres:18 + WAL-G
+              volumes: [pgdata:/var/lib/postgresql],
               command: ["postgres", "-c", "archive_mode=on", "-c", "archive_timeout=60",
                         "-c", "archive_command=wal-g wal-push %p"] }
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }

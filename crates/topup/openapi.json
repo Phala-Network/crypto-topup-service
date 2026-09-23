@@ -25,7 +25,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -35,7 +35,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -71,7 +71,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -81,7 +81,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -127,7 +127,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -137,7 +137,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -147,7 +147,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -157,7 +157,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -182,7 +182,7 @@
         "operationId": "daily_report",
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -227,7 +227,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -237,7 +237,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -282,7 +282,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -292,7 +292,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -328,7 +328,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -338,7 +338,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -348,7 +348,7 @@
             }
           },
           "503": {
-            "description": "",
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -389,7 +389,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -399,7 +399,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -409,7 +409,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
@@ -454,7 +454,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -464,7 +464,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
@@ -474,7 +474,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -484,7 +484,7 @@
             }
           },
           "423": {
-            "description": "",
+            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -527,7 +527,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -537,7 +537,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
@@ -547,7 +547,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -557,7 +557,7 @@
             }
           },
           "423": {
-            "description": "",
+            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -612,7 +612,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -622,7 +622,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
@@ -632,7 +632,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -642,7 +642,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -652,7 +652,7 @@
             }
           },
           "423": {
-            "description": "",
+            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -734,7 +734,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -744,7 +744,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -754,7 +754,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -797,7 +797,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -807,7 +807,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -860,7 +860,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -870,7 +870,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -916,7 +916,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -926,7 +926,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Unauthorized",
             "content": {
               "application/json": {
                 "schema": {
@@ -936,7 +936,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -989,7 +989,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -999,7 +999,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -1009,7 +1009,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1019,7 +1019,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -1029,7 +1029,7 @@
             }
           },
           "423": {
-            "description": "",
+            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -1039,7 +1039,7 @@
             }
           },
           "429": {
-            "description": "",
+            "description": "Too Many Requests",
             "content": {
               "application/json": {
                 "schema": {
@@ -1049,7 +1049,7 @@
             }
           },
           "503": {
-            "description": "",
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1100,7 +1100,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1110,7 +1110,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1159,7 +1159,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1169,7 +1169,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1232,7 +1232,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1242,7 +1242,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -1313,7 +1313,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1323,7 +1323,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -1367,7 +1367,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1377,7 +1377,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1431,7 +1431,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -1441,7 +1441,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Bad Request",
             "content": {
               "application/json": {
                 "schema": {
@@ -1451,7 +1451,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1461,7 +1461,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -1471,7 +1471,7 @@
             }
           },
           "423": {
-            "description": "",
+            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -2282,11 +2282,11 @@
           "payment": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RateLockPayment",
                 "description": "The payment to the lock address that the checkout page should show, once one is seen on\nchain: the deposit that consumed the lock; otherwise the first payment that would consume\nit; otherwise the first payment. Display only: while `status` is `seen` the payment is not\nfinal and nothing has been credited."
+              },
+              {
+                "type": "null"
               }
             ]
           },

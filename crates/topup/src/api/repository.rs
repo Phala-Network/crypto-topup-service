@@ -863,7 +863,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
     }
 }
 
-fn deposit_query() -> QueryBuilder<'static, Postgres> {
+fn deposit_query() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         r#"
         SELECT deposit.id, deposit.chain_id, deposit.tx_hash, deposit.log_index,
@@ -881,7 +881,7 @@ fn deposit_query() -> QueryBuilder<'static, Postgres> {
 
 async fn fetch_page(
     pool: &PgPool,
-    mut query: QueryBuilder<'static, Postgres>,
+    mut query: QueryBuilder<Postgres>,
 ) -> Result<DepositsResponse, ApiError> {
     query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 51");
     let rows = query
@@ -905,7 +905,7 @@ async fn fetch_page(
 
 async fn fetch_support_page(
     pool: &PgPool,
-    mut query: QueryBuilder<'static, Postgres>,
+    mut query: QueryBuilder<Postgres>,
 ) -> Result<SupportDepositsResponse, ApiError> {
     query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 51");
     let rows = query

@@ -2,7 +2,7 @@
 
 ## Setup
 
-The committed `rust-toolchain.toml` selects Rust 1.98 with the formatting and lint components.
+The committed `rust-toolchain.toml` selects Rust 1.98.1 with the formatting and lint components.
 Install that toolchain (rustup 1.28 or newer reads it when given no toolchain name), Foundry v1.8.3
 for contract work, and cargo-deny 0.20.2 for dependency policy checks:
 
