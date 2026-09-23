@@ -63,11 +63,11 @@ expect() {
 
 start default "$image"
 expect default 'SHOW archive_mode' on
-expect default 'SHOW archive_command' 'walg-wal-push %p'
+expect default 'SHOW archive_command' 'walg-cron wal-push %p'
 
 # User flags come first; the entrypoint's archive flags are appended and win.
 start off -e TOPUP_WAL_ARCHIVE=off "$image" postgres -c archive_mode=on \
-    -c "archive_command=walg-wal-push %p"
+    -c "archive_command=walg-cron wal-push %p"
 expect off 'SHOW archive_mode' off
 sql off 'CREATE TABLE archive_probe (id int); INSERT INTO archive_probe VALUES (1)' >/dev/null
 sql off 'SELECT pg_switch_wal()' >/dev/null

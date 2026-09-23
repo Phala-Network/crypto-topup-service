@@ -11,9 +11,14 @@ compose="$root/deploy/local/docker-compose.yml"
 project="topup-service-smoke-$$"
 tmp=$(mktemp -d)
 port=${TOPUP_LOCAL_PORT:-18080}
+export TOPUP_LOCAL_DSTACK_IMAGE="$project-dstack"
+export TOPUP_LOCAL_POSTGRES_IMAGE="$project-postgres"
+export TOPUP_LOCAL_SERVICE_IMAGE="$project-topup"
 
 cleanup() {
     docker compose -p "$project" -f "$compose" down --volumes --remove-orphans
+    docker image rm "$TOPUP_LOCAL_DSTACK_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
+        "$TOPUP_LOCAL_SERVICE_IMAGE" >/dev/null 2>&1 || true
     find "$tmp" -depth -delete
 }
 trap cleanup EXIT INT TERM
@@ -50,6 +55,7 @@ printf '%s\n' "$run_help" | grep -F -- '--bind' >/dev/null || {
     echo "unified topup run command is not available" >&2
     exit 1
 }
+printf '%s\n' "$run_help" | grep -F -- '--metrics-bind' >/dev/null
 printf '%s\n' "$run_help" | grep -F -- '--route' >/dev/null
 
 docker compose -p "$project" -f "$compose" up -d postgres dstack-simulator backup topup

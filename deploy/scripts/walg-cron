@@ -1,6 +1,27 @@
 #!/bin/sh
 set -eu
 
+write_marker() {
+    marker=${TOPUP_BACKUP_TIMESTAMP_FILE:-/run/topup-observability/last-backup-unix-seconds}
+    marker_dir=$(dirname "$marker")
+    mkdir -p "$marker_dir"
+    marker_tmp="$marker.tmp.$$"
+    (
+        umask 022
+        date -u +%s > "$marker_tmp"
+        chmod 0644 "$marker_tmp"
+    )
+    mv "$marker_tmp" "$marker"
+}
+
+# PostgreSQL archive_command: the key-versioned D3 wrapper uploads and annotates the segment, and
+# the backup-age marker is refreshed only after both succeeded.
+if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
+    walg-wal-push "$2"
+    write_marker
+    exit 0
+fi
+
 if [ "${1:-}" != "backup-push" ] || [ "$#" -ne 2 ]; then
     echo 'usage: walg-cron backup-push "MINUTE HOUR * * *"' >&2
     exit 64
@@ -48,6 +69,26 @@ if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi
 
+# archive_timeout only switches a segment that contains new WAL, and an idle database writes none:
+# one transaction id every 30 s keeps a segment switch, wal-push, and marker refresh every minute.
+# PostgreSQL 15+ also ignores archive_timeout after startup until the checkpointer first wakes (up
+# to checkpoint_timeout later), so a CHECKPOINT is requested once per postmaster start.
+wal_keepalive() {
+    woken_postmaster=
+    while :; do
+        postmaster=$(psql -XAtq -c 'SELECT pg_catalog.pg_postmaster_start_time()') ||
+            postmaster=
+        if [ -n "$postmaster" ] && [ "$postmaster" != "$woken_postmaster" ] &&
+            psql -XAtq -c 'CHECKPOINT'; then
+            woken_postmaster=$postmaster
+        fi
+        psql -XAtq -c 'SELECT pg_catalog.txid_current()' >/dev/null ||
+            echo "WAL keepalive transaction failed" >&2
+        sleep 30
+    done
+}
+wal_keepalive &
+
 while :; do
     now=$(date -u +%s)
     run_at=$(date -u -d "$(date -u +%F) $hour:$minute:00" +%s)
@@ -58,5 +99,6 @@ while :; do
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
     sleep "$delay"
     walg-base-backup "${PGDATA:-/var/lib/postgresql/data}"
+    write_marker
     wal-g delete retain FULL "$retention" --use-sentinel-time --confirm
 done

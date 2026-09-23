@@ -1,0 +1,106 @@
+pub use topup_adapters::redaction::{Redacted, RedactedTransportError};
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use topup_adapters::settlement::http::SettlementAnswer;
+    use topup_core::route::RouteFile;
+    use tracing_test::traced_test;
+
+    use crate::reconciler::{
+        CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationMetrics,
+        RpcReconciliationChain, SettlementLookup,
+    };
+
+    use super::Redacted;
+
+    #[test]
+    fn env_derived_provider_url_is_redacted_in_errors_and_logs() {
+        let secret = "rpc-secret-token";
+        let value = format!("https://user:{secret}@rpc.example/v1?api_key={secret}");
+        let provider = Redacted::parse(&value).expect("valid provider URL");
+        let message = format!("provider {provider:?} failed: {provider}");
+
+        assert_eq!(message, "provider [REDACTED URL] failed: [REDACTED URL]");
+        assert!(!message.contains(secret));
+        assert!(!message.contains("user"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn failing_rpc_provider_is_logged_by_production_code_without_url_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        // Every connection closes before a response, so the real HTTP transport fails.
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let secret = "rpc-secret-token";
+        let rpc_url = format!("http://user:{secret}@{address}/rpc?api_key={secret}");
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let chain_id = route.chain.chain_id;
+        let chain = RpcReconciliationChain::connect(&rpc_url, Duration::from_secs(5), 10)
+            .expect("production adapter accepts URL")
+            .with_provider("provider-a");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .expect("lazy pool URL is valid");
+        let reconciler = Reconciler::with_dependencies(
+            pool,
+            vec![route],
+            BTreeMap::from([(chain_id, Arc::new(chain) as Arc<dyn ReconciliationChain>)]),
+            Arc::new(NoSettlement),
+            Arc::new(ReconciliationMetrics::default()),
+        )
+        .expect("reconciler configures");
+
+        reconciler
+            .check(CheckName::MissingDeposit)
+            .await
+            .expect_err("closed connections fail the finalized-head request");
+        server.abort();
+
+        logs_assert(|lines: &[&str]| {
+            let line = lines
+                .iter()
+                .find(|line| line.contains("missing-deposit check failed for chain"))
+                .ok_or_else(|| "missing production reconciler error log".to_owned())?;
+            if !line.contains("finalized head fetch failed for provider `provider-a` (transport)") {
+                return Err(format!("adapter error was not redacted: {line}"));
+            }
+            // This capture enables every level; `log_subscriber` drops alloy's DEBUG transport
+            // span, which records the raw URL, so only production-visible levels are checked.
+            let production_levels = [" INFO ", " WARN ", " ERROR "];
+            if let Some(line) = lines.iter().find(|line| {
+                production_levels.iter().any(|level| line.contains(level))
+                    && (line.contains(secret) || line.contains("api_key"))
+            }) {
+                return Err(format!("provider URL credentials reached the logs: {line}"));
+            }
+            Ok(())
+        });
+    }
+
+    struct NoSettlement;
+
+    #[async_trait]
+    impl SettlementLookup for NoSettlement {
+        async fn get_by_key(
+            &self,
+            _settlement_url: &str,
+            _key: &str,
+        ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
+            Ok(None)
+        }
+    }
+}

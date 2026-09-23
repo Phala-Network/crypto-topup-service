@@ -33,6 +33,7 @@ use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::SecretKey32;
 use topup_core::route::RouteFile;
 use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
+use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -71,6 +72,9 @@ struct RunArgs {
     /// API socket address; defaults to the deployment port on all interfaces.
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind: std::net::SocketAddr,
+    /// Monitoring socket address; keep this listener off the public gateway.
+    #[arg(long, default_value = "127.0.0.1:9464")]
+    metrics_bind: std::net::SocketAddr,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
@@ -190,12 +194,12 @@ enum RouteCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    if let Err(error) = tracing_subscriber::fmt()
-        .json()
-        .with_target(false)
-        .try_init()
-    {
+    if let Err(error) = topup::observability::log_subscriber(std::io::stdout).try_init() {
         eprintln!("failed to initialize tracing: {error}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = topup::observability::init() {
+        tracing::error!(%error, "failed to initialize observability");
         return ExitCode::FAILURE;
     }
 
@@ -671,6 +675,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let metrics_listener = match tokio::net::TcpListener::bind(args.metrics_bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(%error, bind = %args.metrics_bind, "failed to bind metrics listener");
+            return ExitCode::FAILURE;
+        }
+    };
     let product_lookup =
         SettlementProductLookup::new(pool.clone(), signer.clone(), Duration::from_secs(30));
     let confirm_step =
@@ -747,6 +758,13 @@ async fn run(args: &RunArgs) -> ExitCode {
             .await
     });
     tracing::info!(bind = %args.bind, "API listening");
+    let metrics_cancellation = cancellation.child_token();
+    let mut metrics_server_task = tokio::spawn(async move {
+        axum::serve(metrics_listener, topup::observability::metrics_router())
+            .with_graceful_shutdown(metrics_cancellation.cancelled_owned())
+            .await
+    });
+    tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
     let scanner_cancellation = cancellation.child_token();
@@ -763,7 +781,9 @@ async fn run(args: &RunArgs) -> ExitCode {
         let worker_cancellation = cancellation.child_token();
         pump_tasks.push(tokio::spawn(async move {
             tracing::info!(worker, "deposit pump started");
-            worker_pump.run(worker_cancellation).await;
+            worker_pump
+                .run_with_instance(worker.to_string(), worker_cancellation)
+                .await;
         }));
     }
     let metrics = Arc::new(PumpMetrics::default());
@@ -777,6 +797,21 @@ async fn run(args: &RunArgs) -> ExitCode {
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
         age_alerter.run(age_cancellation).await;
+    });
+    let database_metrics_cancellation = cancellation.child_token();
+    let metrics_pool = pool.clone();
+    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(&routes);
+    let database_metrics_task = tokio::spawn(async move {
+        topup::observability::collect_database_metrics(
+            metrics_pool,
+            lock_exposure_caps,
+            database_metrics_cancellation,
+        )
+        .await;
+    });
+    let backup_metrics_cancellation = cancellation.child_token();
+    let backup_metrics_task = tokio::spawn(async move {
+        topup::observability::collect_backup_metrics(backup_metrics_cancellation).await;
     });
     let expiry_metrics = Arc::new(topup::locks::ExpiryMetrics::default());
     let expiry_worker = topup::locks::ExpiryWorker::new(
@@ -814,6 +849,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     );
     let mut clean_shutdown = true;
     let mut api_finished = false;
+    let mut metrics_server_finished = false;
     let mut scanner_finished = false;
     let mut reconciliation_finished = false;
     let mut refund_finished = false;
@@ -839,6 +875,15 @@ async fn run(args: &RunArgs) -> ExitCode {
                 Ok(Ok(())) => tracing::error!("scanner stopped before shutdown"),
                 Ok(Err(error)) => tracing::error!(%error, "scanner task failed"),
                 Err(error) => tracing::error!(%error, "scanner task failed to join"),
+            }
+            clean_shutdown = false;
+        }
+        result = &mut metrics_server_task => {
+            metrics_server_finished = true;
+            match result {
+                Ok(Ok(())) => tracing::error!("metrics server stopped before shutdown"),
+                Ok(Err(error)) => tracing::error!(%error, "metrics server failed"),
+                Err(error) => tracing::error!(%error, "metrics server task failed"),
             }
             clean_shutdown = false;
         }
@@ -890,6 +935,19 @@ async fn run(args: &RunArgs) -> ExitCode {
             }
         }
     }
+    if !metrics_server_finished {
+        match metrics_server_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "metrics server failed during shutdown");
+                clean_shutdown = false;
+            }
+            Err(error) => {
+                tracing::error!(%error, "metrics server task failed during shutdown");
+                clean_shutdown = false;
+            }
+        }
+    }
     if !reconciliation_finished && let Err(error) = reconciliation_task.await {
         tracing::error!(%error, "reconciler task failed during shutdown");
         clean_shutdown = false;
@@ -906,6 +964,14 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     if let Err(error) = age_task.await {
         tracing::error!(%error, "age alert task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if let Err(error) = database_metrics_task.await {
+        tracing::error!(%error, "database metrics collector task failed during shutdown");
+        clean_shutdown = false;
+    }
+    if let Err(error) = backup_metrics_task.await {
+        tracing::error!(%error, "backup metrics collector task failed during shutdown");
         clean_shutdown = false;
     }
     if let Err(error) = expiry_task.await {

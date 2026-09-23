@@ -12,6 +12,18 @@ pub(crate) fn configured_provider_url(provider: &str) -> Result<String, String> 
         .ok_or(environment)
 }
 
+/// Returns a log-safe label for the provider entry at `index` in `chain.rpc_providers`.
+///
+/// Provider ids are used as-is; an inline URL entry is named by its position so its host,
+/// path, and credentials never reach an error or log line.
+pub(crate) fn provider_label(provider: &str, index: usize) -> String {
+    if provider.contains("://") {
+        format!("rpc_providers[{index}]")
+    } else {
+        provider.to_owned()
+    }
+}
+
 /// Returns the attested environment-variable name for one provider id.
 pub(crate) fn provider_environment_name(provider_id: &str) -> String {
     let normalized = provider_id
@@ -44,6 +56,11 @@ mod tests {
         assert_eq!(
             configured_provider_url("http://127.0.0.1:8545"),
             Ok("http://127.0.0.1:8545".to_owned())
+        );
+        assert_eq!(provider_label("provider-a", 0), "provider-a");
+        assert_eq!(
+            provider_label("https://user:secret@rpc.example/v1?key=secret", 1),
+            "rpc_providers[1]"
         );
     }
 }

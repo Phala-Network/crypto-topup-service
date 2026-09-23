@@ -4,9 +4,9 @@
 
 Trigger on `rate-lock expiry scan failed` errors in the service log, open rate locks more than a
 minute past `expires_at`, missing `rate_lock.expired` events, or `overdue_locks > 0` persisting in
-the [Lock exposure near cap](lock-exposure-near-cap.md) query. PR #56 registers no heartbeat for
-this loop, so `TopupLoopStopped` does not cover it; that metric gap must be closed when #56 is
-rebased onto C10.
+the [Lock exposure near cap](lock-exposure-near-cap.md) query, or `TopupLoopStopped{loop="lock_expiry"}`.
+The loop heartbeat only proves the worker is scanning; a scan that keeps failing still heartbeats,
+so also watch `time() - topup_loop_progress_unixtime_seconds{loop="lock_expiry"}`.
 
 ## Impact and blast radius
 

@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::db::{Deposit, OutboxEvent};
 use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
-use crate::rpc_provider::configured_provider_url;
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RouteKey {
@@ -83,7 +83,7 @@ impl ScreenRoute {
         if let StepOutcome::Reject(reason) = outcome {
             result
                 .events
-                .push(rejected_event(deposit.id, product_id, reason));
+                .push(rejected_event(deposit, product_id, reason));
         }
         result
     }
@@ -220,6 +220,7 @@ impl ScreenStep {
                     version: route.version,
                 });
             };
+            let provider_ids = (provider_label(provider_a, 0), provider_label(provider_b, 1));
             let provider_a = configured_provider_url(provider_a).map_err(|environment| {
                 ScreenStepConfigError::MissingProviderUrl {
                     route: route.route.clone(),
@@ -244,7 +245,8 @@ impl ScreenStep {
                 route: route.route.clone(),
                 version: route.version,
                 source,
-            })?;
+            })?
+            .with_provider_ids(provider_ids.0, provider_ids.1);
             screening_routes.push(ScreenRoute::new(
                 route.route.clone(),
                 route.version,
@@ -316,13 +318,16 @@ fn screening_evidence(
     })
 }
 
-fn rejected_event(deposit_id: Uuid, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
     OutboxEvent {
         id: Uuid::new_v4(),
         event_type: "deposit.rejected".to_owned(),
         payload: json!({
             "product_id": product_id,
-            "deposit_id": deposit_id,
+            "deposit_id": deposit.id,
+            "chain_id": deposit.chain_id,
+            "state": "rejected",
+            "route": deposit.route.as_deref(),
             "reason": reason.code(),
         }),
         next_attempt_at: Utc::now(),
@@ -504,6 +509,8 @@ mod tests {
                     product_id.to_string()
                 );
                 assert_eq!(result.events[0].payload["reason"], "sanctioned");
+                assert_eq!(result.events[0].payload["state"], "rejected");
+                assert_eq!(result.events[0].payload["route"], "route");
             } else {
                 assert!(result.events.is_empty());
             }

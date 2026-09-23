@@ -22,6 +22,14 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 
 ## Decision tree
 
+- Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
+  `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle
+  (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `backup` service or its
+  WAL keepalive has stopped, so nothing gives `archive_timeout` a segment to switch. Check
+  `docker compose -f deploy/docker-compose.staging.yml ps backup` and search the `backup` logs for
+  `WAL keepalive transaction failed`; fix the reported database connection or credential error,
+  then run `docker compose -f deploy/docker-compose.staging.yml restart backup` and confirm
+  `last_archived_time` advances within two minutes.
 - WAL archiver failing but object storage reachable: fix credentials/permissions and verify a new WAL.
 - Object storage unavailable: escalate provider outage; do not delete local WAL.
 - Backup age unknown (no recent `last_archived_time` or `key-versions/wal/` object): treat as failed

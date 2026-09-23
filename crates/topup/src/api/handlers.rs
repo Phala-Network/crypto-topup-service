@@ -478,11 +478,13 @@ async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyRepo
                 "treasury balance unavailable: route has no RPC provider".to_owned();
             continue;
         };
-        let environment = rpc_environment_name(provider);
-        let Ok(url) = std::env::var(&environment) else {
-            route_report.treasury_balance_note =
-                format!("treasury balance unavailable: {environment} is not configured");
-            continue;
+        let url = match crate::rpc_provider::configured_provider_url(provider) {
+            Ok(url) => url,
+            Err(environment) => {
+                route_report.treasury_balance_note =
+                    format!("treasury balance unavailable: {environment} is not configured");
+                continue;
+            }
         };
         let Ok(batch_size) = usize::try_from(route.chain.flush.balance_batch_size) else {
             route_report.treasury_balance_note =
@@ -491,6 +493,7 @@ async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyRepo
         };
         let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
         let Ok(client) = AlloyChainClient::connect_http_with_policy(&url, timeout, batch_size)
+            .map(|client| client.with_provider(crate::rpc_provider::provider_label(provider, 0)))
         else {
             route_report.treasury_balance_note =
                 "treasury balance unavailable: RPC client configuration is invalid".to_owned();
@@ -518,20 +521,6 @@ async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyRepo
             }
         }
     }
-}
-
-fn rpc_environment_name(provider_id: &str) -> String {
-    let normalized = provider_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 async fn deposit_address(

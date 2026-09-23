@@ -4,9 +4,20 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 compose="$root/deploy/local/docker-compose.yml"
 project="topup-infra-smoke-$$"
+tmp=$(mktemp -d "$root/.infra-smoke.XXXXXX")
+topup_container=
+export TOPUP_LOCAL_DSTACK_IMAGE="$project-dstack"
+export TOPUP_LOCAL_POSTGRES_IMAGE="$project-postgres"
+export TOPUP_LOCAL_SERVICE_IMAGE="$project-topup"
 
 cleanup() {
+    if [ -n "$topup_container" ]; then
+        docker rm -f "$topup_container" >/dev/null 2>&1 || true
+    fi
     docker compose -p "$project" -f "$compose" down --volumes --remove-orphans
+    docker image rm "$TOPUP_LOCAL_DSTACK_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
+        "$TOPUP_LOCAL_SERVICE_IMAGE" >/dev/null 2>&1 || true
+    find "$tmp" -depth -delete
 }
 trap cleanup EXIT INT TERM
 
@@ -62,10 +73,44 @@ settings=$(docker compose -p "$project" -f "$compose" exec -T postgres \
     psql -U postgres -d topup -At -c \
     "select name || '=' || setting from pg_settings where name in ('archive_command','archive_mode','archive_timeout') order by name")
 printf '%s\n' "$settings"
-printf '%s\n' "$settings" | grep -Fx 'archive_command=walg-wal-push %p' >/dev/null
+printf '%s\n' "$settings" | grep -Fx 'archive_command=walg-cron wal-push %p' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_mode=on' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_timeout=60' >/dev/null
 echo "postgres archive settings passed"
+
+# No manual WAL switch: the backup keepalive must refresh the marker on an idle database.
+wait_for backup-marker docker compose -p "$project" -f "$compose" \
+    exec -T postgres test -s /run/topup-observability/last-backup-unix-seconds
+marker_age() {
+    docker compose -p "$project" -f "$compose" exec -T postgres sh -c \
+        'echo $(( $(date -u +%s) - $(cat /run/topup-observability/last-backup-unix-seconds) ))'
+}
+idle_checks=16
+while [ "$idle_checks" -gt 0 ]; do
+    age=$(marker_age)
+    if [ "$age" -gt 120 ]; then
+        echo "idle backup marker is ${age}s old; TopupBackupTooOld would fire" >&2
+        exit 1
+    fi
+    idle_checks=$((idle_checks - 1))
+    sleep 10
+done
+echo "idle database kept the backup marker fresh for 160s"
+marker_mode=$(docker compose -p "$project" -f "$compose" exec -T postgres \
+    stat -c %a /run/topup-observability/last-backup-unix-seconds)
+[ "$marker_mode" = 644 ]
+
+topup_container=$(docker create "$TOPUP_LOCAL_SERVICE_IMAGE")
+docker cp "$topup_container:/etc/passwd" "$tmp/passwd"
+docker rm "$topup_container" >/dev/null
+topup_container=
+topup_uid=$(awk -F: '$1 == "nonroot" { print $3 }' "$tmp/passwd")
+[ -n "$topup_uid" ]
+docker run --rm --user "$topup_uid" \
+    --volume "${project}_observability:/run/topup-observability:ro" \
+    --entrypoint /bin/sh "$TOPUP_LOCAL_POSTGRES_IMAGE" \
+    -c 'test -r /run/topup-observability/last-backup-unix-seconds && read -r timestamp < /run/topup-observability/last-backup-unix-seconds && test -n "$timestamp"'
+echo "backup marker is readable by the topup image UID"
 
 dry_run=$(docker compose -p "$project" -f "$compose" run --rm --no-deps \
     -e WALG_CRON_DRY_RUN=1 backup walg-cron backup-push "0 3 * * *")

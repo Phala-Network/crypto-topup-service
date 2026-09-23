@@ -17,11 +17,13 @@ use topup_adapters::pricing::native::CoinMetricsUsdClient;
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::money::ScaledPrice;
 use topup_core::route::RouteFile;
+use tracing::Instrument as _;
 
 use super::{
     AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
-    PriceError, PriceSource,
+    PriceError, PriceSource, RunResult,
 };
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// One configured chain/token flusher task.
 pub struct FlusherTask {
@@ -62,9 +64,27 @@ impl FlusherTask {
     /// checked on every maintenance tick, the first of which is immediate; without it, the task
     /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
+        let instance = format!("{}:{}", self.route.chain.chain_id, self.route.route);
+        crate::observability::register_loop("flusher", instance.clone());
+        crate::observability::heartbeat("flusher", instance.clone());
         let mut authorized = false;
-        if let Err(error) = self.flusher.maintain_sent(&self.route).await {
-            tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
+        let startup_span = crate::observability::flush_action_span(
+            self.route.chain.chain_id,
+            &self.route.route,
+            "startup_recovery",
+            0,
+        );
+        match self
+            .flusher
+            .maintain_sent(&self.route)
+            .instrument(startup_span)
+            .await
+        {
+            Ok(Some(_)) => crate::observability::progress("flusher", instance.clone()),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
+            }
         }
         let mut maintenance = interval(self.maintenance_interval);
         maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -76,27 +96,66 @@ impl FlusherTask {
             }
         };
         loop {
+            let wait = self
+                .maintenance_interval
+                .min(next_plan.saturating_duration_since(Instant::now()));
+            crate::observability::waiting("flusher", instance.clone(), wait);
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
+                    crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
+                    let span = crate::observability::flush_action_span(
+                        self.route.chain.chain_id,
+                        &self.route.route,
+                        "maintenance",
+                        0,
+                    );
                     let result = if authorized {
-                        self.flusher.run_once(&self.route).await.map(drop)
+                        self.flusher.run_once(&self.route).instrument(span).await
                     } else {
-                        self.flusher.maintain_sent(&self.route).await.map(drop)
+                        self.flusher
+                            .maintain_sent(&self.route)
+                            .instrument(span)
+                            .await
+                            .map(|result| result.unwrap_or(RunResult::Idle))
                     };
-                    if let Err(error) = result {
-                        tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
+                    match result {
+                        Ok(RunResult::Idle) => {}
+                        Ok(_) => crate::observability::progress("flusher", instance.clone()),
+                        Err(error) => {
+                            tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
+                        }
                     }
                 }
                 () = sleep_until(next_plan) => {
+                    crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
                     if authorized {
-                        match self.planner.plan(&self.route).await {
+                        let plan_span = crate::observability::flush_action_span(
+                            self.route.chain.chain_id,
+                            &self.route.route,
+                            "planning",
+                            0,
+                        );
+                        match self.planner.plan(&self.route).instrument(plan_span).await {
                             Ok(flush_id) => {
+                                if flush_id.is_some() {
+                                    crate::observability::progress("flusher", instance.clone());
+                                }
                                 tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
-                                if let Err(error) = self.flusher.run_once(&self.route).await {
-                                    tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                let send_span = crate::observability::flush_action_span(
+                                    self.route.chain.chain_id,
+                                    &self.route.route,
+                                    "planned_send",
+                                    0,
+                                );
+                                match self.flusher.run_once(&self.route).instrument(send_span).await {
+                                    Ok(RunResult::Idle) => {}
+                                    Ok(_) => crate::observability::progress("flusher", instance.clone()),
+                                    Err(error) => {
+                                        tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -192,10 +251,15 @@ pub fn configure_tasks(
             .rpc_providers
             .first()
             .ok_or_else(|| format!("route `{}` has no RPC provider", route.route))?;
-        let environment = provider_environment_name(provider);
-        let url = std::env::var(&environment).map_err(|_| {
+        let url = configured_provider_url(provider).map_err(|environment| {
             format!(
                 "{environment} is required for flusher route `{}`",
+                route.route
+            )
+        })?;
+        let url = crate::observability::Redacted::parse(&url).map_err(|_| {
+            format!(
+                "flusher route `{}` has an invalid provider URL",
                 route.route
             )
         })?;
@@ -217,8 +281,9 @@ pub fn configure_tasks(
         let batch_size = usize::try_from(route.chain.flush.balance_batch_size)
             .map_err(|_| "flush balance batch size exceeds usize".to_owned())?;
         let chain = Arc::new(
-            AlloyChainClient::connect_http_with_policy(&url, timeout, batch_size)
-                .map_err(|error| error.to_string())?,
+            AlloyChainClient::connect_http_with_policy(url.expose().as_str(), timeout, batch_size)
+                .map_err(|_| format!("failed to configure flusher provider {url}"))?
+                .with_provider(provider_label(provider, 0)),
         );
         let prices: Arc<dyn PriceSource> =
             Arc::new(CoinMetricsPriceSource(CoinMetricsUsdClient::new(timeout)?));
@@ -302,20 +367,6 @@ fn next_deadline(schedule: &Cron) -> Result<Instant, String> {
     Instant::now()
         .checked_add(delay)
         .ok_or_else(|| "flush schedule deadline exceeds Tokio instant range".to_owned())
-}
-
-fn provider_environment_name(provider_id: &str) -> String {
-    let normalized = provider_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 #[cfg(test)]

@@ -24,9 +24,9 @@ case "$drill_id" in
 esac
 project="topup-restore-drill-$mode-$drill_id"
 # Per-run image tags keep concurrent checkouts from replacing this drill's images mid-run.
-export TOPUP_LOCAL_IMAGE="crypto-topup-service:$project"
+export TOPUP_LOCAL_SERVICE_IMAGE="crypto-topup-service:$project"
 export TOPUP_LOCAL_POSTGRES_IMAGE="crypto-topup-postgres-walg:$project"
-export TOPUP_LOCAL_DSTACK_SIMULATOR_IMAGE="crypto-topup-dstack-simulator:$project"
+export TOPUP_LOCAL_DSTACK_IMAGE="crypto-topup-dstack-simulator:$project"
 writer_pid=
 samples_file=
 routes_dir=
@@ -43,8 +43,8 @@ cleanup() {
         rm -f "$samples_file"
     fi
     dc --profile tools down --volumes --remove-orphans >/dev/null 2>&1 || true
-    docker image rm "$TOPUP_LOCAL_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
-        "$TOPUP_LOCAL_DSTACK_SIMULATOR_IMAGE" >/dev/null 2>&1 || true
+    docker image rm "$TOPUP_LOCAL_SERVICE_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
+        "$TOPUP_LOCAL_DSTACK_IMAGE" >/dev/null 2>&1 || true
     if [ -n "$routes_dir" ]; then
         rm -rf "$routes_dir"
     fi
