@@ -71,7 +71,7 @@ fi
 
 # archive_timeout only switches a segment that contains new WAL; the heartbeat service commits a
 # row every minute, which keeps a segment switch, wal-push, and marker refresh every minute on an
-# otherwise idle database. PostgreSQL 15+ ignores archive_timeout after startup until the
+# otherwise idle database. PostgreSQL 15+ (still true on 18) ignores archive_timeout after startup until the
 # checkpointer first wakes (up to checkpoint_timeout later), so a CHECKPOINT is requested once per
 # postmaster start.
 checkpoint_on_start() {
