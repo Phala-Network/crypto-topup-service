@@ -7,7 +7,6 @@ require_command anvil
 require_command cast
 require_command forge
 require_command jq
-require_command ss
 
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 safe_singleton="$(cast compute-address "$owner" --nonce 0)"
@@ -29,15 +28,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-ports=("$(find_free_port)" "")
-first_port="${ports[0]}"
-for candidate in $(seq $((first_port + 1)) 19646); do
-    if ! ss -ltn "sport = :$candidate" 2>/dev/null | grep -q LISTEN; then
-        ports[1]="$candidate"
-        break
-    fi
-done
-[[ -n "${ports[1]}" ]] || die "could not find a second free local port"
+ports=("$(find_free_port)")
+ports+=("$(find_free_port $((ports[0] + 1)))")
 
 rpcs=("http://127.0.0.1:${ports[0]}" "http://127.0.0.1:${ports[1]}")
 chain_ids=(31337 31338)

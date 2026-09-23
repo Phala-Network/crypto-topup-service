@@ -64,10 +64,12 @@ code_hash() {
     fi
 }
 
+# Prints the first local port from FIRST (default 19545) through 19645 that refuses a TCP
+# connection. Uses bash's /dev/tcp so no extra tool is needed.
 find_free_port() {
     local port
-    for port in $(seq 19545 19645); do
-        if ! ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+    for port in $(seq "${1:-19545}" 19645); do
+        if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
             printf '%s\n' "$port"
             return 0
         fi

@@ -2,10 +2,17 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# One self-hosted runner executes jobs serially; a new push to a PR supersedes its previous run.
+# Pushes to main queue instead, so every merge keeps a complete CI result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -104,6 +111,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
       - name: Ensure Rust toolchain (self-hosted runners may lack rustup)
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
@@ -146,6 +155,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
       - name: Ensure Rust toolchain (self-hosted runners may lack rustup)
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
@@ -245,8 +256,8 @@ jobs:
           PRODUCT_SLUG=ci-check PRODUCT_KID=ci-check/v1 \
           SETTLEMENT_URL=https://product.invalid/settlements \
             deploy/sandbox/render-route.sh >"$route"
-          docker run --rm -v "$route:/route.yaml:ro" crypto-topup-service:ci \
-            topup route validate --template /route.yaml
+          docker run --rm -i crypto-topup-service:ci \
+            topup route validate --template /dev/stdin <"$route"
 
   deployment:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -257,14 +268,7 @@ jobs:
           deploy/validate-compose.sh
           docker compose -f deploy/local/docker-compose.yml config >/dev/null
       - name: Validate Prometheus rules and alert behavior
-        run: |
-          image=prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
-          docker run --rm --entrypoint promtool \
-            -v "$PWD/deploy/alerts:/rules:ro" "$image" \
-            check rules /rules/prometheus-rules.yml
-          docker run --rm --entrypoint promtool \
-            -v "$PWD/deploy/alerts:/rules:ro" "$image" \
-            test rules /rules/prometheus-rules.test.yml
+        run: deploy/check-alerts.sh
       - name: Validate deployment scripts and app compose
         run: |
           for file in deploy/*.sh deploy/contracts/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
@@ -308,6 +312,8 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
       - name: Install Foundry
         if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
