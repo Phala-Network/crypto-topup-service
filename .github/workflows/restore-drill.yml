@@ -1,0 +1,56 @@
+name: Restore drill
+
+# Runner constraints (org self-hosted runner):
+# - The runner is a container that drives the host Docker daemon through its socket. The daemon
+#   cannot see this workspace, so nothing here or in deploy/local/restore-drill.sh bind-mounts a
+#   workspace path, route file, sample file, or $TMPDIR. The drill fills named volumes with
+#   `docker cp` instead (deploy/local/restore-drill.compose.yml) and refuses to start if the
+#   rendered stack contains a bind mount.
+# - `ss` and `envsubst` are not installed, and the drill uses neither.
+# - Submodules are not fetched; the drill's images build from crates/ and deploy/ only, and
+#   contracts/lib is not needed.
+
+on:
+  schedule:
+    # Weekly, Monday 03:17 UTC: the architecture section 14 restore drill.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new run (including a re-run) cancels the previous one. The cancelled job's `if: always()`
+# cleanup step still removes that run's projects.
+concurrency:
+  group: restore-drill
+  cancel-in-progress: true
+
+jobs:
+  drill:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    env:
+      # Lowercase alphanumeric; unique per run attempt so a re-run never shares projects.
+      TOPUP_RESTORE_DRILL_ID: gh${{ github.run_id }}a${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run the controlled and crash restore drills
+        env:
+          # The runner empties runner.temp after every job, including cancelled ones. The runner
+          # context is only available at step level.
+          TMPDIR: ${{ runner.temp }}
+        run: make restore-drill
+      # A cancelled or timed-out job skips the drill's own trap; remove only this run's projects.
+      - name: Remove this run's drill projects, volumes, and image tags
+        if: always()
+        run: |
+          suffix="-$TOPUP_RESTORE_DRILL_ID"
+          for project in "topup-restore-drill-controlled$suffix" "topup-restore-drill-crash$suffix"; do
+            docker ps -aq --filter "label=com.docker.compose.project=$project" | xargs -r docker rm -f
+            docker volume ls -q --filter "label=com.docker.compose.project=$project" |
+              xargs -r docker volume rm
+            docker network ls -q --filter "label=com.docker.compose.project=$project" |
+              xargs -r docker network rm
+            docker images --format '{{.Repository}}:{{.Tag}}' | grep -F ":$project" |
+              xargs -r docker image rm || true
+          done

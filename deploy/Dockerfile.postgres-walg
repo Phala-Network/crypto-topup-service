@@ -20,9 +20,18 @@ RUN apt-get update && \
 
 FROM postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends jq && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=wal-g-download /wal-g /usr/local/bin/wal-g
 COPY deploy/scripts/postgres-walg-entrypoint.sh /usr/local/bin/postgres-walg-entrypoint
 COPY deploy/scripts/walg-cron /usr/local/bin/walg-cron
+COPY deploy/scripts/walg-key-manifest /usr/local/bin/walg-key-manifest
+COPY deploy/scripts/walg-wal-push /usr/local/bin/walg-wal-push
+COPY deploy/scripts/walg-base-backup /usr/local/bin/walg-base-backup
+COPY deploy/scripts/walg-backup-fetch /usr/local/bin/walg-backup-fetch
+COPY deploy/scripts/walg-restore-command /usr/local/bin/walg-restore-command
 
 ENTRYPOINT ["postgres-walg-entrypoint"]
 CMD ["postgres"]

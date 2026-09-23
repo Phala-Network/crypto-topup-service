@@ -267,6 +267,8 @@ jobs:
         run: |
           deploy/validate-compose.sh
           docker compose -f deploy/local/docker-compose.yml config >/dev/null
+          docker compose -f deploy/local/docker-compose.yml \
+            -f deploy/local/restore-drill.compose.yml config >/dev/null
       - name: Validate Prometheus rules and alert behavior
         run: deploy/check-alerts.sh
       - name: Validate deployment scripts and app compose
@@ -279,7 +281,9 @@ jobs:
           done
           jq empty deploy/app-compose.example.json
           deploy/tests/walg-cron.sh
+          deploy/tests/walg-restore.sh
           deploy/tests/render-compose.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
           TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
           POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
             deploy/render-app-compose.sh deploy/staging.env.example | jq -e \
@@ -307,6 +311,8 @@ jobs:
         run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
       - name: Check WAL-G runtime
         run: docker run --rm postgres-walg:ci wal-g --version
+      - name: Check the WAL archive switch
+        run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 
   contracts:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}

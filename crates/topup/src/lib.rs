@@ -13,8 +13,10 @@
 )]
 
 pub mod api;
+pub mod backup;
 pub mod db;
 pub mod flusher;
+pub mod heartbeat;
 pub mod locks;
 pub mod observability;
 pub mod outbox;
@@ -22,6 +24,7 @@ mod pause;
 pub mod pump;
 pub mod reconciler;
 pub mod refunds;
+pub mod restore;
 mod rpc_provider;
 pub mod scanner;
 pub mod steps;

@@ -48,6 +48,16 @@ wait_for backup docker compose -p "$project" -f "$compose" \
     exec -T backup wal-g --version
 echo "local backup service is running"
 
+key_metadata=$(docker compose -p "$project" -f "$compose" exec -T postgres \
+    stat -c '%a:%u:%g' /run/wal-g/backup.key)
+test "$key_metadata" = "600:999:999"
+if docker inspect "${project}-postgres-1" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+    grep -q '^WALG_LIBSODIUM_KEY='; then
+    echo "backup key value must not be present in the container environment" >&2
+    exit 1
+fi
+echo "backup key tmpfs permissions passed"
+
 docker compose -p "$project" -f "$compose" run --rm migrate
 docker compose -p "$project" -f "$compose" run --rm --no-deps topup \
     topup route validate --template /etc/topup/routes/phala-cloud-sepolia-pha.yaml
@@ -106,7 +116,7 @@ dry_run=$(docker compose -p "$project" -f "$compose" run --rm --no-deps \
     -e WALG_CRON_DRY_RUN=1 backup walg-cron backup-push "0 3 * * *")
 printf '%s\n' "$dry_run"
 printf '%s\n' "$dry_run" | grep -F \
-    'dry-run: wal-g backup-push /var/lib/postgresql/data' >/dev/null
+    'dry-run: walg-base-backup /var/lib/postgresql/data' >/dev/null
 printf '%s\n' "$dry_run" | grep -F \
     'dry-run: wal-g delete retain FULL 2 --use-sentinel-time --confirm' >/dev/null
 echo "backup helper dry-run passed"

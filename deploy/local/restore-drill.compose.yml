@@ -1,0 +1,38 @@
+# Restore-drill overlay for docker-compose.yml, used locally and on CI alike.
+#
+# The org's self-hosted CI runner is a container that drives the host Docker daemon through its
+# socket, so the daemon cannot see the checkout: bind-mounting a workspace path fails with "path
+# does not exist". The drill therefore never bind-mounts. It creates these project volumes and
+# fills them with `docker cp`, which streams through the API. `!override` (Compose 2.24.4 or
+# newer) replaces each service's whole volume list, because the base mounts single files that a
+# named volume cannot shadow.
+services:
+  postgres:
+    volumes: !override
+      - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+      - observability:/run/topup-observability
+      - drill_postgres_init:/docker-entrypoint-initdb.d:ro
+
+  topup:
+    volumes: !override
+      - dstack_socket:/var/run
+      - observability:/run/topup-observability:ro
+      - drill_chains:/etc/topup/chains:ro
+      - drill_routes:/etc/topup/routes:ro
+
+  mock-product:
+    volumes: !override
+      - drill_mock_product:/opt/topup:ro
+
+  restore-check:
+    volumes: !override
+      - dstack_socket:/var/run
+      - drill_chains:/etc/topup/chains:ro
+      - drill_routes:/etc/topup/routes:ro
+
+volumes:
+  drill_postgres_init:
+  drill_chains:
+  drill_routes:
+  drill_mock_product:

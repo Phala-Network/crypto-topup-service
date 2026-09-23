@@ -1,5 +1,5 @@
 .PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image \
-	deploy-check alerts-check runbook-check sdk-check sdk-generate sandbox-local
+	restore-drill deploy-check alerts-check runbook-check sdk-check sdk-generate sandbox-local
 
 build:
 	cargo build --workspace --locked
@@ -37,6 +37,9 @@ service-smoke:
 
 verify-image:
 	deploy/verify-image.sh
+
+restore-drill:
+	deploy/local/restore-drill.sh
 
 deploy-check:
 	cd contracts && forge fmt --check

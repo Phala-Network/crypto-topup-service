@@ -2,6 +2,7 @@
 
 mod route;
 
+use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,9 +55,16 @@ enum TopupCommand {
         #[command(subcommand)]
         command: OutboxCommand,
     },
+    /// Run one reconciliation pass; with --post-restore, only while the service is stopped.
     Reconcile(ReconcileArgs),
     Attest(AttestArgs),
-    RestoreCheck,
+    BackupKey(BackupKeyArgs),
+    Heartbeat(HeartbeatArgs),
+    /// Validate a restored database and run post-restore reconciliation.
+    ///
+    /// Run only while the service, heartbeat, and backup processes are stopped: the post-restore
+    /// round claims every deposit at or beyond `cleared` and adopts the product's answers.
+    RestoreCheck(RestoreCheckArgs),
 }
 
 #[derive(Args)]
@@ -95,7 +103,8 @@ struct ReconcileArgs {
     /// Run one pass and exit.
     #[arg(long, required = true)]
     once: bool,
-    /// Run the restore gate and fail while any deposit is incomplete.
+    /// Run the restore gate and fail while any deposit is incomplete. Run it only while the
+    /// service, heartbeat, and backup processes are stopped.
     #[arg(long, requires = "once")]
     post_restore: bool,
     /// Validated route file; repeat for every enabled route version.
@@ -113,6 +122,49 @@ struct AttestArgs {
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
+}
+
+#[derive(Args)]
+struct BackupKeyArgs {
+    /// File that WAL-G reads through WALG_LIBSODIUM_KEY_PATH.
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+    /// dstack backup key version, producing the domain backup/vN.
+    #[arg(long, default_value_t = 1)]
+    version: u32,
+    /// Comma-separated retained domains written as backup-vN.key for restore fallback.
+    #[arg(long, value_delimiter = ',', default_value = "0")]
+    fallback_versions: Vec<u32>,
+    /// Keep the process alive so the shared tmpfs remains mounted.
+    #[arg(long, conflicts_with = "check")]
+    hold: bool,
+    /// Check only that the key file was atomically published with safe metadata.
+    #[arg(long, conflicts_with = "hold")]
+    check: bool,
+    #[cfg(feature = "dev-signer")]
+    #[arg(long, help = "Use deterministic local-only backup key material")]
+    dev: bool,
+}
+
+#[derive(Args)]
+struct RestoreCheckArgs {
+    /// Last source heartbeat committed before the recorded failure point.
+    #[arg(long, value_name = "RFC3339")]
+    expected_heartbeat_at: DateTime<Utc>,
+    /// Source WAL location from the same heartbeat log line. Omit only as a declared incident
+    /// exception; RPO is then proven by the heartbeat timestamp alone and flagged in the report.
+    #[arg(long, value_name = "PG_LSN")]
+    expected_lsn: Option<String>,
+    /// Validated route file; repeat for every enabled route version.
+    #[arg(long = "route", required = true, value_name = "FILE")]
+    routes: Vec<PathBuf>,
+}
+
+#[derive(Args)]
+struct HeartbeatArgs {
+    /// Seconds between persisted RPO heartbeats.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    interval_s: u64,
 }
 
 #[derive(Subcommand)]
@@ -164,13 +216,209 @@ async fn main() -> ExitCode {
         } => return replay_outbox(id, since.as_deref(), force).await,
         TopupCommand::Reconcile(args) => return reconcile(&args).await,
         TopupCommand::Attest(args) => attest(&args).await,
-        TopupCommand::RestoreCheck => Err("restore-check is not implemented"),
+        TopupCommand::BackupKey(args) => return backup_key(&args).await,
+        TopupCommand::Heartbeat(args) => return heartbeat(&args).await,
+        TopupCommand::RestoreCheck(args) => return restore_check(&args).await,
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn backup_key(args: &BackupKeyArgs) -> ExitCode {
+    if args.check {
+        return if topup::backup::check_libsodium_key(&args.output).is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
+    let versions = std::iter::once(args.version)
+        .chain(args.fallback_versions.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for version in versions {
+        #[cfg(feature = "dev-signer")]
+        let key = if args.dev {
+            let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
+            signer.derive_backup_key_version(version)
+        } else {
+            match DstackSigner::new().derive_backup_key_version(version).await {
+                Ok(key) => key,
+                Err(_) => {
+                    tracing::error!(version, "failed to derive backup key");
+                    return ExitCode::FAILURE;
+                }
+            }
+        };
+
+        #[cfg(not(feature = "dev-signer"))]
+        let key = match DstackSigner::new().derive_backup_key_version(version).await {
+            Ok(key) => key,
+            Err(_) => {
+                tracing::error!(version, "failed to derive backup key");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let versioned = topup::backup::versioned_key_path(&args.output, version);
+        if topup::backup::write_libsodium_key(&versioned, &key).is_err() {
+            tracing::error!(path = %versioned.display(), version, "failed to write backup key file");
+            return ExitCode::FAILURE;
+        }
+        if version == args.version
+            && topup::backup::write_libsodium_key(&args.output, &key).is_err()
+        {
+            tracing::error!(path = %args.output.display(), version, "failed to write current backup key file");
+            return ExitCode::FAILURE;
+        }
+    }
+    tracing::info!(
+        path = %args.output.display(),
+        version = args.version,
+        "backup key file is ready"
+    );
+    if args.hold {
+        if tokio::signal::ctrl_c().await.is_err() {
+            tracing::error!("failed to listen for backup key shutdown signal");
+            return ExitCode::FAILURE;
+        }
+        tracing::info!("backup key holder stopped");
+    }
+    ExitCode::SUCCESS
+}
+
+async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        Ok(_) | Err(_) => {
+            tracing::error!("DATABASE_URL is required for heartbeat");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(_) => {
+            tracing::error!("failed to connect to database for heartbeat");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut interval = tokio::time::interval(Duration::from_secs(args.interval_s));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                match topup::heartbeat::record(&pool).await {
+                    Ok(record) => tracing::info!(
+                        heartbeat_id = record.id,
+                        // RFC 3339, so the value can be passed to --expected-heartbeat-at as is.
+                        recorded_at = %record
+                            .recorded_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                        rpo_seconds = record.rpo_seconds,
+                        wal_lsn = %record.wal_lsn,
+                        "restore heartbeat recorded"
+                    ),
+                    Err(_) => {
+                        tracing::error!("failed to record restore heartbeat");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_err() {
+                    tracing::error!("failed to listen for heartbeat shutdown signal");
+                    return ExitCode::FAILURE;
+                }
+                tracing::info!("heartbeat stopped");
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
+}
+
+async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
+    let routes = match load_routes(&args.routes) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::error!(%error, "failed to load route configuration");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_url = [
+        "RESTORE_DATABASE_URL",
+        "MIGRATE_DATABASE_URL",
+        "DATABASE_URL",
+    ]
+    .into_iter()
+    .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let Some(database_url) = database_url else {
+        tracing::error!(
+            "RESTORE_DATABASE_URL, MIGRATE_DATABASE_URL, or DATABASE_URL is required for restore-check"
+        );
+        return ExitCode::FAILURE;
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(_) => {
+            tracing::error!("failed to connect to restored database");
+            return ExitCode::FAILURE;
+        }
+    };
+    let signer = match SignerHandle::spawn(
+        DstackSigner::new(),
+        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        Duration::from_secs(10),
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::error!(%error, "failed to start restore-check signer actor");
+            return ExitCode::FAILURE;
+        }
+    };
+    let metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer, metrics) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure post-restore reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
+    let expectations = topup::restore::RestoreExpectations {
+        expected_heartbeat_at: args.expected_heartbeat_at,
+        expected_lsn: args.expected_lsn.clone(),
+    };
+    let report = match topup::restore::check(&pool, &expectations, &reconciler).await {
+        Ok(report) => report,
+        Err(message) => {
+            tracing::error!(%message, "restore check failed");
+            return ExitCode::FAILURE;
+        }
+    };
+    match serde_json::to_string(&report) {
+        Ok(encoded) => {
+            println!("{encoded}");
+            if report.status == "ok" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(_) => {
+            tracing::error!("failed to encode restore check report");
             ExitCode::FAILURE
         }
     }
@@ -195,6 +443,8 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
             &public_key.0,
             &report_data(&nonce, &public_key),
             &[],
+            &[],
+            &[],
             version,
             operator,
         );
@@ -213,6 +463,8 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
         &evidence.settlement_public_key.0,
         &evidence.report_data,
         &evidence.quote,
+        &evidence.info.app_id,
+        &evidence.info.compose_hash,
         version,
         operator,
     )
@@ -232,6 +484,8 @@ fn print_attestation(
     settlement_public_key: &[u8; 32],
     report_data: &[u8; 32],
     quote: &[u8],
+    app_id: &[u8],
+    compose_hash: &[u8],
     operator_key_version: NonZeroU32,
     operator: alloy_primitives::Address,
 ) -> Result<(), &'static str> {
@@ -240,6 +494,8 @@ fn print_attestation(
         "settlement_pubkey": hex::encode(settlement_public_key),
         "report_data": hex::encode(report_data),
         "quote": hex::encode(quote),
+        "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
+        "compose_hash": if compose_hash.is_empty() { String::new() } else { format!("0x{}", hex::encode(compose_hash)) },
         "operator_keyid": operator_key_domain(operator_key_version),
         "operator_address": format!("{operator:#x}"),
     });
