@@ -1,5 +1,7 @@
 //! PostgreSQL integration tests for the cleared-deposit settlement step.
 
+mod support;
+
 use std::collections::VecDeque;
 use std::env;
 use std::future::Future;
@@ -189,6 +191,7 @@ impl TestContext {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        support::ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_206_001)")
             .execute(&admin_pool)
             .await?;

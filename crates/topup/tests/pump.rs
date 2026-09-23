@@ -1,5 +1,7 @@
 //! PostgreSQL integration tests for concurrent deposit pumps.
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::future::Future;
@@ -67,6 +69,7 @@ impl TestContext {
             .connect(admin_url.as_str())
             .await
             .context("connect to the PostgreSQL maintenance database")?;
+        support::ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_202_001)")
             .execute(&admin_pool)
             .await?;

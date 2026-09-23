@@ -1,5 +1,7 @@
 //! PostgreSQL and reference-receiver tests for Standard Webhooks delivery.
 
+mod support;
+
 use std::collections::VecDeque;
 use std::env;
 use std::process::Command;
@@ -354,6 +356,7 @@ impl TestContext {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        support::ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_201_013)")
             .execute(&admin_pool)
             .await?;

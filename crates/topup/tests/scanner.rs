@@ -1,5 +1,7 @@
 //! Anvil and PostgreSQL integration coverage for the C3 scanner.
 
+mod support;
+
 use std::env;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -208,6 +210,7 @@ impl TestDatabase {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        support::ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_203_001)")
             .execute(&admin_pool)
             .await?;

@@ -2,6 +2,8 @@
 
 #![cfg(feature = "dev-signer")]
 
+mod support;
+
 use std::env;
 use std::future::Future;
 use std::net::TcpListener;
@@ -78,6 +80,7 @@ impl Database {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        support::ensure_app_role(&admin).await?;
         let name = format!("topup_c7_{}", Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE DATABASE \"{name}\""))
             .execute(&admin)

@@ -27,6 +27,32 @@ pub struct TestDatabase {
     app_role: String,
 }
 
+/// Creates the cluster-wide `topup_app` role before any per-test database is migrated.
+///
+/// Roles are shared by every database in the cluster, so parallel per-test migrations of
+/// `20260922000001` would otherwise race on `CREATE ROLE` on a fresh cluster. The advisory lock
+/// key is shared by every test binary; the migration then finds the role and skips creating it.
+pub async fn ensure_app_role(admin_pool: &PgPool) -> Result<()> {
+    let mut transaction = admin_pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(704_200_000)")
+        .execute(&mut *transaction)
+        .await?;
+    transaction
+        .execute(
+            "DO $$ BEGIN \
+             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_app') THEN \
+             CREATE ROLE topup_app NOLOGIN; \
+             END IF; \
+             END $$",
+        )
+        .await?;
+    transaction
+        .commit()
+        .await
+        .context("create topup_app role")?;
+    Ok(())
+}
+
 impl TestDatabase {
     pub async fn create() -> Result<Option<Self>> {
         let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
@@ -43,6 +69,7 @@ impl TestDatabase {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_209_001)")
             .execute(&admin_pool)
             .await?;
