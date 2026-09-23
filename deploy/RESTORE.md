@@ -71,8 +71,9 @@ heartbeat and LSN to `restore-check`, assert RTO is at most 3600 seconds, exerci
 GET, and remove their uniquely named Compose projects, volumes, and per-run image tags.
 
 The `Restore drill` workflow (`.github/workflows/restore-drill.yml`) runs `make restore-drill` every
-Monday at 03:17 UTC on the CI runner and can be started manually. The per-push deployment job runs
-the bounded WAL-G wrapper and archive-switch tests instead. The CI runner reaches the host Docker
+Monday at 03:17 UTC on the CI runner and can be started manually. Instead of the full drill, the
+per-push `deployment` CI job includes the bounded WAL-G wrapper and archive-switch tests. The CI
+runner reaches the host Docker
 daemon through its socket and the daemon cannot see the checkout, so the drill never bind-mounts a
 host path: `deploy/local/restore-drill.compose.yml` swaps the local stack's file mounts for project
 volumes that the drill fills with `docker cp`, locally and on CI alike.
@@ -98,6 +99,15 @@ for a real restore as well as a drill, with this restore-time encrypted environm
   (`DATABASE_URL is required for …`) before touching the database, keys, or network.
 - Everything else as for production, including `MIGRATE_DATABASE_URL`, `TOPUP_BACKUP_KEY_VERSION`,
   and `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version).
+
+Alerts during the restore window are expected, not incidents. The replacement archives nothing
+and refreshes no backup-age marker, so `TopupBackupTooOld` fires whenever an old or missing marker
+is scraped. `topup` is stopped or failing closed and exports no metrics, so the monitoring
+collector's scrape-target-down alert for the instance fires. Silence both, scoped to the
+replacement instance, from commit until [step 7](#restore-the-database) shows a fresh archived
+segment and the marker is younger than 120 seconds. During a staging drill, silence them for the
+drill instance only, never for the live staging instance, and remove the silences when the drill
+CVM is destroyed.
 
 Run every command below inside the replacement CVM (`npx --yes phala@1.1.22 ssh "$CVM_ID"`)
 through dstack's own compose file, project, and decrypted environment. A separate
@@ -142,10 +152,40 @@ steps using Phala Cloud credentials and the Finance Safe.
    encrypts it with the key of an existing instance record of the app, so stop the failed CVM but
    do not delete it before this step.
 
+   `restore.env` holds every production secret plus the restore overrides in plaintext. Create it
+   only on the operator's machine, in a private directory, and only for this restore. It has one
+   `KEY=VALUE` line for every name in `deploy/app-compose.example.json` `allowed_envs`, with the
+   production values (staging values for a drill) except these overrides:
+
    ```sh
+   umask 077
+   export RESTORE_ENV_DIR="$(mktemp -d)"
+   cat >"$RESTORE_ENV_DIR/restore.env" <<'EOF'
+   TOPUP_WAL_ARCHIVE=off
+   AWS_ACCESS_KEY_ID=<read-only restore key id>
+   AWS_SECRET_ACCESS_KEY=<read-only restore secret>
+   AWS_SESSION_TOKEN=
+   DATABASE_URL=
+   EOF
+   ```
+
+   Append every other `allowed_envs` name with its production value, then require that both checks
+   print nothing (no name duplicated, missing, or extra):
+
+   ```sh
+   jq -r '.allowed_envs[]' deploy/app-compose.example.json | sort >"$RESTORE_ENV_DIR/expected"
+   cut -d= -f1 "$RESTORE_ENV_DIR/restore.env" | sort | uniq -d
+   cut -d= -f1 "$RESTORE_ENV_DIR/restore.env" | sort -u | diff - "$RESTORE_ENV_DIR/expected"
+   ```
+
+   `NODE_ID` is the numeric node (teepod) id to run the replacement on, taken from the node list:
+
+   ```sh
+   npx --yes phala@1.1.22 nodes list --json
+   export NODE_ID=<node id>
    npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --node-id "$NODE_ID" \
-     --compose-hash "$ORIGINAL_COMPOSE_HASH" --env-file restore.env --prepare-only --json \
-     > prepare.json
+     --compose-hash "$ORIGINAL_COMPOSE_HASH" --env-file "$RESTORE_ENV_DIR/restore.env" \
+     --prepare-only --json > prepare.json
    ```
 
    The prepare output uses camelCase keys, and only the `onchainStatus` object is snake_case.
@@ -191,13 +231,19 @@ steps using Phala Cloud credentials and the Finance Safe.
 
 4. Commit the prepared replacement only after both authorizations are final. It boots the whole
    compose at once, so the restore-time environment must already be in the prepared encrypted
-   environment. Pass the Safe transaction hash, or `already-registered` when nothing was added:
+   environment. Pass the Safe transaction hash, or `already-registered` when nothing was added, and
+   the compose hash exactly as the server returned it, as the CLI's own commit path does, not the
+   normalized `0x` form used for `cast`. Then destroy the plaintext environment file:
 
    ```sh
    npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --commit \
-     --token "$COMMIT_TOKEN" --compose-hash "$COMPOSE_HASH" \
+     --token "$COMMIT_TOKEN" --compose-hash "$(jq -r '.composeHash' prepare.json)" \
      --transaction-hash "${AUTH_TX_HASH:-already-registered}" --json
+   shred -u "$RESTORE_ENV_DIR/restore.env"
+   rm -rf "$RESTORE_ENV_DIR"
    ```
+
+   If the restore is abandoned before this step, run the same `shred -u` and `rm -rf` anyway.
 
    Fetch `cvm.json` and `attestation.json`, then run the normal compose verification:
 
@@ -323,7 +369,9 @@ steps using Phala Cloud credentials and the Finance Safe.
    - `SHOW archive_mode` is `on`, and a new WAL segment on the promoted timeline appears with its
      `key-versions/wal/<segment>.json` object;
    - a fresh encrypted base backup (`dc exec -T backup walg-base-backup /var/lib/postgresql/data`);
-   - `restore heartbeat recorded` log lines and healthy `topup` attestation.
+   - `restore heartbeat recorded` log lines and healthy `topup` attestation;
+   - `topup_backup_last_success_unixtime_seconds` scraped from the new instance and less than 120
+     seconds old. Only then remove the restore-window alert silences.
 
    Let the product resume calls only after health and reconciliation remain clean. Addresses need no
    separate restore because their salts are deterministic from product data.
@@ -348,9 +396,12 @@ reaches the drill CVM fails with a connection error and changes nothing.
 
 1. Issue drill object-storage credentials that can only list and read `WALG_S3_PREFIX`, and put them
    with `TOPUP_WAL_ARCHIVE=off` and an empty `DATABASE_URL` in the drill's encrypted environment.
-2. Run steps 1-6 of the restore. Never run step 7 and never switch the drill's environment to
-   production values. Record the `restore-check` report, RPO, and RTO in the drill log.
-3. Destroy the drill CVM and its volumes and revoke the read-only drill credentials.
+2. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only (see
+   [boot environment](#replacement-cvm-boot-environment)). Run steps 1-6 of the restore. Never run
+   step 7 and never switch the drill's environment to production values. Record the
+   `restore-check` report, RPO, and RTO in the drill log.
+3. Destroy the drill CVM and its volumes, revoke the read-only drill credentials, and remove the
+   drill silences.
 4. **Finance Safe:** only if the recorded `DEVICE_PREVIOUSLY_ALLOWED` was `false` (the device was
    added for this drill), remove it with `removeDevice(bytes32)` and verify `allowedDeviceIds`
    returns `false`. Otherwise leave it: the live CVM may run on that host, and removing its device

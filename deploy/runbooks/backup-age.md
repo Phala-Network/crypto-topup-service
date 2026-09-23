@@ -22,6 +22,12 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 
 ## Decision tree
 
+- Restore window or staging restore drill in progress (`deploy/RESTORE.md`): expected. The
+  replacement runs with `TOPUP_WAL_ARCHIVE=off` and never refreshes the marker, and its `topup` is
+  stopped, so its scrape target is also down. Silence `TopupBackupTooOld` and the target-down alert
+  for that instance only, and lift them when the restore resumes archiving or the drill CVM is
+  destroyed. Never silence them for the live instance.
+
 - Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
   `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle
   (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `backup` service or its
