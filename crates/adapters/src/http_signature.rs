@@ -1,9 +1,10 @@
-//! RFC 9421 HTTP Message Signatures verification shared by every inbound verifier.
+//! RFC 9421 HTTP Message Signatures: the one signing and verification profile.
 //!
-//! The service authenticates product and admin requests with this profile, and the settlement
-//! conformance reference uses the same code to verify service-signed settlement requests. Header
-//! values are parsed as RFC 8941 Structured Fields, so any signature label, any parameter order,
-//! and an optional `alg="ed25519"` parameter are accepted.
+//! The settlement client signs with [`sign`]; the service authenticates product and admin
+//! requests with [`verify`], and the settlement conformance reference uses it to verify
+//! service-signed settlement requests. Both build the same signature base, and every header
+//! value is serialized or parsed as an RFC 8941 Structured Field, so a verifier accepts any
+//! signature label, any parameter order, and an optional `alg="ed25519"` parameter.
 //!
 //! A verifier reconstructs `@target-uri` (RFC 9421 section 2.2.2) from its own configured
 //! [`PublicOrigin`] and the request's path and query, never from `Host` or `X-Forwarded-*`
@@ -13,8 +14,12 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use sfv::{BareItem, Dictionary, FieldType as _, List, ListEntry, Parser, Version};
+use sfv::{
+    BareItem, DictSerializer, Dictionary, FieldType as _, InnerListSerializer, Integer,
+    ItemSerializer, KeyRef, List, ListEntry, Parser, StringRef, Version,
+};
 use sha2::{Digest, Sha256};
+use topup_core::{Signer, SignerError};
 
 /// Components every signature must cover, in order.
 const REQUIRED_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-digest"];
@@ -22,6 +27,8 @@ const REQUIRED_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-diges
 const IDEMPOTENCY_COMPONENT: &str = "idempotency-key";
 /// Maximum distance between `created` and the verifier's clock.
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
+/// Label of every signature this service produces.
+const SIGNATURE_LABEL: &KeyRef = KeyRef::constant("sig1");
 
 /// The scheme and authority a verifier is publicly reachable at, such as
 /// `https://topup.example`.
@@ -127,6 +134,130 @@ impl std::fmt::Display for VerificationFailed {
 
 impl std::error::Error for VerificationFailed {}
 
+/// The covered components of one outbound request, as their header values will be sent.
+#[derive(Clone, Copy, Debug)]
+pub struct Components<'a> {
+    /// HTTP method, for example `POST`.
+    pub method: &'a str,
+    /// Absolute target URI.
+    pub target_uri: &'a str,
+    /// `Content-Digest` header value, as produced by [`content_digest`].
+    pub content_digest: &'a str,
+    /// `Idempotency-Key` header value, as produced by [`structured_string`], when covered.
+    pub idempotency_key: Option<&'a str>,
+}
+
+/// `Signature-Input` and `Signature` header values of one signed request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignatureHeaders {
+    /// `Signature-Input` header value.
+    pub signature_input: String,
+    /// `Signature` header value.
+    pub signature: String,
+}
+
+/// Why a request could not be signed.
+#[derive(Debug)]
+pub enum SignError {
+    /// A component or parameter is not representable as an RFC 8941 value.
+    InvalidInput,
+    /// The signer failed.
+    Signer(SignerError),
+}
+
+impl std::fmt::Display for SignError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput => formatter.write_str("request cannot be signed"),
+            Self::Signer(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for SignError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidInput => None,
+            Self::Signer(error) => Some(error),
+        }
+    }
+}
+
+/// Returns the `Content-Digest` header value of `body`.
+#[must_use]
+pub fn content_digest(body: &[u8]) -> String {
+    let digest: [u8; 32] = Sha256::digest(body).into();
+    let mut serializer = DictSerializer::new();
+    let _ = serializer
+        .bare_item(KeyRef::constant("sha-256"), digest.as_slice())
+        .finish();
+    serializer.finish().unwrap_or_default()
+}
+
+/// Serializes `value` as an RFC 8941 String, such as the `Idempotency-Key` header value.
+pub fn structured_string(value: &str) -> Result<String, SignError> {
+    let value = StringRef::from_str(value).map_err(|_| SignError::InvalidInput)?;
+    Ok(ItemSerializer::new().bare_item(value).finish())
+}
+
+/// Signs `components` as `keyid` at Unix time `created` with the settlement key.
+pub async fn sign<S: Signer>(
+    signer: &S,
+    components: &Components<'_>,
+    created: i64,
+    keyid: &str,
+) -> Result<SignatureHeaders, SignError> {
+    let created = Integer::try_from(created).map_err(|_| SignError::InvalidInput)?;
+    let keyid = StringRef::from_str(keyid).map_err(|_| SignError::InvalidInput)?;
+    let covered = covered_components(components.idempotency_key.is_some());
+    let write_parameters = |inner: InnerListSerializer<'_>| {
+        write_signature_parameters(inner, &covered, created, keyid);
+    };
+    let mut parameters = sfv::ListSerializer::new();
+    write_parameters(parameters.inner_list());
+    let parameters = parameters.finish().ok_or(SignError::InvalidInput)?;
+    let base = signature_base(components, &parameters);
+    let signature = signer
+        .sign_settlement(base.as_bytes())
+        .await
+        .map_err(SignError::Signer)?;
+
+    let mut signature_input = DictSerializer::new();
+    write_parameters(signature_input.inner_list(SIGNATURE_LABEL));
+    let mut signature_header = DictSerializer::new();
+    let _ = signature_header
+        .bare_item(SIGNATURE_LABEL, signature.0.as_slice())
+        .finish();
+    Ok(SignatureHeaders {
+        signature_input: signature_input.finish().ok_or(SignError::InvalidInput)?,
+        signature: signature_header.finish().ok_or(SignError::InvalidInput)?,
+    })
+}
+
+/// The profile's covered component identifiers, in order.
+fn covered_components(covers_idempotency_key: bool) -> Vec<&'static str> {
+    REQUIRED_COMPONENTS
+        .into_iter()
+        .chain(covers_idempotency_key.then_some(IDEMPOTENCY_COMPONENT))
+        .collect()
+}
+
+fn write_signature_parameters(
+    mut inner: InnerListSerializer<'_>,
+    covered: &[&str],
+    created: Integer,
+    keyid: &StringRef,
+) {
+    for component in covered {
+        let _ = inner.bare_item(StringRef::constant(component)).finish();
+    }
+    let _ = inner
+        .finish()
+        .parameter(KeyRef::constant("created"), created)
+        .parameter(KeyRef::constant("keyid"), keyid)
+        .finish();
+}
+
 /// Verifies one request against a pinned `(keyid, public key)` pair at Unix time `now`.
 ///
 /// Every dictionary member of `Signature-Input` is tried; the first entry which covers exactly
@@ -159,13 +290,13 @@ pub fn verify(
         let Ok(signature) = Signature::from_slice(signature_bytes) else {
             continue;
         };
-        let base = signature_base(
-            message.method,
-            message.target_uri,
-            message.content_digest.trim(),
+        let components = Components {
+            method: message.method,
+            target_uri: message.target_uri,
+            content_digest: message.content_digest.trim(),
             idempotency_key,
-            &parsed.parameters,
-        );
+        };
+        let base = signature_base(&components, &parsed.parameters);
         if key.verify_strict(base.as_bytes(), &signature).is_ok() {
             return Ok(VerifiedSignature {
                 keyid: parsed.keyid,
@@ -271,27 +402,43 @@ fn signature_bytes(entry: Option<&ListEntry>) -> Option<&[u8]> {
     Some(bytes)
 }
 
-fn signature_base(
-    method: &str,
-    target_uri: &str,
-    content_digest: &str,
-    idempotency_key: Option<&str>,
+/// Builds the profile's RFC 9421 signature base; signing and verification both use it.
+fn signature_base(components: &Components<'_>, parameters: &str) -> String {
+    let values = [
+        Some(components.method),
+        Some(components.target_uri),
+        Some(components.content_digest),
+        components.idempotency_key,
+    ];
+    base_lines(
+        covered_components(components.idempotency_key.is_some())
+            .into_iter()
+            .zip(values.into_iter().flatten()),
+        parameters,
+    )
+}
+
+/// Formats RFC 9421 section 2.5 signature-base lines for `(identifier, value)` components.
+fn base_lines<'a>(
+    components: impl IntoIterator<Item = (&'a str, &'a str)>,
     parameters: &str,
 ) -> String {
-    let mut base = format!(
-        "\"@method\": {method}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}"
-    );
-    if let Some(idempotency_key) = idempotency_key {
-        base.push_str("\n\"idempotency-key\": ");
-        base.push_str(idempotency_key);
+    let mut base = String::new();
+    for (identifier, value) in components {
+        base.push('"');
+        base.push_str(identifier);
+        base.push_str("\": ");
+        base.push_str(value);
+        base.push('\n');
     }
-    base.push_str("\n\"@signature-params\": ");
+    base.push_str("\"@signature-params\": ");
     base.push_str(parameters);
     base
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ed25519_dalek::{Signer as _, SigningKey};
 
     use super::*;
@@ -348,11 +495,14 @@ mod tests {
     fn sign(label: &str, components: &str, parameters: &str, idempotency: bool) -> Signed {
         let key = SigningKey::from_bytes(&[5; 32]);
         let signature_params = format!("({components}){parameters}");
+        let digest = digest();
         let base = signature_base(
-            "POST",
-            URI,
-            &digest(),
-            idempotency.then_some(KEY),
+            &Components {
+                method: "POST",
+                target_uri: URI,
+                content_digest: &digest,
+                idempotency_key: idempotency.then_some(KEY),
+            },
             &signature_params,
         );
         let signature = STANDARD.encode(key.sign(base.as_bytes()).to_bytes());
@@ -529,5 +679,146 @@ mod tests {
             NOW,
         );
         assert_eq!(result, Err(VerificationFailed));
+    }
+
+    struct FixedSigner(SigningKey);
+
+    impl Signer for FixedSigner {
+        async fn sign_operator_tx(
+            &self,
+            _tx: topup_core::TxRequest,
+        ) -> Result<topup_core::SignedTx, SignerError> {
+            Err(SignerError::SigningFailed)
+        }
+
+        async fn sign_settlement(
+            &self,
+            payload: &[u8],
+        ) -> Result<topup_core::Ed25519Signature, SignerError> {
+            Ok(topup_core::Ed25519Signature(
+                self.0.sign(payload).to_bytes(),
+            ))
+        }
+
+        async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
+            Err(SignerError::KeyUnavailable)
+        }
+
+        async fn settlement_public_key(&self) -> Result<topup_core::Ed25519PublicKey, SignerError> {
+            Ok(topup_core::Ed25519PublicKey(
+                self.0.verifying_key().to_bytes(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_headers_have_the_profile_shape_and_verify() {
+        let digest = content_digest(BODY);
+        assert_eq!(digest, self::digest());
+        let key = structured_string("deposit:abc").expect("key is an SFV string");
+        assert_eq!(key, KEY);
+        for idempotency in [true, false] {
+            let headers = super::sign(
+                &FixedSigner(SigningKey::from_bytes(&[5; 32])),
+                &Components {
+                    method: "POST",
+                    target_uri: URI,
+                    content_digest: &digest,
+                    idempotency_key: idempotency.then_some(KEY),
+                },
+                NOW,
+                "settlement/v1",
+            )
+            .await
+            .expect("request signs");
+            let components = if idempotency {
+                SETTLEMENT_COMPONENTS
+            } else {
+                "\"@method\" \"@target-uri\" \"content-digest\""
+            };
+            assert_eq!(
+                headers.signature_input,
+                format!("sig1=({components});created={NOW};keyid=\"settlement/v1\"")
+            );
+            assert!(headers.signature.starts_with("sig1=:") && headers.signature.ends_with(':'));
+            let signed = Signed {
+                input: headers.signature_input,
+                signature: headers.signature,
+            };
+            assert!(check(&signed, idempotency).is_ok());
+        }
+    }
+
+    #[test]
+    fn settlement_profile_signature_base_has_exact_components() {
+        assert_eq!(
+            signature_base(
+                &Components {
+                    method: "POST",
+                    target_uri: "https://product.example/settlements",
+                    content_digest: "sha-256=:YWJj:",
+                    idempotency_key: Some("\"deposit:123\""),
+                },
+                "(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=1618884473;keyid=\"settlement/v1\"",
+            ),
+            concat!(
+                "\"@method\": POST\n",
+                "\"@target-uri\": https://product.example/settlements\n",
+                "\"content-digest\": sha-256=:YWJj:\n",
+                "\"idempotency-key\": \"deposit:123\"\n",
+                "\"@signature-params\": (\"@method\" \"@target-uri\" ",
+                "\"content-digest\" \"idempotency-key\");created=1618884473;",
+                "keyid=\"settlement/v1\""
+            )
+        );
+    }
+
+    #[test]
+    fn rfc_9421_ed25519_example_matches_base_and_signature() {
+        let components = [
+            ("date", "Tue, 20 Apr 2021 02:07:55 GMT"),
+            ("@method", "POST"),
+            ("@path", "/foo"),
+            ("@authority", "example.com"),
+            ("content-type", "application/json"),
+            ("content-length", "18"),
+        ];
+        let parameters = concat!(
+            "(\"date\" \"@method\" \"@path\" \"@authority\" ",
+            "\"content-type\" \"content-length\");created=1618884473;",
+            "keyid=\"test-key-ed25519\""
+        );
+        let base = base_lines(components, parameters);
+        let private = URL_SAFE_NO_PAD
+            .decode("n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU")
+            .expect("RFC key is valid base64url");
+        let private: [u8; 32] = private.try_into().expect("RFC key is 32 bytes");
+        let key = SigningKey::from_bytes(&private);
+        let signature = key.sign(base.as_bytes());
+        assert_eq!(
+            STANDARD.encode(signature.to_bytes()),
+            concat!(
+                "wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1",
+                "u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw=="
+            )
+        );
+        assert!(
+            key.verifying_key()
+                .verify_strict(base.as_bytes(), &signature)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn idempotency_key_is_a_quoted_structured_field_string() {
+        assert_eq!(
+            structured_string("deposit:123").expect("key is valid"),
+            "\"deposit:123\""
+        );
+        assert_eq!(
+            structured_string("quoted\"slash\\").expect("key is escapable"),
+            "\"quoted\\\"slash\\\\\""
+        );
+        assert!(structured_string("line\nbreak").is_err());
     }
 }
