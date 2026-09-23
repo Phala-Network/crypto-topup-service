@@ -335,8 +335,11 @@ steps using Phala Cloud credentials and the Finance Safe.
 
 6. Run the dedicated signer-enabled service. **Run it only while `topup`, `heartbeat`, and `backup`
    are stopped:** its post-restore reconciliation claims every deposit at or beyond `cleared` and
-   adopts product answers, which must not race the service's own settlement pumps. It mounts the
-   dstack socket, the attested route files, and uses owner credentials:
+   adopts product answers, which must not race the service's own settlement pumps. It refuses to
+   start with `lease_owner_lock_held` while `topup run` or `topup reconcile --once` is connected
+   to this database; the lock only sees processes connected to this PostgreSQL, so stopping the
+   old instance remains the control. It mounts the dstack socket, the attested route files, and
+   uses owner credentials:
 
    ```sh
    dc run --rm --no-deps restore-check \

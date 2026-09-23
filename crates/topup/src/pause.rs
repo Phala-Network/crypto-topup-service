@@ -84,32 +84,42 @@ pub(crate) async fn route_pause_scopes(
     )
 }
 
-pub(crate) async fn flush_paused_for_addresses_locked(
+/// Returns which level pauses the `flush` scope for a planned batch, locking the pause rows read.
+///
+/// The route row is created when missing so that its `FOR SHARE` lock also serializes the
+/// route's first pause, which would otherwise insert a row this transaction never saw.
+pub(crate) async fn flush_pause_for_addresses_locked(
     transaction: &mut Transaction<'_, Postgres>,
     route: &str,
     address_ids: &[Uuid],
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query("INSERT INTO route_pauses (route) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(route)
+        .execute(&mut **transaction)
+        .await?;
     let route_scopes = sqlx::query_scalar::<_, Vec<String>>(
         "SELECT paused_scopes FROM route_pauses WHERE route = $1 FOR SHARE",
     )
     .bind(route)
-    .fetch_optional(&mut **transaction)
-    .await?
-    .unwrap_or_default();
+    .fetch_one(&mut **transaction)
+    .await?;
     if parse_codes(&route_scopes)?.contains(PauseScope::Flush) {
-        return Ok(true);
+        return Ok(Some(format!("route `{route}`")));
     }
 
     let rows = sqlx::query(
         r#"
         SELECT
             address.id,
+            account.id AS account_id,
+            product.id AS product_id,
             account.paused_scopes AS account_scopes,
             product.paused_scopes AS product_scopes
         FROM addresses AS address
         JOIN accounts AS account ON account.id = address.account_id
         JOIN products AS product ON product.id = account.product_id
         WHERE address.id = ANY($1)
+        ORDER BY address.id
         FOR SHARE OF account, product
         "#,
     )
@@ -123,15 +133,18 @@ pub(crate) async fn flush_paused_for_addresses_locked(
         ));
     }
     for row in rows {
-        let account_scopes: Vec<String> = row.try_get("account_scopes")?;
-        let product_scopes: Vec<String> = row.try_get("product_scopes")?;
-        if PauseScopeSources::from_codes(&account_scopes, &product_scopes, &route_scopes)?
-            .contains(PauseScope::Flush)
-        {
-            return Ok(true);
+        let product_codes: Vec<String> = row.try_get("product_scopes")?;
+        if parse_codes(&product_codes)?.contains(PauseScope::Flush) {
+            let product_id: Uuid = row.try_get("product_id")?;
+            return Ok(Some(format!("product {product_id}")));
+        }
+        let account_codes: Vec<String> = row.try_get("account_scopes")?;
+        if parse_codes(&account_codes)?.contains(PauseScope::Flush) {
+            let account_id: Uuid = row.try_get("account_id")?;
+            return Ok(Some(format!("account {account_id}")));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn parse_codes<S: AsRef<str>>(codes: &[S]) -> Result<PauseScopes, sqlx::Error> {

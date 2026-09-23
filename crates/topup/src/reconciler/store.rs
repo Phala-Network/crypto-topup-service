@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{Connection as _, PgConnection, PgPool, Row};
+use tokio::time::{MissedTickBehavior, interval};
+use tokio_util::sync::CancellationToken;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
@@ -86,8 +89,7 @@ pub(crate) async fn block_address(
         INSERT INTO reconciliation_blocks
             (block_key, scope, chain_id, address_id, check_name, reason)
         VALUES ($1, 'address', $2, $3, $4, $5)
-        ON CONFLICT (block_key) DO UPDATE
-        SET check_name = EXCLUDED.check_name, reason = EXCLUDED.reason
+        ON CONFLICT (block_key) DO NOTHING
         "#,
     )
     .bind(format!("address:{address_id}"))
@@ -111,8 +113,7 @@ pub(crate) async fn block_chain(
         INSERT INTO reconciliation_blocks
             (block_key, scope, chain_id, address_id, check_name, reason)
         VALUES ($1, 'chain', $2, NULL, $3, $4)
-        ON CONFLICT (block_key) DO UPDATE
-        SET check_name = EXCLUDED.check_name, reason = EXCLUDED.reason
+        ON CONFLICT (block_key) DO NOTHING
         "#,
     )
     .bind(format!("chain:{chain_id}"))
@@ -259,10 +260,109 @@ pub(crate) async fn linkable_flushes(pool: &PgPool) -> Result<Vec<Uuid>, Reconci
     .await?)
 }
 
+/// Session advisory lock key which separates lease-holding processes from the post-restore gate.
+const LEASE_OWNER_LOCK: i64 = 0x746f_7075_705f_6c73;
+
+/// Hold on the lease-owner lock, released explicitly or when its connection closes.
+///
+/// Every process that leases deposits holds it shared for its lifetime; the post-restore gate
+/// takes it exclusively, so it cannot preempt the leases of a running process.
+pub struct LeaseOwnerLock {
+    connection: PgConnection,
+    exclusive: bool,
+}
+
+impl LeaseOwnerLock {
+    /// Pings the lock connection every `every` until `shutdown` is cancelled.
+    ///
+    /// The lock lives only as long as its connection. When a ping fails the lock may already be
+    /// gone, so this cancels `shutdown` to stop the processes it guards and returns the error.
+    /// On cancellation it returns the still-held lock, so the caller can release it once those
+    /// processes have stopped.
+    pub async fn watch(
+        mut self,
+        every: Duration,
+        shutdown: CancellationToken,
+    ) -> Result<Self, ReconciliationError> {
+        let mut ticks = interval(every);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return Ok(self),
+                _ = ticks.tick() => {
+                    if let Err(error) = self.connection.ping().await {
+                        shutdown.cancel();
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Releases the lock and closes its connection.
+    pub async fn release(mut self) -> Result<(), ReconciliationError> {
+        let unlock = if self.exclusive {
+            "SELECT pg_advisory_unlock($1)"
+        } else {
+            "SELECT pg_advisory_unlock_shared($1)"
+        };
+        sqlx::query_scalar::<_, bool>(unlock)
+            .bind(LEASE_OWNER_LOCK)
+            .fetch_one(&mut self.connection)
+            .await?;
+        self.connection.close().await?;
+        Ok(())
+    }
+}
+
+/// Takes the lease-owner lock shared on a dedicated connection.
+///
+/// Fails while the post-restore gate is running.
+pub async fn hold_lease_owner_lock(pool: &PgPool) -> Result<LeaseOwnerLock, ReconciliationError> {
+    try_lease_owner_lock(pool, false)
+        .await?
+        .ok_or(ReconciliationError::LeaseOwnerLock(
+            "post-restore reconciliation is running",
+        ))
+}
+
+/// Takes the lease-owner lock exclusively on a dedicated connection.
+///
+/// Fails while any lease-holding process is connected.
+pub(crate) async fn exclusive_lease_owner_lock(
+    pool: &PgPool,
+) -> Result<LeaseOwnerLock, ReconciliationError> {
+    try_lease_owner_lock(pool, true)
+        .await?
+        .ok_or(ReconciliationError::LeaseOwnerLock(
+            "a process holding deposit leases is running; stop it before post-restore reconciliation",
+        ))
+}
+
+async fn try_lease_owner_lock(
+    pool: &PgPool,
+    exclusive: bool,
+) -> Result<Option<LeaseOwnerLock>, ReconciliationError> {
+    let mut connection = pool.acquire().await?.detach();
+    let lock = if exclusive {
+        "SELECT pg_try_advisory_lock($1)"
+    } else {
+        "SELECT pg_try_advisory_lock_shared($1)"
+    };
+    let held: bool = sqlx::query_scalar(lock)
+        .bind(LEASE_OWNER_LOCK)
+        .fetch_one(&mut connection)
+        .await?;
+    Ok(held.then_some(LeaseOwnerLock {
+        connection,
+        exclusive,
+    }))
+}
+
 /// Leases one deposit for settlement adoption, skipping rows a pump currently owns.
 ///
-/// Normal mode claims only unleased `cleared` deposits. Post-restore mode runs before pumps
-/// resume, so restored lease columns carry no ownership and are replaced.
+/// Normal mode claims only unleased `cleared` deposits. Post-restore mode holds the lease-owner
+/// lock exclusively, so no pump is running and restored lease columns carry no ownership.
 pub(crate) async fn claim_deposit(
     pool: &PgPool,
     deposit_id: Uuid,

@@ -153,9 +153,9 @@ pub fn register_metrics() {
         "topup_loop_expected",
         "Whether a loop instance is expected to emit heartbeats"
     );
-    describe_gauge!(
-        "topup_flush_send_paused",
-        "Whether the next planned flush on a chain is held by a flush pause scope"
+    describe_counter!(
+        "topup_flush_send_paused_total",
+        "Unsigned flush plans voided at send time because a flush pause scope covered them"
     );
     describe_counter!(
         "topup_unsupported_inflows_total",
@@ -352,10 +352,10 @@ impl LockExposureCaps {
     }
 }
 
-/// Records whether a chain's next planned flush is held by an operator pause.
-pub fn record_flush_send_paused(chain: u64, paused: bool) {
-    gauge!("topup_flush_send_paused", "chain" => chain.to_string(), "producer_enabled" => "true")
-        .set(if paused { 1.0 } else { 0.0 });
+/// Counts one planned flush voided at send time by a flush pause.
+pub fn record_flush_send_paused(chain: u64) {
+    counter!("topup_flush_send_paused_total", "chain" => chain.to_string(), "producer_enabled" => "true")
+        .increment(1);
 }
 
 /// Counts one failed rate-lock expiry scan.

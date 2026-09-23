@@ -108,88 +108,90 @@ impl Flusher {
     }
 
     /// Signs and broadcasts the oldest planned row if this operator has no in-flight flush.
+    ///
+    /// A plan whose route, product, or account has the `flush` scope paused is voided instead,
+    /// and the next plan takes over its nonce, so one pause never stalls the chain's queue.
     pub async fn send_next(&self, route: &RouteFile) -> Result<RunResult, FlusherError> {
         let operator = self.signer.operator_address().await.map_err(map_signer)?;
         let latest = self.chain.latest_block().await.map_err(map_chain)?;
         let fees = self.chain.fee_quote().await.map_err(map_chain)?;
-        let mut transaction = self.pool.begin().await?;
-        db::lock_operator(&mut transaction, route.chain.chain_id, operator).await?;
-        let Some(flush) =
-            db::next_planned_flush(&mut transaction, route.chain.chain_id, operator).await?
-        else {
-            transaction.commit().await?;
-            crate::observability::record_flush_send_paused(route.chain.chain_id, false);
-            return Ok(RunResult::Idle);
-        };
-        let mut evidence = parse_evidence(&flush)?;
-        let address_ids = evidence
-            .plan
-            .iter()
-            .map(|address| address.address_id)
-            .collect::<Vec<_>>();
-        if pause::flush_paused_for_addresses_locked(
-            &mut transaction,
-            &evidence.binding.route,
-            &address_ids,
-        )
-        .await?
-        {
-            let recorded =
-                db::record_flush_send_paused(&mut transaction, flush.id, &evidence.binding.route)
-                    .await?;
-            transaction.commit().await?;
-            crate::observability::record_flush_send_paused(route.chain.chain_id, true);
-            if recorded {
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            db::lock_operator(&mut transaction, route.chain.chain_id, operator).await?;
+            let Some(flush) =
+                db::next_planned_flush(&mut transaction, route.chain.chain_id, operator).await?
+            else {
+                transaction.commit().await?;
+                return Ok(RunResult::Idle);
+            };
+            let mut evidence = parse_evidence(&flush)?;
+            let (factory, token, salts) = bound_call(&flush, &evidence)?;
+            let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
+            let priority = fees.max_priority_fee_per_gas.min(max_fee);
+            let gas_limit = buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?;
+            let request = TxRequest {
+                chain_id: flush.chain_id,
+                nonce: flush.nonce,
+                to: factory,
+                value: U256::ZERO,
+                data: encode_flush(salts, token),
+                gas_limit,
+                max_fee_per_gas: max_fee,
+                max_priority_fee_per_gas: priority,
+            };
+            // Sign under the operator nonce lock only; the pause rows are share-locked afterwards
+            // so a slow signer never blocks account, product, or route writes.
+            let signed = self
+                .signer
+                .sign_operator_tx(request)
+                .await
+                .map_err(map_signer)?;
+            let address_ids = evidence
+                .plan
+                .iter()
+                .map(|address| address.address_id)
+                .collect::<Vec<_>>();
+            if let Some(paused) = pause::flush_pause_for_addresses_locked(
+                &mut transaction,
+                &evidence.binding.route,
+                &address_ids,
+            )
+            .await?
+            {
+                db::void_paused_plan(&mut transaction, &flush, &address_ids, &paused).await?;
+                transaction.commit().await?;
+                crate::observability::record_flush_send_paused(route.chain.chain_id);
                 tracing::info!(
                     flush_id = %flush.id,
                     route = %evidence.binding.route,
-                    outcome = "wait",
-                    "planned flush send paused"
+                    paused = %paused,
+                    outcome = "voided",
+                    "planned flush voided by a flush pause"
                 );
+                continue;
             }
-            return Ok(RunResult::Idle);
+            let hash = keccak256(&signed.raw_signed_bytes);
+            evidence.signed.push(SignedVersion {
+                hash: format!("{hash:#x}"),
+                raw: hex::encode(&signed.raw_signed_bytes),
+                signed_at_block: latest,
+                max_fee_per_gas: max_fee,
+                max_priority_fee_per_gas: priority,
+            });
+            db::mark_flush_sent(&mut transaction, flush.id, hash, &to_value(&evidence)?).await?;
+            transaction.commit().await?;
+            let broadcast = self
+                .chain
+                .send_raw_transaction(&signed.raw_signed_bytes)
+                .await
+                .map_err(map_chain)?;
+            if broadcast != hash {
+                return Err(FlusherError::Invariant(
+                    "RPC returned a hash different from the signed transaction",
+                ));
+            }
+            return Ok(RunResult::Sent { flush_id: flush.id });
         }
-        crate::observability::record_flush_send_paused(route.chain.chain_id, false);
-        let (factory, token, salts) = bound_call(&flush, &evidence)?;
-        let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
-        let priority = fees.max_priority_fee_per_gas.min(max_fee);
-        let gas_limit = buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?;
-        let request = TxRequest {
-            chain_id: flush.chain_id,
-            nonce: flush.nonce,
-            to: factory,
-            value: U256::ZERO,
-            data: encode_flush(salts, token),
-            gas_limit,
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: priority,
-        };
-        let signed = self
-            .signer
-            .sign_operator_tx(request)
-            .await
-            .map_err(map_signer)?;
-        let hash = keccak256(&signed.raw_signed_bytes);
-        evidence.signed.push(SignedVersion {
-            hash: format!("{hash:#x}"),
-            raw: hex::encode(&signed.raw_signed_bytes),
-            signed_at_block: latest,
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: priority,
-        });
-        db::mark_flush_sent(&mut transaction, flush.id, hash, &to_value(&evidence)?).await?;
-        transaction.commit().await?;
-        let broadcast = self
-            .chain
-            .send_raw_transaction(&signed.raw_signed_bytes)
-            .await
-            .map_err(map_chain)?;
-        if broadcast != hash {
-            return Err(FlusherError::Invariant(
-                "RPC returned a hash different from the signed transaction",
-            ));
-        }
-        Ok(RunResult::Sent { flush_id: flush.id })
     }
 
     /// Recovers, replaces, or confirms one sent flush for this route.

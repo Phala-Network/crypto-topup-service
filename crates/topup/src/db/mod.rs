@@ -35,8 +35,8 @@ pub use flushes::{
     insert_flushed, insert_planned_flush, link_confirmed_flush, list_active_flush_exclusions,
     list_flushes, lock_flush_plan, lock_operator, mark_flush_reverted, mark_flush_reverted_locked,
     mark_flush_sent, next_flush_nonce, next_planned_flush, rebind_planned_flushes,
-    record_flush_send_paused, store_flush_replacement, store_flush_replacement_cas,
-    update_sent_evidence, upsert_flush_exclusion,
+    store_flush_replacement, store_flush_replacement_cas, update_sent_evidence,
+    upsert_flush_exclusion, void_paused_plan,
 };
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
 pub use products::{

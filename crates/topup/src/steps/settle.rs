@@ -1,37 +1,38 @@
 //! Cleared-deposit settlement step.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use topup_adapters::settlement::http::{
-    SettlementAnswer, SettlementClient, SettlementClientError, SettlementRequest,
+    SettlementAnswer, SettlementApi, SettlementClient, SettlementClientError, SettlementRequest,
 };
+use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::PRICE_SCALE;
 use uuid::Uuid;
 
 use crate::db::{self, OutboxEvent, SettlementIntent, SettlementStatus};
+use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
 
 /// Product settlement operation for a deposit in `cleared`.
 #[derive(Clone)]
 pub struct SettleStep {
     pool: PgPool,
-    client_timeout: std::time::Duration,
-    signer: topup_adapters::signer::actor::SignerHandle,
-    client_override: Option<std::sync::Arc<dyn topup_adapters::settlement::http::SettlementApi>>,
+    client_timeout: Duration,
+    signer: SignerHandle,
+    client_override: Option<Arc<dyn SettlementApi>>,
 }
 
 impl SettleStep {
     /// Creates a settlement step backed by PostgreSQL and one product client.
     #[must_use]
-    pub fn new(
-        pool: PgPool,
-        signer: topup_adapters::signer::actor::SignerHandle,
-        client_timeout: std::time::Duration,
-    ) -> Self {
+    pub fn new(pool: PgPool, signer: SignerHandle, client_timeout: Duration) -> Self {
         Self {
             pool,
             client_timeout,
@@ -42,14 +43,10 @@ impl SettleStep {
 
     /// Creates a settlement step with a mockable product API.
     #[must_use]
-    pub fn with_api(
-        pool: PgPool,
-        signer: topup_adapters::signer::actor::SignerHandle,
-        client: std::sync::Arc<dyn topup_adapters::settlement::http::SettlementApi>,
-    ) -> Self {
+    pub fn with_api(pool: PgPool, signer: SignerHandle, client: Arc<dyn SettlementApi>) -> Self {
         Self {
             pool,
-            client_timeout: std::time::Duration::from_secs(1),
+            client_timeout: Duration::from_secs(1),
             signer,
             client_override: Some(client),
         }
@@ -65,18 +62,17 @@ impl SettleStep {
         let product = db::get_product(&self.pool, account.product_id)
             .await?
             .ok_or(SettleStepError::MissingProduct)?;
-        let client: std::sync::Arc<dyn topup_adapters::settlement::http::SettlementApi> =
-            match &self.client_override {
-                Some(client) => std::sync::Arc::clone(client),
-                None => std::sync::Arc::new(
-                    SettlementClient::new(
-                        &product.settlement_url,
-                        self.signer.clone(),
-                        self.client_timeout,
-                    )
-                    .map_err(SettleStepError::Client)?,
-                ),
-            };
+        let client: Arc<dyn SettlementApi> = match &self.client_override {
+            Some(client) => Arc::clone(client),
+            None => Arc::new(
+                SettlementClient::new(
+                    &product.settlement_url,
+                    self.signer.clone(),
+                    self.client_timeout,
+                )
+                .map_err(SettleStepError::Client)?,
+            ),
+        };
         let lock_ref = settlement_lock_ref(deposit, address.lock_ref.as_deref());
         let payload = SettlementPayload::from_deposit(
             deposit,
@@ -664,16 +660,14 @@ async fn settlement_paused(
     product_scopes: &[String],
 ) -> Result<bool, sqlx::Error> {
     let Some(route) = deposit.route.as_deref() else {
-        return Ok(crate::pause::PauseScopeSources::from_codes(
-            account_scopes,
-            product_scopes,
-            &[],
-        )?
-        .contains(topup_core::screening::PauseScope::Settlement));
+        return Ok(
+            PauseScopeSources::from_codes(account_scopes, product_scopes, &[])?
+                .contains(topup_core::screening::PauseScope::Settlement),
+        );
     };
-    let route_scopes = crate::pause::route_pause_scopes(pool, route).await?;
+    let route_scopes = pause::route_pause_scopes(pool, route).await?;
     Ok(
-        crate::pause::PauseScopeSources::from_codes(account_scopes, product_scopes, &route_scopes)?
+        PauseScopeSources::from_codes(account_scopes, product_scopes, &route_scopes)?
             .contains(topup_core::screening::PauseScope::Settlement),
     )
 }
