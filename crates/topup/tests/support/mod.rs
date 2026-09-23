@@ -42,7 +42,7 @@ pub struct TestDatabase {
 /// Creates the cluster-wide `topup_app` role before any per-test database is migrated.
 ///
 /// Roles are shared by every database in the cluster, so parallel per-test migrations of
-/// `20260922000001` would otherwise race on `CREATE ROLE` on a fresh cluster. The advisory lock
+/// `20260922000000` would otherwise race on `CREATE ROLE` on a fresh cluster. The advisory lock
 /// key is shared by every test binary; the migration then finds the role and skips creating it.
 pub async fn ensure_app_role(admin_pool: &PgPool) -> Result<()> {
     let mut transaction = admin_pool.begin().await?;

@@ -20,10 +20,10 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=200 p
 docker compose -f deploy/docker-compose.staging.yml exec -T backup wal-g backup-list
 ```
 
-Check the restored schema version with the application role, which can read `_sqlx_migrations`
-since C7b (#70). Require the newest version shipped by the attested release, `applied` equal to the
-number of `*.up.sql` files in `crates/topup/migrations` at the release's source commit, and
-`failed=0`:
+Check the restored schema version with the application role, which can read `_sqlx_migrations`.
+Require the newest version shipped by the attested release, `applied` equal to the number of
+`*.up.sql` files in `crates/topup/migrations` at the release's source commit (one,
+`20260922000000_initial_schema`, until a migration is added), and `failed=0`:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1; SELECT count(*) AS applied,count(*) FILTER (WHERE NOT success) AS failed FROM _sqlx_migrations; COMMIT;"
