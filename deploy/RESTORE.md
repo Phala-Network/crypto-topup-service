@@ -72,11 +72,11 @@ GET, and remove their uniquely named Compose projects, volumes, and per-run imag
 
 The `Restore drill` workflow (`.github/workflows/restore-drill.yml`) runs `make restore-drill` every
 Monday at 03:17 UTC on the CI runner and can be started manually. Instead of the full drill, the
-per-push `deployment` CI job includes the bounded WAL-G wrapper and archive-switch tests. The CI
-runner reaches the host Docker
-daemon through its socket and the daemon cannot see the checkout, so the drill never bind-mounts a
-host path: `deploy/local/restore-drill.compose.yml` swaps the local stack's file mounts for project
-volumes that the drill fills with `docker cp`, locally and on CI alike.
+`deployment` CI job (pull requests and pushes to `main`) runs the bounded `walg-cron`, WAL-G
+restore-command, and archive-switch tests on the self-hosted runner. The CI runner reaches the host
+Docker daemon through its socket and the daemon cannot see the checkout, so the drill never
+bind-mounts a host path: `deploy/local/restore-drill.compose.yml` swaps the local stack's file
+mounts for project volumes that the drill fills with `docker cp`, locally and on CI alike.
 
 ## Replacement CVM boot environment
 
