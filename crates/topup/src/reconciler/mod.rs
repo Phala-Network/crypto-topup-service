@@ -43,7 +43,7 @@ pub use chain::{ReconciliationChain, RpcReconciliationChain};
 pub use store::{
     LeaseOwnerLock, blocked_addresses, chain_is_blocked, frozen_chains, hold_lease_owner_lock,
 };
-pub use types::{CheckName, Finding, ReconciliationMetrics, ReconciliationReport};
+pub use types::{CheckName, Finding, ReconciliationReport};
 
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
 const MAX_WINDOWS_PER_ROUND: usize = 64;
@@ -241,7 +241,6 @@ pub struct Reconciler {
     scanner_routes: BTreeMap<u64, ChainRoutes>,
     chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
     settlement: Arc<dyn SettlementLookup>,
-    metrics: Arc<ReconciliationMetrics>,
 }
 
 impl Reconciler {
@@ -250,7 +249,6 @@ impl Reconciler {
         pool: PgPool,
         routes: Vec<RouteFile>,
         signer: SignerHandle,
-        metrics: Arc<ReconciliationMetrics>,
     ) -> Result<Self, ReconciliationError> {
         let mut chains = BTreeMap::<u64, Arc<dyn ReconciliationChain>>::new();
         for route in &routes {
@@ -282,7 +280,7 @@ impl Reconciler {
             signer,
             timeout: Duration::from_secs(30),
         });
-        Self::with_dependencies(pool, routes, chains, settlement, metrics)
+        Self::with_dependencies(pool, routes, chains, settlement)
     }
 
     /// Builds a reconciler with explicit dependencies for integration tests.
@@ -291,7 +289,6 @@ impl Reconciler {
         routes: Vec<RouteFile>,
         chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
         settlement: Arc<dyn SettlementLookup>,
-        metrics: Arc<ReconciliationMetrics>,
     ) -> Result<Self, ReconciliationError> {
         let scanner_routes = configure_routes(&routes)?
             .into_iter()
@@ -303,7 +300,6 @@ impl Reconciler {
             scanner_routes,
             chains,
             settlement,
-            metrics,
         })
     }
 
@@ -352,7 +348,7 @@ impl Reconciler {
             let mut findings = Vec::new();
             let mut result = self.run_check(check, &mut heads, &mut findings).await;
             for finding in &findings {
-                match store::persist_finding(&self.pool, finding, &self.metrics).await {
+                match store::persist_finding(&self.pool, finding).await {
                     Ok(inserted) => log_finding(finding, inserted),
                     Err(error) => result = result.and(Err(error)),
                 }
@@ -369,7 +365,7 @@ impl Reconciler {
                     .failed_checks
                     .contains(&CheckName::PostRestoreSettlement));
         if report.succeeded() {
-            self.metrics.heartbeat();
+            crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
             tracing::info!(
                 findings = report.findings.len(),
                 post_restore,
@@ -1321,7 +1317,7 @@ fn log_finding(finding: &Finding, inserted: bool) {
             subjects = ?finding.subjects,
             expected = %finding.expected,
             observed = %finding.observed,
-            metric = ReconciliationMetrics::MISMATCH_METRIC,
+            metric = types::MISMATCH_METRIC,
             "reconciliation mismatch"
         );
     }

@@ -78,11 +78,3 @@ pub async fn set_account_paused_scopes(
     .fetch_optional(pool)
     .await
 }
-
-/// Deletes an account and returns whether a row was removed.
-pub async fn delete_account(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query!("DELETE FROM accounts WHERE id = $1", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() == 1)
-}

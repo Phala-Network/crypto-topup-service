@@ -19,7 +19,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
-use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
+use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
@@ -223,7 +223,7 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
 
             let pump = Pump::new(
                 context.app_pool.clone(),
-                Arc::new(NoopStepSet::build().with_confirmed(Box::new(step))),
+                Arc::new(wait_steps().with_confirmed(Box::new(step))),
                 PumpConfig::default(),
             )?;
             let mut applied = Vec::new();
@@ -548,4 +548,28 @@ fn current_block(rpc_url: &str) -> Result<u64> {
         .trim()
         .parse()
         .context("cast returned an invalid block number")
+}
+
+/// Leaves every deposit waiting so only the step under test advances state.
+struct WaitStep;
+
+#[async_trait]
+impl Step for WaitStep {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        StepResult::new(
+            StepOutcome::Wait {
+                reason: WaitReason::Paused,
+            },
+            serde_json::json!({"outcome": "wait"}),
+        )
+    }
+}
+
+fn wait_steps() -> StepSet {
+    StepSet::new(
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+    )
 }

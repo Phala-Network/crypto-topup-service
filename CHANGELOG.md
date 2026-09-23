@@ -19,6 +19,12 @@ webhook receivers must ignore unknown fields.
   PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
   the endpoint is admin-only and no service has been deployed.
 
+### HTTP API
+
+- Removed the unreachable `501` response from `/v1/attestation` and the `work_package` error field
+  from `openapi.json`; both belonged only to the pre-C11 placeholder, and production never
+  returned them (#90).
+
 ### Webhooks
 
 - `deposit.credited` and `deposit.rejected` payloads now include `chain_id`, `state`

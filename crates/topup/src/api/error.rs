@@ -20,9 +20,6 @@ pub struct ErrorDetail {
     pub code: &'static str,
     /// Human-readable summary without internal details.
     pub message: String,
-    /// Work package that owns a deliberately deferred handler.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub work_package: Option<&'static str>,
 }
 
 /// API failure with an HTTP status and stable public body.
@@ -133,19 +130,6 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
     }
 
-    /// Returns a deliberately deferred work-package response.
-    #[must_use]
-    pub fn not_implemented(work_package: &'static str) -> Self {
-        Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            detail: ErrorDetail {
-                code: "not_implemented",
-                message: format!("handler is owned by work package {work_package}"),
-                work_package: Some(work_package),
-            },
-        }
-    }
-
     /// Returns an internal failure without exposing its cause.
     #[must_use]
     pub fn internal() -> Self {
@@ -162,7 +146,6 @@ impl ApiError {
             detail: ErrorDetail {
                 code,
                 message: message.into(),
-                work_package: None,
             },
         }
     }

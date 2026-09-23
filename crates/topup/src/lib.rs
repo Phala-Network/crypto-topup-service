@@ -18,6 +18,7 @@ pub mod contracts;
 pub mod db;
 pub mod flusher;
 pub mod heartbeat;
+pub mod jitter;
 pub mod locks;
 pub mod observability;
 pub mod outbox;

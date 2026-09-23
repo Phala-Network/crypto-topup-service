@@ -1,4 +1,4 @@
-.PHONY: build build-topup test lint image up down smoke infra-smoke service-smoke verify-image \
+.PHONY: build build-topup test lint image up down infra-smoke service-smoke verify-image \
 	restore-drill deploy-check alerts-check runbook-check sdk-check sdk-generate sandbox-local
 
 build:
@@ -25,9 +25,6 @@ up:
 
 down:
 	docker compose -f deploy/local/docker-compose.yml down --remove-orphans
-
-smoke:
-	deploy/local/infra-smoke.sh
 
 infra-smoke:
 	deploy/local/infra-smoke.sh

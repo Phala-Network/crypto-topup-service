@@ -127,8 +127,7 @@ impl EvmRefundChainReader {
                 .rpc_providers
                 .first()
                 .ok_or(RefundReadError::MissingField("chain.rpc_providers[0]"))?;
-            let environment = provider_environment_name(provider_id);
-            let rpc_url = std::env::var(&environment)
+            let rpc_url = crate::rpc_provider::configured_provider_url(provider_id)
                 .map_err(|_| RefundReadError::MissingField("refund RPC environment"))?;
             let url = Url::parse(&rpc_url)
                 .map_err(|error| RefundReadError::InvalidUrl(error.to_string()))?;
@@ -603,20 +602,6 @@ fn transfer_total(transfers: &[RefundTransfer]) -> Result<U256, sqlx::Error> {
             .checked_add(transfer.transferred_atomic)
             .ok_or_else(|| decode_error("matching transfer sum overflow"))
     })
-}
-
-fn provider_environment_name(provider_id: &str) -> String {
-    let normalized = provider_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("TOPUP_RPC_{normalized}_URL")
 }
 
 fn decode_error(error: impl Display) -> sqlx::Error {

@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -72,29 +70,10 @@ impl Display for AgeAlertConfigError {
 
 impl Error for AgeAlertConfigError {}
 
-/// Minimal in-process metrics emitted by the pump work package.
-#[derive(Debug, Default)]
-pub struct PumpMetrics {
-    stuck_deposit_alerts: AtomicU64,
-}
-
-impl PumpMetrics {
-    /// Returns the number of stuck-deposit alert observations.
-    #[must_use]
-    pub fn stuck_deposit_alerts(&self) -> u64 {
-        self.stuck_deposit_alerts.load(Ordering::Relaxed)
-    }
-
-    fn record_stuck_deposit(&self) {
-        self.stuck_deposit_alerts.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 /// Periodically finds deposits older than their route's state threshold.
 pub struct AgeAlerter {
     pool: PgPool,
     config: AgeAlertConfig,
-    metrics: Arc<PumpMetrics>,
     scan_interval: Duration,
     reminder_interval: Duration,
     alerts: Mutex<BTreeMap<Uuid, AlertRecord>>,
@@ -103,19 +82,8 @@ pub struct AgeAlerter {
 impl AgeAlerter {
     /// Creates a periodic state-age alerter.
     #[must_use]
-    pub fn new(
-        pool: PgPool,
-        config: AgeAlertConfig,
-        metrics: Arc<PumpMetrics>,
-        scan_interval: Duration,
-    ) -> Self {
-        Self::with_reminder_interval(
-            pool,
-            config,
-            metrics,
-            scan_interval,
-            DEFAULT_REMINDER_INTERVAL,
-        )
+    pub fn new(pool: PgPool, config: AgeAlertConfig, scan_interval: Duration) -> Self {
+        Self::with_reminder_interval(pool, config, scan_interval, DEFAULT_REMINDER_INTERVAL)
     }
 
     /// Creates an alerter with an explicit reminder interval.
@@ -123,14 +91,12 @@ impl AgeAlerter {
     pub fn with_reminder_interval(
         pool: PgPool,
         config: AgeAlertConfig,
-        metrics: Arc<PumpMetrics>,
         scan_interval: Duration,
         reminder_interval: Duration,
     ) -> Self {
         Self {
             pool,
             config,
-            metrics,
             scan_interval,
             reminder_interval,
             alerts: Mutex::new(BTreeMap::new()),
@@ -234,7 +200,6 @@ impl AgeAlerter {
                     threshold_seconds,
                     "deposit has exceeded its state-age threshold"
                 );
-                self.metrics.record_stuck_deposit();
                 alert_count = alert_count.saturating_add(1);
                 alerts.insert(
                     row.id,

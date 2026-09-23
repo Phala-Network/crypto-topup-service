@@ -4,8 +4,7 @@
 
 Trigger on `TopupBackupTooOld` (PR #56: successful backup marker older than 120 seconds), WAL
 archiving failures, or `wal-g backup-list` failing to read storage. D3 provides the encrypted base
-backups, WAL archiving, and `key-versions/` metadata described in `deploy/RESTORE.md`; the backup-age
-alert itself is pending #56.
+backups, WAL archiving, and `key-versions/` metadata described in `deploy/RESTORE.md`.
 
 ## Impact and blast radius
 

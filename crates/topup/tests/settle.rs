@@ -27,8 +27,9 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use tokio::sync::{Mutex, Semaphore};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::jitter::JitterSource;
 use topup::outbox::{DeliveryConfig, DeliveryWorker};
-use topup::pump::{JitterSource, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
+use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::settle::SettleStep;
 use topup_adapters::settlement::http::{
     SettlementAnswer, SettlementApi, SettlementClientError, SettlementRequest,

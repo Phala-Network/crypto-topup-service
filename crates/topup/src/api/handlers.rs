@@ -328,7 +328,6 @@ pub(crate) async fn request_refund(
     responses(
         (status = 200, body = AttestationResponse),
         (status = 400, body = ErrorResponse),
-        (status = 501, body = ErrorResponse),
         (status = 503, body = ErrorResponse)
     ),
     tag = "attestation"
@@ -340,7 +339,6 @@ pub(crate) async fn get_attestation(
     let nonce = decode_nonce(&query.nonce)?;
     match state.attestor.attest(&nonce).await {
         Ok(response) => Ok(Json(response)),
-        Err(AttestationError::NotConfigured) => Err(ApiError::not_implemented("C11")),
         Err(AttestationError::Unavailable) => {
             Err(ApiError::service_unavailable("attestation is unavailable"))
         }

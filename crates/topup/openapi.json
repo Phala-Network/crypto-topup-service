@@ -347,16 +347,6 @@
               }
             }
           },
-          "501": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "503": {
             "description": "",
             "content": {
@@ -1840,13 +1830,6 @@
           "message": {
             "type": "string",
             "description": "Human-readable summary without internal details."
-          },
-          "work_package": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Work package that owns a deliberately deferred handler."
           }
         }
       },
