@@ -94,7 +94,7 @@ gas from a public faucet.
 
    ```sh
    cast wallet import sandbox-deployer --interactive   # once, with a funded throwaway key
-   ETH_PASSWORD=... deploy/sandbox/deploy-test-contracts.sh \
+   ETH_PASSWORD=/path/to/0600-password-file deploy/sandbox/deploy-test-contracts.sh \
      --rpc-url "$SEPOLIA_RPC_URL" --account sandbox-deployer
    ```
 
@@ -171,7 +171,8 @@ Write a configuration file; the fields are those of `SandboxConfig` in
   HTTPS URL registered with the operator, forwarded to it by your tunnel or reverse proxy. The
   endpoint verifies signatures against `public_url`, never the incoming `Host` header.
 - `payer_account` is a Foundry keystore account (`cast wallet import sandbox-payer --interactive`)
-  holding a throwaway test key with Sepolia ETH; export `ETH_PASSWORD` for `cast`.
+  holding a throwaway test key with Sepolia ETH; export `ETH_PASSWORD` as the path of a mode-0600
+  file holding its keystore password (Foundry reads the variable as a password file).
 - Set `settlement_public_key` (hex) after verifying the attestation quote; otherwise the example
   checks only the attestation's nonce binding and warns.
 

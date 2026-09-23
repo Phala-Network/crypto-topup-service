@@ -163,7 +163,7 @@ class Payer:
 
     On Anvil the payer is an unlocked development account. On Sepolia set `payer_account` to a
     Foundry keystore account holding a funded throwaway test key (`cast wallet import`); `cast`
-    signs with it and reads the keystore password from `ETH_PASSWORD`.
+    signs with it and reads the keystore password from the mode-0600 file named by `ETH_PASSWORD`.
     """
 
     def __init__(self, config: SandboxConfig, rpc: JsonRpc) -> None:

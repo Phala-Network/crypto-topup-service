@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local (offline) preflight checks: the example env file, the committed zero-address route, and
+# Local (offline) preflight checks: the example env file, a zero-address route, and
 # a stale render must be refused, and a complete env file with a filled route must pass.
 set -euo pipefail
 
@@ -10,12 +10,12 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111
 export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222
-"$root/deploy/render-compose.sh" >"$tmp/zero-route.yml"
-# A source compose whose inline route carries real-looking addresses, as after the route PR.
-sed -e 's/0x0000000000000000000000000000000000000000/0x5FbDB2315678afecb367f032d93F642f64180aa3/' \
-    -e 's/0x1111111111111111111111111111111111111111/0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512/' \
-    -e 's/0x2222222222222222222222222222222222222222/0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0/' \
-    "$root/deploy/docker-compose.yml" >"$tmp/filled-source.yml"
+# A source compose whose inline route still has zero-address placeholders, as before the route PR.
+sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
+    "$root/deploy/docker-compose.yml" >"$tmp/zero-source.yml"
+"$root/deploy/render-compose.sh" "$tmp/zero-source.yml" >"$tmp/zero-route.yml"
+# The committed compose carries the deployed route addresses.
+cp "$root/deploy/docker-compose.yml" "$tmp/filled-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/filled-route.yml"
 
 app_password=$(printf 'a%.0s' {1..32})
@@ -52,10 +52,11 @@ expect_failure() {
 }
 
 expect_failure example-env "TOPUP_PUBLIC_ORIGIN still contains replace-me" \
-    --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml"
+    --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml" \
+    --source "$tmp/zero-source.yml"
 expect_failure zero-route \
     "route forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
-    --env "$tmp/complete.env" --compose "$tmp/zero-route.yml"
+    --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
 if grep -v 'placeholder or zero address' "$tmp/zero-route.err" | grep -q '^FAIL'; then
     echo "the complete env file failed a check:" >&2
     cat "$tmp/zero-route.err" >&2
@@ -64,10 +65,10 @@ fi
 echo "EXTRA_SECRET=x" >>"$tmp/extra.env"
 cat "$tmp/complete.env" >>"$tmp/extra.env"
 expect_failure extra-name "names outside staging.env.example: EXTRA_SECRET" \
-    --env "$tmp/extra.env" --compose "$tmp/zero-route.yml"
+    --env "$tmp/extra.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
 # A render that does not match its source (stale or hand-edited) is refused.
 expect_failure stale-render "differs from a fresh render" \
-    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml"
+    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/zero-source.yml"
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null

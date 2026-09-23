@@ -26,9 +26,11 @@ Human inputs, all required before step 1 below:
 | Coin Metrics API key, or empty for the community endpoint | `COINMETRICS_API_KEY` |
 | Admin keypair (`topup-sdk keygen`); only the key id and public key go into the env | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` |
 
-Owner decisions, also before step 1: the staging `settlement_url` and `product_kid` in
-`deploy/config/routes/phala-cloud-sepolia-pha.yaml` currently name the production Phala Cloud
-endpoint; confirm or change them (new route file content, reviewed like any attested change).
+Owner decisions, also before step 1: the staging `settlement_url` in
+`deploy/config/routes/phala-cloud-sepolia-pha.yaml` is a non-routable `.invalid` placeholder, so
+settlements fail on DNS and deposits stay unsettled (expect the stuck-deposit alerts). Supply a
+staging product endpoint (new route content, reviewed like any attested change) before any
+end-to-end settlement test on staging.
 The OS image must be a dstack 0.6.0 build (step 6).
 
 Steps, in order. Nothing before step 8 touches Phala Cloud; `make cvm-rehearsal` has already run
@@ -42,10 +44,15 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
 
    ```sh
    cast wallet import staging-deployer --interactive
-   read -rsp "Keystore password: " ETH_PASSWORD && printf '\n' && export ETH_PASSWORD
-   deploy/sandbox/deploy-test-contracts.sh \
-     --rpc-url "$SEPOLIA_RPC_A" --account staging-deployer > sepolia-test-contracts.json
-   unset ETH_PASSWORD
+   # Foundry reads ETH_PASSWORD as the path of a password file, not the password itself.
+   (
+     ETH_PASSWORD_FILE=$(mktemp)   # created mode 0600
+     trap 'rm -f "$ETH_PASSWORD_FILE"' EXIT
+     read -rsp "Keystore password: " pw; printf '\n'
+     printf '%s' "$pw" > "$ETH_PASSWORD_FILE"; unset pw
+     ETH_PASSWORD="$ETH_PASSWORD_FILE" deploy/sandbox/deploy-test-contracts.sh \
+       --rpc-url "$SEPOLIA_RPC_A" --account staging-deployer > sepolia-test-contracts.json
+   )
    ```
 
 2. Route PR: copy `factory` and `implementation` from `sepolia-contract-verification.json`, the
