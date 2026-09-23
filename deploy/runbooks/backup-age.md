@@ -27,14 +27,24 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
   for that instance only, and lift them when the restore resumes archiving or the drill CVM is
   destroyed. Never silence them for the live instance.
 
+- Idle-database margin: the only WAL on an idle database is the heartbeat's row every 60 seconds,
+  and `archive_timeout=60` switches a segment only once new WAL exists. If a heartbeat commits just
+  after a switch check, the next switch waits for the following check, so the marker can reach
+  about 120 seconds plus the `wal-push` upload time before it refreshes (usually it refreshes every
+  60 seconds). `TopupBackupTooOld` needs the marker above 120 seconds for a full minute, so this
+  worst case does not page; a marker that stays past 180 seconds does. The local infra smoke
+  bounds the idle marker at 150 seconds.
 - Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
   `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle
-  (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `backup` service or its
-  WAL keepalive has stopped, so nothing gives `archive_timeout` a segment to switch. Check
-  `docker compose -f deploy/docker-compose.staging.yml ps backup` and search the `backup` logs for
-  `WAL keepalive transaction failed`; fix the reported database connection or credential error,
-  then run `docker compose -f deploy/docker-compose.staging.yml restart backup` and confirm
-  `last_archived_time` advances within two minutes.
+  (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `heartbeat` service has
+  stopped, so nothing gives `archive_timeout` a segment to switch. Check
+  `docker compose -f deploy/docker-compose.staging.yml ps heartbeat` and search the `heartbeat` logs
+  for `failed to record restore heartbeat`; fix the reported database connection or credential
+  error, then run `docker compose -f deploy/docker-compose.staging.yml restart heartbeat` and confirm
+  `last_archived_time` advances within two minutes. Right after a PostgreSQL restart, also search
+  the `backup` logs for `startup CHECKPOINT failed`: without that checkpoint PostgreSQL ignores
+  `archive_timeout` for up to `checkpoint_timeout`; restart `backup` once the database accepts
+  connections.
 - WAL archiver failing but object storage reachable: fix credentials/permissions and verify a new WAL.
 - Object storage unavailable: escalate provider outage; do not delete local WAL.
 - Backup age unknown (no recent `last_archived_time` or `key-versions/wal/` object): treat as failed

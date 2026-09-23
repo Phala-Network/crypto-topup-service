@@ -2,6 +2,9 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`. The commands below
+are recorded as run; use the current [runbook](../chain-frozen.md).
+
 Status: complete local CLI scenario against PostgreSQL 16 and Anvil, continuing from the
 [reconciliation mismatch exercise](reconciliation-mismatch.md) in database `wp_d5_recon2`.
 

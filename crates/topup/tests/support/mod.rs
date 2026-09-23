@@ -1,6 +1,12 @@
 #![allow(dead_code)]
 
+pub mod chain;
+
 use std::env;
+use std::future::{Future, poll_fn};
+use std::panic::{self, AssertUnwindSafe};
+use std::pin::Pin;
+use std::task::Poll;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -19,10 +25,16 @@ use uuid::Uuid;
 /// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
 pub const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+pub type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+
+/// An isolated, migrated database with an owner connection and a `topup_app` login.
 pub struct TestDatabase {
     admin_pool: PgPool,
-    owner_pool: PgPool,
+    /// Connects as the migration owner; only for migrations and fault injection.
+    pub owner_pool: PgPool,
     pub app_pool: PgPool,
+    pub owner_url: String,
+    pub app_url: String,
     database_name: String,
     app_role: String,
 }
@@ -75,9 +87,9 @@ impl TestDatabase {
             .await?;
 
         let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c9_{suffix}");
-        let app_role = format!("topup_c9_app_{suffix}");
-        let password = format!("c9_{suffix}");
+        let database_name = format!("topup_test_{suffix}");
+        let app_role = format!("topup_test_app_{suffix}");
+        let password = format!("test_{suffix}");
         admin_pool
             .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
             .await?;
@@ -118,6 +130,8 @@ impl TestDatabase {
             admin_pool,
             owner_pool,
             app_pool,
+            owner_url: owner_url.into(),
+            app_url: app_url.into(),
             database_name,
             app_role,
         }))
@@ -129,13 +143,41 @@ impl TestDatabase {
         self.admin_pool
             .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
             .await
-            .context("drop API test database")?;
+            .context("drop test database")?;
         self.admin_pool
             .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
             .await
-            .context("drop API test role")?;
+            .context("drop test role")?;
         self.admin_pool.close().await;
         Ok(())
+    }
+}
+
+/// Runs `test` against a fresh [`TestDatabase`] and drops it afterwards, or skips when the
+/// database URLs are not set. A panicking test still drops its database and role before the
+/// panic resumes.
+pub async fn with_database<F>(test: F) -> Result<()>
+where
+    F: for<'a> FnOnce(&'a TestDatabase) -> TestFuture<'a>,
+{
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let outcome = {
+        let mut future = test(&database);
+        poll_fn(|context| {
+            match panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(result)) => Poll::Ready(Ok(result)),
+                Err(payload) => Poll::Ready(Err(payload)),
+            }
+        })
+        .await
+    };
+    let cleanup = database.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(payload) => panic::resume_unwind(payload),
     }
 }
 
@@ -311,7 +353,7 @@ fn required_url(name: &str) -> Option<String> {
     match env::var(name).ok().filter(|value| !value.is_empty()) {
         Some(value) => Some(value),
         None => {
-            eprintln!("skipping API integration test: {name} is not set");
+            eprintln!("skipping integration test: {name} is not set");
             None
         }
     }

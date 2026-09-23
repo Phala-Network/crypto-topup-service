@@ -16,7 +16,7 @@ use super::{MAX_SCAN_WINDOW, ScannerError};
 use crate::db::{self, HeadCommit, NewPendingTransfer};
 
 /// Longest interval between head scans: about one Ethereum slot. A shorter scanner poll interval
-/// (`TOPUP_SCANNER_POLL_INTERVAL_SECONDS`) also shortens the head scan.
+/// (`--scanner-poll-interval-s`) also shortens the head scan.
 pub const HEAD_SCAN_INTERVAL: Duration = Duration::from_secs(12);
 
 /// Outcome of one head scan.

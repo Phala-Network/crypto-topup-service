@@ -18,7 +18,7 @@ use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, Settleme
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::RouteFile;
+use topup_core::route::{RouteFile, product_destination};
 use topup_core::valuation::{
     LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
 };
@@ -65,16 +65,23 @@ pub trait ProductLookup: Send + Sync {
 /// Signed product lookup resolved from the deposit's owning product.
 pub struct SettlementProductLookup {
     pool: PgPool,
+    routes: Arc<[RouteFile]>,
     signer: SignerHandle,
     request_timeout: Duration,
 }
 
 impl SettlementProductLookup {
-    /// Creates a lookup using each product's configured settlement endpoint.
+    /// Creates a lookup using each product's attested route destination.
     #[must_use]
-    pub const fn new(pool: PgPool, signer: SignerHandle, request_timeout: Duration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        routes: &[RouteFile],
+        signer: SignerHandle,
+        request_timeout: Duration,
+    ) -> Self {
         Self {
             pool,
+            routes: routes.into(),
             signer,
             request_timeout,
         }
@@ -89,9 +96,9 @@ impl ProductLookup for SettlementProductLookup {
             .ok_or(ProductLookupError)?
             .parse::<Uuid>()
             .map_err(|_| ProductLookupError)?;
-        let settlement_url = sqlx::query_scalar::<_, String>(
+        let product = sqlx::query_scalar::<_, String>(
             r#"
-            SELECT products.settlement_url
+            SELECT products.slug
             FROM deposits
             JOIN accounts ON accounts.id = deposits.account_id
             JOIN products ON products.id = accounts.product_id
@@ -103,9 +110,15 @@ impl ProductLookup for SettlementProductLookup {
         .await
         .map_err(|_| ProductLookupError)?
         .ok_or(ProductLookupError)?;
-        let client =
-            SettlementClient::new(&settlement_url, self.signer.clone(), self.request_timeout)
-                .map_err(|_| ProductLookupError)?;
+        let destination = product_destination(self.routes.iter(), &product)
+            .map_err(|_| ProductLookupError)?
+            .ok_or(ProductLookupError)?;
+        let client = SettlementClient::new(
+            &destination.settlement_url,
+            self.signer.clone(),
+            self.request_timeout,
+        )
+        .map_err(|_| ProductLookupError)?;
         match client
             .get_by_key(key)
             .await

@@ -26,7 +26,7 @@ use topup_adapters::settlement::http::{SettlementAnswer, SettlementClient, Settl
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{DepositState, StepOutcome, TransitionKind, next};
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::RouteFile;
+use topup_core::route::{RouteFile, product_destination};
 use uuid::Uuid;
 
 use crate::db::{self, ApplyTransitionError, ApplyTransitionResult, ScanAddress};
@@ -268,14 +268,12 @@ impl Reconciler {
                         route.route
                     ))
                 })?;
-            let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
-            let batch = usize::try_from(route.chain.flush.balance_batch_size).map_err(|_| {
-                ReconciliationError::Configuration(
-                    "reconciliation balance batch size exceeds usize".to_owned(),
-                )
-            })?;
-            let chain = RpcReconciliationChain::connect(&url, timeout, batch)?
-                .with_provider(&crate::rpc_provider::provider_label(provider, 0));
+            let chain = RpcReconciliationChain::connect(
+                &url,
+                crate::rpc_provider::RPC_TIMEOUT,
+                crate::rpc_provider::BALANCE_BATCH_SIZE,
+            )?
+            .with_provider(&crate::rpc_provider::provider_label(provider, 0));
             chains.insert(route.chain.chain_id, Arc::new(chain));
         }
         let settlement = Arc::new(SignedSettlementLookup {
@@ -683,6 +681,24 @@ impl Reconciler {
         Ok(finding)
     }
 
+    /// Fetches the product answer from the product's attested route destination.
+    async fn settlement_answer(
+        &self,
+        product: &str,
+        key: &str,
+    ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
+        let destination = product_destination(&self.routes, product)
+            .map_err(|error| ReconciliationError::Configuration(error.to_string()))?
+            .ok_or_else(|| {
+                ReconciliationError::Configuration(format!(
+                    "no loaded route names product `{product}`"
+                ))
+            })?;
+        self.settlement
+            .get_by_key(&destination.settlement_url, key)
+            .await
+    }
+
     async fn reconcile_claimed_settlement(
         &self,
         deposit_id: Uuid,
@@ -694,7 +710,7 @@ impl Reconciler {
         )?;
         let row = sqlx::query(
             r#"
-            SELECT a.external_id, a.product_id, p.settlement_url,
+            SELECT a.external_id, a.product_id, p.slug AS product,
                    COALESCE(s.key, 'deposit:' || d.id::text) AS key,
                    s.status AS settlement_status
             FROM deposits d
@@ -709,7 +725,7 @@ impl Reconciler {
         .await?;
         let external_id: String = row.try_get("external_id")?;
         let product_id: Uuid = row.try_get("product_id")?;
-        let settlement_url: String = row.try_get("settlement_url")?;
+        let product: String = row.try_get("product")?;
         let key: String = row.try_get("key")?;
         let settlement_status: Option<String> = row.try_get("settlement_status")?;
         let local = state_code(deposit.state);
@@ -727,7 +743,7 @@ impl Reconciler {
             )
         };
 
-        let answer = match self.settlement.get_by_key(&settlement_url, &key).await {
+        let answer = match self.settlement_answer(&product, &key).await {
             Ok(answer) => answer,
             Err(error) => {
                 tracing::warn!(%deposit_id, %error, "product settlement lookup failed");

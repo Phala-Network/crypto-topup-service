@@ -8,14 +8,10 @@ pub struct Product {
     pub id: Uuid,
     /// Product slug used in deterministic address inputs.
     pub slug: String,
-    /// Settlement endpoint URL.
-    pub settlement_url: String,
     /// Webhook endpoint URL.
     pub webhook_url: String,
-    /// Product verification public key.
+    /// Product verification public key; its key id is the route's `destination.product_kid`.
     pub pubkey: String,
-    /// Product verification key identifier.
-    pub kid: String,
     /// Runtime pause scopes.
     pub paused_scopes: Vec<String>,
 }
@@ -27,14 +23,10 @@ pub struct NewProduct {
     pub id: Uuid,
     /// Product slug used in deterministic address inputs.
     pub slug: String,
-    /// Settlement endpoint URL.
-    pub settlement_url: String,
     /// Webhook endpoint URL.
     pub webhook_url: String,
-    /// Product verification public key.
+    /// Product verification public key; its key id is the route's `destination.product_kid`.
     pub pubkey: String,
-    /// Product verification key identifier.
-    pub kid: String,
     /// Runtime pause scopes.
     pub paused_scopes: Vec<String>,
 }
@@ -44,16 +36,14 @@ pub async fn create_product(pool: &PgPool, product: &NewProduct) -> Result<Produ
     sqlx::query_as!(
         Product,
         r#"
-        INSERT INTO products (id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes
+        INSERT INTO products (id, slug, webhook_url, pubkey, paused_scopes)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, slug, webhook_url, pubkey, paused_scopes
         "#,
         product.id,
         product.slug,
-        product.settlement_url,
         product.webhook_url,
         product.pubkey,
-        product.kid,
         &product.paused_scopes
     )
     .fetch_one(pool)
@@ -64,7 +54,7 @@ pub async fn create_product(pool: &PgPool, product: &NewProduct) -> Result<Produ
 pub async fn get_product(pool: &PgPool, id: Uuid) -> Result<Option<Product>, sqlx::Error> {
     sqlx::query_as!(
         Product,
-        "SELECT id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes FROM products WHERE id = $1",
+        "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE id = $1",
         id
     )
     .fetch_optional(pool)
@@ -83,7 +73,7 @@ pub async fn set_product_paused_scopes(
         UPDATE products
         SET paused_scopes = $2
         WHERE id = $1
-        RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes
+        RETURNING id, slug, webhook_url, pubkey, paused_scopes
         "#,
         id,
         paused_scopes

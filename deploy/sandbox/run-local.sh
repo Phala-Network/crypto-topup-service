@@ -89,9 +89,9 @@ FORWARDER_FACTORY="$factory" IMPLEMENTATION="$implementation" TREASURY="$owner" 
     "$root/deploy/sandbox/render-route.sh" >"$TOPUP_LOCAL_ROUTES_DIR/sandbox.yaml"
 "${compose[@]}" run --rm --no-deps topup topup route validate /etc/topup/routes/sandbox.yaml
 PSQL="${compose[*]} exec -T postgres psql -U postgres -d topup" \
-    "$root/deploy/sandbox/issue-product.sh" --slug "$slug" --keyid "$keyid" \
+    "$root/deploy/sandbox/issue-product.sh" --slug "$slug" \
     --public-key "$(jq -er .public_key "$tmp/product-key.json")" \
-    --settlement-url "$public_url/settlements" --webhook-url "$public_url/webhooks" \
+    --webhook-url "$public_url/webhooks" \
     --operator run-local --allow-http
 
 echo "== starting the service"

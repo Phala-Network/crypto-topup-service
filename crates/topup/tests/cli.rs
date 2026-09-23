@@ -18,7 +18,7 @@ fn help_and_version_succeed() {
 }
 
 #[test]
-fn restore_check_requires_a_database_url() {
+fn restore_check_requires_owner_credentials() {
     let route = format!(
         "{}/tests/fixtures/phala-cloud-pha.yaml",
         env!("CARGO_MANIFEST_DIR")
@@ -33,9 +33,9 @@ fn restore_check_requires_a_database_url() {
             "--route",
             &route,
         ])
-        .env_remove("RESTORE_DATABASE_URL")
         .env_remove("MIGRATE_DATABASE_URL")
-        .env_remove("DATABASE_URL")
+        // The service login is never a fallback for the owner-only restore gate.
+        .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
         .output()
         .expect("topup process should start");
     assert!(!output.status.success());
@@ -44,7 +44,7 @@ fn restore_check_requires_a_database_url() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output_text.contains("required for restore-check"));
+    assert!(output_text.contains("MIGRATE_DATABASE_URL is required for restore-check"));
 }
 
 #[test]
@@ -320,11 +320,10 @@ fn outbox_replay_validates_selector_and_timestamp_before_connecting() {
 }
 
 #[test]
-fn reconcile_help_exposes_once_and_post_restore_modes() {
+fn reconcile_help_exposes_the_post_restore_mode() {
     let output = topup(&["reconcile", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("--once"));
     assert!(help.contains("--post-restore"));
     assert!(help.contains("--route"));
     assert!(help.contains("processes are stopped"));

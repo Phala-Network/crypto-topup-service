@@ -23,7 +23,32 @@ jq -e '
     .cbor_metadata == false
 ' >/dev/null <<<"$config" || die "Foundry compiler settings drifted from the deterministic deployment profile"
 
-(cd "$CONTRACTS_DIR" && forge build >/dev/null)
+# --ast adds the AST to the artifacts (bytecode is unchanged) so immutable references can be named.
+(cd "$CONTRACTS_DIR" && forge build --ast >/dev/null)
+
+# Prints {name: [offsets]} for every immutable of one contract's runtime code. Every reference must
+# be a full 32-byte word: the service zeroes exactly these words before comparing code hashes.
+immutable_offsets() {
+    local contract="$1"
+    jq -ce --arg contract "$contract" '
+        [.ast.nodes[]
+            | select(.nodeType == "ContractDefinition" and .name == $contract)
+            | .nodes[]
+            | select(.nodeType == "VariableDeclaration" and .mutability == "immutable")
+            | {id: (.id | tostring), name}] as $immutables
+        | .deployedBytecode.immutableReferences as $references
+        | if ($references | keys | sort) != ($immutables | map(.id) | sort) then
+              error("immutable references do not match declared immutables")
+          elif ([$references[][] | .length] | all(. == 32)) | not then
+              error("immutable reference is not a 32-byte word")
+          else
+              $immutables | map({key: .name, value: [$references[.id][] | .start]}) | from_entries
+          end
+    ' "$CONTRACTS_DIR/out/$contract.sol/$contract.json"
+}
+# Read before `forge inspect`, which may rewrite the artifacts without the AST.
+factory_immutables="$(immutable_offsets ForwarderFactory)"
+forwarder_immutables="$(immutable_offsets Forwarder)"
 
 factory_creation="$(cd "$CONTRACTS_DIR" && forge inspect ForwarderFactory bytecode)"
 factory_runtime="$(cd "$CONTRACTS_DIR" && forge inspect ForwarderFactory deployedBytecode)"
@@ -43,6 +68,8 @@ jq -n \
     --arg factory_runtime_template_hash "$(cast keccak "$factory_runtime")" \
     --arg forwarder_creation_hash "$(cast keccak "$forwarder_creation")" \
     --arg forwarder_runtime_template_hash "$(cast keccak "$forwarder_runtime")" \
+    --argjson factory_immutables "$factory_immutables" \
+    --argjson forwarder_immutables "$forwarder_immutables" \
     '{
         compiler: {
             solc: $solc,
@@ -60,11 +87,13 @@ jq -n \
         artifacts: {
             ForwarderFactory: {
                 creation_code_hash: $factory_creation_hash,
-                runtime_template_code_hash: $factory_runtime_template_hash
+                runtime_template_code_hash: $factory_runtime_template_hash,
+                immutable_offsets: $factory_immutables
             },
             Forwarder: {
                 creation_code_hash: $forwarder_creation_hash,
-                runtime_template_code_hash: $forwarder_runtime_template_hash
+                runtime_template_code_hash: $forwarder_runtime_template_hash,
+                immutable_offsets: $forwarder_immutables
             }
         }
     }' >"$tmp"

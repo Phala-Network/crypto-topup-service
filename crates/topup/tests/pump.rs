@@ -3,9 +3,6 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::env;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -14,8 +11,7 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
 use topup::db::{
@@ -34,138 +30,9 @@ use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
-
-struct TestContext {
-    admin_pool: PgPool,
-    owner_pool: PgPool,
-    app_pool: PgPool,
-    database_name: String,
-    app_role: String,
-}
-
-impl TestContext {
-    async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
-            return Ok(None);
-        };
-        let Some(app_template) = required_url("DATABASE_URL") else {
-            return Ok(None);
-        };
-
-        let mut admin_url =
-            Url::parse(&owner_template).context("MIGRATE_DATABASE_URL must be a PostgreSQL URL")?;
-        admin_url.set_path("/postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await
-            .context("connect to the PostgreSQL maintenance database")?;
-        support::ensure_app_role(&admin_pool).await?;
-        sqlx::query("SELECT pg_advisory_lock(704_202_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c2_{suffix}");
-        let app_role = format!("topup_c2_app_{suffix}");
-        let password = format!("c2_{suffix}");
-        admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
-            .await
-            .context("create isolated test database")?;
-
-        let mut owner_url = Url::parse(&owner_template)?;
-        owner_url.set_path(&format!("/{database_name}"));
-        let owner_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(owner_url.as_str())
-            .await
-            .context("connect to isolated test database as owner")?;
-        db::migrate(&owner_pool).await.context("apply migrations")?;
-
-        admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
-            .await
-            .context("create isolated application login role")?;
-
-        let mut app_url = Url::parse(&app_template).context("DATABASE_URL must be a URL")?;
-        app_url
-            .set_username(&app_role)
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application username"))?;
-        app_url
-            .set_password(Some(&password))
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application password"))?;
-        app_url.set_path(&format!("/{database_name}"));
-        let app_pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(app_url.as_str())
-            .await
-            .context("connect to isolated test database as application role")?;
-
-        sqlx::query("SELECT pg_advisory_unlock(704_202_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        Ok(Some(Self {
-            admin_pool,
-            owner_pool,
-            app_pool,
-            database_name,
-            app_role,
-        }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.app_pool.close().await;
-        self.owner_pool.close().await;
-        self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
-            .await
-            .context("drop isolated test database")?;
-        self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
-            .await
-            .context("drop isolated application login role")?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
-}
-
-fn required_url(name: &str) -> Option<String> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping pump integration test: {name} is not set");
-            None
-        }
-    }
-}
-
-async fn with_database<F>(test: F) -> Result<()>
-where
-    F: for<'a> FnOnce(&'a TestContext) -> TestFuture<'a>,
-{
-    let Some(context) = TestContext::create().await? else {
-        return Ok(());
-    };
-    let result = test(&context).await;
-    let cleanup = context.cleanup().await;
-    result.and(cleanup)
-}
+use support::with_database;
 
 #[tokio::test]
 async fn two_pumps_racing_on_one_deposit_apply_exactly_one_transition() -> Result<()> {
@@ -644,6 +511,15 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                 .fetch_one(&context.app_pool)
                 .await?;
                 ensure!(account_open == if consumed { "0" } else { "777" }, "{name}");
+
+                // The confirmed deposit stays claimable; move it out of the queue so the next
+                // case's pump cannot claim it ahead of that case's deposit on a slow setup.
+                sqlx::query(
+                    "UPDATE deposits SET next_attempt_at = now() + interval '1 day' WHERE id = $1",
+                )
+                .bind(deposit_id)
+                .execute(&context.app_pool)
+                .await?;
             }
             Ok(())
         })
@@ -1416,10 +1292,8 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
     let product = NewProduct {
         id: Uuid::new_v4(),
         slug: format!("product-{number}"),
-        settlement_url: format!("https://product-{number}.test/settlements"),
         webhook_url: format!("https://product-{number}.test/webhooks"),
         pubkey: format!("public-key-{number}"),
-        kid: format!("product/{number}"),
         paused_scopes: Vec::new(),
     };
     db::create_product(pool, &product).await?;

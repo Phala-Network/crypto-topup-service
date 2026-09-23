@@ -5,11 +5,11 @@
 Trigger on `TopupReconciliationMismatch` (PR #56: any increase of
 `topup_reconciliation_mismatches_total{check=...}` in 15 minutes), a `reconciliation mismatch`
 warning in the service log, `TopupLoopStopped{loop="reconciler"}`, or a non-zero exit from
-`topup reconcile --once`.
+`topup reconcile`.
 
 ## Impact and blast radius
 
-C8 runs the architecture section 13 checks every `--reconciliation-interval-s` (default 600 s).
+C8 runs the architecture section 13 checks every 10 minutes.
 Each first observation is stored once in append-only `reconciliation_findings` with an `audit` row.
 Findings with `repair_applied=true` are the safe repairs section 13 allows and do not increment the
 metric. Mismatches act by check:
@@ -23,7 +23,7 @@ metric. Mismatches act by check:
 | `missing_flush_link` | Repair: link the deposit to its confirmed `flushed` row | One deposit |
 | `sent_settlement` | Repair: adopt the product's GET answer under a lease | One deposit |
 | `post_restore_settlement` | Restore gate stays incomplete | Every restored settlement |
-| `lock_exposure` | Repair: recompute the `lock_exposure` counter under its row lock and write a `repair_lock_exposure` audit row; `TopupLockExposureDrift` fires for repairs by the service loop only (not `reconcile --once`); follow [Lock expiry worker failure](lock-expiry-worker-failure.md) | One exposure scope |
+| `lock_exposure` | Repair: recompute the `lock_exposure` counter under its row lock and write a `repair_lock_exposure` audit row; `TopupLockExposureDrift` fires for repairs by the service loop only (not `reconcile`); follow [Lock expiry worker failure](lock-expiry-worker-failure.md) | One exposure scope |
 
 ## First 5 minutes
 
@@ -54,7 +54,7 @@ To re-run the checks on demand after a fix, run one pass inside the service cont
 same application role and attested route files, and is idempotent:
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --once --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
 ```
 
 ## Decision tree
@@ -84,7 +84,7 @@ If the mismatch persists, the next pass writes the block again.
 
 ## Verification
 
-A fresh `topup reconcile --once` exits `0`, no new mismatch appears for the subject, the block is
+A fresh `topup reconcile` exits `0`, no new mismatch appears for the subject, the block is
 absent, and flush planning includes the address again. `TopupReconciliationMismatch` resolves
 after its 15-minute window.
 

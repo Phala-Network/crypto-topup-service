@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO products (id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes)\n        VALUES ($1, $2, $3, $4, $5, $6, $7)\n        RETURNING id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes\n        ",
+  "query": "\n        INSERT INTO products (id, slug, webhook_url, pubkey, paused_scopes)\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING id, slug, webhook_url, pubkey, paused_scopes\n        ",
   "describe": {
     "columns": [
       {
@@ -15,26 +15,16 @@
       },
       {
         "ordinal": 2,
-        "name": "settlement_url",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 3,
         "name": "webhook_url",
         "type_info": "Text"
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "pubkey",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
-        "name": "kid",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 6,
+        "ordinal": 4,
         "name": "paused_scopes",
         "type_info": "TextArray"
       }
@@ -42,8 +32,6 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text",
-        "Text",
         "Text",
         "Text",
         "Text",
@@ -55,10 +43,8 @@
       false,
       false,
       false,
-      false,
-      false,
       false
     ]
   },
-  "hash": "507909110135b7756c5aa96b37a0966b6664ce900c7a99b77b267c8c995182a9"
+  "hash": "7fa2b551e81dc66ee9fdf3aaab2174d21a9cedd48a914c2687210efdd44ff20d"
 }

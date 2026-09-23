@@ -4,12 +4,8 @@
 
 mod support;
 
-use std::net::TcpListener;
-use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
@@ -31,11 +27,10 @@ use topup_core::route::RouteFile;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
+use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
+use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, with_database};
 
-const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-const CHAIN_ID: u64 = 31_337;
 const PRODUCT_KID: &str = "phala-cloud/v1";
 /// With 32-slot epochs anvil reports `finalized = latest - 64`.
 const FINALITY_LAG: u64 = 64;
@@ -54,25 +49,23 @@ impl QuoteProvider for FixedQuote {
 
 #[tokio::test]
 async fn pending_transfers_are_display_only_until_final() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let Some(anvil) = Anvil::start()? else {
-        database.cleanup().await?;
-        return Ok(());
-    };
-    let result = run_scenario(&database, &anvil).await;
-    drop(anvil);
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
+    with_database(|database| {
+        Box::pin(async move {
+            // 32-slot epochs keep transfers above `finalized` for 64 blocks.
+            let Some(anvil) = Anvil::start_if_available(&["--slots-in-an-epoch", "32"]).await?
+            else {
+                return Ok(());
+            };
+            run_scenario(database, &anvil).await
+        })
+    })
+    .await
 }
 
 async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let pool = &database.app_pool;
-    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
-    run_checked("forge", &["build"], Some(&contracts))?;
-    let token = deploy_token(&contracts, &anvil.rpc_url)?;
-    let other_token = deploy_token(&contracts, &anvil.rpc_url)?;
+    let token = forge_create(&anvil.rpc_url, MOCK_ERC20, &[])?;
+    let other_token = forge_create(&anvil.rpc_url, MOCK_ERC20, &[])?;
     anvil.mine(FINALITY_LAG + 2)?;
 
     let route = test_route(token);
@@ -127,7 +120,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     )?;
     let before = Ledger::read(pool).await?;
 
-    let snapshot = anvil.snapshot()?;
+    let snapshot = snapshot(anvil)?;
     transfer(&anvil.rpc_url, token, lock_address, 100)?;
     transfer(&anvil.rpc_url, other_token, persistent_address, 5)?;
     transfer(&anvil.rpc_url, token, persistent_address, 7)?;
@@ -209,7 +202,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     );
 
     // A reorg that drops the transfers removes them from the pending view.
-    anvil.revert(&snapshot)?;
+    revert(anvil, &snapshot)?;
     anvil.mine(8)?;
     let reorged = head_scan_once(pool, &reader, &chain_routes)
         .await?
@@ -338,19 +331,14 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 
 #[tokio::test]
 async fn head_scan_watches_open_locks_and_recently_requested_persistent_addresses() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = run_watched_scenario(&database.app_pool).await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
+    with_database(|database| Box::pin(run_watched_scenario(&database.app_pool))).await
 }
 
 async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
     let product_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO products (id, slug, settlement_url, webhook_url, pubkey, kid) \
-         VALUES ($1, 'watch', 'https://product.test/s', 'https://product.test/w', 'k', 'watch/v1')",
+        "INSERT INTO products (id, slug, webhook_url, pubkey) \
+         VALUES ($1, 'watch', 'https://product.test/w', 'k')",
     )
     .bind(product_id)
     .execute(pool)
@@ -600,10 +588,8 @@ async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<()> {
         &NewProduct {
             id: Uuid::new_v4(),
             slug: "phala-cloud".to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: public_key_base64(key),
-            kid: PRODUCT_KID.to_owned(),
             paused_scopes: Vec::new(),
         },
     )
@@ -637,124 +623,27 @@ fn test_route(token: Address) -> RouteFile {
     route
 }
 
-struct Anvil {
-    child: Child,
-    rpc_url: String,
+const MOCK_ERC20: &str = "test/mocks/MockTokens.sol:MockERC20";
+
+fn rpc(anvil: &Anvil, method: &str, params: &[&str]) -> Result<String> {
+    let mut arguments = vec!["rpc", "--rpc-url", &anvil.rpc_url, method];
+    arguments.extend_from_slice(params);
+    let output = run_checked("cast", &arguments, None)?;
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-impl Anvil {
-    fn start() -> Result<Option<Self>> {
-        if !command_available("anvil") {
-            eprintln!("skipping pending integration test: anvil is not on PATH");
-            return Ok(None);
-        }
-        ensure!(command_available("forge") && command_available("cast"));
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
-        let rpc_url = format!("http://127.0.0.1:{port}");
-        let child = Command::new("anvil")
-            .args([
-                "--silent",
-                "--port",
-                &port.to_string(),
-                "--chain-id",
-                &CHAIN_ID.to_string(),
-                "--slots-in-an-epoch",
-                "32",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start anvil")?;
-        let anvil = Self { child, rpc_url };
-        for _ in 0..100 {
-            if run_checked("cast", &["block-number", "--rpc-url", &anvil.rpc_url], None).is_ok() {
-                return Ok(Some(anvil));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        anyhow::bail!("anvil did not become ready")
-    }
-
-    fn rpc(&self, method: &str, params: &[&str]) -> Result<String> {
-        let mut arguments = vec!["rpc", "--rpc-url", &self.rpc_url, method];
-        arguments.extend_from_slice(params);
-        let output = run_checked("cast", &arguments, None)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-    }
-
-    fn mine(&self, count: u64) -> Result<()> {
-        self.rpc("anvil_mine", &[&format!("0x{count:x}")])?;
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<String> {
-        Ok(self.rpc("evm_snapshot", &[])?.trim_matches('"').to_owned())
-    }
-
-    fn revert(&self, snapshot: &str) -> Result<()> {
-        ensure!(
-            self.rpc("evm_revert", &[snapshot])? == "true",
-            "revert failed"
-        );
-        Ok(())
-    }
+fn snapshot(anvil: &Anvil) -> Result<String> {
+    Ok(rpc(anvil, "evm_snapshot", &[])?
+        .trim_matches('"')
+        .to_owned())
 }
 
-impl Drop for Anvil {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn run_checked(command: &str, arguments: &[&str], directory: Option<&Path>) -> Result<Output> {
-    let mut invocation = Command::new(command);
-    invocation.args(arguments);
-    if let Some(directory) = directory {
-        invocation.current_dir(directory);
-    }
-    let output = invocation.output()?;
+fn revert(anvil: &Anvil, snapshot: &str) -> Result<()> {
     ensure!(
-        output.status.success(),
-        "{command} failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        rpc(anvil, "evm_revert", &[snapshot])? == "true",
+        "revert failed"
     );
-    Ok(output)
-}
-
-fn deploy_token(contracts: &Path, rpc_url: &str) -> Result<Address> {
-    let output = run_checked(
-        "forge",
-        &[
-            "create",
-            "--rpc-url",
-            rpc_url,
-            "--private-key",
-            ANVIL_PRIVATE_KEY,
-            "--broadcast",
-            "--json",
-            "test/mocks/MockTokens.sol:MockERC20",
-        ],
-        Some(contracts),
-    )?;
-    let result: Value = serde_json::from_slice(&output.stdout)?;
-    let address = result
-        .get("deployedTo")
-        .and_then(Value::as_str)
-        .context("forge create omitted deployedTo")?;
-    Address::from_str(address).context("parse deployed token address")
+    Ok(())
 }
 
 fn transfer(rpc_url: &str, token: Address, recipient: Address, amount: u64) -> Result<()> {

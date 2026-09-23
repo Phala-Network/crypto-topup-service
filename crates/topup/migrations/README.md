@@ -49,6 +49,16 @@ DELETE FROM reconciliation_blocks WHERE block_key = 'chain:<chain_id>';
 DELETE FROM reconciliation_blocks WHERE block_key = 'address:<address_id>';
 ```
 
+Migration `20260922000021_route_settlement_destination` drops `products.settlement_url` and
+`products.kid`. The attested route's `destination.settlement_url` and `destination.product_kid`
+are the only source of both values (architecture §14); the service refuses to start when two loaded
+routes of one product disagree on either. Its down migration restores the columns empty; copy the
+values back from the route files before running an older service.
+
+Dropping these columns is a deliberate exception to the additive-migrations rule (plan §6 item 6):
+no environment has been deployed, and a later work package squashes all migrations into one
+initial schema. Do not treat it as precedent once any environment holds data.
+
 Migration `20260922000022_pending_transfers` adds the display-only `pending_transfers` table
 (`SELECT`, `INSERT`, `UPDATE`, `DELETE` for `topup_app`) written by the head scan and cleared by the
 finalized scanner's cursor advance, and `addresses.requested_at`, the last time the product issued

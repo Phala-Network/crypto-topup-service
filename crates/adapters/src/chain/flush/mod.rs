@@ -8,6 +8,9 @@ sol! {
     function addressOf(bytes32 salt) external view returns (address);
     function flush(bytes32[] salts, address token) external;
     function hasRole(bytes32 role, address account) external view returns (bool);
+    function implementation() external view returns (address);
+    function treasury() external view returns (address);
+    function factory() external view returns (address);
     event Flushed(
         bytes32 indexed salt,
         address indexed forwarder,
@@ -49,6 +52,40 @@ pub fn encode_address_of(salt: B256) -> Bytes {
 /// Decodes a `ForwarderFactory.addressOf(salt)` result.
 pub fn decode_address_of(output: &[u8]) -> Result<Address, alloy_sol_types::Error> {
     addressOfCall::abi_decode_returns(output)
+}
+
+/// Encodes a view call to `ForwarderFactory.implementation()`, `Forwarder.treasury()`, or
+/// `Forwarder.factory()`.
+#[must_use]
+pub fn encode_contract_address_getter(getter: ContractAddressGetter) -> Bytes {
+    match getter {
+        ContractAddressGetter::Implementation => implementationCall {}.abi_encode().into(),
+        ContractAddressGetter::Treasury => treasuryCall {}.abi_encode().into(),
+        ContractAddressGetter::Factory => factoryCall {}.abi_encode().into(),
+    }
+}
+
+/// Decodes the address returned by one of the forwarder contracts' immutable getters.
+pub fn decode_contract_address_getter(
+    getter: ContractAddressGetter,
+    output: &[u8],
+) -> Result<Address, alloy_sol_types::Error> {
+    match getter {
+        ContractAddressGetter::Implementation => implementationCall::abi_decode_returns(output),
+        ContractAddressGetter::Treasury => treasuryCall::abi_decode_returns(output),
+        ContractAddressGetter::Factory => factoryCall::abi_decode_returns(output),
+    }
+}
+
+/// Immutable address getters of the forwarder contracts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContractAddressGetter {
+    /// `ForwarderFactory.implementation()`.
+    Implementation,
+    /// `Forwarder.treasury()`.
+    Treasury,
+    /// `Forwarder.factory()`.
+    Factory,
 }
 
 /// Encodes `ForwarderFactory.flush(salts, token)`.

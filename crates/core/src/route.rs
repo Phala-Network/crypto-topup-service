@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 
-use crate::money::{AtomicAmount, Bps, PRICE_SCALE};
+use crate::money::{AtomicAmount, Bps};
 
 /// A complete route file with its inline chain configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,36 +84,6 @@ impl RouteFile {
                 "must be greater than 10000",
             ));
         }
-        validate_positive(
-            "chain.flush.replacement_after_blocks",
-            self.chain.flush.replacement_after_blocks,
-        )?;
-        if self.chain.flush.gas_limit_bps < 10_000 {
-            return Err(RouteError::validation(
-                "chain.flush.gas_limit_bps",
-                "must be at least 10000",
-            ));
-        }
-        validate_positive(
-            "chain.flush.rpc_timeout_ms",
-            self.chain.flush.rpc_timeout_ms,
-        )?;
-        validate_positive(
-            "chain.flush.balance_batch_size",
-            self.chain.flush.balance_batch_size,
-        )?;
-        validate_positive(
-            "chain.flush.recovery_scan_blocks",
-            self.chain.flush.recovery_scan_blocks,
-        )?;
-        validate_positive(
-            "chain.flush.estimation_retry_after_s",
-            self.chain.flush.estimation_retry_after_s,
-        )?;
-        validate_positive(
-            "chain.flush.maintenance_interval_s",
-            self.chain.flush.maintenance_interval_s,
-        )?;
         if self.chain.flush.native_price_asset.trim().is_empty() {
             return Err(RouteError::validation(
                 "chain.flush.native_price_asset",
@@ -141,12 +111,6 @@ impl RouteFile {
             "rate_lock.lock_tolerance_bps",
             self.rate_lock.lock_tolerance_bps,
         )?;
-        if self.pricing.price_scale != PRICE_SCALE {
-            return Err(RouteError::validation(
-                "pricing.price_scale",
-                format!("must be {PRICE_SCALE}"),
-            ));
-        }
         validate_positive("pricing.max_age_s", self.pricing.max_age_s)?;
         validate_positive("rate_lock.window_s", self.rate_lock.window_s)?;
         validate_positive(
@@ -186,8 +150,6 @@ impl RouteFile {
 pub struct ChainConfig {
     /// EVM chain identifier.
     pub chain_id: u64,
-    /// Human-readable chain name.
-    pub name: String,
     /// Reviewed finality rule, such as `finalized`.
     pub finality: String,
     /// Independent RPC provider identifiers.
@@ -235,28 +197,12 @@ pub struct FlushConfig {
     pub max_fee_per_gas_wei: u64,
     /// Required fee replacement multiplier in basis points.
     pub replacement_bps: u16,
-    /// Blocks an unmined transaction waits before replacement.
-    pub replacement_after_blocks: u64,
-    /// Gas-limit multiplier over the estimate in basis points.
-    pub gas_limit_bps: u16,
-    /// Timeout for each flusher RPC request.
-    pub rpc_timeout_ms: u64,
-    /// Maximum addresses in one balance JSON-RPC batch.
-    pub balance_batch_size: u64,
-    /// Maximum blocks inspected in one nonce-recovery iteration.
-    pub recovery_scan_blocks: u64,
-    /// Delay before retrying a planning-time singleton exclusion.
-    pub estimation_retry_after_s: u64,
-    /// Interval between confirmation and replacement maintenance iterations.
-    pub maintenance_interval_s: u64,
 }
 
 /// Deposited asset configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetConfig {
-    /// Asset ticker symbol.
-    pub symbol: String,
     /// ERC-20 contract address.
     pub contract: Address,
     /// ERC-20 decimal count.
@@ -273,14 +219,45 @@ pub struct AssetConfig {
 pub struct DestinationConfig {
     /// Product slug.
     pub product: String,
-    /// Ledger unit, such as USD.
-    pub unit: String,
-    /// Number of minor-unit decimal places.
+    /// Number of USD minor-unit decimal places.
     pub unit_decimals: u8,
     /// Signed settlement endpoint.
     pub settlement_url: String,
     /// Product signing key identifier.
     pub product_kid: String,
+}
+
+/// Returns the attested destination of `product`, or `None` when no route names it.
+///
+/// Settlement calls and product request verification read the destination from here, so every
+/// loaded route that names the product must agree on its settlement URL and key identifier.
+pub fn product_destination<'a>(
+    routes: impl IntoIterator<Item = &'a RouteFile>,
+    product: &str,
+) -> Result<Option<&'a DestinationConfig>, RouteError> {
+    let mut destination: Option<&DestinationConfig> = None;
+    for route in routes {
+        if route.destination.product != product {
+            continue;
+        }
+        let Some(first) = destination else {
+            destination = Some(&route.destination);
+            continue;
+        };
+        if first.settlement_url != route.destination.settlement_url {
+            return Err(RouteError::validation(
+                "destination.settlement_url",
+                format!("routes for product `{product}` must use one settlement URL"),
+            ));
+        }
+        if first.product_kid != route.destination.product_kid {
+            return Err(RouteError::validation(
+                "destination.product_kid",
+                format!("routes for product `{product}` must use one product key id"),
+            ));
+        }
+    }
+    Ok(destination)
 }
 
 /// Price validation configuration.
@@ -293,8 +270,6 @@ pub struct PricingConfig {
     pub primary: PrimaryPriceConfig,
     /// Independent market cross-check, required for spot pricing.
     pub check: Option<CheckPriceConfig>,
-    /// Decimal scale for stored prices; currently fixed at eight.
-    pub price_scale: u8,
     /// Maximum quote age in seconds.
     pub max_age_s: u64,
     /// Maximum primary/check divergence.
@@ -319,12 +294,8 @@ pub enum PricingMode {
 pub struct PrimaryPriceConfig {
     /// Provider identifier.
     pub source: String,
-    /// Provider asset identifier.
+    /// Provider asset identifier; the metric is always the one-minute `ReferenceRateUSD`.
     pub asset: String,
-    /// Provider metric name.
-    pub metric: String,
-    /// Sampling frequency.
-    pub frequency: String,
 }
 
 /// Market cross-check descriptor.

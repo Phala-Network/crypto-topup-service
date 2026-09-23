@@ -86,30 +86,16 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
-      RPC_PROVIDER_A_API_KEY: ${RPC_PROVIDER_A_API_KEY:-}
       TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
-      RPC_PROVIDER_B_API_KEY: ${RPC_PROVIDER_B_API_KEY:-}
       COINMETRICS_API_KEY: ${COINMETRICS_API_KEY:-}
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      KRAKEN_API_KEY: ${KRAKEN_API_KEY:-}
-      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
-      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-      AWS_REGION: ${AWS_REGION:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TOPUP_ADMIN_KID: ${TOPUP_ADMIN_KID:-}
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
       TOPUP_PUBLIC_ORIGIN: ${TOPUP_PUBLIC_ORIGIN:-}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
-      TOPUP_CHAINS_DIR: /etc/topup/chains
-      TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - observability:/run/topup-observability:ro
     configs:
-      - source: topup_chain_ethereum_sepolia
-        target: /etc/topup/chains/ethereum-sepolia.yaml
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     ports:
@@ -184,20 +170,21 @@ services:
   restore-check:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     profiles: ["tools"]
-    command: ["topup", "restore-check"]
+    # The operator appends the recorded failure point:
+    # run --rm --no-deps restore-check --expected-heartbeat-at <RFC3339> --expected-lsn <PG_LSN>
+    entrypoint:
+      - topup
+      - restore-check
+      - --route
+      - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+    command: []
     environment:
-      RESTORE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
       TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
-      RPC_PROVIDER_A_API_KEY: ${RPC_PROVIDER_A_API_KEY:-}
       TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
-      RPC_PROVIDER_B_API_KEY: ${RPC_PROVIDER_B_API_KEY:-}
-      TOPUP_CHAINS_DIR: /etc/topup/chains
-      TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
     configs:
-      - source: topup_chain_ethereum_sepolia
-        target: /etc/topup/chains/ethereum-sepolia.yaml
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     depends_on:
@@ -248,37 +235,11 @@ configs:
       \gexec
       SQL
 
-  topup_chain_ethereum_sepolia:
-    content: |
-      chain_id: 11155111
-      name: ethereum-sepolia
-      finality: finalized
-      rpc_providers: [provider-a, provider-b]
-      operator_key_version: 1
-      contracts:
-        forwarder_factory: "0x0000000000000000000000000000000000000000"
-        implementation: "0x0000000000000000000000000000000000000000"
-        treasury: "0x0000000000000000000000000000000000000000"
-      flush:
-        schedule: "0 */6 * * *"
-        max_gas_ratio_bps: 200
-        native_price_asset: eth
-        max_fee_per_gas_wei: 500000000000
-        replacement_bps: 12500
-        replacement_after_blocks: 3
-        gas_limit_bps: 12000
-        rpc_timeout_ms: 10000
-        balance_batch_size: 500
-        recovery_scan_blocks: 128
-        estimation_retry_after_s: 3600
-        maintenance_interval_s: 5
-
   topup_route_phala_cloud_sepolia_pha:
     content: |
       # Deployment template. Replace every placeholder and validate without --template before enabling it.
       chain:
         chain_id: 11155111
-        name: ethereum-sepolia
         finality: finalized
         rpc_providers: [provider-a, provider-b]
         operator_key_version: 1
@@ -292,19 +253,11 @@ configs:
           native_price_asset: eth
           max_fee_per_gas_wei: 500000000000
           replacement_bps: 12500
-          replacement_after_blocks: 3
-          gas_limit_bps: 12000
-          rpc_timeout_ms: 10000
-          balance_batch_size: 500
-          recovery_scan_blocks: 128
-          estimation_retry_after_s: 3600
-          maintenance_interval_s: 5
 
       route: phala-cloud-sepolia-pha-usd
       version: 1
 
       asset:
-        symbol: PHA
         contract: "0x1111111111111111111111111111111111111111"
         decimals: 18
         min_flush_atomic: "20000000000000000000000"
@@ -312,16 +265,14 @@ configs:
 
       destination:
         product: phala-cloud
-        unit: USD
         unit_decimals: 2
         settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
         product_kid: phala-cloud/v1
 
       pricing:
         mode: spot
-        primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
+        primary: { source: coinmetrics, asset: pha }
         check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-        price_scale: 8
         max_age_s: 120
         max_deviation_bps: 100
         max_fx_deviation_bps: 50

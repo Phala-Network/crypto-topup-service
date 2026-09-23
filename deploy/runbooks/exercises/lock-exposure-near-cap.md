@@ -2,6 +2,9 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `products` no longer has `settlement_url` or `kid`. The
+commands below are recorded as run; use the current [runbook](../lock-exposure-near-cap.md).
+
 Status: complete local PostgreSQL scenario for the runbook query and C10 cap enforcement (see
 [local setup](local-setup.md), database `wp_d5_locks`). `TopupLockExposureNearCap` itself is
 pending PR #56 and was not evaluated.

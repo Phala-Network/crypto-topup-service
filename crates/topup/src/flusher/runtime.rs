@@ -24,7 +24,12 @@ use super::{
     AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
     PriceError, PriceSource, RunResult,
 };
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::rpc_provider::{
+    BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
+};
+
+/// Interval between confirmation, replacement, and operator-role maintenance iterations.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One configured chain/token flusher task.
 pub struct FlusherTask {
@@ -37,7 +42,7 @@ pub struct FlusherTask {
 }
 
 impl FlusherTask {
-    /// Creates a task whose schedule and maintenance interval come from the route's chain policy.
+    /// Creates a task whose schedule comes from the route's chain policy.
     pub fn new(
         route: RouteFile,
         planner: Planner,
@@ -46,15 +51,21 @@ impl FlusherTask {
     ) -> Result<Self, String> {
         let schedule = Cron::from_str(&route.chain.flush.schedule)
             .map_err(|error| format!("invalid flush schedule for `{}`: {error}", route.route))?;
-        let maintenance_interval = Duration::from_secs(route.chain.flush.maintenance_interval_s);
         Ok(Self {
             route,
             planner,
             flusher,
             alerts,
             schedule,
-            maintenance_interval,
+            maintenance_interval: MAINTENANCE_INTERVAL,
         })
+    }
+
+    /// Replaces the maintenance interval, for tests that observe several ticks.
+    #[must_use]
+    pub const fn with_maintenance_interval(mut self, interval: Duration) -> Self {
+        self.maintenance_interval = interval;
+        self
     }
 
     /// Runs startup recovery, scheduled planning, and periodic lifecycle maintenance.
@@ -278,13 +289,15 @@ pub fn configure_tasks(
                 signer
             }
         };
-        let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
-        let batch_size = usize::try_from(route.chain.flush.balance_batch_size)
-            .map_err(|_| "flush balance batch size exceeds usize".to_owned())?;
+        let timeout = RPC_TIMEOUT;
         let chain = Arc::new(
-            AlloyChainClient::connect_http_with_policy(url.expose().as_str(), timeout, batch_size)
-                .map_err(|_| format!("failed to configure flusher provider {url}"))?
-                .with_provider(provider_label(provider, 0)),
+            AlloyChainClient::connect_http_with_policy(
+                url.expose().as_str(),
+                timeout,
+                BALANCE_BATCH_SIZE,
+            )
+            .map_err(|_| format!("failed to configure flusher provider {url}"))?
+            .with_provider(provider_label(provider, 0)),
         );
         let prices: Arc<dyn PriceSource> = Arc::new(CoinMetricsPriceSource::for_route(&route)?);
         let alerts: Arc<dyn AlertSink> = Arc::new(TracingAlertSink);
@@ -296,11 +309,9 @@ pub fn configure_tasks(
             alerts.clone(),
         );
         let policy = FlusherPolicy {
-            replacement_after_blocks: route.chain.flush.replacement_after_blocks,
             replacement_bps: route.chain.flush.replacement_bps,
             max_fee_per_gas: u128::from(route.chain.flush.max_fee_per_gas_wei),
-            gas_limit_bps: route.chain.flush.gas_limit_bps,
-            recovery_scan_blocks: route.chain.flush.recovery_scan_blocks,
+            ..FlusherPolicy::default()
         };
         let flusher = Flusher::new(pool.clone(), chain, signer, alerts.clone(), policy);
         tasks.push(FlusherTask::new(route, planner, flusher, alerts)?);
@@ -349,13 +360,9 @@ impl CoinMetricsPriceSource {
         ]
         .into_iter()
         .map(|asset| {
-            CoinMetrics::new(
-                asset.clone(),
-                "ReferenceRateUSD".to_owned(),
-                "1m".to_owned(),
-            )
-            .map(|source| (asset.clone(), source))
-            .map_err(|error| format!("failed to configure Coin Metrics for `{asset}`: {error}"))
+            CoinMetrics::new(asset.clone())
+                .map(|source| (asset.clone(), source))
+                .map_err(|error| format!("failed to configure Coin Metrics for `{asset}`: {error}"))
         })
         .collect::<Result<_, _>>()
         .map(Self)

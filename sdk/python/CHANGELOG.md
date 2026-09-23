@@ -29,6 +29,18 @@ follow [Semantic Versioning](https://semver.org/).
   signed for the public URL verify behind the dstack gateway (#77). The `http_message_signature`
   security scheme in `openapi.json` documents this. No SDK code changed.
 
+### Added
+
+- `DailyReportResponse.exposure_minor`, the global open rate-lock credit in destination minor
+  units (#94). Optional, so the model also parses reports from servers that predate it.
+
+### Removed
+
+- **Breaking:** `RouteDailyReport.exposure_minor`, `exposure_minor_reason`, `pnl_minor`, and
+  `pnl_minor_reason` (#94). They were always null placeholders on the admin-only daily report;
+  PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
+  no service has been deployed. Regenerated models only.
+
 ## 0.1.0 - 2026-09-22
 
 Generated from OpenAPI `info.version` 0.1.0.

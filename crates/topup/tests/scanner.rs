@@ -3,21 +3,16 @@
 mod support;
 
 use std::env;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::scanner::{ChainRoutes, configure_routes, scan_once};
@@ -28,16 +23,16 @@ use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+use support::TestDatabase;
+use support::chain::{
+    ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, contracts_dir, forge_create, run_checked,
+};
 
-const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+/// One slot per epoch keeps anvil's finalized block close to the head for the finalized scanner.
+const ANVIL_ARGS: &[&str] = &["--slots-in-an-epoch", "1"];
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-const CHAIN_ID: u64 = 31_337;
 
 struct MissingProductAnswer;
 
@@ -195,177 +190,6 @@ impl ChainReader for BackfillReader {
     }
 }
 
-struct TestDatabase {
-    admin_pool: PgPool,
-    owner_pool: PgPool,
-    app_pool: PgPool,
-    database_name: String,
-    app_role: String,
-}
-
-impl TestDatabase {
-    async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
-            return Ok(None);
-        };
-        let Some(app_template) = required_url("DATABASE_URL") else {
-            return Ok(None);
-        };
-        let mut admin_url = Url::parse(&owner_template)?;
-        admin_url.set_path("/postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await?;
-        support::ensure_app_role(&admin_pool).await?;
-        sqlx::query("SELECT pg_advisory_lock(704_203_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c3_{suffix}");
-        let app_role = format!("topup_c3_app_{suffix}");
-        let password = format!("c3_{suffix}");
-        admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
-            .await?;
-
-        let mut owner_url = Url::parse(&owner_template)?;
-        owner_url.set_path(&format!("/{database_name}"));
-        let owner_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(owner_url.as_str())
-            .await?;
-        db::migrate(&owner_pool).await?;
-        admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
-            .await?;
-
-        let mut app_url = Url::parse(&app_template)?;
-        app_url
-            .set_username(&app_role)
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept a username"))?;
-        app_url
-            .set_password(Some(&password))
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept a password"))?;
-        app_url.set_path(&format!("/{database_name}"));
-        let app_pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(app_url.as_str())
-            .await?;
-        sqlx::query("SELECT pg_advisory_unlock(704_203_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        Ok(Some(Self {
-            admin_pool,
-            owner_pool,
-            app_pool,
-            database_name,
-            app_role,
-        }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.app_pool.close().await;
-        self.owner_pool.close().await;
-        self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
-            .await?;
-        self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
-            .await?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
-}
-
-struct Anvil {
-    child: Child,
-    rpc_url: String,
-}
-
-impl Anvil {
-    fn start() -> Result<Option<Self>> {
-        if !command_available("anvil") {
-            eprintln!("skipping scanner integration test: anvil is not on PATH");
-            return Ok(None);
-        }
-        ensure!(
-            command_available("forge"),
-            "forge is required when anvil is available"
-        );
-        ensure!(
-            command_available("cast"),
-            "cast is required when anvil is available"
-        );
-
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
-        let rpc_url = format!("http://127.0.0.1:{port}");
-        let child = Command::new("anvil")
-            .args([
-                "--silent",
-                "--port",
-                &port.to_string(),
-                "--chain-id",
-                &CHAIN_ID.to_string(),
-                "--slots-in-an-epoch",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start anvil")?;
-        let anvil = Self { child, rpc_url };
-        for _ in 0..100 {
-            if command_success("cast", &["block-number", "--rpc-url", &anvil.rpc_url]) {
-                return Ok(Some(anvil));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        anyhow::bail!("anvil did not become ready")
-    }
-
-    fn mine(&self, count: u64) -> Result<()> {
-        run_checked(
-            "cast",
-            &[
-                "rpc",
-                "--rpc-url",
-                &self.rpc_url,
-                "anvil_mine",
-                &format!("0x{count:x}"),
-            ],
-            None,
-        )?;
-        Ok(())
-    }
-
-    fn reset(&self) -> Result<()> {
-        run_checked(
-            "cast",
-            &["rpc", "--rpc-url", &self.rpc_url, "anvil_reset"],
-            None,
-        )?;
-        Ok(())
-    }
-}
-
-impl Drop for Anvil {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 struct RouteFixture {
     path: PathBuf,
 }
@@ -406,7 +230,7 @@ async fn finalized_scanner_is_idempotent_atomic_and_backfills_new_addresses() ->
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start_if_available(ANVIL_ARGS).await? else {
         database.cleanup().await?;
         return Ok(());
     };
@@ -445,11 +269,11 @@ async fn scanned_transfer_confirms_with_two_providers_and_waits_for_a_lagging_pr
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
-    let Some(primary_anvil) = Anvil::start()? else {
+    let Some(primary_anvil) = Anvil::start_if_available(ANVIL_ARGS).await? else {
         database.cleanup().await?;
         return Ok(());
     };
-    let Some(lagging_anvil) = Anvil::start()? else {
+    let Some(lagging_anvil) = Anvil::start_if_available(ANVIL_ARGS).await? else {
         drop(primary_anvil);
         database.cleanup().await?;
         return Ok(());
@@ -463,14 +287,13 @@ async fn scanned_transfer_confirms_with_two_providers_and_waits_for_a_lagging_pr
 }
 
 async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
-    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
-    run_checked("forge", &["build"], Some(&contracts))?;
-    let supported_token = deploy_token(&contracts, &anvil.rpc_url)?;
-    let unsupported_token = deploy_token(&contracts, &anvil.rpc_url)?;
-    let nft = deploy_contract(
-        &contracts,
+    run_checked("forge", &["build"], Some(&contracts_dir()))?;
+    let supported_token = deploy_token(&anvil.rpc_url)?;
+    let unsupported_token = deploy_token(&anvil.rpc_url)?;
+    let nft = forge_create(
         &anvil.rpc_url,
         "test/mocks/MockTokens.sol:MockERC721Transfer",
+        &[],
     )?;
     let tracked_one = Address::from([0x11_u8; 20]);
     let tracked_two = Address::from([0x22_u8; 20]);
@@ -741,9 +564,8 @@ async fn run_confirm_scenario(
     primary_anvil: &Anvil,
     lagging_anvil: &Anvil,
 ) -> Result<()> {
-    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
-    run_checked("forge", &["build"], Some(&contracts))?;
-    let token = deploy_token(&contracts, &primary_anvil.rpc_url)?;
+    run_checked("forge", &["build"], Some(&contracts_dir()))?;
+    let token = deploy_token(&primary_anvil.rpc_url)?;
     let tracked = Address::from([0x91_u8; 20]);
     let account_id = seed_account(&database.app_pool).await?;
     insert_address(&database.app_pool, account_id, tracked, 1).await?;
@@ -869,75 +691,8 @@ fn observation(source: &str, price: u64, observed_at: u64) -> Observation {
     }
 }
 
-fn required_url(name: &str) -> Option<String> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping scanner integration test: {name} is not set");
-            None
-        }
-    }
-}
-
-fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn command_success(command: &str, arguments: &[&str]) -> bool {
-    Command::new(command)
-        .args(arguments)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn run_checked(command: &str, arguments: &[&str], directory: Option<&Path>) -> Result<Output> {
-    let mut invocation = Command::new(command);
-    invocation.args(arguments);
-    if let Some(directory) = directory {
-        invocation.current_dir(directory);
-    }
-    let output = invocation.output()?;
-    ensure!(
-        output.status.success(),
-        "{command} failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(output)
-}
-
-fn deploy_token(contracts: &Path, rpc_url: &str) -> Result<Address> {
-    deploy_contract(contracts, rpc_url, "test/mocks/MockTokens.sol:MockERC20")
-}
-
-fn deploy_contract(contracts: &Path, rpc_url: &str, contract: &str) -> Result<Address> {
-    let output = run_checked(
-        "forge",
-        &[
-            "create",
-            "--rpc-url",
-            rpc_url,
-            "--private-key",
-            ANVIL_PRIVATE_KEY,
-            "--broadcast",
-            "--json",
-            contract,
-        ],
-        Some(contracts),
-    )?;
-    let result: Value = serde_json::from_slice(&output.stdout)?;
-    let address = result
-        .get("deployedTo")
-        .and_then(Value::as_str)
-        .context("forge create omitted deployedTo")?;
-    Address::from_str(address).context("parse deployed token address")
+fn deploy_token(rpc_url: &str) -> Result<Address> {
+    forge_create(rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])
 }
 
 fn mint_nft(rpc_url: &str, token: Address, recipient: Address, token_id: u64) -> Result<()> {
@@ -1008,10 +763,8 @@ async fn seed_account(pool: &PgPool) -> Result<Uuid> {
         &NewProduct {
             id: product_id,
             slug: "scanner-test".to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: "test-key".to_owned(),
-            kid: "test/v1".to_owned(),
             paused_scopes: Vec::new(),
         },
     )

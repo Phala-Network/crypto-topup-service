@@ -205,10 +205,8 @@ mod tests {
         let product = Product {
             id: Uuid::nil(),
             slug: "phala-cloud".to_owned(),
-            settlement_url: String::new(),
             webhook_url: String::new(),
             pubkey: String::new(),
-            kid: String::new(),
             paused_scopes: Vec::new(),
         };
 

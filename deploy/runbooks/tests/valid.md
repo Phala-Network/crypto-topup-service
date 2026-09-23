@@ -7,7 +7,7 @@ misclassify; it is not an operator runbook.
 cargo test --locked -p topup --test refunds refund_flow -- --nocapture
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 docker compose -f deploy/docker-compose.staging.yml exec -T postgres psql -c "SELECT 'topup bogus'"
-topup reconcile --once \
+topup reconcile \
   --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
 cargo run --locked -q -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
 export OPERATOR_ROLE="$(cast keccak OPERATOR_ROLE)"
