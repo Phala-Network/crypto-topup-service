@@ -1064,7 +1064,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(route["exposure_minor_reason"]
             .as_str()
             .context("exposure reason")?
-            .contains("C10"));
+            .contains("not per route"));
         ensure!(route["pnl_minor"].is_null());
         ensure!(route["pnl_minor_reason"]
             .as_str()
