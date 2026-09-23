@@ -28,6 +28,8 @@ jq -e '
         "run",
         "--bind",
         "0.0.0.0:8080",
+        "--metrics-bind",
+        "0.0.0.0:9464",
         "--route",
         "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
     ]

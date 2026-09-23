@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::time::timeout;
 use topup_adapters::chain::evm::{ChainReader, EvmChain, TransferLog};
 use topup_adapters::chain::flush::{decode_flushed, flushed_signature};
-use url::Url;
+use topup_adapters::redaction::Redacted;
 
 use crate::flusher::AlloyChainClient;
 use crate::scanner::MAX_SCAN_WINDOW;
@@ -58,6 +58,7 @@ pub struct RpcReconciliationChain {
     scanner: EvmChain,
     flusher: AlloyChainClient,
     provider: RootProvider,
+    endpoint: Redacted,
     request_timeout: Duration,
 }
 
@@ -68,8 +69,9 @@ impl RpcReconciliationChain {
         request_timeout: Duration,
         balance_batch_size: usize,
     ) -> Result<Self, ReconciliationError> {
-        let url = Url::parse(rpc_url)
-            .map_err(|error| ReconciliationError::Configuration(error.to_string()))?;
+        let endpoint = Redacted::parse(rpc_url).map_err(|_| {
+            ReconciliationError::Configuration("invalid reconciliation RPC URL".to_owned())
+        })?;
         Ok(Self {
             scanner: EvmChain::new(rpc_url)?,
             flusher: AlloyChainClient::connect_http_with_policy(
@@ -77,9 +79,21 @@ impl RpcReconciliationChain {
                 request_timeout,
                 balance_batch_size,
             )?,
-            provider: RootProvider::new_http(url),
+            provider: RootProvider::new_http(endpoint.expose().clone()),
+            endpoint,
             request_timeout,
         })
+    }
+
+    /// Labels every provider error with the configured provider id instead of the URL.
+    #[must_use]
+    pub fn with_provider(self, provider: &str) -> Self {
+        Self {
+            scanner: self.scanner.with_provider(provider),
+            flusher: self.flusher.with_provider(provider),
+            endpoint: self.endpoint.with_provider(provider),
+            ..self
+        }
     }
 }
 
@@ -144,9 +158,17 @@ impl ReconciliationChain for RpcReconciliationChain {
             let logs = timeout(self.request_timeout, self.provider.get_logs(&filter))
                 .await
                 .map_err(|_| {
-                    ReconciliationError::Chain("Flushed log request timed out".to_owned())
+                    ReconciliationError::Chain(
+                        self.endpoint.timeout_error("Flushed log fetch").to_string(),
+                    )
                 })?
-                .map_err(|error| ReconciliationError::Chain(error.to_string()))?;
+                .map_err(|error| {
+                    ReconciliationError::Chain(
+                        self.endpoint
+                            .rpc_error("Flushed log fetch", &error)
+                            .to_string(),
+                    )
+                })?;
             for log in logs {
                 let decoded = decode_flushed(log.data())
                     .map_err(|error| ReconciliationError::Chain(error.to_string()))?;
@@ -175,5 +197,40 @@ impl ReconciliationChain for RpcReconciliationChain {
             .factory_addresses(factory, salts)
             .await
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn flushed_log_transport_failure_does_not_format_the_provider_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let secret = "rpc-secret-token";
+        let chain = RpcReconciliationChain::connect(
+            &format!("http://user:{secret}@{address}/rpc?api_key={secret}"),
+            Duration::from_secs(5),
+            10,
+        )
+        .expect("production adapter accepts URL");
+
+        let error = chain
+            .flushed_total(Address::ZERO, Address::ZERO, 1, 1)
+            .await
+            .expect_err("closed connections fail the log request");
+        server.abort();
+
+        let message = error.to_string();
+        assert!(message.contains("[REDACTED URL]"), "{message}");
+        assert!(!message.contains(secret) && !message.contains("api_key"));
     }
 }

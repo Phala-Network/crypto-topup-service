@@ -28,6 +28,17 @@ pub enum CheckName {
 }
 
 impl CheckName {
+    /// Every check, including the post-restore gate, in metric registration order.
+    pub const ALL: [Self; 7] = [
+        Self::MissingDeposit,
+        Self::SentSettlement,
+        Self::CreditRecomputation,
+        Self::MissingFlushLink,
+        Self::CustodyBalance,
+        Self::AddressDerivation,
+        Self::PostRestoreSettlement,
+    ];
+
     /// Returns the stable metric label value.
     #[must_use]
     pub const fn code(self) -> &'static str {
@@ -116,9 +127,7 @@ impl ReconciliationReport {
     }
 }
 
-/// In-process counters reserved under the §16 reconciliation metric name.
-///
-/// These values are not exported yet; the heartbeat is logged after every successful round.
+/// In-process counters mirrored to the §16 reconciliation metric and loop progress gauge.
 #[derive(Debug, Default)]
 pub struct ReconciliationMetrics {
     missing_deposit: AtomicU64,
@@ -146,11 +155,14 @@ impl ReconciliationMetrics {
             CheckName::PostRestoreSettlement => &self.post_restore_settlement,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(Self::MISMATCH_METRIC, "check" => check.code(), "producer_enabled" => "true")
+            .increment(1);
     }
 
     pub(crate) fn heartbeat(&self) {
         self.last_heartbeat_unix
             .store(Utc::now().timestamp(), Ordering::Relaxed);
+        crate::observability::progress(super::LOOP_NAME, super::LOOP_INSTANCE);
     }
 
     /// Returns the mismatch count for one check in this process.

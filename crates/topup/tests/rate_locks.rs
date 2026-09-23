@@ -634,6 +634,63 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
 }
 
 #[tokio::test]
+async fn database_collector_exports_product_and_global_lock_exposure() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The current-thread test runtime polls the spawned collector on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
+        let account = seed_account(&database.app_pool, product.id, "exposed").await?;
+        let route = test_route();
+        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
+        create_lock(&database, &quotes, &product, &account, &route, "exposed-1").await?;
+
+        let caps = topup::observability::LockExposureCaps::from_routes(std::slice::from_ref(&route));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let collector = tokio::spawn(topup::observability::collect_database_metrics(
+            database.app_pool.clone(),
+            caps,
+            cancellation.clone(),
+        ));
+        let product_exposure = format!(
+            "topup_open_lock_exposure_minor{{scope=\"product\",id=\"{}\",producer_enabled=\"true\"}} 100",
+            route.destination.product
+        );
+        let mut rendered = String::new();
+        for _ in 0..200 {
+            rendered = handle.render();
+            if rendered.contains(&product_exposure) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        cancellation.cancel();
+        collector.await?;
+
+        ensure!(rendered.contains(&product_exposure), "{rendered}");
+        ensure!(
+            rendered.contains(
+                "topup_open_lock_exposure_minor{scope=\"global\",id=\"global\",producer_enabled=\"true\"} 100"
+            ),
+            "{rendered}"
+        );
+        ensure!(rendered.contains(&format!(
+            "topup_open_lock_exposure_cap_minor{{scope=\"global\",id=\"global\",producer_enabled=\"true\"}} {}",
+            route.rate_lock.max_open_minor.global
+        )));
+        ensure!(!rendered.contains("scope=\"account\""), "{rendered}");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
 async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());

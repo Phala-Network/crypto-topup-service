@@ -27,4 +27,20 @@ printf '%s\n' "$output" | grep -F \
 printf '%s\n' "$output" | grep -F \
     'dry-run: wal-g delete retain FULL 3 --use-sentinel-time --confirm' >/dev/null
 
+mkdir -p "$tmp/bin" "$tmp/marker"
+cat > "$tmp/bin/wal-g" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" > "$WALG_TEST_CALL"
+EOF
+chmod +x "$tmp/bin/wal-g"
+touch "$tmp/segment"
+PATH="$tmp/bin:$PATH" \
+    WALG_TEST_CALL="$tmp/wal-g.call" \
+    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
+    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment"
+grep -F "wal-push $tmp/segment" "$tmp/wal-g.call" >/dev/null
+grep -E '^[0-9]+$' "$tmp/marker/last-success" >/dev/null
+[ "$(stat -c %a "$tmp/marker/last-success")" = 644 ]
+
 echo "walg-cron dry-run test passed"

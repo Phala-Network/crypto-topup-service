@@ -364,7 +364,12 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
 
 #[tokio::test]
 async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    // The current-thread test runtime polls every flusher call on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|database| {
+        let metrics = metrics.clone();
         Box::pin(async move {
             let anvil = Anvil::start()?;
             let root = repository_root();
@@ -421,6 +426,11 @@ async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() 
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(flush_status(&database.pool, route_plan).await? == "planned");
             }
+            let send_paused = format!(
+                "topup_flush_send_paused{{chain=\"{}\",producer_enabled=\"true\"}}",
+                route.chain.chain_id
+            );
+            ensure!(metrics.render().contains(&format!("{send_paused} 1")));
             let pause_audits: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM audit WHERE action = 'flush.send_paused' AND subject = $1",
             )
@@ -436,6 +446,7 @@ async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() 
                         flush_id: route_plan
                     }
             );
+            ensure!(metrics.render().contains(&format!("{send_paused} 0")));
             set_route_flush_pause(&database.pool, &route.route, true).await?;
             finalize(&anvil.rpc_url)?;
             ensure!(

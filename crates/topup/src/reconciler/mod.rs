@@ -45,6 +45,9 @@ pub use types::{CheckName, Finding, ReconciliationMetrics, ReconciliationReport}
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
 const MAX_WINDOWS_PER_ROUND: usize = 64;
 
+const LOOP_NAME: &str = "reconciler";
+const LOOP_INSTANCE: &str = "0";
+
 /// Order in which a round runs its checks; derivation runs first so a freeze lands early.
 const REGULAR_CHECKS: [CheckName; 6] = [
     CheckName::AddressDerivation,
@@ -262,7 +265,8 @@ impl Reconciler {
                     "reconciliation balance batch size exceeds usize".to_owned(),
                 )
             })?;
-            let chain = RpcReconciliationChain::connect(&url, timeout, batch)?;
+            let chain = RpcReconciliationChain::connect(&url, timeout, batch)?
+                .with_provider(&crate::rpc_provider::provider_label(provider, 0));
             chains.insert(route.chain.chain_id, Arc::new(chain));
         }
         let settlement = Arc::new(SignedSettlementLookup {
@@ -382,16 +386,22 @@ impl Reconciler {
 
     /// Runs periodic reconciliation until cancellation.
     pub async fn run_loop(&self, every: Duration, cancellation: CancellationToken) {
+        crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
         let mut ticks = interval(every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticks.tick() => {
+                    crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
+                    // A round may legitimately run past the heartbeat threshold; it is overdue
+                    // only once it overruns the interval that schedules the next round.
+                    crate::observability::execution_deadline(LOOP_NAME, LOOP_INSTANCE, every);
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         _report = self.run_checks(false) => {}
                     }
+                    crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, every);
                 }
             }
         }

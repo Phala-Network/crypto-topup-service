@@ -1,11 +1,14 @@
 //! Coin Metrics `ReferenceRateUSD` adapter.
 
+use std::fmt::{self, Debug, Formatter};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
 use topup_core::valuation::{Observation, SourceId, UnixSeconds};
+
+use crate::redaction::Redacted;
 
 use super::decimal::parse_scaled;
 use super::{PriceError, PriceSource, http_client};
@@ -13,14 +16,26 @@ use super::{PriceError, PriceSource, http_client};
 const ENDPOINT: &str = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics";
 
 /// Coin Metrics asset-metric observation source.
-#[derive(Debug)]
 pub struct CoinMetrics {
     client: reqwest::Client,
-    endpoint: Url,
+    endpoint: Redacted,
     asset: String,
     metric: String,
     frequency: String,
     api_key: Option<String>,
+}
+
+impl Debug for CoinMetrics {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CoinMetrics")
+            .field("endpoint", &self.endpoint)
+            .field("asset", &self.asset)
+            .field("metric", &self.metric)
+            .field("frequency", &self.frequency)
+            .field("api_key_configured", &self.api_key.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CoinMetrics {
@@ -35,7 +50,7 @@ impl CoinMetrics {
         frequency: String,
         endpoint: &str,
     ) -> Result<Self, PriceError> {
-        let endpoint = Url::parse(endpoint).map_err(|_| PriceError::InvalidUrl)?;
+        let endpoint = Redacted::parse(endpoint).map_err(|_| PriceError::InvalidUrl)?;
         let api_key = std::env::var("COINMETRICS_API_KEY")
             .ok()
             .filter(|value| !value.is_empty());
@@ -82,7 +97,7 @@ impl CoinMetrics {
 #[async_trait]
 impl PriceSource for CoinMetrics {
     async fn observe(&self) -> Result<Observation, PriceError> {
-        let mut request = self.client.get(self.endpoint.clone()).query(&[
+        let mut request = self.client.get(self.endpoint.expose().clone()).query(&[
             ("assets", self.asset.as_str()),
             ("metrics", self.metric.as_str()),
             ("frequency", self.frequency.as_str()),
@@ -92,17 +107,15 @@ impl PriceSource for CoinMetrics {
         if let Some(api_key) = &self.api_key {
             request = request.query(&[("api_key", api_key)]);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| PriceError::Request("coinmetrics fetch"))?;
+        let response = request.send().await.map_err(|error| {
+            PriceError::Request(self.endpoint.request_error("coinmetrics fetch", &error))
+        })?;
         if !response.status().is_success() {
             return Err(PriceError::HttpStatus(response.status().as_u16()));
         }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| PriceError::Request("coinmetrics body"))?;
+        let body = response.bytes().await.map_err(|error| {
+            PriceError::Request(self.endpoint.request_error("coinmetrics body", &error))
+        })?;
         self.parse_response(&body)
     }
 }
@@ -156,5 +169,22 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn debug_does_not_expose_api_key() {
+        let secret = "coinmetrics-secret-token";
+        let source = CoinMetrics {
+            client: http_client().expect("HTTP client"),
+            endpoint: Redacted::parse(ENDPOINT).expect("endpoint URL"),
+            asset: "pha".to_owned(),
+            metric: "ReferenceRateUSD".to_owned(),
+            frequency: "1m".to_owned(),
+            api_key: Some(secret.to_owned()),
+        };
+
+        let debug = format!("{source:?}");
+        assert!(debug.contains("api_key_configured: true"));
+        assert!(!debug.contains(secret));
     }
 }

@@ -16,6 +16,7 @@ pub mod api;
 pub mod db;
 pub mod flusher;
 pub mod locks;
+pub mod observability;
 pub mod outbox;
 mod pause;
 pub mod pump;

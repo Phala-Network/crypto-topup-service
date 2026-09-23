@@ -1,9 +1,10 @@
 //! Binance public ticker-price adapter.
 
 use async_trait::async_trait;
-use reqwest::Url;
 use serde::Deserialize;
 use topup_core::valuation::{Observation, SourceId};
+
+use crate::redaction::Redacted;
 
 use super::decimal::parse_scaled;
 use super::{PriceError, PriceSource, http_client, unix_now};
@@ -14,7 +15,7 @@ const ENDPOINT: &str = "https://data-api.binance.vision/api/v3/ticker/price";
 #[derive(Debug)]
 pub struct Binance {
     client: reqwest::Client,
-    endpoint: Url,
+    endpoint: Redacted,
     symbol: String,
 }
 
@@ -23,7 +24,7 @@ impl Binance {
     pub fn new(symbol: String) -> Result<Self, PriceError> {
         Ok(Self {
             client: http_client()?,
-            endpoint: Url::parse(ENDPOINT).map_err(|_| PriceError::InvalidUrl)?,
+            endpoint: Redacted::parse(ENDPOINT).map_err(|_| PriceError::InvalidUrl)?,
             symbol,
         })
     }
@@ -47,18 +48,19 @@ impl PriceSource for Binance {
     async fn observe(&self) -> Result<Observation, PriceError> {
         let response = self
             .client
-            .get(self.endpoint.clone())
+            .get(self.endpoint.expose().clone())
             .query(&[("symbol", self.symbol.as_str())])
             .send()
             .await
-            .map_err(|_| PriceError::Request("binance fetch"))?;
+            .map_err(|error| {
+                PriceError::Request(self.endpoint.request_error("binance fetch", &error))
+            })?;
         if !response.status().is_success() {
             return Err(PriceError::HttpStatus(response.status().as_u16()));
         }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| PriceError::Request("binance body"))?;
+        let body = response.bytes().await.map_err(|error| {
+            PriceError::Request(self.endpoint.request_error("binance body", &error))
+        })?;
         self.parse_response(&body)
     }
 }
