@@ -561,6 +561,7 @@ impl Reconciler {
                         std::slice::from_ref(&deposit),
                         &[],
                         None,
+                        None,
                     )
                     .await?;
                     if committed.inserted == 0 {

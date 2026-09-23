@@ -533,6 +533,7 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
         .bind(expiring.address_id)
         .execute(&database.app_pool)
         .await?;
+        finalize_chain_past_now(&database.app_pool).await?;
         ensure!(locks::expire_once(&database.app_pool).await? == 1);
         let event: Value =
             sqlx::query_scalar("SELECT payload FROM outbox WHERE event_type = 'rate_lock.expired'")
@@ -558,6 +559,67 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(first_status == "cancelled");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
+        let account = seed_account(&database.app_pool, product.id, "unpaid").await?;
+        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
+        let lock = create_lock(
+            &database,
+            &quotes,
+            &product,
+            &account,
+            &test_route(),
+            "unpaid-1",
+        )
+        .await?;
+        let expires_at = Utc::now() - chrono::Duration::minutes(5);
+        sqlx::query("UPDATE rate_locks SET expires_at = $2 WHERE address_id = $1")
+            .bind(lock.address_id)
+            .bind(expires_at)
+            .execute(&database.app_pool)
+            .await?;
+        let account_key = format!("account:{}", account.id);
+
+        // The wall-clock window has closed, but the scanner has not committed a finalized block
+        // past it (never, then stalled at the deadline itself): the lock stays open and reserved.
+        ensure!(locks::expire_once(&database.app_pool).await? == 0);
+        set_finalized_time(&database.app_pool, expires_at).await?;
+        ensure!(locks::expire_once(&database.app_pool).await? == 0);
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "open");
+        ensure!(exposure(&database.app_pool, &account_key).await? == 100);
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
+        )
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(events == 0);
+
+        set_finalized_time(
+            &database.app_pool,
+            expires_at + chrono::Duration::seconds(12),
+        )
+        .await?;
+        ensure!(locks::expire_once(&database.app_pool).await? == 1);
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "expired");
+        ensure!(exposure(&database.app_pool, &account_key).await? == 0);
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
+        )
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(events == 1);
         Ok(())
     }
     .await;
@@ -812,6 +874,7 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
             .execute(&database.app_pool)
             .await?;
         }
+        finalize_chain_past_now(&database.app_pool).await?;
 
         // Hold the second account's scope row and then request `global`, exactly as a creation
         // for that account does, while the expiry batch releases both accounts.
@@ -837,6 +900,7 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
             .bind(third_lock.address_id)
             .execute(&database.app_pool)
             .await?;
+        finalize_chain_past_now(&database.app_pool).await?;
         let (expired, created) = tokio::join!(
             locks::expire_once(&database.app_pool),
             create_lock(&database, &quotes, &product, &second, &route, "b-2"),
@@ -946,6 +1010,7 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
         sqlx::query("UPDATE lock_exposure SET open_minor = 40 WHERE scope_key = 'global'")
             .execute(&database.app_pool)
             .await?;
+        finalize_chain_past_now(&database.app_pool).await?;
 
         let metrics = Arc::new(locks::ExpiryMetrics::default());
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1057,6 +1122,7 @@ async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_ex
             .execute(&database.app_pool)
             .await?;
         ensure!(!drifted_scopes(&database.app_pool).await?.is_empty());
+        finalize_chain_past_now(&database.app_pool).await?;
 
         let done = tokio_util::sync::CancellationToken::new();
         let repairer = {
@@ -1216,6 +1282,26 @@ async fn every_lock_exposure_repair_leaves_a_finding_and_an_audit_row() -> Resul
     .await;
     let cleanup = database.cleanup().await;
     result.and(cleanup)
+}
+
+/// Commits the test chain's scanner cursor through a finalized block just past every lock already
+/// overdue by wall clock, as the scanner does on reaching the finalized head.
+async fn finalize_chain_past_now(pool: &sqlx::PgPool) -> Result<()> {
+    set_finalized_time(pool, Utc::now() + chrono::Duration::seconds(1)).await
+}
+
+async fn set_finalized_time(pool: &sqlx::PgPool, time: chrono::DateTime<Utc>) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO cursors (chain_id, scanned_block, scanned_block_time)
+        VALUES (1, 0, $1)
+        ON CONFLICT (chain_id) DO UPDATE SET scanned_block_time = EXCLUDED.scanned_block_time
+        "#,
+    )
+    .bind(time)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn retry_invariant<T, F, Fut>(mut operation: F) -> Result<T>

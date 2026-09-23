@@ -178,7 +178,7 @@ fn response(
         price_scaled: lock.price.value().to_string(),
         credit_minor: lock.credit_minor.value().to_string(),
         expires_at: lock.expires_at,
-        status: lock.visible_status(now).code().to_owned(),
+        status: lock.status.code().to_owned(),
         remaining_seconds: lock.remaining_seconds(now),
         eip681_uri: format!(
             "ethereum:{:#x}@{}/transfer?address={:#x}&uint256={}",

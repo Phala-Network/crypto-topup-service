@@ -150,7 +150,7 @@ addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_re
               UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
 rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
               consumed_by (deposit_id) UNIQUE
-cursors       chain_id PK, scanned_block
+cursors       chain_id PK, scanned_block, scanned_block_time
 deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
               address_id, account_id, route, route_version, asset_contract, from_address, amount_atomic,
               state, reason, attempt, next_attempt_at, lease_token, lease_until,
@@ -244,12 +244,17 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock` and the
   product receives exactly the `credit_minor` it showed the user.
 - Any other deposit to a lock address (late, wrong amount, second payment) is valued at spot
-  and still credited; the product shows this rule before payment. `rate_lock.expired` is
-  emitted when a lock passes `expires_at` unconsumed. Eligibility uses `block_time`, so a
-  payment mined before `expires_at` but finalized after the expiry worker ran is still valued
-  at the lock price even though `rate_lock.expired` was already emitted and its exposure
-  released. A lock whose address has received any deposit, even a rejected one, can no longer
-  be cancelled (`409 pending_payment`).
+  and still credited; the product shows this rule before payment.
+- Expiry uses chain time, like eligibility. A lock expires unconsumed, releasing its exposure
+  and emitting `rate_lock.expired`, only once the chain's scanner has committed through a
+  finalized block whose time is past `expires_at` (the finalized head's time, read with the
+  head, is stored with the cursor) and no deposit mined inside the window still awaits its
+  confirm step. A payment mined inside the window is therefore consumed at the lock price and
+  never reported as expired. Exposure stays reserved until finality, about 15 minutes after
+  `expires_at`, and longer while the scanner is stalled (`TopupScannerLag`). Until then the API
+  shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
+  window has closed. A lock whose address has received any deposit, even a rejected one, can no
+  longer be cancelled (`409 pending_payment`).
 - Exposure counters sum `credit_minor` across routes, so every rate-lock route must use the
   same `destination.unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to the persistent address" variant is deliberately not offered: matching
@@ -405,10 +410,43 @@ checklist:
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
 | Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
-| Exceptions | Wrong asset, below minimum, or overpayment beyond tolerance: "contact support"; funds reach the treasury and finance may return them per the refund policy (§15). Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
+| Exceptions | Wrong asset or below minimum: "contact support"; funds reach the treasury and finance may return them per the refund policy (§15). Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9) and not refunded. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
 | Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`. |
 | Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
+
+### Deposit status for exchange users (product UI)
+
+Exchange users expect one progress line per deposit. The product maps service states to these UI
+states; the service reports a deposit only once it is final (§8), so the first state comes from the
+product's own pre-finality view of the transaction, when it offers one.
+
+| UI state | Service state | Copy |
+|---|---|---|
+| Detected, N confirmations | none yet: seen by the product before finality | "Payment detected: N confirmations. Ethereum finality takes about 15 minutes." |
+| Finalizing | `detected` | "Final on Ethereum. Checking the payment and fixing the rate." |
+| Crediting | `confirmed`, `cleared` | "Crediting your balance." |
+| Completed | `credited`, `swept` | "Credited $X at $rate." When a lock-address payment was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |
+| Needs attention | `rejected` | By reason, below. The reason code itself is never shown. |
+
+| `reason` | "Needs attention" copy |
+|---|---|
+| `unsupported_asset` | "This token is not accepted here, so it was not credited. Contact support to have it returned." |
+| `below_minimum` | "This payment is below the minimum deposit of X, so it was not credited. Contact support; amounts at or above the refund minimum can be returned." |
+| `out_of_bounds`, `out_of_range` | "This payment is outside the deposit limits, so it was not credited. Contact support to have it returned." |
+| `sanctioned`, `product_refused` | "This payment is under compliance review. Contact support." |
+
+### Quote and address copy (product UI)
+
+- Quote page, next to the single-use address: "Paying from an exchange? Use your persistent
+  address; exchanges may hold new withdrawal addresses and deduct withdrawal fees, so the amount
+  received must still equal the quote."
+- QR codes: the persistent address QR encodes the plain address only. Only a quote's QR is an
+  EIP-681 URI (token and amount), always shown with copy-address and copy-amount buttons for
+  wallets and exchanges that do not read the URI.
+- Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
+  are not credited." Support handles such a payment with the
+  [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).
 
 ## 13. Reconciliation
 
@@ -474,7 +512,7 @@ compose) and pin `(keyid, public key)`.
 |---|---|
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. |
-| Refunds | Refundable: wrong asset, overpayment beyond tolerance, rejected-not-sanctioned, and late-arriving funds to a closed workspace. Not refundable: credited USD, below-minimum dust under `min_refund_atomic` *(policy)*. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
+| Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. Not refundable: credited USD, including an overpayment beyond tolerance (credited at spot for the full amount, §9), and below-minimum dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
@@ -542,7 +580,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Feature | Owner | Pilot | GA | Later |
 |---|---|---|---|---|
 | Quote-first checkout: spread and fee disclosure, exact amount, EIP-681 QR, countdown, resume by `lock_ref`, cancel, re-quote | S+P | ✓ | | |
-| Underpayment shortfall and top-up re-quote; overpayment handling and refund entry | S+P | ✓ | | |
+| Underpayment shortfall and top-up re-quote; overpayment beyond tolerance credited at spot | S+P | ✓ | | |
 | Persistent address as advanced option with indicative rate | S+P | ✓ | | |
 | Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
 | Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |

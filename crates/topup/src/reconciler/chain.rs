@@ -106,6 +106,7 @@ impl ReconciliationChain for RpcReconciliationChain {
         )
         .await
         .map_err(|_| ReconciliationError::Chain("finalized-head request timed out".to_owned()))?
+        .map(|head| head.number)
         .map_err(Into::into)
     }
 

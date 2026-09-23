@@ -107,20 +107,13 @@ pub struct ExposureAvailability {
 }
 
 impl RateLock {
-    /// Returns the visible status, treating an overdue open row as expired.
-    #[must_use]
-    pub fn visible_status(&self, now: DateTime<Utc>) -> RateLockStatus {
-        if self.status == RateLockStatus::Open && self.expires_at <= now {
-            RateLockStatus::Expired
-        } else {
-            self.status
-        }
-    }
-
     /// Returns whole seconds remaining in the payment window.
+    ///
+    /// A lock stays `open` after its window closes until the finalized chain passes `expires_at`
+    /// (§9), so a payment mined inside the window is never reported as expired.
     #[must_use]
     pub fn remaining_seconds(&self, now: DateTime<Utc>) -> u64 {
-        if self.visible_status(now) != RateLockStatus::Open {
+        if self.status != RateLockStatus::Open {
             return 0;
         }
         u64::try_from(self.expires_at.signed_duration_since(now).num_seconds()).unwrap_or_default()
@@ -565,6 +558,11 @@ pub(crate) async fn consume(
 
 /// Expires one bounded batch and returns the number of rows closed.
 ///
+/// A lock expires by chain time, not wall-clock time: only once its chain's scanner has committed
+/// through a finalized block whose time is past `expires_at`, so every payment mined inside the
+/// window is already recorded, and only while no such payment still awaits the confirm step that
+/// may consume the lock. A stalled scanner therefore holds locks and their exposure open.
+///
 /// Exposure releases are aggregated per scope key and applied in sorted key order, the same order
 /// creation, cancellation, and consumption lock scope rows in, so a batch spanning several
 /// accounts cannot deadlock with them.
@@ -580,9 +578,17 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
         JOIN accounts AS account ON account.id = address.account_id
+        JOIN cursors AS cursor ON cursor.chain_id = address.chain_id
         WHERE rate_lock.status = 'open'
           AND rate_lock.consumed_by IS NULL
-          AND rate_lock.expires_at <= now()
+          AND rate_lock.expires_at < cursor.scanned_block_time
+          AND NOT EXISTS (
+              SELECT 1
+              FROM deposits AS deposit
+              WHERE deposit.address_id = rate_lock.address_id
+                AND deposit.state = 'detected'
+                AND deposit.block_time <= rate_lock.expires_at
+          )
         ORDER BY rate_lock.expires_at, rate_lock.address_id
         FOR UPDATE OF rate_lock SKIP LOCKED
         LIMIT $1

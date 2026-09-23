@@ -235,9 +235,11 @@ pub struct RateLockResponse {
     pub credit_minor: String,
     /// Lock expiry time.
     pub expires_at: DateTime<Utc>,
-    /// Stable lifecycle status.
+    /// Stable lifecycle status: `open`, `consumed`, `expired`, or `cancelled`. A lock stays `open`
+    /// after its window closes until the finalized chain passes `expires_at`, so a payment mined
+    /// inside the window is never reported as expired.
     pub status: String,
-    /// Whole seconds remaining while the lock is open.
+    /// Whole seconds remaining in the payment window; zero once `expires_at` has passed.
     pub remaining_seconds: u64,
     /// EIP-681 payment URI.
     pub eip681_uri: String,

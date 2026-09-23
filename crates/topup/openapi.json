@@ -2044,7 +2044,7 @@
           "remaining_seconds": {
             "type": "integer",
             "format": "int64",
-            "description": "Whole seconds remaining while the lock is open.",
+            "description": "Whole seconds remaining in the payment window; zero once `expires_at` has passed.",
             "minimum": 0
           },
           "salt_inputs": {
@@ -2053,7 +2053,7 @@
           },
           "status": {
             "type": "string",
-            "description": "Stable lifecycle status."
+            "description": "Stable lifecycle status: `open`, `consumed`, `expired`, or `cancelled`. A lock stays `open`\nafter its window closes until the finalized chain passes `expires_at`, so a payment mined\ninside the window is never reported as expired."
           }
         }
       },

@@ -2,8 +2,10 @@
 
 ## Trigger
 
-Trigger when Finance has approved a refundable wrong-asset, overpayment, rejected-not-sanctioned,
-or late closed-workspace deposit. Credited funds and dust below policy are not refundable.
+Trigger when Finance has approved a refundable deposit (architecture §15): wrong token, below the
+minimum credit but at or above `min_refund_atomic`, rejected for a reason other than sanctions, or
+funds that arrived after the workspace closed. Credited funds, including an overpayment beyond the
+lock tolerance (credited at spot for the full amount), and dust below policy are not refundable.
 
 ## Impact and blast radius
 

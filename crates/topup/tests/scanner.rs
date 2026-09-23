@@ -14,7 +14,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
@@ -22,7 +22,7 @@ use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
 use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
 use topup::scanner::{load_route_files, scan_once};
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
-use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
+use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, FinalizedHead, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
@@ -57,13 +57,15 @@ struct RecordedRequest {
 
 struct RecordingReader {
     finalized: u64,
+    finalized_time: DateTime<Utc>,
     requests: Mutex<Vec<RecordedRequest>>,
 }
 
 impl RecordingReader {
-    fn new(finalized: u64) -> Self {
+    fn new(finalized: u64, finalized_time: DateTime<Utc>) -> Self {
         Self {
             finalized,
+            finalized_time,
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -74,8 +76,11 @@ impl RecordingReader {
 }
 
 impl ChainReader for RecordingReader {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
-        Ok(self.finalized)
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
+        Ok(FinalizedHead {
+            number: self.finalized,
+            time: self.finalized_time,
+        })
     }
 
     async fn transfer_logs_to(
@@ -127,8 +132,11 @@ impl BackfillReader {
 }
 
 impl ChainReader for BackfillReader {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
-        Ok(4_000)
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
+        Ok(FinalizedHead {
+            number: 4_000,
+            time: DateTime::UNIX_EPOCH,
+        })
     }
 
     async fn transfer_logs_to(
@@ -474,7 +482,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         .next()
         .context("one chain route")?;
     let reader = EvmChain::new(&anvil.rpc_url)?;
-    let expected_cursor = reader.finalized_head().await?;
+    let expected_cursor = reader.finalized_head().await?.number;
     let first = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(
         first.inserted == 3,
@@ -538,7 +546,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     assert_deposit_counts(&database.app_pool, 5, 1).await?;
 
     let previous = reader.finalized_head().await?;
-    ensure!(previous > 0);
+    ensure!(previous.number > 0);
     anvil.reset()?;
     ensure!(
         matches!(
@@ -671,9 +679,19 @@ async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
         .into_iter()
         .next()
         .context("one chain route")?;
-    let reader = RecordingReader::new(4_001);
+    let finalized_time = DateTime::from_timestamp(1_700_000_000, 0).context("finalized time")?;
+    let reader = RecordingReader::new(4_001, finalized_time);
     let stats = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(stats.cursor == 4_001);
+    let scanned_block_time: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT scanned_block_time FROM cursors WHERE chain_id = $1")
+            .bind(i64::try_from(CHAIN_ID)?)
+            .fetch_one(&database.app_pool)
+            .await?;
+    ensure!(
+        scanned_block_time == Some(finalized_time),
+        "cursor must record the finalized head's block time, got {scanned_block_time:?}"
+    );
 
     let requests = reader.requests();
     ensure!(requests.len() == 6, "unexpected requests: {requests:?}");
