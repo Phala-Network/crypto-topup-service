@@ -140,7 +140,7 @@ pub async fn check(
 
     let round = reconciler::post_restore_once(reconciler)
         .await
-        .map_err(|_| "post-restore reconciliation failed".to_owned())?;
+        .map_err(|error| format!("post-restore reconciliation failed: {}", error.code()))?;
     let post_restore_reconciliation = PostRestoreReconciliation {
         status: if round.incomplete {
             "incomplete"

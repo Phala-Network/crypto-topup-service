@@ -22,7 +22,7 @@ use topup::db::{
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationMetrics,
-    ReconciliationReport, SettlementLookup, frozen_chains,
+    ReconciliationReport, SettlementLookup, frozen_chains, hold_lease_owner_lock,
 };
 use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
 use topup_adapters::settlement::http::SettlementAnswer;
@@ -204,6 +204,7 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
             500,
         ));
         let reconciler = reconciler(&pool, route.clone(), chain.clone(), Arc::default())?;
+        scanned_through(&pool, 5).await?;
 
         let missing = reconciler.check(CheckName::MissingDeposit).await?;
         ensure!(missing.len() == 1 && missing[0].repair_applied);
@@ -212,6 +213,7 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
         ensure!(reconciler.check(CheckName::MissingDeposit).await?.is_empty());
         ensure!(chain.log_requests.lock().unwrap().len() == 1);
         chain.finalized.store(9, Ordering::SeqCst);
+        scanned_through(&pool, 9).await?;
         ensure!(reconciler.check(CheckName::MissingDeposit).await?.is_empty());
         ensure!(chain.log_requests.lock().unwrap().last() == Some(&(6, 9)));
         let repaired = deposit(&pool, deposit_id(CHAIN_ID, B256::from([11; 32]), 2)).await?;
@@ -239,6 +241,62 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
         .fetch_one(&pool)
         .await?;
         ensure!(repairs >= 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        let seed = seed_identity(&pool, &route, 2).await?;
+        let chain = Arc::new(MockChain::at(9));
+        chain.derive(&[&seed]);
+        chain.logs.lock().unwrap().push(transfer(
+            12,
+            0,
+            7,
+            route.asset.contract,
+            Address::from([13; 20]),
+            seed.address,
+            500,
+        ));
+        let reconciler = reconciler(&pool, route, chain.clone(), Arc::default())?;
+
+        // Nothing is compared before the scanner commits a range.
+        ensure!(
+            reconciler
+                .check(CheckName::MissingDeposit)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.log_requests.lock().unwrap().is_empty());
+
+        // The scanner cursor does not cover an address still awaiting its backfill.
+        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(6)).await?;
+        ensure!(
+            reconciler
+                .check(CheckName::MissingDeposit)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.log_requests.lock().unwrap().is_empty());
+
+        // A transfer the scanner has not reached yet is not reported as missing.
+        db::commit_scan(&pool, CHAIN_ID, &[], &[seed.address_id], None).await?;
+        ensure!(
+            reconciler
+                .check(CheckName::MissingDeposit)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.log_requests.lock().unwrap().as_slice() == [(0, 6)]);
+
+        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(9)).await?;
+        let missing = reconciler.check(CheckName::MissingDeposit).await?;
+        ensure!(missing.len() == 1 && missing[0].repair_applied);
+        ensure!(chain.log_requests.lock().unwrap().last() == Some(&(7, 9)));
         Ok(())
     })
     .await
@@ -479,6 +537,87 @@ async fn post_restore_completes_when_product_truth_is_adopted() -> Result<()> {
                 .fetch_one(&pool)
                 .await?;
         ensure!(swept_settlement == "accepted");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn post_restore_refuses_to_preempt_a_running_lease_owner() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        let seed = seed_identity(&pool, &route, 45).await?;
+        let deposit_id = seed_deposit(
+            &pool,
+            &route,
+            &seed,
+            DepositSeed::new(45, DepositState::Credited),
+        )
+        .await?;
+        let lease_token = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE deposits SET lease_token = $2, lease_until = now() + interval '5 minutes' WHERE id = $1",
+        )
+        .bind(deposit_id)
+        .bind(lease_token)
+        .execute(&pool)
+        .await?;
+        let settlement = Arc::new(MockSettlement::default());
+        settlement.answer(deposit_id, Some(accepted_answer(&pool, deposit_id).await?));
+        let chain = Arc::new(MockChain::at(150));
+        chain.derive(&[&seed]);
+        let reconciler = reconciler(&pool, route, chain, settlement)?;
+
+        let service = hold_lease_owner_lock(&pool).await?;
+        let second_service = hold_lease_owner_lock(&pool).await?;
+        let refused = reconciler.post_restore_once().await;
+        ensure!(matches!(
+            refused,
+            Err(ReconciliationError::LeaseOwnerLock(_))
+        ));
+        ensure!(deposit(&pool, deposit_id).await?.lease_token == Some(lease_token));
+        second_service.release().await?;
+        service.release().await?;
+
+        let report = reconciler.post_restore_once().await?;
+        ensure!(!report.incomplete, "restore must complete: {report:?}");
+        ensure!(deposit(&pool, deposit_id).await?.lease_token.is_none());
+        hold_lease_owner_lock(&pool).await?.release().await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
+    with_database(|pool| async move {
+        let shutdown = CancellationToken::new();
+        let lock = hold_lease_owner_lock(&pool).await?;
+        let watch = tokio::spawn(lock.watch(StdDuration::from_millis(50), shutdown.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
+        let pump = Pump::new(
+            pool.clone(),
+            Arc::new(StepSet::new(step(), step(), step(), step())),
+            PumpConfig::default(),
+        )?;
+        let pump_shutdown = shutdown.child_token();
+        let pump_task = tokio::spawn(async move { pump.run(pump_shutdown).await });
+
+        let terminated: bool = sqlx::query_scalar(
+            r#"
+            SELECT pg_terminate_backend(pid) FROM pg_locks
+            WHERE locktype = 'advisory' AND mode = 'ShareLock'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            "#,
+        )
+        .fetch_one(&pool)
+        .await?;
+        ensure!(terminated);
+        let watched = tokio::time::timeout(StdDuration::from_secs(10), watch).await??;
+        ensure!(watched.is_err());
+        ensure!(shutdown.is_cancelled());
+        tokio::time::timeout(StdDuration::from_secs(10), pump_task).await??;
         Ok(())
     })
     .await
@@ -898,7 +1037,7 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
             ("reconciliation_findings", "DELETE", false),
             ("reconciliation_findings", "TRUNCATE", false),
             ("reconciliation_blocks", "INSERT", true),
-            ("reconciliation_blocks", "UPDATE", true),
+            ("reconciliation_blocks", "UPDATE", false),
             ("reconciliation_blocks", "DELETE", false),
             ("reconciliation_blocks", "TRUNCATE", false),
             ("reconciliation_deposit_cursors", "UPDATE", true),
@@ -918,17 +1057,34 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
                 "topup_app {privilege} on {table} should be {expected}"
             );
         }
-        let denied = sqlx::query("DELETE FROM reconciliation_blocks")
-            .execute(&pool)
-            .await
-            .err()
-            .and_then(|error| {
-                error
-                    .as_database_error()
-                    .and_then(|error| error.code())
-                    .map(|code| code.into_owned())
-            });
-        ensure!(denied.as_deref() == Some("42501"));
+        sqlx::query(
+            r#"
+            INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
+            VALUES ('chain:31337', 'chain', 31337, 'address_derivation', 'test freeze')
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+        for statement in [
+            "DELETE FROM reconciliation_blocks",
+            "UPDATE reconciliation_blocks SET chain_id = 1",
+        ] {
+            let denied = sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .err()
+                .and_then(|error| {
+                    error
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .map(|code| code.into_owned())
+                });
+            ensure!(
+                denied.as_deref() == Some("42501"),
+                "{statement} must be denied"
+            );
+        }
+        ensure!(frozen_chains(&pool, &[route()?]).await? == BTreeSet::from([CHAIN_ID]));
         Ok(())
     })
     .await
@@ -1019,6 +1175,17 @@ fn has_check(report: &ReconciliationReport, check: CheckName) -> bool {
         .findings
         .iter()
         .any(|finding| finding.check == check && !finding.repair_applied && !finding.incomplete)
+}
+
+/// Records that the scanner has backfilled every address and committed through `block`.
+async fn scanned_through(pool: &PgPool, block: u64) -> Result<()> {
+    let ids = db::list_scan_addresses(pool, CHAIN_ID)
+        .await?
+        .into_iter()
+        .map(|address| address.id)
+        .collect::<Vec<_>>();
+    db::commit_scan(pool, CHAIN_ID, &[], &ids, Some(block)).await?;
+    Ok(())
 }
 
 async fn count(pool: &PgPool, query: &str) -> Result<i64> {

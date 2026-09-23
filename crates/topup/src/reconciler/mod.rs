@@ -39,7 +39,9 @@ use crate::steps::settle::{SettleStepError, adopt_answer, validate_answer_identi
 use store::{CustodyCursor, state_code};
 
 pub use chain::{ReconciliationChain, RpcReconciliationChain};
-pub use store::{blocked_addresses, chain_is_blocked, frozen_chains};
+pub use store::{
+    LeaseOwnerLock, blocked_addresses, chain_is_blocked, frozen_chains, hold_lease_owner_lock,
+};
 pub use types::{CheckName, Finding, ReconciliationMetrics, ReconciliationReport};
 
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
@@ -73,6 +75,8 @@ pub enum ReconciliationError {
     Encode(serde_json::Error),
     /// Durable data violated an internal invariant.
     Invariant(&'static str),
+    /// The lease-owner lock is held in a conflicting mode by another process.
+    LeaseOwnerLock(&'static str),
 }
 
 impl ReconciliationError {
@@ -86,6 +90,7 @@ impl ReconciliationError {
             Self::Database(_) => "database",
             Self::Encode(_) => "encode",
             Self::Invariant(message) => message,
+            Self::LeaseOwnerLock(_) => "lease_owner_lock_held",
         }
     }
 }
@@ -98,7 +103,9 @@ impl Display for ReconciliationError {
             }
             Self::Database(error) => Display::fmt(error, formatter),
             Self::Encode(error) => Display::fmt(error, formatter),
-            Self::Invariant(message) => formatter.write_str(message),
+            Self::Invariant(message) | Self::LeaseOwnerLock(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -108,9 +115,11 @@ impl Error for ReconciliationError {
         match self {
             Self::Database(error) => Some(error),
             Self::Encode(error) => Some(error),
-            Self::Configuration(_) | Self::Chain(_) | Self::Settlement(_) | Self::Invariant(_) => {
-                None
-            }
+            Self::Configuration(_)
+            | Self::Chain(_)
+            | Self::Settlement(_)
+            | Self::Invariant(_)
+            | Self::LeaseOwnerLock(_) => None,
         }
     }
 }
@@ -308,9 +317,16 @@ impl Reconciler {
 
     /// Runs the restore gate: every regular check plus authoritative product GETs.
     ///
-    /// [`ReconciliationReport::incomplete`] is driven only by the product GETs.
+    /// The gate preempts restored deposit leases, so it refuses to run while any process holds
+    /// the [`LeaseOwnerLock`]. [`ReconciliationReport::incomplete`] is driven only by the
+    /// product GETs.
     pub async fn post_restore_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
-        Ok(self.run_checks(true).await)
+        let lock = store::exclusive_lease_owner_lock(&self.pool).await?;
+        let report = self.run_checks(true).await;
+        if let Err(error) = lock.release().await {
+            tracing::warn!(%error, "failed to release the post-restore lease-owner lock");
+        }
+        Ok(report)
     }
 
     /// Runs one check without persisting its findings.
@@ -491,8 +507,10 @@ impl Reconciler {
 
     /// Scans incrementally from a durable cursor, at most [`MAX_WINDOWS_PER_ROUND`] windows.
     ///
-    /// The address list is read after the finalized head, so an address issued later can only
-    /// receive transfers above the scanned range.
+    /// The scan never passes the range the scanner has committed, so a transfer the scanner has
+    /// not reached yet is not reported as missing, and a frozen chain's scan stops with its
+    /// scanner. The address list is read after the finalized head and the scanner cursor, so an
+    /// address issued later can only receive transfers above the scanned range.
     async fn missing_deposits_for_chain(
         &self,
         chain_id: u64,
@@ -502,7 +520,23 @@ impl Reconciler {
     ) -> Result<(), ReconciliationError> {
         let chain = Arc::clone(self.chain(chain_id)?);
         let finalized = self.finalized(heads, chain_id).await?;
+        let Some(scanned) = db::get_cursor(&self.pool, chain_id).await? else {
+            tracing::warn!(
+                chain_id,
+                reason = "no_cursor",
+                "missing-deposit check skipped: the scanner has not committed a range"
+            );
+            return Ok(());
+        };
         let addresses = db::list_scan_addresses(&self.pool, chain_id).await?;
+        let Some(through) = scanner_covered_through(finalized.min(scanned), &addresses) else {
+            tracing::warn!(
+                chain_id,
+                reason = "pending_backfill",
+                "missing-deposit check skipped: an address awaits its scanner backfill"
+            );
+            return Ok(());
+        };
         let mut cursor = store::deposit_cursor(&self.pool, chain_id).await?;
         let Some(start) = cursor.or_else(|| first_created_block(&addresses)) else {
             return Ok(());
@@ -511,7 +545,7 @@ impl Reconciler {
             .iter()
             .map(|address| address.address)
             .collect::<Vec<_>>();
-        for (from_block, to_block) in bounded_windows(start, finalized)? {
+        for (from_block, to_block) in bounded_windows(start, through)? {
             for batch in physical.chunks(MAX_ADDRESSES_PER_REQUEST) {
                 let logs = chain.transfer_logs_to(batch, from_block, to_block).await?;
                 for deposit in resolve_logs_for_reconciliation(logs, &addresses, routes)? {
@@ -1092,6 +1126,9 @@ impl Reconciler {
             )?);
         }
 
+        // Only transfers from our forwarders count as inflow: the treasury also receives finance
+        // top-ups and other funds that no `Flushed` event accounts for, so comparing its total
+        // inflow would alert on every such transfer.
         let factory = route.chain.contracts.forwarder_factory;
         let treasury = route.chain.contracts.treasury;
         let cursor = store::custody_cursor(&self.pool, chain_id, factory, token).await?;
@@ -1250,6 +1287,19 @@ const fn settlement_check(post_restore: bool) -> CheckName {
 
 fn first_created_block(addresses: &[ScanAddress]) -> Option<u64> {
     addresses.iter().map(|address| address.created_block).min()
+}
+
+/// Returns the last block the scanner has covered for every address, if any.
+///
+/// The scanner cursor covers only backfilled addresses; one still awaiting its backfill is
+/// covered only below its creation block.
+fn scanner_covered_through(scanned: u64, addresses: &[ScanAddress]) -> Option<u64> {
+    addresses
+        .iter()
+        .filter(|address| !address.backfilled)
+        .try_fold(scanned, |through, address| {
+            Some(through.min(address.created_block.checked_sub(1)?))
+        })
 }
 
 /// Splits `[from, to]` into scan windows, capped at [`MAX_WINDOWS_PER_ROUND`].
