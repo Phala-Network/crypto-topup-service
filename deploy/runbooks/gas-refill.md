@@ -51,7 +51,22 @@ cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 
 Both providers show the finalized balance and the pending nonce is expected. Resume the `flush`
 scope, then require flush maintenance to confirm or replace the existing row and send new plans for
-the addresses of any plan that logged `flush.send_paused`.
+the addresses of any plan that logged `flush.send_paused`. Each audit `reason` lists the voided
+plan's token and `address ids [...]`; confirm that a later `planned`, `sent`, or `confirmed` flush
+for that token carries those ids in `receipt->'plan'`:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<'SQL'
+BEGIN TRANSACTION READ ONLY;
+SELECT subject AS voided_flush_id,reason,created_at FROM audit
+WHERE action='flush.send_paused' ORDER BY created_at DESC LIMIT 20;
+SELECT id,token,nonce::text,status,item->>'address_id' AS address_id FROM flushes,
+  jsonb_array_elements(receipt->'plan') AS item
+WHERE chain_id=:chain_id AND status IN ('planned','sent','confirmed')
+ORDER BY nonce DESC LIMIT 100;
+COMMIT;
+SQL
+```
 
 ## Rollback
 

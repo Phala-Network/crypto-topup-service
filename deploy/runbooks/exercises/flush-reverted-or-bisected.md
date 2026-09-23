@@ -33,8 +33,8 @@ plans, and bisected until `IsolatedAddress` identified the blocked forwarder. It
 stale-plan operator re-binding and its `flush.plan_operator_rebound` audit record.
 `flush_pauses_gate_planning_and_sending_without_blocking_confirmation` covers the runbook's stop:
 account, product, and route `flush` pauses exclude addresses from planning, a plan paused before
-send stays `planned` with one `flush.send_paused` audit row, and an already sent flush still
-confirms.
+send stays `planned` with one `flush.send_paused` audit row (pre-#71 behaviour; see the re-run
+below), and an already sent flush still confirms.
 
 Re-run on 2026-09-23 for [#71](https://github.com/Phala-Network/crypto-topup-service/issues/71) as
 part of `cargo test --workspace --locked --all-features --no-fail-fast` against a task-scoped

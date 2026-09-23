@@ -446,10 +446,12 @@ pub async fn next_planned_flush(
 ///
 /// The caller holds the operator nonce lock and the plan's row lock. The plan's addresses are
 /// planned again once the pause lifts, so a pause on one route, product, or account never holds
-/// the operator nonce needed by every later flush on the chain.
+/// the operator nonce needed by every later flush on the chain. The audit reason keeps the token
+/// and address identifiers so operators can confirm that later plans cover them.
 pub async fn void_paused_plan(
     transaction: &mut Transaction<'_, Postgres>,
     plan: &Flush,
+    address_ids: &[Uuid],
     paused: &str,
 ) -> Result<(), sqlx::Error> {
     let deleted = sqlx::query("DELETE FROM flushes WHERE id = $1 AND status = 'planned'")
@@ -493,9 +495,15 @@ pub async fn void_paused_plan(
     .bind(Uuid::new_v4())
     .bind(plan.id.to_string())
     .bind(format!(
-        "voided unsigned plan at operator {operator} nonce {}: {paused} has the flush scope \
-         paused; {} later plan(s) moved down one nonce",
+        "voided unsigned plan for token {} at operator {operator} nonce {}: {paused} has the \
+         flush scope paused; address ids [{}]; {} later plan(s) moved down one nonce",
+        address_hex(plan.token),
         plan.nonce,
+        address_ids
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
         later.len()
     ))
     .execute(&mut **transaction)

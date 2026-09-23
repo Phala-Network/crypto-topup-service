@@ -158,7 +158,7 @@ impl Flusher {
             )
             .await?
             {
-                db::void_paused_plan(&mut transaction, &flush, &paused).await?;
+                db::void_paused_plan(&mut transaction, &flush, &address_ids, &paused).await?;
                 transaction.commit().await?;
                 crate::observability::record_flush_send_paused(route.chain.chain_id);
                 tracing::info!(

@@ -93,6 +93,11 @@ cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.dat
 - Isolated address: verify token behavior and forwarder balance; keep only that address excluded.
 - Missing consumed receipt: follow operator compromise/provider investigation.
 - Fee cap reached: review gas policy, not the batch contents.
+- Pause during bisection: a paused revert replan is voided like any other plan, so its
+  `failure_attempt` and `parent_flush_id` are discarded and bisection restarts from a fresh plan
+  after resume. Isolation then depends on gas estimation excluding the failing address (`flush_exclusions`,
+  `PlanningExcluded`) or on the fresh plan reverting again; expect `IsolatedAddress` later than
+  without the pause, and keep the pause short while a bisection is in progress.
 
 ## Remediation
 

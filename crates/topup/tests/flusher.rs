@@ -356,6 +356,49 @@ async fn paused_route_plan_is_voided_so_later_plans_on_the_chain_still_send() ->
 }
 
 #[tokio::test]
+async fn voiding_the_first_plan_renumbers_later_plans_across_tokens_contiguously() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x65; 20]);
+            let paused = test_route(factory, Address::from([0x66; 20]))?;
+            let mut other = test_route(factory, Address::from([0x67; 20]))?;
+            other.route = "other-route".to_owned();
+            seed_addresses(&database.pool, factory, Address::from([0x68; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let paused_plan = planner.plan(&paused).await?.context("plan paused route")?;
+            let other_plan = planner.plan(&other).await?.context("plan other route")?;
+            // Interleave further unsigned plans of both tokens behind the first two.
+            let other_later = copy_planned_flush(&database.pool, other_plan, 2).await?;
+            let paused_later = copy_planned_flush(&database.pool, paused_plan, 3).await?;
+
+            set_route_flush_pause(&database.pool, &paused.route, true).await?;
+            ensure!(
+                flusher.send_next(&other).await?
+                    == RunResult::Sent {
+                        flush_id: other_plan
+                    }
+            );
+            voided_reason(&database.pool, paused_plan).await?;
+            let nonces: Vec<(Uuid, String, String)> =
+                sqlx::query_as("SELECT id, nonce::text, status FROM flushes ORDER BY nonce")
+                    .fetch_all(&database.pool)
+                    .await?;
+            ensure!(
+                nonces
+                    == [
+                        (other_plan, "0".to_owned(), "sent".to_owned()),
+                        (other_later, "1".to_owned(), "planned".to_owned()),
+                        (paused_later, "2".to_owned(), "planned".to_owned()),
+                    ],
+                "unexpected nonces after voiding: {nonces:?}"
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
@@ -368,11 +411,16 @@ async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Res
 
             set_account_flush_pause(&database.pool, seeded[0].account_id, true).await?;
             ensure!(flusher.send_next(&route).await? == RunResult::Idle);
-            ensure!(
-                voided_reason(&database.pool, batch)
-                    .await?
-                    .contains(&format!("account {}", seeded[0].account_id))
-            );
+            let reason = voided_reason(&database.pool, batch).await?;
+            ensure!(reason.contains(&format!("account {}", seeded[0].account_id)));
+            ensure!(reason.contains(&format!("token {:#x}", route.asset.contract)));
+            let ids = reason
+                .split_once("address ids [")
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(ids, _)| ids)
+                .context("reason lists the voided address ids")?;
+            ensure!(ids.contains(&seeded[0].id.to_string()));
+            ensure!(ids.contains(&seeded[1].id.to_string()));
             let replan = planner
                 .plan(&route)
                 .await?
@@ -1854,6 +1902,23 @@ async fn wait_for_lock_wait(pool: &PgPool, statement: &str) -> Result<()> {
         tokio::time::sleep(StdDuration::from_millis(20)).await;
     }
     bail!("no session blocked inside `{statement}`")
+}
+
+async fn copy_planned_flush(pool: &PgPool, source: Uuid, nonce: u64) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO flushes (id, chain_id, token, operator, nonce, status, receipt)
+        SELECT $2, chain_id, token, operator, $3::text::numeric, status, receipt
+        FROM flushes WHERE id = $1 AND status = 'planned'
+        "#,
+    )
+    .bind(source)
+    .bind(id)
+    .bind(nonce.to_string())
+    .execute(pool)
+    .await?;
+    Ok(id)
 }
 
 async fn flush_nonce(pool: &PgPool, flush_id: Uuid) -> Result<u64> {
