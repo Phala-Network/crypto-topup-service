@@ -30,7 +30,7 @@ therefore produces a new factory address and requires a new route version.
 - The Finance Safe deployed at the same address on every target chain with the same owners and
   threshold.
 - Finance approval of the Safe version: its proxy runtime code hash, singleton address, and
-  singleton runtime code hash.
+  singleton runtime code hash; and of the Safe's enabled modules, guard, and fallback handler.
 
 Before deployment, replace the intentionally unconfigured values in
 `deploy/contracts/safe-expectations.json` and set `configured` to `true`. This file contains no
@@ -40,14 +40,21 @@ secrets and is the single source of truth for the factory constructor inputs:
 - `admin` and `treasury`: the factory `DEFAULT_ADMIN_ROLE` holder and the forwarder treasury.
   Each must match exactly one entry in `safes`; they may be the same Safe.
 - `safes[]`: for each approved Safe, its `address`, `owners`, `threshold`, allowed
-  `proxy_code_hashes`, `singleton`, and `singleton_code_hash`.
+  `proxy_code_hashes`, `singleton`, `singleton_code_hash`, enabled `modules` (usually `[]`),
+  `guard`, and `fallback_handler`. Use the zero address for "no guard" or "no fallback handler";
+  a Safe created through the Safe UI normally has the `CompatibilityFallbackHandler` set.
 
 `verify-safe.sh` checks each Safe on every target: the RPC's `eth_chainId` equals the committed
 chain id for the target network, the address has code (an EOA is rejected), the proxy runtime code
 hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton, the
-singleton's runtime code hash matches, owners match as a set, and the threshold matches exactly.
+singleton's runtime code hash matches, owners match as a set, the threshold matches exactly, the
+enabled modules (`getModulesPaginated`) match as a set, and the guard and fallback handler storage
+slots of Safe v1.4.1 hold exactly the approved addresses.
 The singleton check matters because every Safe proxy has the same runtime code; only slot 0
 decides which implementation answers `getOwners()` and `getThreshold()` and executes transactions.
+Modules, the guard, and the fallback handler matter because a module can execute from the Safe
+without the owners' signatures, a guard can block Safe transactions, and the fallback handler
+answers calls the Safe does not implement itself.
 
 Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects the expected chain id and the optional
 label distinguishes providers in the report. Verify the Safes independently on every chain:

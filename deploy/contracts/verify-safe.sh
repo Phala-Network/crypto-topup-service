@@ -17,6 +17,13 @@ done
 require_command cast
 require_command jq
 
+# Safe v1.4.1 constants: keccak256("guard_manager.guard.address"),
+# keccak256("fallback_manager.handler.address"), and the module list sentinel.
+GUARD_STORAGE_SLOT="0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8"
+FALLBACK_HANDLER_STORAGE_SLOT="0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5"
+SENTINEL_MODULES="0x0000000000000000000000000000000000000001"
+MODULES_PAGE_SIZE=100
+
 load_expectations "$expectations"
 
 # Verify each approved Safe once, reporting every role it fills.
@@ -78,6 +85,42 @@ for entry in "${rpcs[@]}"; do
         [[ "$(lower "$master_copy_actual")" == "$expected_singleton" ]] && master_copy_ok=true
         [[ "$singleton_code_hash" == "$expected_singleton_code_hash" ]] && singleton_code_hash_ok=true
 
+        # Safe v1.4.1 keeps the guard and fallback handler in fixed slots and the modules in a
+        # sentinel-terminated list. Any of them can move funds or veto transactions without the
+        # owners, so each must match the approved set exactly (zero address for none).
+        expected_modules="$(jq -c '.modules | map(ascii_downcase) | sort' <<<"$expected")"
+        expected_guard="$(lower "$(jq -r '.guard' <<<"$expected")")"
+        expected_fallback_handler="$(lower "$(jq -r '.fallback_handler' <<<"$expected")")"
+        modules_json='"error"'
+        modules_ok=false
+        modules_error=""
+        if modules_call="$(cast call "$address" 'getModulesPaginated(address,uint256)(address[],address)' \
+            "$SENTINEL_MODULES" "$MODULES_PAGE_SIZE" --json --rpc-url "$TARGET_RPC_URL" 2>/dev/null)"; then
+            modules_json="$(jq -c '.[0] | map(ascii_downcase) | sort' <<<"$modules_call")"
+            # A next pointer other than the sentinel means the list did not fit in one page.
+            if [[ "$(lower "$(jq -r '.[1]' <<<"$modules_call")")" != "$SENTINEL_MODULES" ]]; then
+                modules_error="module list did not end at the sentinel (more than $MODULES_PAGE_SIZE modules)"
+            elif [[ "$modules_json" != "$expected_modules" ]]; then
+                modules_error="modules $modules_json do not match $expected_modules"
+            fi
+        else
+            modules_error="getModulesPaginated failed; the enabled modules cannot be read"
+        fi
+        [[ -n "$modules_error" ]] || modules_ok=true
+        guard_actual="error"
+        if slot="$(cast storage "$address" "$GUARD_STORAGE_SLOT" --rpc-url "$TARGET_RPC_URL" 2>/dev/null)"; then
+            guard_actual="$(lower "0x${slot: -40}")"
+        fi
+        fallback_handler_actual="error"
+        if slot="$(cast storage "$address" "$FALLBACK_HANDLER_STORAGE_SLOT" \
+            --rpc-url "$TARGET_RPC_URL" 2>/dev/null)"; then
+            fallback_handler_actual="$(lower "0x${slot: -40}")"
+        fi
+        guard_ok=false
+        fallback_handler_ok=false
+        [[ "$guard_actual" == "$expected_guard" ]] && guard_ok=true
+        [[ "$fallback_handler_actual" == "$expected_fallback_handler" ]] && fallback_handler_ok=true
+
         owners_json='[]'
         threshold_actual="unknown"
         owners_ok=false
@@ -104,6 +147,10 @@ for entry in "${rpcs[@]}"; do
         [[ "$owners_ok" == true ]] || fail "$address owners $owners_json do not match $expected_owners"
         [[ "$threshold_ok" == true ]] || \
             fail "$address threshold $threshold_actual does not match $expected_threshold"
+        [[ "$modules_ok" == true ]] || fail "$address $modules_error"
+        [[ "$guard_ok" == true ]] || fail "$address guard $guard_actual does not match $expected_guard"
+        [[ "$fallback_handler_ok" == true ]] || \
+            fail "$address fallback handler $fallback_handler_actual does not match $expected_fallback_handler"
 
         safe_reports="$(jq -c \
             --arg address "$address" \
@@ -114,6 +161,9 @@ for entry in "${rpcs[@]}"; do
             --arg singleton_code_hash "$singleton_code_hash" \
             --argjson owners "$owners_json" \
             --arg threshold "$threshold_actual" \
+            --argjson modules "$modules_json" \
+            --arg guard "$guard_actual" \
+            --arg fallback_handler "$fallback_handler_actual" \
             --argjson contract_ok "$contract_ok" \
             --argjson code_hash_ok "$code_hash_ok" \
             --argjson singleton_ok "$singleton_ok" \
@@ -121,14 +171,20 @@ for entry in "${rpcs[@]}"; do
             --argjson singleton_code_hash_ok "$singleton_code_hash_ok" \
             --argjson owners_ok "$owners_ok" \
             --argjson threshold_ok "$threshold_ok" \
+            --argjson modules_ok "$modules_ok" \
+            --argjson guard_ok "$guard_ok" \
+            --argjson fallback_handler_ok "$fallback_handler_ok" \
             '. + [{address: $address, roles: $roles, code_hash: $code_hash,
                    singleton: $singleton, master_copy: $master_copy,
                    singleton_code_hash: $singleton_code_hash,
-                   owners: $owners, threshold: $threshold,
+                   owners: $owners, threshold: $threshold, modules: $modules,
+                   guard: $guard, fallback_handler: $fallback_handler,
                    checks: {contract: $contract_ok, safe_proxy_code_hash: $code_hash_ok,
                             singleton: $singleton_ok, master_copy: $master_copy_ok,
                             singleton_code_hash: $singleton_code_hash_ok,
-                            owners: $owners_ok, threshold: $threshold_ok}}
+                            owners: $owners_ok, threshold: $threshold_ok,
+                            modules: $modules_ok, guard: $guard_ok,
+                            fallback_handler: $fallback_handler_ok}}
                   | .passed = all(.checks[]; .)]' <<<"$safe_reports")"
     done
 
