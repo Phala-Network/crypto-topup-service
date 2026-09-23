@@ -21,8 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -31,12 +30,9 @@ use topup::outbox::{DeliveryConfig, DeliveryWorker, SignedWebhook};
 use topup_core::{
     Ed25519PublicKey, Ed25519Signature, SignedTx, Signer as CoreSigner, SignerError, TxRequest,
 };
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+use support::TestDatabase;
 
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
@@ -332,110 +328,6 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, ()> {
     headers.get(name).ok_or(())?.to_str().map_err(|_| ())
 }
 
-struct TestContext {
-    admin_pool: PgPool,
-    owner_pool: PgPool,
-    app_pool: PgPool,
-    database_name: String,
-    app_role: String,
-    app_url: String,
-}
-
-impl TestContext {
-    async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
-            return Ok(None);
-        };
-        let Some(app_template) = required_url("DATABASE_URL") else {
-            return Ok(None);
-        };
-        let mut admin_url = Url::parse(&owner_template)?;
-        admin_url.set_path("/postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await?;
-        support::ensure_app_role(&admin_pool).await?;
-        sqlx::query("SELECT pg_advisory_lock(704_201_013)")
-            .execute(&admin_pool)
-            .await?;
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c13_{suffix}");
-        let app_role = format!("topup_c13_app_{suffix}");
-        let password = format!("c13_{suffix}");
-        admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
-            .await?;
-
-        let mut owner_url = Url::parse(&owner_template)?;
-        owner_url.set_path(&format!("/{database_name}"));
-        let owner_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(owner_url.as_str())
-            .await?;
-        db::migrate(&owner_pool).await?;
-        admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
-            .await?;
-
-        let mut app_url = Url::parse(&app_template)?;
-        app_url
-            .set_username(&app_role)
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application username"))?;
-        app_url
-            .set_password(Some(&password))
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application password"))?;
-        app_url.set_path(&format!("/{database_name}"));
-        let app_url = app_url.to_string();
-        let app_pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(&app_url)
-            .await?;
-        sqlx::query("SELECT pg_advisory_unlock(704_201_013)")
-            .execute(&admin_pool)
-            .await?;
-
-        Ok(Some(Self {
-            admin_pool,
-            owner_pool,
-            app_pool,
-            database_name,
-            app_role,
-            app_url,
-        }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.app_pool.close().await;
-        self.owner_pool.close().await;
-        self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
-            .await?;
-        self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
-            .await?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
-}
-
-fn required_url(name: &str) -> Option<String> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping outbox integration test: {name} is not set");
-            None
-        }
-    }
-}
-
 fn worker(pool: &PgPool, signer: Arc<TestSigner>) -> Result<DeliveryWorker<TestSigner>> {
     worker_with_timeout(pool, signer, StdDuration::from_secs(2))
 }
@@ -539,7 +431,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
 
 #[tokio::test]
 async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -575,7 +467,7 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
 
 #[tokio::test]
 async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -615,7 +507,7 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
 
 #[tokio::test]
 async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -640,7 +532,7 @@ async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
 
 #[tokio::test]
 async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -681,7 +573,7 @@ async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
 
 #[tokio::test]
 async fn different_events_for_one_product_are_delivered_sequentially() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -716,7 +608,7 @@ async fn different_events_for_one_product_are_delivered_sequentially() -> Result
 
 #[tokio::test]
 async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -750,7 +642,7 @@ async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
 
 #[tokio::test]
 async fn redirect_is_not_followed_and_is_recorded() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -779,7 +671,7 @@ async fn redirect_is_not_followed_and_is_recorded() -> Result<()> {
 
 #[tokio::test]
 async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
@@ -823,7 +715,7 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
 
 #[tokio::test]
 async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
-    let Some(context) = TestContext::create().await? else {
+    let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());

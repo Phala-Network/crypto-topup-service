@@ -4,13 +4,8 @@
 
 mod support;
 
-use std::env;
-use std::future::Future;
-use std::net::TcpListener;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
@@ -19,8 +14,6 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
@@ -40,12 +33,10 @@ use topup_core::route::RouteFile;
 use topup_core::{
     Ed25519PublicKey, Ed25519Signature, SecretKey32, SignedTx, Signer, SignerError, TxRequest,
 };
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+use support::chain::{Anvil, forge_create};
+use support::with_database;
 
 const ADMIN_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 const ADMIN_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -55,96 +46,6 @@ const ROTATED_ADDRESS: &str = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
 const ROTATED_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const TREASURY: &str = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc";
 const TOKEN_AMOUNT: &str = "100000000000000000000";
-
-type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
-
-struct Database {
-    admin: PgPool,
-    pool: PgPool,
-    name: String,
-}
-
-impl Database {
-    async fn create() -> Result<Option<Self>> {
-        let Some(template) = env::var("MIGRATE_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.is_empty())
-        else {
-            eprintln!("skipping flusher integration test: MIGRATE_DATABASE_URL is not set");
-            return Ok(None);
-        };
-        let mut admin_url = Url::parse(&template)?;
-        admin_url.set_path("/postgres");
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await?;
-        support::ensure_app_role(&admin).await?;
-        let name = format!("topup_c7_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&admin)
-            .await?;
-        let mut database_url = Url::parse(&template)?;
-        database_url.set_path(&format!("/{name}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(database_url.as_str())
-            .await?;
-        topup::db::migrate(&pool).await?;
-        Ok(Some(Self { admin, pool, name }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-            .execute(&self.admin)
-            .await?;
-        self.admin.close().await;
-        Ok(())
-    }
-}
-
-struct Anvil {
-    child: Child,
-    rpc_url: String,
-}
-
-impl Anvil {
-    fn start() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
-        let child = Command::new("anvil")
-            .args([
-                "--silent",
-                "--port",
-                &port.to_string(),
-                "--chain-id",
-                "31337",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start anvil")?;
-        let rpc_url = format!("http://127.0.0.1:{port}");
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Ok(Self { child, rpc_url });
-            }
-            std::thread::sleep(StdDuration::from_millis(25));
-        }
-        bail!("anvil did not start")
-    }
-}
-
-impl Drop for Anvil {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 #[derive(Clone)]
 struct FixedPrice;
@@ -270,10 +171,10 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
         Box::pin(async move {
             let factory = Address::from([0x51; 20]);
             let route = test_route(factory, Address::from([0x52; 20]))?;
-            let seeded = seed_addresses(&database.pool, factory, Address::from([0x53; 20])).await?;
+            let seeded = seed_addresses(&database.app_pool, factory, Address::from([0x53; 20])).await?;
             let chain = Arc::new(StubChain::default());
             let planner = Planner::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer_handle(OPERATOR_KEY)?,
                 Arc::new(FixedPrice),
@@ -286,18 +187,18 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
                 VALUES ('chain:31337', 'chain', 31337, 'address_derivation', 'test freeze')
                 "#,
             )
-            .execute(&database.pool)
+            .execute(&database.app_pool)
             .await?;
             ensure!(planner.plan(&route).await?.is_none());
             ensure!(*chain.calls.lock().expect("call mutex is available") == 0);
             let flushes: i64 = sqlx::query_scalar("SELECT count(*) FROM flushes")
-                .fetch_one(&database.pool)
+                .fetch_one(&database.app_pool)
                 .await?;
             ensure!(flushes == 0);
 
             // Unfreezing is the owner deleting the block row; planning resumes without restart.
             sqlx::query("DELETE FROM reconciliation_blocks WHERE block_key = 'chain:31337'")
-                .execute(&database.pool)
+                .execute(&database.owner_pool)
                 .await?;
             sqlx::query(
                 r#"
@@ -308,7 +209,7 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
             )
             .bind(format!("address:{}", seeded[0].id))
             .bind(seeded[0].id)
-            .execute(&database.pool)
+            .execute(&database.app_pool)
             .await?;
             let flush_id = planner.plan(&route).await?.context("plan unblocked address")?;
             let reads = chain
@@ -321,7 +222,7 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
                 "SELECT item->>'address_id' FROM flushes, jsonb_array_elements(receipt->'plan') AS item WHERE id = $1",
             )
             .bind(flush_id)
-            .fetch_all(&database.pool)
+            .fetch_all(&database.app_pool)
             .await?;
             ensure!(planned == [seeded[1].id.to_string()]);
             Ok(())
@@ -338,23 +239,23 @@ async fn paused_route_plan_is_voided_so_later_plans_on_the_chain_still_send() ->
             let paused = test_route(factory, Address::from([0x62; 20]))?;
             let mut other = test_route(factory, Address::from([0x63; 20]))?;
             other.route = "other-route".to_owned();
-            seed_addresses(&database.pool, factory, Address::from([0x64; 20])).await?;
-            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            seed_addresses(&database.app_pool, factory, Address::from([0x64; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.app_pool, signer_handle(OPERATOR_KEY)?);
             let paused_plan = planner.plan(&paused).await?.context("plan paused route")?;
             let other_plan = planner.plan(&other).await?.context("plan other route")?;
-            ensure!(flush_nonce(&database.pool, paused_plan).await? == 0);
-            ensure!(flush_nonce(&database.pool, other_plan).await? == 1);
+            ensure!(flush_nonce(&database.app_pool, paused_plan).await? == 0);
+            ensure!(flush_nonce(&database.app_pool, other_plan).await? == 1);
 
-            set_route_flush_pause(&database.pool, &paused.route, true).await?;
+            set_route_flush_pause(&database.app_pool, &paused.route, true).await?;
             ensure!(
                 flusher.send_next(&other).await?
                     == RunResult::Sent {
                         flush_id: other_plan
                     }
             );
-            ensure!(flush_nonce(&database.pool, other_plan).await? == 0);
+            ensure!(flush_nonce(&database.app_pool, other_plan).await? == 0);
             ensure!(
-                voided_reason(&database.pool, paused_plan)
+                voided_reason(&database.app_pool, paused_plan)
                     .await?
                     .contains(&format!("route `{}`", paused.route))
             );
@@ -372,25 +273,25 @@ async fn voiding_the_first_plan_renumbers_later_plans_across_tokens_contiguously
             let paused = test_route(factory, Address::from([0x66; 20]))?;
             let mut other = test_route(factory, Address::from([0x67; 20]))?;
             other.route = "other-route".to_owned();
-            seed_addresses(&database.pool, factory, Address::from([0x68; 20])).await?;
-            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            seed_addresses(&database.app_pool, factory, Address::from([0x68; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.app_pool, signer_handle(OPERATOR_KEY)?);
             let paused_plan = planner.plan(&paused).await?.context("plan paused route")?;
             let other_plan = planner.plan(&other).await?.context("plan other route")?;
             // Interleave further unsigned plans of both tokens behind the first two.
-            let other_later = copy_planned_flush(&database.pool, other_plan, 2).await?;
-            let paused_later = copy_planned_flush(&database.pool, paused_plan, 3).await?;
+            let other_later = copy_planned_flush(&database.app_pool, other_plan, 2).await?;
+            let paused_later = copy_planned_flush(&database.app_pool, paused_plan, 3).await?;
 
-            set_route_flush_pause(&database.pool, &paused.route, true).await?;
+            set_route_flush_pause(&database.app_pool, &paused.route, true).await?;
             ensure!(
                 flusher.send_next(&other).await?
                     == RunResult::Sent {
                         flush_id: other_plan
                     }
             );
-            voided_reason(&database.pool, paused_plan).await?;
+            voided_reason(&database.app_pool, paused_plan).await?;
             let nonces: Vec<(Uuid, String, String)> =
                 sqlx::query_as("SELECT id, nonce::text, status FROM flushes ORDER BY nonce")
-                    .fetch_all(&database.pool)
+                    .fetch_all(&database.app_pool)
                     .await?;
             ensure!(
                 nonces
@@ -413,14 +314,15 @@ async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Res
         Box::pin(async move {
             let factory = Address::from([0x71; 20]);
             let route = test_route(factory, Address::from([0x72; 20]))?;
-            let seeded = seed_addresses(&database.pool, factory, Address::from([0x73; 20])).await?;
-            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let seeded =
+                seed_addresses(&database.app_pool, factory, Address::from([0x73; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.app_pool, signer_handle(OPERATOR_KEY)?);
             let batch = planner.plan(&route).await?.context("plan batch")?;
-            ensure!(planned_address_ids(&database.pool, batch).await?.len() == 2);
+            ensure!(planned_address_ids(&database.app_pool, batch).await?.len() == 2);
 
-            set_account_flush_pause(&database.pool, seeded[0].account_id, true).await?;
+            set_account_flush_pause(&database.app_pool, seeded[0].account_id, true).await?;
             ensure!(flusher.send_next(&route).await? == RunResult::Idle);
-            let reason = voided_reason(&database.pool, batch).await?;
+            let reason = voided_reason(&database.app_pool, batch).await?;
             ensure!(reason.contains(&format!("account {}", seeded[0].account_id)));
             ensure!(reason.contains(&format!("token {:#x}", route.asset.contract)));
             let ids = reason
@@ -435,8 +337,8 @@ async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Res
                 .await?
                 .context("replan without paused")?;
             ensure!(replan != batch);
-            ensure!(planned_address_ids(&database.pool, replan).await? == [seeded[1].id]);
-            ensure!(flush_nonce(&database.pool, replan).await? == 0);
+            ensure!(planned_address_ids(&database.app_pool, replan).await? == [seeded[1].id]);
+            ensure!(flush_nonce(&database.app_pool, replan).await? == 0);
             ensure!(flusher.send_next(&route).await? == RunResult::Sent { flush_id: replan });
             Ok(())
         })
@@ -450,7 +352,8 @@ async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
         Box::pin(async move {
             let factory = Address::from([0x81; 20]);
             let route = test_route(factory, Address::from([0x82; 20]))?;
-            let seeded = seed_addresses(&database.pool, factory, Address::from([0x83; 20])).await?;
+            let seeded =
+                seed_addresses(&database.app_pool, factory, Address::from([0x83; 20])).await?;
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             let gated = SignerHandle::spawn(
@@ -462,14 +365,14 @@ async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
                 NonZeroUsize::new(8).context("queue is non-zero")?,
                 StdDuration::from_secs(10),
             )?;
-            let (planner, flusher) = stub_flusher(&database.pool, gated);
+            let (planner, flusher) = stub_flusher(&database.app_pool, gated);
             let batch = planner.plan(&route).await?.context("plan batch")?;
 
             let pause_while_signing = async {
                 entered.notified().await;
                 let paused = tokio::time::timeout(
                     StdDuration::from_secs(2),
-                    set_account_flush_pause(&database.pool, seeded[0].account_id, true),
+                    set_account_flush_pause(&database.app_pool, seeded[0].account_id, true),
                 )
                 .await;
                 release.notify_one();
@@ -480,7 +383,7 @@ async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
             // The pause committed while the signer ran is still honored before the plan is sent.
             ensure!(sent? == RunResult::Idle);
             ensure!(
-                voided_reason(&database.pool, batch)
+                voided_reason(&database.app_pool, batch)
                     .await?
                     .contains(&format!("account {}", seeded[0].account_id))
             );
@@ -496,23 +399,24 @@ async fn first_route_pause_waits_for_a_send_that_passed_the_route_check() -> Res
         Box::pin(async move {
             let factory = Address::from([0x91; 20]);
             let route = test_route(factory, Address::from([0x92; 20]))?;
-            let seeded = seed_addresses(&database.pool, factory, Address::from([0x93; 20])).await?;
-            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let seeded =
+                seed_addresses(&database.app_pool, factory, Address::from([0x93; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.app_pool, signer_handle(OPERATOR_KEY)?);
             let batch = planner.plan(&route).await?.context("plan batch")?;
             let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM route_pauses")
-                .fetch_one(&database.pool)
+                .fetch_one(&database.app_pool)
                 .await?;
             ensure!(rows == 0, "the route must not have a pause row yet");
 
             // Hold the sender between its route check and its account check.
-            let mut account_lock = database.pool.begin().await?;
+            let mut account_lock = database.app_pool.begin().await?;
             sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
                 .bind(seeded[0].account_id)
                 .execute(&mut *account_lock)
                 .await?;
             let first_pause = async {
-                wait_for_lock_wait(&database.pool, "FOR SHARE OF account, product").await?;
-                let mut pause = database.pool.begin().await?;
+                wait_for_lock_wait(&database.app_pool, "FOR SHARE OF account, product").await?;
+                let mut pause = database.app_pool.begin().await?;
                 sqlx::query("SET LOCAL lock_timeout = '300ms'")
                     .execute(&mut *pause)
                     .await?;
@@ -565,7 +469,7 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
             )?);
             let signer = signer_handle(OPERATOR_KEY)?;
             let flusher = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain,
                 signer,
                 Arc::new(Alerts::default()),
@@ -574,7 +478,7 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
             ensure!(flusher.send_next(&route).await.is_err());
 
             let operator = Address::from_str(OPERATOR_ADDRESS)?;
-            let mut transaction = database.pool.begin().await?;
+            let mut transaction = database.app_pool.begin().await?;
             tokio::time::timeout(
                 StdDuration::from_millis(200),
                 topup::db::lock_operator(&mut transaction, route.chain.chain_id, operator),
@@ -599,38 +503,31 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
     with_database(|database| {
         let metrics = metrics.clone();
         Box::pin(async move {
-            let anvil = Anvil::start()?;
-            let root = repository_root();
-            let factory = deploy(
-                &root,
+            let anvil = Anvil::start(&[]).await?;
+            let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
                 &[ADMIN_ADDRESS, TREASURY],
             )?;
-            let token = deploy(
-                &root,
-                &anvil.rpc_url,
-                "test/mocks/MockTokens.sol:MockERC20",
-                &[],
-            )?;
+            let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
             grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let route = test_route(factory, token)?;
-            let seeded = seed_addresses(&database.pool, factory, implementation).await?;
+            let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
             let address = &seeded[0];
             let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
             let alerts = Arc::new(Alerts::default());
             let signer = signer_handle(OPERATOR_KEY)?;
             let planner = Planner::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 Arc::new(FixedPrice),
                 alerts.clone(),
             );
             let flusher = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain,
                 signer,
                 alerts,
@@ -638,23 +535,23 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             );
 
             mint(&anvil.rpc_url, token, address.physical)?;
-            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, true).await?;
             for _ in 0..2 {
                 ensure!(planner.plan(&route).await?.is_none());
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
             }
-            set_route_flush_pause(&database.pool, &route.route, false).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, false).await?;
             let route_plan = planner
                 .plan(&route)
                 .await?
                 .context("plan before route pause")?;
-            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, true).await?;
             for _ in 0..2 {
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(planner.plan(&route).await?.is_none());
             }
             ensure!(
-                voided_reason(&database.pool, route_plan)
+                voided_reason(&database.app_pool, route_plan)
                     .await?
                     .contains(&format!("route `{}`", route.route))
             );
@@ -664,7 +561,7 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             );
             ensure!(metrics.render().contains(&format!("{send_paused} 1")));
 
-            set_route_flush_pause(&database.pool, &route.route, false).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, false).await?;
             let route_plan = planner
                 .plan(&route)
                 .await?
@@ -675,7 +572,7 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
                         flush_id: route_plan
                     }
             );
-            set_route_flush_pause(&database.pool, &route.route, true).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, true).await?;
             finalize(&anvil.rpc_url)?;
             ensure!(
                 flusher.run_once(&route).await?
@@ -683,32 +580,34 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
                         flush_id: route_plan
                     }
             );
-            set_route_flush_pause(&database.pool, &route.route, false).await?;
+            set_route_flush_pause(&database.app_pool, &route.route, false).await?;
 
             mint(&anvil.rpc_url, token, address.physical)?;
-            set_product_flush_pause(&database.pool, address.product_id, true).await?;
-            let completed_before_product = completed_flush_count(&database.pool).await?;
+            set_product_flush_pause(&database.app_pool, address.product_id, true).await?;
+            let completed_before_product = completed_flush_count(&database.app_pool).await?;
             for _ in 0..2 {
                 ensure!(planner.plan(&route).await?.is_none());
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
-                ensure!(completed_flush_count(&database.pool).await? == completed_before_product);
+                ensure!(
+                    completed_flush_count(&database.app_pool).await? == completed_before_product
+                );
             }
-            set_product_flush_pause(&database.pool, address.product_id, false).await?;
+            set_product_flush_pause(&database.app_pool, address.product_id, false).await?;
             let product_plan = planner
                 .plan(&route)
                 .await?
                 .context("plan after product resume")?;
-            set_product_flush_pause(&database.pool, address.product_id, true).await?;
+            set_product_flush_pause(&database.app_pool, address.product_id, true).await?;
             for _ in 0..2 {
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(planner.plan(&route).await?.is_none());
             }
             ensure!(
-                voided_reason(&database.pool, product_plan)
+                voided_reason(&database.app_pool, product_plan)
                     .await?
                     .contains(&format!("product {}", address.product_id))
             );
-            set_product_flush_pause(&database.pool, address.product_id, false).await?;
+            set_product_flush_pause(&database.app_pool, address.product_id, false).await?;
             let product_plan = planner
                 .plan(&route)
                 .await?
@@ -728,29 +627,31 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             );
 
             mint(&anvil.rpc_url, token, address.physical)?;
-            set_account_flush_pause(&database.pool, address.account_id, true).await?;
-            let completed_before_account = completed_flush_count(&database.pool).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
+            let completed_before_account = completed_flush_count(&database.app_pool).await?;
             for _ in 0..2 {
                 ensure!(planner.plan(&route).await?.is_none());
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
-                ensure!(completed_flush_count(&database.pool).await? == completed_before_account);
+                ensure!(
+                    completed_flush_count(&database.app_pool).await? == completed_before_account
+                );
             }
-            set_account_flush_pause(&database.pool, address.account_id, false).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
             let account_plan = planner
                 .plan(&route)
                 .await?
                 .context("plan after account resume")?;
-            set_account_flush_pause(&database.pool, address.account_id, true).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
             for _ in 0..2 {
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(planner.plan(&route).await?.is_none());
             }
             ensure!(
-                voided_reason(&database.pool, account_plan)
+                voided_reason(&database.app_pool, account_plan)
                     .await?
                     .contains(&format!("account {}", address.account_id))
             );
-            set_account_flush_pause(&database.pool, address.account_id, false).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
             let account_plan = planner
                 .plan(&route)
                 .await?
@@ -772,16 +673,13 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
 -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
-            let anvil = Anvil::start()?;
-            let root = repository_root();
-            let factory = deploy(
-                &root,
+            let anvil = Anvil::start(&[]).await?;
+            let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
                 &[ADMIN_ADDRESS, TREASURY],
             )?;
-            let token = deploy(
-                &root,
+            let token = forge_create(
                 &anvil.rpc_url,
                 "test/mocks/MockTokens.sol:MockERC20",
                 &[],
@@ -790,7 +688,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let mut route = test_route(factory, token)?;
-            let seeded = seed_addresses(&database.pool, factory, implementation).await?;
+            let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
             for address in &seeded {
                 cast_send(
                     &anvil.rpc_url,
@@ -801,7 +699,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 )?;
             }
             let credited = insert_deposit(
-                &database.pool,
+                &database.app_pool,
                 &seeded[0],
                 token,
                 DepositFixture {
@@ -814,7 +712,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             )
             .await?;
             let rejected = insert_deposit(
-                &database.pool,
+                &database.app_pool,
                 &seeded[1],
                 token,
                 DepositFixture {
@@ -830,14 +728,14 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let alerts = Arc::new(Alerts::default());
             let signer = signer_handle(OPERATOR_KEY)?;
             let planner = Planner::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 Arc::new(FixedPrice),
                 alerts.clone(),
             );
             let flusher = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 alerts.clone(),
@@ -863,12 +761,12 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                         flush_id: first_flush
                     })
             );
-            assert_deposit(&database.pool, credited, "swept", Some(first_flush)).await?;
-            assert_deposit(&database.pool, rejected, "rejected", Some(first_flush)).await?;
-            let event_position = first_event_position(&database.pool, first_flush).await?;
+            assert_deposit(&database.app_pool, credited, "swept", Some(first_flush)).await?;
+            assert_deposit(&database.app_pool, rejected, "rejected", Some(first_flush)).await?;
+            let event_position = first_event_position(&database.app_pool, first_flush).await?;
 
             let backfilled = insert_deposit(
-                &database.pool,
+                &database.app_pool,
                 &seeded[0],
                 token,
                 DepositFixture {
@@ -880,9 +778,9 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 },
             )
             .await?;
-            assert_deposit(&database.pool, backfilled, "swept", Some(first_flush)).await?;
+            assert_deposit(&database.app_pool, backfilled, "swept", Some(first_flush)).await?;
             let after = insert_deposit(
-                &database.pool,
+                &database.app_pool,
                 &seeded[0],
                 token,
                 DepositFixture {
@@ -894,7 +792,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 },
             )
             .await?;
-            assert_deposit(&database.pool, after, "credited", None).await?;
+            assert_deposit(&database.app_pool, after, "credited", None).await?;
 
             cast_send(
                 &anvil.rpc_url,
@@ -909,7 +807,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 .context("plan replacement flush")?;
             cast_rpc(&anvil.rpc_url, "evm_setAutomine", &["false"])?;
             let replacement_flusher = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 alerts.clone(),
@@ -941,7 +839,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "SELECT jsonb_array_length(receipt->'signed') FROM flushes WHERE id = $1",
             )
             .bind(replacement_flush)
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?
             .try_get(0)?;
             ensure!(signed_versions == 2);
@@ -949,7 +847,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             cast_rpc(&anvil.rpc_url, "evm_setAutomine", &["true"])?;
             finalize(&anvil.rpc_url)?;
             let restarted = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 alerts.clone(),
@@ -984,11 +882,11 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "SELECT receipt->'signed'->0->>'max_fee_per_gas' FROM flushes WHERE id = $1",
             )
             .bind(capped_flush)
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             let initial_fee = initial_fee.parse::<u128>()?;
             let capped_flusher = Flusher::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 signer.clone(),
                 alerts.clone(),
@@ -1008,7 +906,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "SELECT jsonb_array_length(receipt->'signed') FROM flushes WHERE id = $1",
             )
             .bind(capped_flush)
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             ensure!(capped_versions == 1);
             ensure!(
@@ -1044,7 +942,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let stale_nonce: String =
                 sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
                     .bind(stale_plan)
-                    .fetch_one(&database.pool)
+                    .fetch_one(&database.app_pool)
                     .await?;
             let repeated_plan = planner
                 .plan(&route)
@@ -1054,19 +952,19 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let repeated_nonce: String =
                 sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
                     .bind(repeated_plan)
-                    .fetch_one(&database.pool)
+                    .fetch_one(&database.app_pool)
                     .await?;
             ensure!(repeated_nonce == stale_nonce);
             let pre_rotation_audits: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1",
             )
             .bind(stale_plan.to_string())
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             ensure!(pre_rotation_audits == 0);
             let rotated_signer = signer_handle(ROTATED_KEY)?;
             let rotated_planner = Planner::new(
-                database.pool.clone(),
+                database.app_pool.clone(),
                 chain.clone(),
                 rotated_signer,
                 Arc::new(FixedPrice),
@@ -1080,7 +978,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let rotated_row =
                 sqlx::query("SELECT nonce::text, operator FROM flushes WHERE id = $1")
                     .bind(rotated_flush)
-                    .fetch_one(&database.pool)
+                    .fetch_one(&database.app_pool)
                     .await?;
             let rotated_nonce: String = rotated_row.try_get("nonce")?;
             let rotated_operator: String = rotated_row.try_get("operator")?;
@@ -1094,20 +992,20 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let repeated_rotated_nonce: String =
                 sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
                     .bind(repeated_rotated)
-                    .fetch_one(&database.pool)
+                    .fetch_one(&database.app_pool)
                     .await?;
             ensure!(repeated_rotated_nonce == rotated_nonce);
             let rebound_audits: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM audit WHERE action = 'flush.plan_operator_rebound' AND subject = $1",
             )
             .bind(stale_plan.to_string())
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             ensure!(rebound_audits == 1);
 
             ensure!(
                 Flusher::new(
-                    database.pool.clone(),
+                    database.app_pool.clone(),
                     chain.clone(),
                     signer_handle(ROTATED_KEY)?,
                     alerts.clone(),
@@ -1122,7 +1020,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             finalize(&anvil.rpc_url)?;
             ensure!(
                 Flusher::new(
-                    database.pool.clone(),
+                    database.app_pool.clone(),
                     chain.clone(),
                     signer_handle(ROTATED_KEY)?,
                     alerts.clone(),
@@ -1135,8 +1033,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                     })
             );
 
-            let reverting = deploy(
-                &root,
+            let reverting = forge_create(
                 &anvil.rpc_url,
                 "test/mocks/MockTokens.sol:SelectiveRevertingToken",
                 &[],
@@ -1166,14 +1063,14 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "SELECT jsonb_array_length(receipt->'plan') FROM flushes WHERE id = $1",
             )
             .bind(estimated_plan)
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             ensure!(estimated_count == 1);
             let exclusion_count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM flush_exclusions WHERE chain_id = 31337 AND token = $1",
             )
             .bind(format!("{reverting:#x}"))
-            .fetch_one(&database.pool)
+            .fetch_one(&database.app_pool)
             .await?;
             ensure!(exclusion_count == 1);
             ensure!(alerts.0.lock().expect("alert mutex is available").iter().any(
@@ -1210,7 +1107,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             }
             sqlx::query("DELETE FROM flush_exclusions WHERE chain_id = 31337 AND token = $1")
                 .bind(format!("{reverting:#x}"))
-                .execute(&database.pool)
+                .execute(&database.app_pool)
                 .await?;
             let revert_flush = planner.plan(&route).await?.context("plan reverting batch")?;
             cast_send(
@@ -1247,23 +1144,20 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
 async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
-            let anvil = Anvil::start()?;
-            let root = repository_root();
-            let factory = deploy(
-                &root,
+            let anvil = Anvil::start(&[]).await?;
+            let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
                 &[ADMIN_ADDRESS, TREASURY],
             )?;
-            let token = deploy(
-                &root,
+            let token = forge_create(
                 &anvil.rpc_url,
                 "test/mocks/MockTokens.sol:MockERC20",
                 &[],
             )?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
-            let seeded = seed_addresses(&database.pool, factory, implementation).await?;
+            let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
             let mint = |address: Address| {
                 cast_send(
                     &anvil.rpc_url,
@@ -1278,14 +1172,14 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             let components = |signer: &SignerHandle| {
                 (
                     Planner::new(
-                        database.pool.clone(),
+                        database.app_pool.clone(),
                         chain.clone(),
                         signer.clone(),
                         Arc::new(FixedPrice),
                         alerts.clone(),
                     ),
                     Flusher::new(
-                        database.pool.clone(),
+                        database.app_pool.clone(),
                         chain.clone(),
                         signer.clone(),
                         alerts.clone(),
@@ -1389,7 +1283,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                      FROM flushes WHERE id = $1",
                 )
                 .bind(id)
-                .fetch_one(&database.pool)
+                .fetch_one(&database.app_pool)
                 .await?;
                 Ok::<_, anyhow::Error>((
                     row.try_get::<String, _>("operator")?,
@@ -1447,7 +1341,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             let flushed: i64 =
                 sqlx::query_scalar("SELECT count(*) FROM flushed WHERE flush_id = $1")
                     .bind(stale)
-                    .fetch_one(&database.pool)
+                    .fetch_one(&database.app_pool)
                     .await?;
             ensure!(flushed == 1);
 
@@ -1510,18 +1404,6 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
     .await
 }
 
-async fn with_database<F>(test: F) -> Result<()>
-where
-    F: for<'a> FnOnce(&'a Database) -> TestFuture<'a>,
-{
-    let Some(database) = Database::create().await? else {
-        return Ok(());
-    };
-    let result = test(&database).await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
 async fn drive_bisection(
     flusher: &Flusher,
     route: &RouteFile,
@@ -1545,45 +1427,6 @@ async fn drive_bisection(
         }
     }
     bail!("bisection did not isolate the failing address")
-}
-
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repository root exists")
-}
-
-fn deploy(root: &Path, rpc_url: &str, contract: &str, args: &[&str]) -> Result<Address> {
-    let mut command = Command::new("forge");
-    command.current_dir(root).args([
-        "create",
-        "--root",
-        "contracts",
-        "--rpc-url",
-        rpc_url,
-        "--private-key",
-        &format!("0x{ADMIN_KEY}"),
-        "--broadcast",
-        "--json",
-        contract,
-    ]);
-    if !args.is_empty() {
-        command.arg("--constructor-args").args(args);
-    }
-    let output = command.output()?;
-    ensure!(
-        output.status.success(),
-        "forge create failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    Address::from_str(
-        value["deployedTo"]
-            .as_str()
-            .context("forge output omitted deployedTo")?,
-    )
-    .map_err(Into::into)
 }
 
 fn cast_send(
