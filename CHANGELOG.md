@@ -21,3 +21,8 @@ webhook receivers must ignore unknown fields.
   expired. Until then `GET …/rate-locks/{ref}` returns `status: open` with
   `remaining_seconds: 0`; expiry events arrive about 15 minutes after `expires_at`. See
   `docs/architecture.md` §9.
+- `DELETE …/rate-locks/{ref}` on a lock whose payment window has closed but which has not yet
+  expired now answers `409` with the new error code `window_closed` ("payment window has
+  closed") instead of `conflict`. `conflict` remains for consumed or expired locks.
+- `GET …/limits` `reset_at` is the earliest payment-window close among open reserved locks. It can
+  be in the past: exposure is released only at chain finality, about 15 minutes later.

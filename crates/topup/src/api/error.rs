@@ -81,6 +81,16 @@ impl ApiError {
         )
     }
 
+    /// Returns a conflict for cancelling a lock whose payment window has closed.
+    #[must_use]
+    pub fn window_closed() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "window_closed",
+            "payment window has closed",
+        )
+    }
+
     /// Returns a conflict for an idempotent replay whose body differs from the original.
     #[must_use]
     pub fn idempotency_mismatch() -> Self {

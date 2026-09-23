@@ -193,7 +193,8 @@ pub struct LimitsResponse {
     pub global_open_minor: u64,
     /// Remaining account exposure.
     pub remaining_account_minor: Option<u64>,
-    /// Earliest open-lock expiry, when any exposure is reserved.
+    /// Earliest payment-window close among open reserved locks; it can be in the past, because
+    /// exposure is released only at chain finality, about 15 minutes after the window closes.
     pub reset_at: Option<DateTime<Utc>>,
 }
 

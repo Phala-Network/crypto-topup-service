@@ -1123,7 +1123,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "`conflict`: the lock is consumed or expired; `window_closed`: the payment window has closed while the lock awaits chain-time expiry; `pending_payment`: the lock address already received a payment.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1916,7 +1916,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "Earliest open-lock expiry, when any exposure is reserved."
+            "description": "Earliest payment-window close among open reserved locks; it can be in the past, because\nexposure is released only at chain finality, about 15 minutes after the window closes."
           },
           "route": {
             "type": "string",

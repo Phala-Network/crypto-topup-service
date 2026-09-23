@@ -190,6 +190,8 @@ pub enum RateLockError {
     NotFound,
     /// The lock can no longer be cancelled.
     NotOpen,
+    /// The lock is still open but its payment window has closed, so it cannot be cancelled.
+    WindowClosed,
     /// The lock address already received a deposit, so it cannot be cancelled.
     PendingPayment,
     /// A replay of an existing reference stated a different amount.
@@ -212,6 +214,7 @@ impl Display for RateLockError {
             Self::ExposureCap(scope) => write!(formatter, "{scope} exposure cap exceeded"),
             Self::NotFound => formatter.write_str("rate lock not found"),
             Self::NotOpen => formatter.write_str("rate lock is not open"),
+            Self::WindowClosed => formatter.write_str("payment window has closed"),
             Self::PendingPayment => {
                 formatter.write_str("rate lock address already received a payment")
             }
@@ -463,8 +466,13 @@ pub async fn cancel(
         transaction.commit().await?;
         return Ok(row);
     }
-    if row.status != RateLockStatus::Open || row.expires_at <= Utc::now() {
+    if row.status != RateLockStatus::Open {
         return Err(RateLockError::NotOpen);
+    }
+    // The lock stays `open` until chain-time expiry, but an in-window payment may still be
+    // finalizing, so cancellation ends with the payment window.
+    if row.expires_at <= Utc::now() {
+        return Err(RateLockError::WindowClosed);
     }
     // `FOR UPDATE` conflicts with the `KEY SHARE` lock a scanner deposit insert takes on its
     // address row, so an uncommitted deposit either commits first and is seen below, or waits

@@ -75,6 +75,7 @@ Until it merges, route the metric or symptom to the same runbook.
 | Approved refund ready for Safe execution | [Refund execution](refund-execution.md) |
 | Any customer-impacting incident | [Incident communication](incident-communication.md) |
 | User paid to their deposit address on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
+| Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
 
 ## Known gaps on main
 
@@ -111,6 +112,7 @@ for any runbook until #56 merges.
 | Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |
 | Wrong-network deposit | Not exercised; every recovery step is human-only Finance and deployer work | [ ] |
+| Route or chain retirement | Not exercised; the upgrade itself is human-only Safe work | [ ] |
 
 Run `make runbook-check` after editing any runbook. Exercise evidence is under
 [`exercises/`](exercises/).

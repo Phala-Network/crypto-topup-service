@@ -253,7 +253,7 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   never reported as expired. Exposure stays reserved until finality, about 15 minutes after
   `expires_at`, and longer while the scanner is stalled (`TopupScannerLag`). Until then the API
   shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
-  window has closed. A lock whose address has received any deposit, even a rejected one, can no
+  window has closed (`409 window_closed`). A lock whose address has received any deposit, even a rejected one, can no
   longer be cancelled (`409 pending_payment`).
 - Exposure counters sum `credit_minor` across routes, so every rate-lock route must use the
   same `destination.unit_decimals`; the service refuses to load routes that differ.
@@ -444,6 +444,9 @@ product's own pre-finality view of the transaction, when it offers one.
 - QR codes: the persistent address QR encodes the plain address only. Only a quote's QR is an
   EIP-681 URI (token and amount), always shown with copy-address and copy-amount buttons for
   wallets and exchanges that do not read the URI.
+- When a quote's `remaining_seconds` reaches 0, hide its QR code and address and show "Payment
+  window closed, awaiting finality. A payment sent in time is still credited at the quoted
+  price." Offer a re-quote; the lock stays `open` until chain-time expiry (§9).
 - Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
   are not credited." Support handles such a payment with the
   [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).
@@ -473,7 +476,10 @@ arrive as dstack encrypted environment variables. Startup refuses to run without
 socket, two RPC providers, or the on-chain contract checks of §4.
 
 All enabled versions are loaded at startup. The highest enabled version of a route is current for
-new API operations, while older versions remain available for historical deposits.
+new API operations, while older versions remain available for historical deposits. A chain is
+scanned only while it has a loaded route, and its rate locks expire only by its scanner's cursor
+(§9), so a route version or a chain's last route is removed only after its open locks and
+in-flight deposits have resolved (`deploy/runbooks/route-retirement.md`).
 
 The attested chain file also owns the complete flush execution policy: the planning cron,
 `max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, replacement bump and
