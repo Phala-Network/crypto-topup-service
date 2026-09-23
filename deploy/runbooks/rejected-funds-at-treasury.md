@@ -26,7 +26,7 @@ cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.dat
 - Deposit has no matching flush: follow flush/reconciliation investigation.
 - Treasury event differs from stored `Flushed`: critical reconciliation incident; use the `flush`
   pause and optional Safe role revocation procedure in
-  [Flush reverted or bisected](flush-reverted-or-bisected.md), including its #71 caveat.
+  [Flush reverted or bisected](flush-reverted-or-bisected.md).
 - Sanctioned funds: Compliance owns disposition; do not refund automatically.
 
 ## Remediation
