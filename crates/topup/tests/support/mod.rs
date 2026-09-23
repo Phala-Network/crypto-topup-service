@@ -3,8 +3,10 @@
 pub mod chain;
 
 use std::env;
-use std::future::Future;
+use std::future::{Future, poll_fn};
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
+use std::task::Poll;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -152,7 +154,8 @@ impl TestDatabase {
 }
 
 /// Runs `test` against a fresh [`TestDatabase`] and drops it afterwards, or skips when the
-/// database URLs are not set.
+/// database URLs are not set. A panicking test still drops its database and role before the
+/// panic resumes.
 pub async fn with_database<F>(test: F) -> Result<()>
 where
     F: for<'a> FnOnce(&'a TestDatabase) -> TestFuture<'a>,
@@ -160,9 +163,22 @@ where
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
-    let result = test(&database).await;
+    let outcome = {
+        let mut future = test(&database);
+        poll_fn(|context| {
+            match panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(result)) => Poll::Ready(Ok(result)),
+                Err(payload) => Poll::Ready(Err(payload)),
+            }
+        })
+        .await
+    };
     let cleanup = database.cleanup().await;
-    result.and(cleanup)
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(payload) => panic::resume_unwind(payload),
+    }
 }
 
 /// Public origin the test routers are configured with and requests are signed for by default.

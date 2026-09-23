@@ -511,6 +511,15 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                 .fetch_one(&context.app_pool)
                 .await?;
                 ensure!(account_open == if consumed { "0" } else { "777" }, "{name}");
+
+                // The confirmed deposit stays claimable; move it out of the queue so the next
+                // case's pump cannot claim it ahead of that case's deposit on a slow setup.
+                sqlx::query(
+                    "UPDATE deposits SET next_attempt_at = now() + interval '1 day' WHERE id = $1",
+                )
+                .bind(deposit_id)
+                .execute(&context.app_pool)
+                .await?;
             }
             Ok(())
         })

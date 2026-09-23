@@ -1375,20 +1375,34 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             ensure!(flusher_v2.operator_role(&slow_v2).await?.granted);
             let before = role_alerts(operator_v2);
             let task_v2 = spawn_task(&slow_v2, &signer_v2)?;
-            tokio::time::sleep(StdDuration::from_millis(500)).await;
-            ensure!(role_alerts(operator_v2) == before);
-            ensure!(planner_v2.plan(&slow_v2).await? == Some(orphan));
+            // Polls instead of sleeping so a loaded host only slows the test down; the task's
+            // ticks interleave with the test on the single-threaded runtime.
+            let wait_for_role_alerts = |count: usize, reason: &'static str| {
+                let role_alerts = &role_alerts;
+                async move {
+                    for _ in 0..300 {
+                        if role_alerts(operator_v2) >= count {
+                            return Ok(());
+                        }
+                        tokio::time::sleep(StdDuration::from_millis(100)).await;
+                    }
+                    bail!("{reason}")
+                }
+            };
             revoke_operator(
                 &anvil.rpc_url,
                 factory,
                 &format!("{operator_v2:#x}"),
                 ADMIN_KEY,
             )?;
-            tokio::time::sleep(StdDuration::from_millis(4_000)).await;
-            ensure!(
-                role_alerts(operator_v2) > before,
-                "revocation must be noticed by the running task"
-            );
+            wait_for_role_alerts(before + 1, "revocation must be noticed by the running task")
+                .await?;
+            ensure!(planner_v2.plan(&slow_v2).await? == Some(orphan));
+            wait_for_role_alerts(
+                before + 2,
+                "the running task must keep re-checking the revoked role",
+            )
+            .await?;
             stop(task_v2).await?;
             ensure!(
                 binding(orphan).await?
