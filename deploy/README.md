@@ -17,7 +17,7 @@ Human inputs, all required before step 1 below:
 | Input | Used for |
 |---|---|
 | Phala Cloud workspace to deploy into, with the CLI 1.1.22 logged in to it | `phala deploy`, `preflight.sh --workspace` |
-| Permission to run the Release images workflow (or push a `staging-*` tag), and admin on the `crypto-topup` and `postgres-walg` packages in `ghcr.io/phala-network` | publishing both images and making the packages public |
+| Permission to run the Release images workflow on `main`, and admin on the `crypto-topup` and `postgres-walg` packages in `ghcr.io/phala-network` | publishing both images and making the packages public |
 | Sepolia deployer key with test ETH, imported as a Foundry keystore account | canonical proxy (if absent), forwarder factory, test PHA token, sanctions oracle |
 | Finance/test Safe on Sepolia (admin and treasury), with its owners, threshold, and Safe version for `deploy/contracts/safe-expectations.json` | factory constructor, `verify-safe.sh`, `verify-deployment.sh` |
 | Base provisioner key with ETH, a Base RPC URL, and the Finance/test Safe on Base | the `DstackApp` contract `phala deploy` creates, then its ownership |
@@ -67,9 +67,9 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
      < deploy/config/routes/phala-cloud-sepolia-pha.yaml
    ```
 
-3. **HUMAN-ONLY, publishes to the registry:** run the Release images workflow on the merged commit
-   (or push a `staging-*` tag), then copy `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE` from its job
-   summary or `images.json` artifact, as in [Build and publish images](#build-and-publish-images).
+3. **HUMAN-ONLY, publishes to the registry:** once the route PR is merged, run the Release images
+   workflow on `main`, then copy `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE` from its job summary or
+   `images.json` artifact, as in [Build and publish images](#build-and-publish-images).
    On the first publish, make both packages public and confirm the summary has no warning.
 4. Fill `.env.staging` (ignored by Git) from the example. Every name stays; only
    `AWS_SESSION_TOKEN`, `AWS_ENDPOINT` (AWS S3), and `COINMETRICS_API_KEY` may be empty. The
@@ -174,9 +174,9 @@ the observability volume.
 
 Images are built and published only by CI, by the
 [Release images](../.github/workflows/release-images.yml) workflow; never push them from a
-workstation. It runs on `workflow_dispatch` (tag `sha-<12-hex commit>`, plus an optional suffix)
-and on pushed `v*` and `staging-*` Git tags (the tag itself), with `SOURCE_DATE_EPOCH` set to the
-commit time:
+workstation. It runs only on `workflow_dispatch` and publishes only from `main`; a dispatch on
+any other ref fails. The tag is `sha-<12-hex commit>`, plus an optional suffix, and
+`SOURCE_DATE_EPOCH` is the commit time:
 
 - `ghcr.io/phala-network/crypto-topup:<tag>`: [verify-image.sh](verify-image.sh) with
   `PUBLISH_IMAGE` set performs two clean BuildKit OCI exports for `linux/amd64`, with provenance
@@ -187,10 +187,12 @@ commit time:
 - `ghcr.io/phala-network/postgres-walg:<postgres>-<wal-g>-<tag>` from
   [Dockerfile.postgres-walg](Dockerfile.postgres-walg): apt and dpkg record wall-clock times, so
   it is not bit-for-bit reproducible. It is built and pushed once; the registry tag must resolve
-  to the digest BuildKit pushed, and the pulled digest must run `wal-g --version`.
+  to the digest BuildKit pushed, and that digest, pulled from the registry, must run
+  `wal-g --version`. Making this image reproducible (removing the apt and dpkg logs and caches,
+  then the same two-build check) is a follow-up.
 
-**HUMAN-ONLY, publishes to the registry:** run the workflow from the Actions tab, or
-`gh workflow run release-images.yml --ref main`, or push a `staging-*` tag. The job summary and the
+**HUMAN-ONLY, publishes to the registry:** run the workflow on `main` from the Actions tab,
+or with `gh workflow run release-images.yml --ref main`. The job summary and the
 `images.json` artifact hold the two platform manifest references, the exact inputs of
 `render-compose.sh`:
 
@@ -208,10 +210,12 @@ Cloud for private repositories.
 
 **HUMAN-ONLY, one-time, package admin:** CVMs pull without registry credentials, so both packages
 must be public; never add registry credentials to a CVM. GitHub's REST API cannot change a
-container package's visibility, and making a package public cannot be undone. After the first
-publish, for `crypto-topup` and for `postgres-walg`: open the package under the organization's
-Packages tab, then Package settings, Danger Zone, Change visibility, Public, and confirm with the
-package name. The workflow checks an anonymous pull of each pushed digest and adds a warning to the
+container package's visibility. Making a package public is irreversible: it cannot be made private
+again. Prerequisite: the organization must allow public container packages (organization
+Settings, Packages, Package creation, with Public enabled for containers); otherwise the Public
+option is unavailable. After the first publish, for `crypto-topup` and for `postgres-walg`: open
+the package under the organization's Packages tab, then Package settings, Danger Zone, Change
+visibility, Public, and confirm with the package name. The workflow checks an anonymous pull of each pushed digest and adds a warning to the
 summary while a package is still private.
 
 Developer check, no push and no credentials: the same two-build comparison runs locally with

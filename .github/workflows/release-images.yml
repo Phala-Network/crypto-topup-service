@@ -1,12 +1,13 @@
 name: Release images
 
-# Publishes the two images the attested compose pins, from CI only (deploy/README.md, "Build and
-# publish images"):
+# Publishes the two images the attested compose pins, from CI only and only from main
+# (deploy/README.md, "Build and publish images"):
 # - crypto-topup: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
 #   config digests, builds and pushes a third time, and fails unless the registry's platform
 #   manifest and config equal the verified local ones.
 # - postgres-walg: apt and dpkg record wall-clock times, so two builds differ; it is built and
-#   pushed once, and the registry tag must resolve to the digest BuildKit pushed.
+#   pushed once, the registry tag must resolve to the digest BuildKit pushed, and that digest,
+#   pulled from the registry, must run `wal-g --version`.
 # The job summary and the `images.json` artifact carry both platform manifest references
 # (`repository@sha256:...`) for deploy/render-compose.sh.
 #
@@ -19,8 +20,6 @@ name: Release images
 # used.
 
 on:
-  push:
-    tags: ["v*", "staging-*"]
   workflow_dispatch:
     inputs:
       tag_suffix:
@@ -41,21 +40,29 @@ env:
   POSTGRES_WALG_REPOSITORY: ghcr.io/phala-network/postgres-walg
 
 jobs:
+  # Only main publishes. A dispatch from any other ref fails here instead of silently skipping.
+  refuse-non-main:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: |
+          echo "::error::Release images publishes only from main, not $GITHUB_REF"
+          exit 1
+
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Choose tags and the build timestamp
         id: meta
         env:
           TAG_SUFFIX: ${{ inputs.tag_suffix }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            tag=$GITHUB_REF_NAME
-          else
-            tag="sha-$(git rev-parse --short=12 HEAD)${TAG_SUFFIX:+-$TAG_SUFFIX}"
-          fi
+          tag="sha-$(git rev-parse --short=12 HEAD)${TAG_SUFFIX:+-$TAG_SUFFIX}"
           if [[ ! $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ ]]; then
             echo "invalid image tag: $tag" >&2
             exit 1
@@ -123,7 +130,9 @@ jobs:
           ref="$repository@$manifest_digest"
           registry_config=$(docker buildx imagetools inspect "$ref" --raw | jq -er '.config.digest')
           echo "registry: tag=$registry_digest manifest=$manifest_digest config=$registry_config"
-          docker run --rm "$ref" wal-g --version
+          # Drop the builder's local copy so the smoke run executes what the registry serves.
+          docker image rm "$IMAGE" >/dev/null 2>&1 || true
+          docker run --rm --pull=always "$ref" wal-g --version
           docker image rm "$ref" >/dev/null || true
           printf '%s\n' "$ref" >"$RUNNER_TEMP/postgres-walg.ref"
       - name: Write images.json and the job summary
