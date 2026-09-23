@@ -19,6 +19,7 @@ pub mod attestation;
 pub mod chain;
 pub mod http_signature;
 pub mod pricing;
+pub mod redaction;
 pub mod risk;
 pub mod settlement;
 pub mod signer;

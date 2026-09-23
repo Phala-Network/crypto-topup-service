@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: walg-restore-command WAL_NAME DESTINATION" >&2
+    exit 126
+fi
+
+walg=${WALG_BIN:-wal-g}
+wal_name=$1
+destination=$2
+case "$wal_name" in
+    ''|*[!A-Za-z0-9_.-]*) echo "WAL name is invalid" >&2; exit 126 ;;
+esac
+
+tmpdir=$(mktemp -d)
+tmp=$tmpdir/manifest.json
+cleanup() {
+    find "$tmpdir" -depth -delete
+}
+trap cleanup EXIT INT TERM
+
+if ! "$walg" st get "key-versions/wal/$wal_name.json" "$tmp" \
+    --no-decompress --no-decrypt >/dev/null 2>&1; then
+    if ! "$walg" st check read >/dev/null 2>&1; then
+        echo "WAL metadata storage is unavailable" >&2
+        exit 126
+    fi
+    if ! "$walg" st get key-versions/current.json "$tmp" \
+        --no-decompress --no-decrypt >/dev/null 2>&1; then
+        echo "current WAL key metadata is unavailable" >&2
+        exit 126
+    fi
+fi
+
+version=$(jq -er '.key_version' "$tmp" 2>/dev/null || true)
+case "$version" in
+    ''|*[!0-9]*) echo "WAL key version metadata is invalid" >&2; exit 126 ;;
+esac
+key_path=${WALG_KEY_DIR:-/run/wal-g}/backup-v${version}.key
+if [ ! -f "$key_path" ]; then
+    echo "WAL key version $version is unavailable" >&2
+    exit 126
+fi
+
+set +e
+WALG_LIBSODIUM_KEY_PATH=$key_path WALG_DOWNLOAD_CONCURRENCY=1 \
+    "$walg" wal-fetch "$wal_name" "$destination"
+status=$?
+set -e
+case "$status" in
+    0) exit 0 ;;
+    74) exit 1 ;;
+    *) exit 126 ;;
+esac

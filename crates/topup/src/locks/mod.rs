@@ -674,6 +674,9 @@ impl ExpiryWorker {
 
     /// Runs expiry scans until cancellation.
     pub async fn run(&self, cancellation: CancellationToken) {
+        const LOOP_NAME: &str = "lock_expiry";
+        const LOOP_INSTANCE: &str = "0";
+        crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
         let mut ticker = interval(self.scan_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -681,12 +684,15 @@ impl ExpiryWorker {
                 () = cancellation.cancelled() => return,
                 _ = ticker.tick() => {
                     self.metrics.heartbeats.fetch_add(1, Ordering::Relaxed);
+                    crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
                     match expire_once(&self.pool).await {
                         Ok(expired) => {
                             self.metrics.expired.fetch_add(expired, Ordering::Relaxed);
+                            crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
                         }
                         Err(error) => tracing::error!(%error, "rate-lock expiry scan failed"),
                     }
+                    crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, self.scan_interval);
                 }
             }
         }

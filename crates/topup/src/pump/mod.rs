@@ -21,6 +21,7 @@ use topup_core::deposit::{
     DepositState, RejectReason, RetryError, StepOutcome, TransitionKind, WaitReason, next,
 };
 use topup_core::retry::backoff;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::db::{
@@ -300,25 +301,48 @@ impl Pump {
 
     /// Runs until cancellation, finishing an already claimed step before stopping.
     pub async fn run(&self, cancellation: CancellationToken) {
+        self.run_with_instance("0".to_owned(), cancellation).await;
+    }
+
+    /// Runs one named worker until cancellation.
+    pub async fn run_with_instance(&self, instance: String, cancellation: CancellationToken) {
+        crate::observability::register_loop("pump", instance.clone());
         loop {
             if cancellation.is_cancelled() {
                 return;
             }
+            crate::observability::heartbeat("pump", instance.clone());
+            crate::observability::execution_deadline(
+                "pump",
+                instance.clone(),
+                self.config.step_timeout,
+            );
 
-            match self.run_once().await {
+            let result = self.run_once().await;
+            crate::observability::clear_execution_deadline("pump", instance.clone());
+            match result {
                 Ok(RunOnceResult::Idle) => {
+                    crate::observability::waiting(
+                        "pump",
+                        instance.clone(),
+                        self.config.idle_poll_interval,
+                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}
                     }
                 }
-                Ok(
-                    RunOnceResult::Applied { .. }
-                    | RunOnceResult::Stale { .. }
-                    | RunOnceResult::Contended { .. },
-                ) => {}
+                Ok(RunOnceResult::Applied { .. }) => {
+                    crate::observability::progress("pump", instance.clone());
+                }
+                Ok(RunOnceResult::Stale { .. } | RunOnceResult::Contended { .. }) => {}
                 Err(error) => {
                     tracing::error!(%error, "deposit pump iteration failed");
+                    crate::observability::waiting(
+                        "pump",
+                        instance.clone(),
+                        self.config.idle_poll_interval,
+                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}
@@ -425,7 +449,7 @@ impl Pump {
                 transaction.commit().await?;
                 tracing::info!(
                     deposit_id = %deposit.id,
-                    chain = deposit.chain_id,
+                    chain_id = deposit.chain_id,
                     state = ?deposit.state,
                     attempt,
                     "deposit step persisted"
@@ -465,7 +489,11 @@ impl Pump {
             );
         };
 
-        match timeout(self.config.step_timeout, step.run(deposit)).await {
+        let span = crate::observability::deposit_step_span(deposit);
+        match timeout(self.config.step_timeout, step.run(deposit))
+            .instrument(span)
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(state = ?state, "deposit step timed out");

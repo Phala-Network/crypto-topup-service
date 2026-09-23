@@ -1029,6 +1029,9 @@ async fn set_product_webhook(pool: &PgPool, id: Uuid, webhook_url: &str) -> Resu
 }
 
 async fn assert_event_product(pool: &PgPool, id: Uuid, event_type: &str) -> Result<()> {
+    let deposit = db::get_deposit(pool, id)
+        .await?
+        .context("deposit must exist")?;
     let payload: Value = sqlx::query_scalar(
         "SELECT payload FROM outbox WHERE event_type = $1 AND payload->>'deposit_id' = $2",
     )
@@ -1037,6 +1040,9 @@ async fn assert_event_product(pool: &PgPool, id: Uuid, event_type: &str) -> Resu
     .fetch_one(pool)
     .await?;
     ensure!(payload.get("product_id").and_then(Value::as_str).is_some());
+    ensure!(payload["chain_id"] == deposit.chain_id);
+    ensure!(payload["state"] == format!("{:?}", deposit.state).to_lowercase());
+    ensure!(payload["route"] == deposit.route.context("deposit route")?);
     Ok(())
 }
 

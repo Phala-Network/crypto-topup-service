@@ -20,7 +20,6 @@ require_command anvil
 require_command cast
 require_command forge
 require_command jq
-require_command ss
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-reference.XXXXXX")"
 anvil_pid=""

@@ -4,17 +4,19 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 compose="$root/deploy/docker-compose.yml"
 rendered=$(mktemp)
+rendered_tools=$(mktemp)
 compose_envs=$(mktemp)
 allowed_envs=$(mktemp)
 escaped_config=$(mktemp)
 staging_envs=$(mktemp)
 
 cleanup() {
-    rm -f "$rendered" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs"
+    rm -f "$rendered" "$rendered_tools" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs"
 }
 trap cleanup EXIT INT TERM
 
 docker compose -f "$compose" config --format json >"$rendered"
+docker compose -f "$compose" --profile tools config --format json >"$rendered_tools"
 
 if jq -e '.services.topup.environment | has("MIGRATE_DATABASE_URL")' "$rendered" \
     >/dev/null; then
@@ -28,6 +30,8 @@ jq -e '
         "run",
         "--bind",
         "0.0.0.0:8080",
+        "--metrics-bind",
+        "0.0.0.0:9464",
         "--route",
         "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
     ]
@@ -38,6 +42,18 @@ jq -e '
     and (.services.topup.environment | has("TOPUP_RPC_PROVIDER_A_URL"))
 ' "$rendered" >/dev/null || {
     echo "topup command or required runtime environment is misconfigured" >&2
+    exit 1
+}
+
+jq -e '
+    .services["restore-check"].command == ["topup", "restore-check"]
+    and (.services["restore-check"].environment | has("RESTORE_DATABASE_URL"))
+    and (.services["restore-check"].volumes | any(.target == "/var/run/dstack.sock"))
+    and (.services["restore-check"].environment | has("TOPUP_RPC_PROVIDER_A_URL"))
+    and (.services["restore-check"].configs
+        | any(.target == "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"))
+' "$rendered_tools" >/dev/null || {
+    echo "restore-check must use owner credentials, the dstack socket, and the attested route" >&2
     exit 1
 }
 

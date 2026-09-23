@@ -11,8 +11,8 @@ use std::time::Duration;
 use dstack_sdk::DstackClient;
 use tokio::time::timeout;
 use topup_core::{
-    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32,
-    SignedTx, Signer, SignerError, TxRequest, operator_key_domain,
+    Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32, SignedTx, Signer,
+    SignerError, TxRequest, operator_key_domain,
 };
 use zeroize::Zeroizing;
 
@@ -92,8 +92,17 @@ impl DstackSigner {
     /// The algorithm string is part of dstack's derivation input and is intentionally fixed here
     /// rather than exposed to callers.
     pub async fn derive_backup_key(&self) -> Result<SecretKey32, SignerError> {
+        self.derive_backup_key_version(1).await
+    }
+
+    /// Derives a versioned `backup/vN` secp256k1 key for backup restore or rotation.
+    pub async fn derive_backup_key_version(
+        &self,
+        version: u32,
+    ) -> Result<SecretKey32, SignerError> {
+        let domain = format!("backup/v{version}");
         Ok(self
-            .derive_key(BACKUP_KEY_DOMAIN, KeyAlgorithm::Secp256k1)
+            .derive_key(&domain, KeyAlgorithm::Secp256k1)
             .await?
             .secret)
     }

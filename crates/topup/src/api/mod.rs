@@ -135,6 +135,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let document = Arc::new(openapi.clone());
     let router = router
         .route("/openapi.json", get(serve_openapi))
+        .layer(middleware::from_fn(crate::observability::request_context))
         .layer(Extension(document));
     (router, openapi)
 }
@@ -163,9 +164,12 @@ async fn healthz(State(state): State<AppState>) -> StatusCode {
 mod tests {
     use std::sync::Arc;
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::SigningKey;
+    use tower::ServiceExt as _;
 
     use super::{AppState, UnavailableAttestor, VerificationKey};
     use crate::db::Product;
@@ -213,5 +217,41 @@ mod tests {
                 .version,
             newer.version
         );
+    }
+
+    #[tokio::test]
+    async fn public_router_does_not_expose_metrics() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .expect("lazy pool URL is valid");
+        let admin_key = SigningKey::from_bytes(&[1; 32]);
+        let state = AppState {
+            pool,
+            routes: Arc::new(Vec::new()),
+            admin_key: VerificationKey::from_base64(
+                "admin/v1".to_owned(),
+                &STANDARD.encode(admin_key.verifying_key().as_bytes()),
+            )
+            .expect("admin key is valid"),
+            public_origin: super::PublicOrigin::parse("http://api.test")
+                .expect("test origin is valid"),
+            attestor: Arc::new(UnavailableAttestor),
+            rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
+        };
+        let response = super::router(state)
+            .0
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("public request succeeds");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().contains_key("x-request-id"));
+        let _ = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body reads");
     }
 }

@@ -1,9 +1,53 @@
+x-walg-environment: &walg-environment
+  WALG_S3_PREFIX: s3://topup-backups/postgres
+  AWS_ENDPOINT: http://minio:9000
+  AWS_REGION: us-east-1
+  AWS_S3_FORCE_PATH_STYLE: "true"
+  # A restore phase switches to the read-only topup-restore-read user created by minio-init.
+  AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-minio}
+  AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-minio-secret}
+  WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+  WALG_LIBSODIUM_KEY_TRANSFORM: hex
+
 services:
+  minio:
+    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: topup-minio
+      MINIO_ROOT_PASSWORD: topup-minio-secret
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 topup-minio topup-minio-secret >/dev/null
+        mc mb --ignore-existing local/topup-backups >/dev/null
+        printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::topup-backups"]},{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::topup-backups/*"]}]}' >/tmp/restore-read.json
+        mc admin policy create local topup-restore-read /tmp/restore-read.json >/dev/null
+        mc admin user add local topup-restore-read topup-restore-read-secret >/dev/null
+        # attach fails when the policy is already attached, e.g. when minio-init runs again.
+        mc admin policy attach local topup-restore-read --user topup-restore-read >/dev/null 2>&1 ||
+          mc admin user info local topup-restore-read | grep -q 'PolicyName: *topup-restore-read'
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
   dstack-simulator:
     build:
       context: ../..
       dockerfile: deploy/local/Dockerfile.dstack-simulator
-    image: crypto-topup-dstack-simulator:local
+    image: ${TOPUP_LOCAL_DSTACK_IMAGE:-crypto-topup-dstack-simulator:local}
     volumes:
       - dstack_socket:/var/run
     healthcheck:
@@ -13,26 +57,63 @@ services:
       retries: 30
     restart: unless-stopped
 
+  backup-key:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
+    user: "999:999"
+    command:
+      - topup
+      - backup-key
+      - --version
+      - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --fallback-versions
+      - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
+      - --output
+      - /run/wal-g/backup.key
+      - --hold
+    environment:
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+    volumes:
+      - dstack_socket:/var/run
+      - walg_key:/run/wal-g
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "topup", "backup-key", "--check", "--output", "/run/wal-g/backup.key"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
   postgres:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile.postgres-walg
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     environment:
+      <<: *walg-environment
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       TOPUP_APP_PASSWORD: topup
-      WALG_FILE_PREFIX: /var/lib/wal-g
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - walg_data:/var/lib/wal-g
+      - walg_key:/run/wal-g:ro
+      - observability:/run/topup-observability
       - ../postgres-init/10-topup-role.sh:/docker-entrypoint-initdb.d/10-topup-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d topup"]
       interval: 2s
       timeout: 3s
       retries: 30
+    depends_on:
+      backup-key:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   migrate:
@@ -41,7 +122,7 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     command: ["topup", "migrate"]
     environment:
       MIGRATE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
@@ -56,30 +137,36 @@ services:
       dockerfile: Dockerfile
       args:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    image: crypto-topup-service:local
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     command:
       - topup
       - run
       - --bind
       - 0.0.0.0:8080
+      - --metrics-bind
+      - 0.0.0.0:9464
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
-      DATABASE_URL: postgres://topup_service:topup@postgres:5432/topup
+      # Empty (not unset) models a replacement CVM booting before restore: the service fails closed.
+      DATABASE_URL: ${TOPUP_LOCAL_DATABASE_URL-postgres://topup_service:topup@postgres:5432/topup}
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
       TOPUP_ADMIN_KID: local-admin/v1
       TOPUP_ADMIN_PUBLIC_KEY: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
       TOPUP_PUBLIC_ORIGIN: http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       TOPUP_RPC_PROVIDER_A_URL: http://127.0.0.1:1
       TOPUP_RPC_PROVIDER_B_URL: http://127.0.0.1:1
       TOPUP_CHAINS_DIR: /etc/topup/chains
       TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - dstack_socket:/var/run
+      - observability:/run/topup-observability:ro
       - ../config/chains:/etc/topup/chains:ro
       - ${TOPUP_LOCAL_ROUTES_DIR:-../config/routes}:/etc/topup/routes:ro
     ports:
       - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
+      - "127.0.0.1:${TOPUP_LOCAL_METRICS_PORT:-19464}:9464"
     healthcheck:
       test: ["CMD", "topup", "attest", "--nonce", "00"]
       interval: 10s
@@ -92,35 +179,105 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  heartbeat:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
+    command: ["topup", "heartbeat", "--interval-s", "60"]
+    environment:
+      # Empty (not unset) models a replacement CVM booting before restore: the service fails closed.
+      DATABASE_URL: ${TOPUP_LOCAL_DATABASE_URL-postgres://topup_service:topup@postgres:5432/topup}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  mock-product:
+    image: python@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+    command: ["python3", "/opt/topup/mock-product.py"]
+    volumes:
+      - ./mock-product.py:/opt/topup/mock-product.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
   backup:
-    image: crypto-topup-postgres-walg:local
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
     user: postgres
     command: ["walg-cron", "backup-push", "0 3 * * *"]
     environment:
+      <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
       PGHOST: postgres
       PGDATABASE: topup
       PGUSER: postgres
       PGPASSWORD: postgres
-      WALG_FILE_PREFIX: /var/lib/wal-g
       WALG_RETENTION_FULL: "2"
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
-      - walg_data:/var/lib/wal-g
+      - walg_key:/run/wal-g:ro
+      - observability:/run/topup-observability
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
       interval: 60s
       timeout: 10s
       retries: 3
     depends_on:
+      backup-key:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  restore:
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-crypto-topup-postgres-walg:local}
+    profiles: ["tools"]
+    user: postgres
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    environment:
+      <<: *walg-environment
+      PGDATA: /var/lib/postgresql/data
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+    restart: "no"
+
+  restore-check:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
+    profiles: ["tools"]
+    command: ["topup", "restore-check"]
+    environment:
+      RESTORE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/topup
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+      TOPUP_RPC_PROVIDER_A_URL: http://127.0.0.1:1
+      TOPUP_RPC_PROVIDER_B_URL: http://127.0.0.1:1
+      TOPUP_CHAINS_DIR: /etc/topup/chains
+      TOPUP_ROUTES_DIR: /etc/topup/routes
+    volumes:
+      - dstack_socket:/var/run
+      - ../config/chains:/etc/topup/chains:ro
+      - ${TOPUP_LOCAL_ROUTES_DIR:-../config/routes}:/etc/topup/routes:ro
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+      mock-product:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   dstack_socket:
+  minio_data:
   pgdata:
-  walg_data:
+  observability:
+  walg_key:
     driver: local
     driver_opts:
       type: tmpfs

@@ -5,6 +5,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use topup_core::money::ScaledPrice;
 
+use crate::redaction::Redacted;
+
 use super::decimal::parse_scaled;
 
 const ENDPOINT: &str = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics";
@@ -13,7 +15,7 @@ const ENDPOINT: &str = "https://community-api.coinmetrics.io/v4/timeseries/asset
 #[derive(Clone, Debug)]
 pub struct CoinMetricsUsdClient {
     client: reqwest::Client,
-    endpoint: String,
+    endpoint: Redacted,
 }
 
 impl CoinMetricsUsdClient {
@@ -22,10 +24,11 @@ impl CoinMetricsUsdClient {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|error| format!("build Coin Metrics client: {error}"))?;
+            .map_err(|_| "build Coin Metrics client failed".to_owned())?;
         Ok(Self {
             client,
-            endpoint: ENDPOINT.to_owned(),
+            endpoint: Redacted::parse(ENDPOINT)
+                .map_err(|_| "Coin Metrics endpoint URL is invalid".to_owned())?,
         })
     }
 
@@ -36,7 +39,7 @@ impl CoinMetricsUsdClient {
         }
         let response = self
             .client
-            .get(&self.endpoint)
+            .get(self.endpoint.expose().clone())
             .query(&[
                 ("assets", asset),
                 ("metrics", "ReferenceRateUSD"),
@@ -46,13 +49,22 @@ impl CoinMetricsUsdClient {
             ])
             .send()
             .await
-            .map_err(|error| format!("Coin Metrics request failed: {error}"))?
+            .map_err(|error| {
+                self.endpoint
+                    .request_error("Coin Metrics request", &error)
+                    .to_string()
+            })?
             .error_for_status()
-            .map_err(|error| format!("Coin Metrics rejected request: {error}"))?;
-        let body = response
-            .json::<Response>()
-            .await
-            .map_err(|error| format!("decode Coin Metrics response: {error}"))?;
+            .map_err(|error| {
+                self.endpoint
+                    .request_error("Coin Metrics status", &error)
+                    .to_string()
+            })?;
+        let body = response.json::<Response>().await.map_err(|error| {
+            self.endpoint
+                .request_error("Coin Metrics response decode", &error)
+                .to_string()
+        })?;
         let value = body
             .data
             .first()

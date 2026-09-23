@@ -1,6 +1,6 @@
 use alloy_primitives::Address as EvmAddress;
 use sqlx::PgPool;
-use topup_core::deposit::DepositState;
+use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use uuid::Uuid;
 
@@ -50,6 +50,8 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
 pub struct ScanCommit {
     /// Number of newly inserted deposits; duplicates are excluded.
     pub inserted: u64,
+    /// Newly inserted deposits rejected as unsupported assets.
+    pub unsupported_inserted: u64,
 }
 
 async fn insert_rejected_event(
@@ -67,6 +69,9 @@ async fn insert_rejected_event(
                jsonb_build_object(
                    'product_id', account.product_id,
                    'deposit_id', $2::uuid,
+                   'chain_id', $5::bigint,
+                   'state', 'rejected',
+                   'route', $6::text,
                    'reason', $3::text
                ),
                now()
@@ -78,6 +83,8 @@ async fn insert_rejected_event(
     .bind(id)
     .bind(reason.code())
     .bind(deposit.account_id)
+    .bind(to_i64(deposit.chain_id, "deposits.chain_id")?)
+    .bind(deposit.route.as_deref())
     .execute(&mut **transaction)
     .await?;
     if inserted.rows_affected() == 1 {
@@ -135,11 +142,17 @@ pub async fn commit_scan(
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let mut inserted = 0_u64;
+    let mut unsupported_inserted = 0_u64;
     for deposit in deposits {
         if insert_deposit_in(&mut transaction, deposit).await? {
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
+            if deposit.reason == Some(RejectReason::UnsupportedAsset) {
+                unsupported_inserted = unsupported_inserted.checked_add(1).ok_or_else(|| {
+                    sqlx::Error::Protocol("unsupported deposit count overflowed u64".to_owned())
+                })?;
+            }
             if deposit.state == DepositState::Rejected {
                 insert_rejected_event(&mut transaction, deposit).await?;
             }
@@ -172,5 +185,8 @@ pub async fn commit_scan(
     }
 
     transaction.commit().await?;
-    Ok(ScanCommit { inserted })
+    Ok(ScanCommit {
+        inserted,
+        unsupported_inserted,
+    })
 }

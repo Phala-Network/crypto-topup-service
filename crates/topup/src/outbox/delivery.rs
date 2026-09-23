@@ -12,6 +12,7 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use topup_core::{Signer, retry::backoff};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{EventEnvelope, SignedWebhook};
@@ -157,14 +158,26 @@ where
     }
 
     /// Polls until shutdown, retaining failed events for unlimited retries.
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(&self, shutdown: watch::Receiver<bool>) {
+        self.run_with_instance("0".to_owned(), shutdown).await;
+    }
+
+    /// Polls one named delivery worker until shutdown.
+    pub async fn run_with_instance(&self, instance: String, mut shutdown: watch::Receiver<bool>) {
+        crate::observability::register_loop("outbox", instance.clone());
         loop {
             if *shutdown.borrow() {
                 return;
             }
+            crate::observability::heartbeat("outbox", instance.clone());
 
             let should_pause = match self.run_once().await {
-                Ok(claimed) => claimed == 0,
+                Ok(claimed) => {
+                    if claimed > 0 {
+                        crate::observability::progress("outbox", instance.clone());
+                    }
+                    claimed == 0
+                }
                 Err(error) => {
                     tracing::error!(%error, "outbox delivery poll failed");
                     true
@@ -172,6 +185,11 @@ where
             };
 
             if should_pause {
+                crate::observability::waiting(
+                    "outbox",
+                    instance.clone(),
+                    self.config.poll_interval,
+                );
                 tokio::select! {
                     () = sleep(self.config.poll_interval) => {}
                     changed = shutdown.changed() => {
@@ -196,7 +214,12 @@ where
                 ClaimResult::Ready(delivery) => {
                     claimed = claimed.saturating_add(1);
                     self.warn_if_old(&delivery.event);
-                    self.deliver_claimed(delivery).await?;
+                    let span = crate::observability::outbox_delivery_span(
+                        delivery.event.id,
+                        &delivery.event.payload,
+                        delivery.event.attempts,
+                    );
+                    self.deliver_claimed(delivery).instrument(span).await?;
                 }
             }
         }

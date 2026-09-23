@@ -1,8 +1,8 @@
 # dstack staging deployment
 
 This directory implements work packages D1 and D2 from `docs/plan.md`. It prepares images and
-deployment artifacts; it does not deploy a CVM. D3 backup encryption, restore automation, and
-restore drills remain separate work.
+deployment artifacts; it does not deploy a CVM. D3 encrypted backups, restore, and restore drills
+are documented in [RESTORE.md](RESTORE.md).
 
 Every command that changes a registry, Phala Cloud, a CVM, a Safe, an on-chain contract, or secret
 state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against dstack commit
@@ -18,8 +18,33 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
 - `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
   compose and the compose hash reported for the CVM.
-- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G. Its hooks prepare D3 but do not claim
-  encrypted backups, a tested restore, or an achieved RPO/RTO.
+- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G and the D3 wrappers for encrypted,
+  key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
+- `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
+  Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and is served on the
+  separate `--metrics-bind` listener (default `127.0.0.1:9464`). The measured compose binds that
+  listener to the container network on port 9464 with `expose`; it is not published through the
+  port-8080 gateway. Only the monitoring collector may reach it. The local compose publishes it on
+  loopback port 19464 for smoke testing. `make alerts-check` (`check-alerts.sh`) runs
+  `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
+  pinned Prometheus image.
+
+## Backup age marker contract
+
+After a successful `walg-wal-push` (key-versioned WAL upload and metadata) or `walg-base-backup`,
+`walg-cron` atomically writes the current Unix timestamp as decimal ASCII plus a newline to
+`TOPUP_BACKUP_TIMESTAMP_FILE` with mode `0644`; the marker is operational metadata and contains no
+secret. PostgreSQL uses `walg-cron wal-push %p` as its archive command, so the 60-second
+`archive_timeout` drives the two-minute alert. `archive_timeout` only switches a segment that
+contains new WAL, so the `backup` service also commits one `txid_current()` transaction every 30
+seconds, and requests one `CHECKPOINT` per postmaster start because PostgreSQL 15+ otherwise ignores
+`archive_timeout` until the checkpointer first wakes, up to `checkpoint_timeout` after startup. An
+idle database therefore still archives a segment and refreshes the marker every minute. The measured
+compose shares `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and
+`backup`, and read-only with `topup`. The service exports the marker value as
+`topup_backup_last_success_unixtime_seconds`; a missing or malformed marker exports zero so the
+PromQL age calculation fails closed. Secret files remain mode `0600` and must not be written into
+the observability volume.
 
 ## Build and publish images
 
@@ -296,7 +321,7 @@ firewall boundary because it runs after Docker startup.
 Before enabling a route, also confirm real route addresses validate without template mode, both RPC
 providers agree at `finalized`, Safe/factory/implementation/CREATE2 checks pass, migrations completed,
 WAL archiving is current, the product pins the attested settlement key, pilot limits are approved,
-and D3 limitations are accepted explicitly.
+and a restore drill per [RESTORE.md](RESTORE.md) has passed.
 
 ## Local verification
 
@@ -318,6 +343,10 @@ administrative verification key, mounted route, and scanner provider URL; then i
 listener, `GET /healthz` for HTTP 200, `GET /openapi.json`, and the running backup service. The local
 provider URL is deliberately unreachable, exercising scanner retry behavior without contacting a
 real chain. A skipped service smoke is not a successful service check.
+
+Backup encryption, MinIO object storage, point-in-time recovery, and the weekly destructive drill
+are documented in [RESTORE.md](RESTORE.md). Run `make restore-drill`; it uses an isolated Compose
+project and removes all drill containers and volumes on exit.
 
 ## Pinned upstream references
 

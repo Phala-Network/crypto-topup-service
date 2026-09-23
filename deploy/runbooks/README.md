@@ -3,8 +3,8 @@
 These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
 operations), C8 (reconciliation), C10 (rate locks), C7b (flush pause), and A2 (deterministic
 deployment) are on `main`.
-PRs #56 (alerts) and #58 (D3 backup/restore) were still open when these commands were re-exercised
-on 2026-09-22.
+PR #56 (alerts) was still open when these commands were re-exercised on 2026-09-22. D3 backup and
+restore (#58) is covered by `deploy/RESTORE.md` and `deploy/local/restore-drill.sh`.
 
 ## Required environment
 
@@ -56,7 +56,7 @@ Until it merges, route the metric or symptom to the same runbook.
 | `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `rate-lock expiry scan failed` log, overdue open locks (no alert in #56) | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
 | `TopupBackupTooOld` | [Backup age](backup-age.md) |
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
@@ -82,9 +82,6 @@ Until it merges, route the metric or symptom to the same runbook.
   flush on its chain until the pause is lifted, and no supported command voids that plan. Runbooks
   pause before a plan exists for targeted stops and keep the Finance Safe `OPERATOR_ROLE` revocation
   as the hard chain-wide stop.
-- `topup restore-check` is listed by `topup --help` but exits `restore-check is not implemented`;
-  encrypted backups, the backup marker, and `deploy/RESTORE.md` are pending D3 in #58. The restore
-  runbook reads `_sqlx_migrations` with the application role instead.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
 - [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`
@@ -106,7 +103,7 @@ for any runbook until #56 merges.
 | Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
 | Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |
 | 422 payload mismatch | Complete: 422, no resend, GET-first adoption with the mock product | [x] |
-| Restore | Partial: post-restore gate; blocked on #58 | [ ] |
+| Restore | Partial: local `deploy/local/restore-drill.sh` controlled and crash drills pass; staging drill pending | [ ] |
 | Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
 | Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
 | Refund execution | Complete: request, approve, record, finality-checked confirm | [x] |
@@ -118,7 +115,7 @@ for any runbook until #56 merges.
 | Lock expiry worker failure | Complete: running service, injected ledger drift, owner repair while running | [x] |
 | Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
-| Backup age | Blocked on #58 backup automation | [ ] |
+| Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |
 
 Run `make runbook-check` after editing any runbook. Exercise evidence is under

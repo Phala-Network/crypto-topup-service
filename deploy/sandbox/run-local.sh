@@ -3,13 +3,13 @@
 # stack: deploy/local plus an Anvil chain (docker-compose.local.yml). Everything it starts is
 # removed on exit. Usage: deploy/sandbox/run-local.sh [SCENARIO ...]
 #
-# Requires docker compose, Foundry (forge, cast), jq, envsubst, and uv. Prices come from the
+# Requires docker compose, Foundry (forge, cast), jq, and uv. Prices come from the
 # live Coin Metrics, Binance, and Kraken endpoints, exactly as on Sepolia.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
-for command in docker forge cast jq envsubst uv; do
+for command in docker forge cast jq uv; do
     require_command "$command"
 done
 

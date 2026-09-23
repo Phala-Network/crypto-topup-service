@@ -63,6 +63,13 @@ address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clie
 request path and query, so behind the dstack gateway it must be the gateway URL, not the internal
 address; `Host` and `X-Forwarded-*` headers are never trusted.
 
+## Restore
+
+`topup restore-check` and `topup reconcile --once --post-restore` run the architecture §13
+post-restore reconciliation, which GETs and adopts the product's answer for every deposit at or
+beyond `cleared`. Run them only while `topup`, `heartbeat`, and `backup` are stopped; the
+[restore runbook](deploy/RESTORE.md) keeps the service stopped until the check reports `ok`.
+
 ## Status
 
 Design v5 is under review. Implementation has not started. Production policy values are set by

@@ -3,8 +3,9 @@
 ## Trigger
 
 Trigger on `TopupBackupTooOld` (PR #56: successful backup marker older than 120 seconds), WAL
-archiving failures, or `wal-g backup-list` failing to read storage. The marker and encrypted
-backups come from D3 (PR #58), which is not on `main`.
+archiving failures, or `wal-g backup-list` failing to read storage. D3 provides the encrypted base
+backups, WAL archiving, and `key-versions/` metadata described in `deploy/RESTORE.md`; the backup-age
+alert itself is pending #56.
 
 ## Impact and blast radius
 
@@ -21,15 +22,30 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 
 ## Decision tree
 
+- Restore window or staging restore drill in progress (`deploy/RESTORE.md`): expected. The
+  replacement runs with `TOPUP_WAL_ARCHIVE=off` and never refreshes the marker, and its `topup` is
+  stopped, so its scrape target is also down. Silence `TopupBackupTooOld` and the target-down alert
+  for that instance only, and lift them when the restore resumes archiving or the drill CVM is
+  destroyed. Never silence them for the live instance.
+
+- Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
+  `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle
+  (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `backup` service or its
+  WAL keepalive has stopped, so nothing gives `archive_timeout` a segment to switch. Check
+  `docker compose -f deploy/docker-compose.staging.yml ps backup` and search the `backup` logs for
+  `WAL keepalive transaction failed`; fix the reported database connection or credential error,
+  then run `docker compose -f deploy/docker-compose.staging.yml restart backup` and confirm
+  `last_archived_time` advances within two minutes.
 - WAL archiver failing but object storage reachable: fix credentials/permissions and verify a new WAL.
 - Object storage unavailable: escalate provider outage; do not delete local WAL.
-- Backup age unknown because D3 marker is absent: treat as failed closed.
+- Backup age unknown (no recent `last_archived_time` or `key-versions/wal/` object): treat as failed
+  closed.
 
 ## Remediation
 
 **HUMAN-ONLY:** correct encrypted environment/object-storage policy through a new attested compose
-deployment. `main` lacks D3 encryption, success marker, key fallback, and restore drill. Do not run
-an unencrypted manual backup as a substitute.
+deployment. Follow `deploy/RESTORE.md` for key versions and fallbacks. Do not run an unencrypted
+manual backup as a substitute.
 
 ## Verification
 

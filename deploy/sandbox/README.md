@@ -23,7 +23,7 @@ Every step that deploys contracts, changes a CVM, or writes to the sandbox datab
 
 ## Run everything locally
 
-Requirements: Docker Compose, Foundry v1.8.3 (`forge`, `cast`), `jq`, `envsubst`, and `uv`.
+Requirements: Docker Compose, Foundry v1.8.3 (`forge`, `cast`), `jq`, and `uv`.
 
 ```sh
 deploy/sandbox/run-local.sh                 # example, then every scenario
