@@ -8,8 +8,8 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
-use tokio::sync::watch;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use topup_core::{Signer, retry::backoff};
 use tracing::Instrument as _;
 use uuid::Uuid;
@@ -143,15 +143,15 @@ where
     }
 
     /// Polls until shutdown, retaining failed events for unlimited retries.
-    pub async fn run(&self, shutdown: watch::Receiver<bool>) {
+    pub async fn run(&self, shutdown: CancellationToken) {
         self.run_with_instance("0".to_owned(), shutdown).await;
     }
 
     /// Polls one named delivery worker until shutdown.
-    pub async fn run_with_instance(&self, instance: String, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run_with_instance(&self, instance: String, shutdown: CancellationToken) {
         crate::observability::register_loop("outbox", instance.clone());
         loop {
-            if *shutdown.borrow() {
+            if shutdown.is_cancelled() {
                 return;
             }
             crate::observability::heartbeat("outbox", instance.clone());
@@ -177,11 +177,7 @@ where
                 );
                 tokio::select! {
                     () = sleep(self.config.poll_interval) => {}
-                    changed = shutdown.changed() => {
-                        if changed.is_err() || *shutdown.borrow() {
-                            return;
-                        }
-                    }
+                    () = shutdown.cancelled() => return,
                 }
             }
         }
