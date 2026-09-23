@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#95): `deploy/local/docker-compose.yml` is an overlay; pass
+`-f deploy/docker-compose.yml -f deploy/local/docker-compose.yml`. The commands below are recorded
+as run.
+
 Status: partial. The output below predates D3; D3 (#58) now provides encrypted base backups, WAL
 key metadata, and `deploy/local/restore-drill.sh`, but this exercise has not been re-run against it.
 
