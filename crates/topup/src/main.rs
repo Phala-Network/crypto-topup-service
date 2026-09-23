@@ -15,9 +15,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
-use topup::pump::{
-    AgeAlertConfig, AgeAlerter, NoopStepSet, Pump, PumpConfig, PumpMetrics, StepSet,
-};
+use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
 use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
 use topup::steps::screen::ScreenStep;
 use topup::steps::settle::SettleStep;
@@ -389,15 +387,14 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
-    let reconciler =
-        match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer, metrics) {
-            Ok(reconciler) => reconciler,
-            Err(error) => {
-                tracing::error!(%error, "failed to configure post-restore reconciler");
-                return ExitCode::FAILURE;
-            }
-        };
+    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
+    {
+        Ok(reconciler) => reconciler,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure post-restore reconciler");
+            return ExitCode::FAILURE;
+        }
+    };
     let expectations = topup::restore::RestoreExpectations {
         expected_heartbeat_at: args.expected_heartbeat_at,
         expected_lsn: args.expected_lsn.clone(),
@@ -655,12 +652,10 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let reconciliation_metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
     let reconciler = match topup::reconciler::Reconciler::from_routes(
         pool.clone(),
         routes.clone(),
         signer.clone(),
-        Arc::clone(&reconciliation_metrics),
     ) {
         Ok(reconciler) => Arc::new(reconciler),
         Err(error) => {
@@ -714,17 +709,16 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let steps = Arc::new(
-        NoopStepSet::build()
-            .with_detected(Box::new(confirm_step))
-            .with_confirmed(Box::new(screen_step))
-            .with_cleared(Box::new(SettleStep::new(
-                pool.clone(),
-                signer,
-                Duration::from_secs(30),
-            )))
-            .with_credited(Box::new(topup::flusher::SweepStep)),
-    );
+    let steps = Arc::new(StepSet::new(
+        Box::new(confirm_step),
+        Box::new(screen_step),
+        Box::new(SettleStep::new(
+            pool.clone(),
+            signer,
+            Duration::from_secs(30),
+        )),
+        Box::new(topup::flusher::SweepStep),
+    ));
     let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
         Ok(pump) => pump,
         Err(error) => {
@@ -801,11 +795,9 @@ async fn run(args: &RunArgs) -> ExitCode {
                 .await;
         }));
     }
-    let metrics = Arc::new(PumpMetrics::default());
     let age_alerter = AgeAlerter::with_reminder_interval(
         pool.clone(),
         age_config,
-        Arc::clone(&metrics),
         Duration::from_secs(args.age_alert_interval_s),
         Duration::from_secs(args.age_alert_reminder_s),
     );
@@ -828,12 +820,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     let backup_metrics_task = tokio::spawn(async move {
         topup::observability::collect_backup_metrics(backup_metrics_cancellation).await;
     });
-    let expiry_metrics = Arc::new(topup::locks::ExpiryMetrics::default());
-    let expiry_worker = topup::locks::ExpiryWorker::new(
-        pool.clone(),
-        Arc::clone(&expiry_metrics),
-        Duration::from_secs(5),
-    );
+    let expiry_worker = topup::locks::ExpiryWorker::new(pool.clone(), Duration::from_secs(5));
     let expiry_cancellation = cancellation.child_token();
     let expiry_task = tokio::spawn(async move {
         expiry_worker.run(expiry_cancellation).await;
@@ -1035,13 +1022,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     }
     pool.close().await;
-    tracing::info!(
-        stuck_deposit_alerts = metrics.stuck_deposit_alerts(),
-        reconciliation_heartbeat = reconciliation_metrics.last_heartbeat_unix(),
-        rate_lock_expiry_heartbeats = expiry_metrics.heartbeats(),
-        rate_locks_expired = expiry_metrics.expired(),
-        "topup service stopped"
-    );
+    tracing::info!("topup service stopped");
 
     if clean_shutdown {
         ExitCode::SUCCESS
@@ -1091,15 +1072,14 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let metrics = Arc::new(topup::reconciler::ReconciliationMetrics::default());
-    let reconciler =
-        match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer, metrics) {
-            Ok(reconciler) => reconciler,
-            Err(error) => {
-                tracing::error!(%error, "failed to configure reconciler");
-                return ExitCode::FAILURE;
-            }
-        };
+    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
+    {
+        Ok(reconciler) => reconciler,
+        Err(error) => {
+            tracing::error!(%error, "failed to configure reconciler");
+            return ExitCode::FAILURE;
+        }
+    };
     let result = if args.post_restore {
         topup::reconciler::post_restore_once(&reconciler).await
     } else {

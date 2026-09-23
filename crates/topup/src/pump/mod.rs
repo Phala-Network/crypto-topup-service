@@ -28,7 +28,7 @@ use crate::db::{
     self, ApplyTransitionError, ApplyTransitionResult, Deposit, OutboxEvent, TransitionUpdate,
 };
 
-pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter, PumpMetrics};
+pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter};
 
 const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 
@@ -131,37 +131,6 @@ impl StepSet {
             DepositState::Credited => Some(self.credited.as_ref()),
             DepositState::Swept | DepositState::Rejected => None,
         }
-    }
-}
-
-/// Placeholder step registry used until the state-specific work packages land.
-pub struct NoopStepSet;
-
-impl NoopStepSet {
-    /// Builds a registry whose steps leave every deposit waiting.
-    #[must_use]
-    pub fn build() -> StepSet {
-        StepSet::new(
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-            Box::new(NoopStep),
-        )
-    }
-}
-
-/// Placeholder step that leaves a deposit waiting without external effects.
-pub struct NoopStep;
-
-#[async_trait]
-impl Step for NoopStep {
-    async fn run(&self, _deposit: &Deposit) -> StepResult {
-        StepResult::new(
-            StepOutcome::Wait {
-                reason: WaitReason::Paused,
-            },
-            json!({"outcome": "wait", "reason": "noop_step_set"}),
-        )
     }
 }
 

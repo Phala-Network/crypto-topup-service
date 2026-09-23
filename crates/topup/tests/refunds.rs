@@ -20,12 +20,13 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::api::{AppState, PublicOrigin, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::refunds::{
     EvmRefundChainReader, RefundChainReader, RefundCheck, RefundConfirmationConfig,
     RefundConfirmationWorker, RefundObservation, RefundReadError, RefundTransfer,
 };
+use topup_adapters::attestation::DstackAttestor;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -1291,7 +1292,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
         )
         .expect("admin key is valid"),
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
-        attestor: Arc::new(UnavailableAttestor),
+        attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
     };
     topup::api::router(state).0
