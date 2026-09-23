@@ -25,7 +25,9 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   separate `--metrics-bind` listener (default `127.0.0.1:9464`). The measured compose binds that
   listener to the container network on port 9464 with `expose`; it is not published through the
   port-8080 gateway. Only the monitoring collector may reach it. The local compose publishes it on
-  loopback port 19464 for smoke testing.
+  loopback port 19464 for smoke testing. `make alerts-check` (`check-alerts.sh`) runs
+  `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
+  pinned Prometheus image.
 
 ## Backup age marker contract
 
