@@ -130,7 +130,8 @@ pub async fn list_scan_addresses(
     records.into_iter().map(TryInto::try_into).collect()
 }
 
-/// Commits deposits, backfill markers, and an optional cursor advance atomically.
+/// Commits deposits, backfill markers, and an optional cursor advance atomically. A cursor
+/// advance also deletes the display-only pending rows it now covers.
 ///
 /// `scanned_block_time` is the block time of `scanned_block` when the advance reaches the
 /// finalized head the scanner observed; it is ignored without a cursor advance. The stored time
@@ -193,6 +194,7 @@ pub async fn commit_scan(
         .bind(scanned_block_time)
         .execute(&mut *transaction)
         .await?;
+        super::pending::delete_finalized_in(&mut transaction, chain_id, scanned_block).await?;
     }
 
     transaction.commit().await?;

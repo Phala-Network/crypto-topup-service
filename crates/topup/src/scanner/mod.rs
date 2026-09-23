@@ -1,5 +1,9 @@
 //! Finalized ERC-20 deposit scanner.
 
+mod head;
+
+pub use head::{HEAD_SCAN_INTERVAL, HeadScan, head_scan_once};
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -9,6 +13,7 @@ use std::time::Duration;
 use alloy_primitives::Address;
 use chrono::Utc;
 use sqlx::PgPool;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
@@ -434,15 +439,36 @@ async fn run_chain(
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
     let chain_id = routes.chain.chain_id;
-    run_scan_loop(
+    let finalized_advanced = Notify::new();
+    let finalized_scan = run_scan_loop(
         chain_id,
         poll_interval,
-        cancellation,
+        cancellation.clone(),
         || scan_once(&pool, &reader, &routes),
-        tokio::time::sleep,
+        |delay| {
+            let finalized_advanced = &finalized_advanced;
+            async move {
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = finalized_advanced.notified() => {}
+                }
+            }
+        },
         || OsJitter.next_u64(),
-    )
-    .await
+    );
+    let head_scan = head::run_head_loop(
+        &pool,
+        &reader,
+        &routes,
+        poll_interval.min(HEAD_SCAN_INTERVAL),
+        &finalized_advanced,
+        cancellation,
+    );
+    // The head loop returns only on cancellation; the finalized loop's result is the chain's.
+    tokio::select! {
+        result = finalized_scan => result,
+        () = head_scan => Ok(()),
+    }
 }
 
 async fn run_scan_loop<Scan, ScanFuture, Sleep, SleepFuture, Jitter>(

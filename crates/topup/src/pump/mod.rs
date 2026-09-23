@@ -32,6 +32,9 @@ use crate::jitter::{JitterSource, OsJitter};
 pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter};
 
 const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
+/// Wait while a provider has not finalized the deposit block yet: about one slot, so a deposit
+/// confirms soon after the lagging provider catches up instead of a full wait interval later.
+const FINALITY_WAIT_INTERVAL: Duration = Duration::from_secs(12);
 
 /// One asynchronous operation for a non-terminal deposit state.
 #[async_trait]
@@ -132,6 +135,15 @@ impl StepSet {
             DepositState::Credited => Some(self.credited.as_ref()),
             DepositState::Swept | DepositState::Rejected => None,
         }
+    }
+}
+
+fn wait_delay(outcome: &StepOutcome, wait_interval: Duration) -> Duration {
+    match outcome {
+        StepOutcome::Wait {
+            reason: WaitReason::Finality,
+        } => wait_interval.min(FINALITY_WAIT_INTERVAL),
+        _ => wait_interval,
     }
 }
 
@@ -364,7 +376,7 @@ impl Pump {
                 let retry_attempt = u32::try_from(deposit.attempt).unwrap_or(u32::MAX);
                 backoff(retry_attempt, self.jitter.next_u64())
             }
-            TransitionKind::Wait => self.config.wait_interval,
+            TransitionKind::Wait => wait_delay(&result.outcome, self.config.wait_interval),
             TransitionKind::Advanced | TransitionKind::Rejected => Duration::ZERO,
         };
         let chrono_delay =
@@ -536,6 +548,27 @@ mod tests {
                 json!({"outcome": "wait"}),
             )
         }
+    }
+
+    #[test]
+    fn finality_wait_retries_after_about_one_slot_and_other_waits_keep_the_interval() {
+        let interval = std::time::Duration::from_secs(60);
+        let wait = |reason| super::wait_delay(&StepOutcome::Wait { reason }, interval);
+        assert_eq!(
+            wait(WaitReason::Finality),
+            std::time::Duration::from_secs(12)
+        );
+        assert_eq!(wait(WaitReason::Paused), interval);
+        assert_eq!(wait(WaitReason::ProductProcessing), interval);
+        assert_eq!(
+            super::wait_delay(
+                &StepOutcome::Wait {
+                    reason: WaitReason::Finality
+                },
+                std::time::Duration::from_secs(5)
+            ),
+            std::time::Duration::from_secs(5)
+        );
     }
 
     #[test]

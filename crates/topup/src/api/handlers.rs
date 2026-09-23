@@ -557,6 +557,7 @@ async fn deposit_address(
         )
         .await?
     };
+    super::pending::touch_requested(state, account.id).await;
     Ok(Json(address_response(route, product, &account, address)))
 }
 
@@ -590,7 +591,7 @@ async fn require_unfrozen_chain(state: &AppState, route: &RouteFile) -> ApiResul
     Ok(())
 }
 
-async fn require_account(
+pub(super) async fn require_account(
     state: &AppState,
     product_id: Uuid,
     external_id: &str,

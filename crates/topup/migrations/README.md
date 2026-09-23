@@ -58,3 +58,9 @@ values back from the route files before running an older service.
 Dropping these columns is a deliberate exception to the additive-migrations rule (plan §6 item 6):
 no environment has been deployed, and a later work package squashes all migrations into one
 initial schema. Do not treat it as precedent once any environment holds data.
+
+Migration `20260922000022_pending_transfers` adds the display-only `pending_transfers` table
+(`SELECT`, `INSERT`, `UPDATE`, `DELETE` for `topup_app`) written by the head scan and cleared by the
+finalized scanner's cursor advance, and `addresses.requested_at`, the last time the product issued
+or fetched a persistent address. Existing addresses get the migration time. Nothing that affects
+money reads either.

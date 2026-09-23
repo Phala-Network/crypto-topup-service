@@ -61,7 +61,7 @@ pub(crate) async fn create_rate_lock(
     .await
     .map_err(map_error)?
     {
-        return Ok(Json(response(route, &product, &account, lock)));
+        return respond(&state, route, &product, &account, lock).await;
     }
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
     if has_quotes_pause(&product, &account, &route_scopes) {
@@ -78,7 +78,7 @@ pub(crate) async fn create_rate_lock(
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(response(route, &product, &account, lock)))
+    respond(&state, route, &product, &account, lock).await
 }
 
 #[utoipa::path(
@@ -103,7 +103,7 @@ pub(crate) async fn get_rate_lock(
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(response(route, &product, &account, lock)))
+    respond(&state, route, &product, &account, lock).await
 }
 
 #[utoipa::path(
@@ -169,11 +169,23 @@ fn parse_decimal_u256(value: &str) -> Result<U256, ()> {
     U256::from_str(value).map_err(|_| ())
 }
 
+async fn respond(
+    state: &AppState,
+    route: &topup_core::route::RouteFile,
+    product: &Product,
+    account: &Account,
+    lock: locks::RateLock,
+) -> ApiResult<Json<RateLockResponse>> {
+    let payment = super::pending::lock_payment(state, route, &lock).await?;
+    Ok(Json(response(route, product, account, lock, payment)))
+}
+
 fn response(
     route: &topup_core::route::RouteFile,
     product: &Product,
     account: &Account,
     lock: locks::RateLock,
+    payment: Option<super::models::RateLockPayment>,
 ) -> RateLockResponse {
     let now = Utc::now();
     RateLockResponse {
@@ -196,6 +208,7 @@ fn response(
             external_id: account.external_id.clone(),
             lock_ref: lock.lock_ref,
         },
+        payment,
     }
 }
 

@@ -1,10 +1,10 @@
 //! EVM finalized-log reader.
 
-use std::collections::BTreeMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::BlockNumberOrTag;
@@ -20,6 +20,8 @@ use topup_core::money::AtomicAmount;
 pub const MAX_BLOCKS_PER_REQUEST: u64 = 2_000;
 /// Maximum recipient count in one `eth_getLogs` request.
 pub const MAX_ADDRESSES_PER_REQUEST: usize = 1_000;
+/// Block timestamps kept per client; the head scan revisits the same recent blocks every poll.
+const BLOCK_TIME_CACHE_CAPACITY: usize = 1_024;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
@@ -174,11 +176,39 @@ impl ProviderHealth {
     }
 }
 
+/// Bounded FIFO block-timestamp cache keyed by block hash, so a reorged block at the same height
+/// never lends its time to a log from another block. It evicts the oldest insertion, not the least
+/// recently used entry: a hash's time never changes, and the head scan reads the newest blocks,
+/// which are the newest insertions, so recency tracking would buy nothing.
+#[derive(Debug, Default)]
+struct BlockTimes {
+    times: HashMap<B256, DateTime<Utc>>,
+    order: VecDeque<B256>,
+}
+
+impl BlockTimes {
+    fn get(&self, hash: &B256) -> Option<DateTime<Utc>> {
+        self.times.get(hash).copied()
+    }
+
+    fn insert(&mut self, hash: B256, time: DateTime<Utc>) {
+        if self.times.insert(hash, time).is_none() {
+            self.order.push_back(hash);
+            if self.order.len() > BLOCK_TIME_CACHE_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.times.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// Alloy HTTP client for finalized EVM reads.
 pub struct EvmChain {
     provider: RootProvider,
     endpoint: Redacted,
     health: Mutex<ProviderHealth>,
+    block_times: Mutex<BlockTimes>,
 }
 
 impl fmt::Debug for EvmChain {
@@ -198,6 +228,7 @@ impl EvmChain {
             provider: RootProvider::new_http(endpoint.expose().clone()),
             endpoint,
             health: Mutex::new(ProviderHealth::default()),
+            block_times: Mutex::new(BlockTimes::default()),
         })
     }
 
@@ -208,55 +239,116 @@ impl EvmChain {
         self
     }
 
-    async fn block_time(&self, block_number: u64) -> Result<DateTime<Utc>, ChainError> {
+    /// Returns the provider's current `latest` block number. Used only by the display-only head
+    /// scan; nothing that affects money reads above `finalized`.
+    pub async fn latest_head(&self) -> Result<u64, ChainError> {
+        self.provider.get_block_number().await.map_err(|error| {
+            ChainError::Transport(self.endpoint.rpc_error("latest head fetch", &error))
+        })
+    }
+
+    async fn block_time(&self, block_hash: B256) -> Result<DateTime<Utc>, ChainError> {
+        let cached = self
+            .block_times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&block_hash);
+        if let Some(time) = cached {
+            return Ok(time);
+        }
         let block = self
             .provider
-            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .get_block_by_hash(block_hash)
             .await
             .map_err(|error| {
                 ChainError::Transport(self.endpoint.rpc_error("block timestamp fetch", &error))
             })?
             .ok_or(ChainError::MissingField("block"))?;
-        utc_timestamp(block.header.inner.timestamp)
+        let time = utc_timestamp(block.header.inner.timestamp)?;
+        self.block_times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(block_hash, time);
+        Ok(time)
     }
 
     async fn transfer_logs_request(
         &self,
+        tokens: &[Address],
         addresses: &[Address],
         from_block: u64,
         to_block: u64,
-        timestamps: &mut BTreeMap<u64, DateTime<Utc>>,
     ) -> Result<Vec<TransferLog>, ChainError> {
         let recipients = addresses
             .iter()
             .copied()
             .fold(Topic::default(), Topic::extend);
-        let filter = Filter::new()
+        let mut filter = Filter::new()
             .from_block(from_block)
             .to_block(to_block)
             .event_signature(Transfer::SIGNATURE_HASH)
             .topic2(recipients);
+        if !tokens.is_empty() {
+            filter = filter.address(tokens.to_vec());
+        }
         let logs = self.provider.get_logs(&filter).await.map_err(|error| {
             ChainError::Transport(self.endpoint.rpc_error("transfer log fetch", &error))
         })?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
-            let block_number = log
-                .block_number
-                .ok_or(ChainError::MissingField("log.block_number"))?;
-            let block_time = match timestamps.get(&block_number) {
-                Some(timestamp) => *timestamp,
-                None => {
-                    let timestamp = self.block_time(block_number).await?;
-                    timestamps.insert(block_number, timestamp);
-                    timestamp
-                }
-            };
+            let block_hash = log
+                .block_hash
+                .ok_or(ChainError::MissingField("log.block_hash"))?;
+            let block_time = self.block_time(block_hash).await?;
             if let Some(transfer) = decode_transfer_log(&log, block_time)? {
                 transfers.push(transfer);
             }
         }
         Ok(transfers)
+    }
+
+    async fn transfer_logs(
+        &self,
+        tokens: &[Address],
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        if from_block > to_block {
+            return Err(ChainError::InvalidRange {
+                from_block,
+                to_block,
+            });
+        }
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut transfers = Vec::new();
+        for (window_from, window_to) in block_windows(from_block, to_block)? {
+            for batch in addresses.chunks(MAX_ADDRESSES_PER_REQUEST) {
+                transfers.extend(
+                    self.transfer_logs_request(tokens, batch, window_from, window_to)
+                        .await?,
+                );
+            }
+        }
+        Ok(transfers)
+    }
+
+    /// Returns transfers of the given token contracts only; used by the display-only head scan
+    /// so unsupported tokens cannot create pending rows or notifications.
+    pub async fn token_transfer_logs_to(
+        &self,
+        tokens: &[Address],
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.transfer_logs(tokens, addresses, from_block, to_block)
+            .await
     }
 }
 
@@ -353,27 +445,8 @@ impl ChainReader for EvmChain {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ChainError> {
-        if from_block > to_block {
-            return Err(ChainError::InvalidRange {
-                from_block,
-                to_block,
-            });
-        }
-        if addresses.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut transfers = Vec::new();
-        for (window_from, window_to) in block_windows(from_block, to_block)? {
-            let mut timestamps = BTreeMap::new();
-            for batch in addresses.chunks(MAX_ADDRESSES_PER_REQUEST) {
-                transfers.extend(
-                    self.transfer_logs_request(batch, window_from, window_to, &mut timestamps)
-                        .await?,
-                );
-            }
-        }
-        Ok(transfers)
+        self.transfer_logs(&[], addresses, from_block, to_block)
+            .await
     }
 
     async fn transfer_log_by_identity(
@@ -410,7 +483,7 @@ impl ChainReader for EvmChain {
         {
             return Err(ChainError::MissingField("receipt.log_identity"));
         }
-        let block_time = self.block_time(block_number).await?;
+        let block_time = self.block_time(block_hash).await?;
         decode_transfer_log(log, block_time)
     }
 }
@@ -443,6 +516,21 @@ fn block_windows(from_block: u64, to_block: u64) -> Result<Vec<(u64, u64)>, Chai
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_times_are_keyed_by_hash_and_bounded() {
+        let mut times = BlockTimes::default();
+        let time = |seconds| DateTime::from_timestamp(seconds, 0).expect("timestamp");
+        let hash = |index: usize| B256::from(alloy::primitives::U256::from(index));
+        for index in 0..=BLOCK_TIME_CACHE_CAPACITY {
+            times.insert(hash(index), time(i64::try_from(index).expect("index")));
+        }
+        assert_eq!(times.times.len(), BLOCK_TIME_CACHE_CAPACITY);
+        assert_eq!(times.get(&hash(0)), None, "oldest entry is evicted");
+        assert_eq!(times.get(&hash(1)), Some(time(1)));
+        // A different block at the same height has a different hash and never shares a time.
+        assert_eq!(times.get(&hash(BLOCK_TIME_CACHE_CAPACITY + 1)), None);
+    }
 
     #[test]
     fn windows_are_inclusive_and_never_exceed_two_thousand_blocks() {

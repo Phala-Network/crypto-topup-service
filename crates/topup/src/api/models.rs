@@ -246,6 +246,85 @@ pub struct RateLockResponse {
     pub eip681_uri: String,
     /// Inputs encoded into the rate-lock salt.
     pub salt_inputs: RateLockSaltInputs,
+    /// The payment to the lock address that the checkout page should show, once one is seen on
+    /// chain: the deposit that consumed the lock; otherwise the first payment that would consume
+    /// it; otherwise the first payment. Display only: while `status` is `seen` the payment is not
+    /// final and nothing has been credited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<RateLockPayment>,
+}
+
+/// A payment observed at a rate-lock address.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RateLockPayment {
+    /// `seen`: in a block above `finalized`, provisional and may still disappear in a reorg.
+    /// `finalized`: recorded as a deposit; follow it by `deposit_id`. New values may be added.
+    pub status: String,
+    /// Identifier the deposit has, or will have once final.
+    pub deposit_id: Uuid,
+    /// Canonical transaction hash.
+    pub tx_hash: String,
+    /// Transfer log index.
+    pub log_index: u64,
+    /// Block that contains the transfer.
+    pub block_number: u64,
+    /// Blocks on top of and including that block at the last head scan; `seen` only.
+    pub confirmations: Option<u64>,
+    /// Atomic token amount encoded as a decimal string.
+    pub amount_atomic: String,
+    /// Canonical token contract address.
+    pub asset_contract: String,
+    /// Whether the token is the lock's route asset.
+    pub supported: bool,
+    /// Whether the amount is the lock's asset within the lock tolerance; always false on a
+    /// cancelled lock.
+    pub amount_within_tolerance: bool,
+    /// Whether the block time is at or before `expires_at`; always false on a cancelled lock.
+    pub in_time: bool,
+    /// Estimated finality time: block time plus 15 minutes; `seen` only.
+    pub estimated_final_at: Option<DateTime<Utc>>,
+}
+
+/// A transfer to a persistent address seen above the finalized head. It is not a deposit, has not
+/// been credited, and may disappear in a reorg; once final it appears under `deposits`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PendingDepositResponse {
+    /// Identifier the deposit will have once final.
+    pub deposit_id: Uuid,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Canonical transaction hash.
+    pub tx_hash: String,
+    /// Transfer log index.
+    pub log_index: u64,
+    /// Block that contains the transfer.
+    pub block_number: u64,
+    /// Block time.
+    pub block_time: DateTime<Utc>,
+    /// Blocks on top of and including that block at the last head scan.
+    pub confirmations: u64,
+    /// Receiving forwarder address.
+    pub address: String,
+    /// Canonical token contract address.
+    pub asset_contract: String,
+    /// Canonical transfer sender address.
+    pub from_address: String,
+    /// Atomic token amount encoded as a decimal string.
+    pub amount_atomic: String,
+    /// Whether a route of this product accepts this token on this chain. Only routed tokens are
+    /// scanned before finality, so this is false only for a token routed for another product.
+    pub supported: bool,
+    /// First time the service saw the transfer.
+    pub first_seen_at: DateTime<Utc>,
+    /// Estimated finality time: block time plus 15 minutes.
+    pub estimated_final_at: DateTime<Utc>,
+}
+
+/// Pending transfers to an account's persistent addresses.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PendingDepositsResponse {
+    /// Pending transfers in block order.
+    pub pending_deposits: Vec<PendingDepositResponse>,
 }
 
 /// Inputs needed to recompute a rate-lock CREATE2 address.

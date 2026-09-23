@@ -16,7 +16,10 @@ from .limits_response import LimitsResponse
 from .nudge_response import NudgeResponse
 from .pause_request import PauseRequest
 from .pause_response import PauseResponse
+from .pending_deposit_response import PendingDepositResponse
+from .pending_deposits_response import PendingDepositsResponse
 from .persistent_salt_inputs import PersistentSaltInputs
+from .rate_lock_payment import RateLockPayment
 from .rate_lock_response import RateLockResponse
 from .rate_lock_salt_inputs import RateLockSaltInputs
 from .record_refund_request import RecordRefundRequest
@@ -50,7 +53,10 @@ __all__ = (
     "NudgeResponse",
     "PauseRequest",
     "PauseResponse",
+    "PendingDepositResponse",
+    "PendingDepositsResponse",
     "PersistentSaltInputs",
+    "RateLockPayment",
     "RateLockResponse",
     "RateLockSaltInputs",
     "RecordRefundRequest",
