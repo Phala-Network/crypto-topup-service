@@ -3,8 +3,8 @@
 # unsupported-asset scenario, and MockSanctionsOracle. Prints a JSON manifest on stdout.
 #
 # HUMAN-ONLY on Sepolia: sign with a Foundry keystore account holding a funded deployer key
-# (`--account NAME`; `forge` reads the keystore password from the file named by ETH_PASSWORD), so no key appears
-# on a command line. `--anvil-unlocked ADDRESS` is for the local Anvil chain only. The forwarder
+# (`--account NAME`; `forge` reads the keystore password from the file named by ETH_PASSWORD),
+# so no key appears on a command line. `--anvil-unlocked ADDRESS` is for the local Anvil chain only. The forwarder
 # factory is not deployed here; on Sepolia it comes from deploy/CONTRACTS.md.
 set -euo pipefail
 
