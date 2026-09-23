@@ -373,6 +373,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         .await?;
         insert_rejected_deposit(&database.app_pool, &route, account.id, paid_address_id).await?;
         let refused = app
+            .clone()
             .oneshot(signed_request(
                 Method::DELETE,
                 "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-6",
@@ -385,6 +386,47 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         ensure!(refused.status() == StatusCode::CONFLICT);
         ensure!(response_json(refused).await?["error"]["code"] == "pending_payment");
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "checkout-6").await? == "open");
+
+        // An unpaid lock whose payment window has closed stays open until chain-time expiry, and
+        // can no longer be cancelled.
+        sqlx::query("UPDATE rate_locks SET created_at = now() - interval '2 minutes'")
+            .execute(&database.app_pool)
+            .await?;
+        let lapsed = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                path,
+                serde_json::to_vec(&json!({
+                    "amount_atomic": "100",
+                    "product_lock_ref": "checkout-7"
+                }))?,
+                PRODUCT_KID,
+                &product_key,
+                now + 10,
+            ))
+            .await?;
+        ensure!(lapsed.status() == StatusCode::OK);
+        sqlx::query(
+            "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = \
+             (SELECT id FROM addresses WHERE account_id = $1 AND lock_ref = 'checkout-7')",
+        )
+        .bind(account.id)
+        .execute(&database.app_pool)
+        .await?;
+        let window_closed = app
+            .oneshot(signed_request(
+                Method::DELETE,
+                "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-7",
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 11,
+            ))
+            .await?;
+        ensure!(window_closed.status() == StatusCode::CONFLICT);
+        ensure!(response_json(window_closed).await?["error"]["code"] == "window_closed");
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "checkout-7").await? == "open");
         Ok(())
     }
     .await;

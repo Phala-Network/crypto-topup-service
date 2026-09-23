@@ -7,9 +7,12 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 
 use crate::db::MIGRATOR;
+use crate::heartbeat::RPO_SECONDS;
 use crate::reconciler::{self, CheckName, Finding, Reconciler};
 
 const HEARTBEAT_SAMPLING_SECONDS: i32 = 60;
+/// A committed heartbeat can be up to one sampling interval older than the failure point.
+const ALLOWED_RPO_SECONDS: i32 = RPO_SECONDS + HEARTBEAT_SAMPLING_SECONDS;
 
 /// Source-side failure point recorded outside the PostgreSQL volume being restored.
 #[derive(Clone, Debug)]
@@ -50,8 +53,8 @@ pub struct RestoreReport {
     pub measured_rpo_seconds: i64,
     /// Maximum accepted loss between committed heartbeat samples.
     pub allowed_rpo_seconds: i32,
-    /// RPO target recorded by the heartbeat schema before sampling tolerance.
-    pub recorded_rpo_seconds: i32,
+    /// RPO target before sampling tolerance.
+    pub rpo_seconds: i32,
     /// Heartbeat sampling interval used when interpreting RPO.
     pub heartbeat_sampling_seconds: i32,
     /// Exact counts for durable service tables.
@@ -116,22 +119,15 @@ pub async fn check(
         .try_get("wal_bytes_behind")
         .map_err(|_| "WAL distance is invalid".to_owned())?;
 
-    let heartbeat = sqlx::query(
-        "SELECT recorded_at, rpo_seconds FROM heartbeat ORDER BY recorded_at DESC, id DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| "failed to read restore heartbeat".to_owned())?
-    .ok_or_else(|| "restore heartbeat table is empty".to_owned())?;
+    let heartbeat =
+        sqlx::query("SELECT recorded_at FROM heartbeat ORDER BY recorded_at DESC, id DESC LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "failed to read restore heartbeat".to_owned())?
+            .ok_or_else(|| "restore heartbeat table is empty".to_owned())?;
     let restored_heartbeat_at: DateTime<Utc> = heartbeat
         .try_get("recorded_at")
         .map_err(|_| "restore heartbeat timestamp is invalid".to_owned())?;
-    let recorded_rpo_seconds: i32 = heartbeat
-        .try_get("rpo_seconds")
-        .map_err(|_| "restore heartbeat RPO is invalid".to_owned())?;
-    let allowed_rpo_seconds = recorded_rpo_seconds
-        .checked_add(HEARTBEAT_SAMPLING_SECONDS)
-        .ok_or_else(|| "restore heartbeat RPO tolerance overflowed".to_owned())?;
     let measured_rpo_seconds = expectations
         .expected_heartbeat_at
         .signed_duration_since(restored_heartbeat_at)
@@ -162,9 +158,9 @@ pub async fn check(
     }
 
     let mut failures = Vec::new();
-    if measured_rpo_seconds > i64::from(allowed_rpo_seconds) {
+    if measured_rpo_seconds > i64::from(ALLOWED_RPO_SECONDS) {
         failures.push(format!(
-            "restore RPO exceeded: measured {measured_rpo_seconds}s > allowed {allowed_rpo_seconds}s"
+            "restore RPO exceeded: measured {measured_rpo_seconds}s > allowed {ALLOWED_RPO_SECONDS}s"
         ));
     }
     failures.extend(
@@ -209,8 +205,8 @@ pub async fn check(
         expected_heartbeat_at: expectations.expected_heartbeat_at,
         restored_heartbeat_at,
         measured_rpo_seconds,
-        allowed_rpo_seconds,
-        recorded_rpo_seconds,
+        allowed_rpo_seconds: ALLOWED_RPO_SECONDS,
+        rpo_seconds: RPO_SECONDS,
         heartbeat_sampling_seconds: HEARTBEAT_SAMPLING_SECONDS,
         row_counts,
         post_restore_reconciliation,

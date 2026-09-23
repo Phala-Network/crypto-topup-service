@@ -1,14 +1,32 @@
+DROP TABLE heartbeat;
+DROP TABLE reconciliation_custody_cursors;
+DROP TABLE reconciliation_deposit_cursors;
+DROP TABLE reconciliation_blocks;
+DROP TABLE reconciliation_findings;
 DROP TABLE audit;
-DROP TABLE outbox;
+DROP TABLE refund_payment_claims;
+DROP FUNCTION enforce_refund_payment_claim_capacity();
 DROP TABLE refunds;
-DROP TABLE flushed;
+DROP TABLE outbox;
 DROP TABLE settlements;
-DROP TABLE transitions;
+DROP TABLE lock_exposure;
 DROP TABLE rate_locks;
+DROP TABLE transitions;
 DROP TABLE deposits;
+DROP TABLE flush_exclusions;
+DROP TABLE flushed;
 DROP TABLE flushes;
+DROP TABLE pending_transfers;
 DROP TABLE cursors;
 DROP TABLE addresses;
+DROP TABLE seen_signatures;
+DROP TABLE route_pauses;
 DROP TABLE accounts;
 DROP TABLE products;
 DROP FUNCTION reject_append_only_mutation();
+
+REVOKE SELECT ON TABLE _sqlx_migrations FROM topup_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM topup_app;
+REVOKE USAGE ON SCHEMA public FROM topup_app;
+DROP ROLE IF EXISTS topup_app;
