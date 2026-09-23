@@ -132,23 +132,48 @@ steps using Phala Cloud credentials and the Finance Safe.
    Require the owner to be the recorded Finance Safe and the KMS chain/root to match the failed
    instance. Stop if the original app id or KMS root cannot be established.
 
-2. Use the Phala replacement-instance workflow for that existing app id, not the new-application
-   workflow. Prepare the exact retained compose with the
-   [restore-time environment](#replacement-cvm-boot-environment), then save the returned JSON as
-   `prepare.json`. It must report the original app id. Record whether the host device was already
-   allowed: another CVM of this app, possibly the live one, may run on the same host.
+2. Prepare a new instance of that existing app with `phala instances add`, not the new-application
+   workflow; `phala cvms replicate` needs the source CVM, which may be gone. The commands and JSON
+   paths below match phala CLI 1.1.22. Reuse the retained attested compose revision and pass the
+   [restore-time environment](#replacement-cvm-boot-environment) as an env file. `--env-file`
+   encrypts it with the key of an existing instance record of the app, so stop the failed CVM but
+   do not delete it before this step.
 
    ```sh
-   export REPLACEMENT_APP_ID="$(jq -er '.app_id' prepare.json)"
-   test "${REPLACEMENT_APP_ID#0x}" = "${ORIGINAL_APP_ID#0x}"
-   export COMPOSE_HASH="$(jq -er '.compose_hash' prepare.json)"
-   export DEVICE_ID="$(jq -er '.device_id' prepare.json)"
-   export DEVICE_PREVIOUSLY_ALLOWED="$(jq -er '.onchain_status.device_id_allowed' prepare.json)"
-   jq '{app_id, compose_hash, device_id, chain_id, onchain_status}' prepare.json
+   npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --node-id "$NODE_ID" \
+     --compose-hash "$ORIGINAL_COMPOSE_HASH" --env-file restore.env --prepare-only --json \
+     > prepare.json
    ```
 
+   The prepare output uses camelCase keys, and only the `onchainStatus` object is snake_case.
+   Validate every field's type before reading it, because `jq -r` prints `null` for a missing path
+   and `export X="$(…)"` would hide the failure. Hex values may lack `0x`, so normalize them. Record
+   whether the host device was already allowed: another CVM of this app, possibly the live one, may
+   run on the same host.
+
+   ```sh
+   jq -e '(.appId | type == "string") and (.composeHash | type == "string")
+     and (.deviceId | type == "string") and (.commitToken | type == "string")
+     and (.kmsInfo.chain_id != null)
+     and (.onchainStatus.compose_hash_allowed | type == "boolean")
+     and (.onchainStatus.device_id_allowed | type == "boolean")' prepare.json
+   hex() { printf '0x%s' "${1#0x}" | tr 'A-F' 'a-f'; }
+   test "$(hex "$(jq -r '.appId' prepare.json)")" = "$(hex "$ORIGINAL_APP_ID")"
+   export COMPOSE_HASH="$(hex "$(jq -r '.composeHash' prepare.json)")"
+   test "$COMPOSE_HASH" = "$(hex "$ORIGINAL_COMPOSE_HASH")"
+   export DEVICE_ID="$(hex "$(jq -r '.deviceId' prepare.json)")"
+   test "$(jq -r '.kmsInfo.chain_id' prepare.json)" = "$(cast chain-id --rpc-url "$ETH_RPC_URL")"
+   export COMPOSE_HASH_PREVIOUSLY_ALLOWED="$(jq -r '.onchainStatus.compose_hash_allowed' prepare.json)"
+   export DEVICE_PREVIOUSLY_ALLOWED="$(jq -r '.onchainStatus.device_id_allowed' prepare.json)"
+   export COMMIT_TOKEN="$(jq -r '.commitToken' prepare.json)"
+   jq '{appId, composeHash, deviceId, chain_id: .kmsInfo.chain_id, onchainStatus}' prepare.json
+   ```
+
+   Record `DEVICE_PREVIOUSLY_ALLOWED` (`true` or `false`) in the incident or drill log; the device
+   cleanup below depends on it.
+
 3. **Finance Safe:** authorize what is not yet allowed on the original contract: `addComposeHash`
-   when `onchain_status.compose_hash_allowed` is `false`, and `addDevice` only when
+   only when `COMPOSE_HASH_PREVIOUSLY_ALLOWED` is `false`, and `addDevice` only when
    `DEVICE_PREVIOUSLY_ALLOWED` is `false`. Submit the calldata through the Safe, wait for finality,
    then verify both reads return `true`:
 
@@ -163,7 +188,15 @@ steps using Phala Cloud credentials and the Finance Safe.
 
 4. Commit the prepared replacement only after both authorizations are final. It boots the whole
    compose at once, so the restore-time environment must already be in the prepared encrypted
-   environment. Fetch `cvm.json` and `attestation.json`, then run the normal compose verification:
+   environment. Pass the Safe transaction hash, or `already-registered` when nothing was added:
+
+   ```sh
+   npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --commit \
+     --token "$COMMIT_TOKEN" --compose-hash "$COMPOSE_HASH" \
+     --transaction-hash "${AUTH_TX_HASH:-already-registered}" --json
+   ```
+
+   Fetch `cvm.json` and `attestation.json`, then run the normal compose verification:
 
    ```sh
    deploy/verify-attested-compose.sh \
@@ -177,8 +210,8 @@ steps using Phala Cloud credentials and the Finance Safe.
    ```sh
    export NONCE="$(openssl rand -hex 32)"
    dc run --rm --no-deps topup topup attest --nonce "$NONCE" > restore-attestation.json
-   jq -e --arg app "${ORIGINAL_APP_ID,,}" \
-     '(.app_id | ascii_downcase) == $app and (.quote | length > 0)' \
+   jq -e --arg app "$(printf '%s' "${ORIGINAL_APP_ID#0x}" | tr 'A-F' 'a-f')" \
+     '(.app_id | ascii_downcase | ltrimstr("0x")) == $app and (.quote | length > 0)' \
      restore-attestation.json
    ```
 
@@ -304,15 +337,22 @@ file, segments, and `key-versions/current.json` would make a later real restore 
 (`wal-g delete retain` on the shared prefix) or `topup` (the live application's keys, next to the
 live instance).
 
+The drill must run as an instance of the staging app itself: a staging-copy app id has a different
+identity and cannot derive the staging backup keys. The dstack gateway can therefore route the
+staging app's port-8080 traffic to the drill CVM, where `topup` keeps exiting on the empty
+`DATABASE_URL`. Pause staging callers for the drill window and announce it; a request that still
+reaches the drill CVM fails with a connection error and changes nothing.
+
 1. Issue drill object-storage credentials that can only list and read `WALG_S3_PREFIX`, and put them
    with `TOPUP_WAL_ARCHIVE=off` and an empty `DATABASE_URL` in the drill's encrypted environment.
 2. Run steps 1-6 of the restore. Never run step 7 and never switch the drill's environment to
    production values. Record the `restore-check` report, RPO, and RTO in the drill log.
 3. Destroy the drill CVM and its volumes and revoke the read-only drill credentials.
-4. **Finance Safe:** only if `DEVICE_PREVIOUSLY_ALLOWED` was `false` (the device was added for this
-   drill), remove it with `removeDevice(bytes32)` and verify `allowedDeviceIds` returns `false`.
-   Otherwise leave it: the live CVM may run on that host, and removing its device would stop it.
-   Keep the compose hash; production uses the same attested compose.
+4. **Finance Safe:** only if the recorded `DEVICE_PREVIOUSLY_ALLOWED` was `false` (the device was
+   added for this drill), remove it with `removeDevice(bytes32)` and verify `allowedDeviceIds`
+   returns `false`. Otherwise leave it: the live CVM may run on that host, and removing its device
+   would stop it. Keep the compose hash; production uses the same attested compose. Resume the
+   staging callers.
 
 `deploy/local/restore-drill.sh` mirrors this: after destroying the source database it boots the
 whole local stack with the restore-time environment, requires `topup` and `heartbeat` to fail closed,
