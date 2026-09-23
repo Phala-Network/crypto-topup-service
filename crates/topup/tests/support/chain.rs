@@ -29,10 +29,10 @@ pub struct Anvil {
 }
 
 impl Anvil {
-    /// Starts anvil, or returns `None` with a skip message when Foundry is not on `PATH`.
+    /// Starts anvil, or returns `None` after [`super::skip`] when Foundry is not on `PATH`.
     pub async fn start_if_available(extra_args: &[&str]) -> Result<Option<Self>> {
         if !command_available("anvil") {
-            eprintln!("skipping integration test: anvil is not on PATH");
+            super::skip("anvil is not on PATH")?;
             return Ok(None);
         }
         ensure!(

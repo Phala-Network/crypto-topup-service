@@ -14,6 +14,9 @@ x-walg-environment: &walg-environment
   # A restore phase switches to the read-only topup-restore-read user created by minio-init.
   AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-minio}
   AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-minio-secret}
+  # The attested file reads AWS_SESSION_TOKEN from the shell; a developer's SSO token must never
+  # reach MinIO.
+  AWS_SESSION_TOKEN: ""
 
 x-service-build: &service-build
   context: ..

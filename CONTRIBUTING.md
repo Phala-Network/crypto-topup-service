@@ -23,7 +23,8 @@ make image
 ```
 
 CI's `lint` job runs `make lint`. Its `test` job runs the whole workspace once with PostgreSQL and
-Foundry and fails if any integration or conformance test prints a skip message.
+Foundry. There, database, Anvil, and conformance tests fail instead of skipping: the test helpers
+check `CI=true` and the conformance suite checks `CONFORMANCE_REQUIRE_TOOLS=1`.
 
 ## Branches and pull requests
 

@@ -42,8 +42,9 @@ jobs:
             exit 1
           fi
 
-  # The whole workspace once, with PostgreSQL and Foundry, so no integration or conformance test
-  # takes its skip path; the last step fails the job if one did.
+  # The whole workspace once, with PostgreSQL and Foundry. The database and Anvil test helpers fail
+  # instead of skipping when CI=true (set by Actions), and CONFORMANCE_REQUIRE_TOOLS=1 does the same
+  # for conformance. The dstack simulator test still skips by design: no simulator runs here.
   test:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
@@ -91,17 +92,7 @@ jobs:
           SQLX_OFFLINE: false
         run: cargo sqlx prepare --workspace --check -- --all-targets --all-features
       - name: Test the workspace, including conformance variants on Anvil and PostgreSQL
-        run: |
-          set -o pipefail
-          cargo test --workspace --locked --all-features -- --nocapture 2>&1 |
-            tee "$RUNNER_TEMP/cargo-test.log"
-      - name: Fail if any database, Anvil, or conformance test was skipped
-        run: |
-          if grep -E 'skipping integration test|skipping conformance test' \
-            "$RUNNER_TEMP/cargo-test.log"; then
-            echo "integration tests must not skip in CI" >&2
-            exit 1
-          fi
+        run: cargo test --workspace --locked --all-features -- --nocapture
 
   sdk:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
