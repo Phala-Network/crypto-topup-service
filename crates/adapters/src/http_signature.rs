@@ -4,6 +4,11 @@
 //! conformance reference uses the same code to verify service-signed settlement requests. Header
 //! values are parsed as RFC 8941 Structured Fields, so any signature label, any parameter order,
 //! and an optional `alg="ed25519"` parameter are accepted.
+//!
+//! A verifier reconstructs `@target-uri` (RFC 9421 section 2.2.2) from its own configured
+//! [`PublicOrigin`] and the request's path and query, never from `Host` or `X-Forwarded-*`
+//! headers: behind a TLS-terminating gateway those describe the internal hop, not the URI the
+//! signer addressed.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -17,6 +22,66 @@ const REQUIRED_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-diges
 const IDEMPOTENCY_COMPONENT: &str = "idempotency-key";
 /// Maximum distance between `created` and the verifier's clock.
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
+
+/// The scheme and authority a verifier is publicly reachable at, such as
+/// `https://topup.example`.
+///
+/// Parsing accepts `http` and `https` with a host and optional port, and rejects user
+/// information, a path other than `/`, a query, and a fragment. The scheme and host are
+/// lowercased and a default port is dropped, matching the URI an HTTP client sends.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicOrigin(String);
+
+/// Why a configured public origin was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidPublicOrigin(&'static str);
+
+impl std::fmt::Display for InvalidPublicOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for InvalidPublicOrigin {}
+
+impl PublicOrigin {
+    /// Parses and normalizes a configured origin.
+    pub fn parse(value: &str) -> Result<Self, InvalidPublicOrigin> {
+        let url = url::Url::parse(value)
+            .map_err(|_| InvalidPublicOrigin("public origin must be an absolute URL"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(InvalidPublicOrigin(
+                "public origin scheme must be http or https",
+            ));
+        }
+        if url.host_str().is_none_or(str::is_empty) {
+            return Err(InvalidPublicOrigin("public origin must include a host"));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(InvalidPublicOrigin(
+                "public origin must not include user information",
+            ));
+        }
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(InvalidPublicOrigin(
+                "public origin must not include a path, query, or fragment",
+            ));
+        }
+        Ok(Self(url.origin().ascii_serialization()))
+    }
+
+    /// Returns the `@target-uri` for a request whose target has `path_and_query`, the raw
+    /// origin-form path and optional query as received.
+    pub fn target_uri(&self, path_and_query: &str) -> String {
+        format!("{}{path_and_query}", self.0)
+    }
+}
+
+impl std::fmt::Display for PublicOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 /// The signed parts of one inbound HTTP request.
 #[derive(Clone, Copy, Debug)]
@@ -230,6 +295,40 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
 
     use super::*;
+
+    #[test]
+    fn public_origin_is_normalized_and_validated() {
+        for (input, expected) in [
+            ("https://topup.example", "https://topup.example"),
+            ("https://Topup.Example/", "https://topup.example"),
+            ("https://topup.example:443", "https://topup.example"),
+            ("http://127.0.0.1:18080", "http://127.0.0.1:18080"),
+            ("https://topup.example:8443", "https://topup.example:8443"),
+        ] {
+            assert_eq!(
+                PublicOrigin::parse(input).map(|origin| origin.to_string()),
+                Ok(expected.to_owned()),
+                "{input}"
+            );
+        }
+        for input in [
+            "",
+            "topup.example",
+            "/v1",
+            "ftp://topup.example",
+            "https://user@topup.example",
+            "https://topup.example/api",
+            "https://topup.example/?a=1",
+            "https://topup.example/#top",
+        ] {
+            assert!(PublicOrigin::parse(input).is_err(), "{input}");
+        }
+        assert_eq!(
+            PublicOrigin::parse("https://topup.example")
+                .map(|origin| origin.target_uri("/v1/products/acme/accounts?x=1")),
+            Ok("https://topup.example/v1/products/acme/accounts?x=1".to_owned())
+        );
+    }
 
     const NOW: i64 = 1_800_000_000;
     const URI: &str = "https://product.example/settlements";

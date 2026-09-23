@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- The service now rebuilds `@target-uri` from its configured public origin
+  (`TOPUP_PUBLIC_ORIGIN`) instead of the `Host` and `X-Forwarded-Proto` headers, so requests
+  signed for the public URL verify behind the dstack gateway (#77). The `http_message_signature`
+  security scheme in `openapi.json` documents this. No SDK code changed.
+
 ## 0.1.0 - 2026-09-22
 
 Generated from OpenAPI `info.version` 0.1.0.

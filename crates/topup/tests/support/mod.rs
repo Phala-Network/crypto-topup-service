@@ -105,6 +105,9 @@ impl TestDatabase {
     }
 }
 
+/// Public origin the test routers are configured with and requests are signed for by default.
+pub const TEST_ORIGIN: &str = "http://api.test";
+
 pub fn public_key_base64(key: &SigningKey) -> String {
     STANDARD.encode(key.verifying_key().as_bytes())
 }
@@ -141,6 +144,8 @@ pub struct SignatureOptions {
     pub parameters: Vec<SignatureParameter>,
     pub origin_form: bool,
     pub idempotency_key: Option<String>,
+    /// Origin the signer addressed; `@target-uri` is this origin plus `path`.
+    pub origin: String,
 }
 
 impl Default for SignatureOptions {
@@ -154,6 +159,7 @@ impl Default for SignatureOptions {
             ],
             origin_form: false,
             idempotency_key: None,
+            origin: TEST_ORIGIN.to_owned(),
         }
     }
 }
@@ -168,7 +174,7 @@ pub fn signed_request_with_options(
     created: i64,
     options: &SignatureOptions,
 ) -> Request<Body> {
-    let target_uri = format!("http://api.test{path}");
+    let target_uri = format!("{}{path}", options.origin);
     let digest = STANDARD.encode(Sha256::digest(&body));
     let content_digest = format!("sha-256=:{digest}:");
     let signature_parameters = signature_parameters(

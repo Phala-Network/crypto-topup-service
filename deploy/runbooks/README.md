@@ -29,6 +29,9 @@ export ADMIN_KEY_ID=admin/v1
 export DATABASE_URL=postgres://topup_service:...@postgres/topup
 ```
 
+`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`: the service verifies `@target-uri`
+against that origin, so a signature over any other host or scheme fails with `401`.
+
 For an authenticated admin request, write the exact body to a file, sign those exact bytes, then
 pass the three returned headers to `curl`. Signatures are single-use and expire after five minutes:
 

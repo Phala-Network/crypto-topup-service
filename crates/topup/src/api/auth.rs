@@ -5,15 +5,14 @@ use super::error::ApiError;
 use super::repository;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::header::HOST;
-use axum::http::{HeaderMap, Uri};
+use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
-use topup_adapters::http_signature::{self, SignedMessage};
+use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
 
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -62,7 +61,7 @@ pub async fn authenticate_product(
             return ApiError::unauthorized().into_response();
         }
     };
-    let verified = match verify_request(&mut request, &key).await {
+    let verified = match verify_request(&mut request, &state.public_origin, &key).await {
         Ok(verified) => verified,
         Err(()) => return ApiError::unauthorized().into_response(),
     };
@@ -79,7 +78,8 @@ pub async fn authenticate_admin(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let verified = match verify_request(&mut request, &state.admin_key).await {
+    let verified = match verify_request(&mut request, &state.public_origin, &state.admin_key).await
+    {
         Ok(verified) => verified,
         Err(()) => return ApiError::unauthorized().into_response(),
     };
@@ -98,6 +98,7 @@ pub(crate) struct VerifiedSignature {
 
 async fn verify_request(
     request: &mut Request,
+    public_origin: &PublicOrigin,
     key: &VerificationKey,
 ) -> Result<VerifiedSignature, ()> {
     let body = std::mem::replace(request.body_mut(), Body::empty());
@@ -106,7 +107,13 @@ async fn verify_request(
         .map_err(|_| ())?;
     *request.body_mut() = Body::from(bytes.clone());
 
-    let target_uri = target_uri(request.uri(), request.headers())?;
+    // `Host` and `X-Forwarded-*` describe the gateway hop, so the configured origin is used.
+    let target_uri = public_origin.target_uri(
+        request
+            .uri()
+            .path_and_query()
+            .map_or("/", |value| value.as_str()),
+    );
     let headers = request.headers();
     let idempotency_key = headers
         .get(IDEMPOTENCY_HEADER)
@@ -132,23 +139,6 @@ async fn verify_request(
         signature_hash: verified.signature_hash,
         created: DateTime::from_timestamp(verified.created, 0).ok_or(())?,
     })
-}
-
-fn target_uri(uri: &Uri, headers: &HeaderMap) -> Result<String, ()> {
-    if uri.scheme().is_some() && uri.authority().is_some() {
-        return Ok(uri.to_string());
-    }
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .map(|value| value.to_str().map_err(|_| ()))
-        .transpose()?
-        .unwrap_or("http");
-    if !matches!(scheme, "http" | "https") {
-        return Err(());
-    }
-    let authority = headers.get(HOST).ok_or(())?.to_str().map_err(|_| ())?;
-    let path = uri.path_and_query().map_or("/", |value| value.as_str());
-    Ok(format!("{scheme}://{authority}{path}"))
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str, ()> {
@@ -238,7 +228,7 @@ mod tests {
             .body(Body::from(body))?;
         *request.headers_mut() = signed.headers().clone();
 
-        verify_request(&mut request, &key)
+        verify_request(&mut request, &PublicOrigin::parse("http://api.test")?, &key)
             .await
             .map_err(|()| "settlement signature must verify")?;
         Ok(())
@@ -262,7 +252,8 @@ mod tests {
     }
 
     /// Requests signed by the Python SDK (`sdk/python/tests/vectors.py`) verify with the shared
-    /// verifier, and this module rebuilds the same `@target-uri` from their `Host` and target.
+    /// verifier, and this module rebuilds the same `@target-uri` from the configured origin and
+    /// the request target.
     #[test]
     fn python_sdk_signatures_verify() -> Result<(), Box<dyn Error>> {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -275,6 +266,7 @@ mod tests {
         let other_key = SigningKey::from_bytes(&[9; 32]).verifying_key();
         let created = fixture["created"].as_i64().ok_or("created")?;
         let vectors = fixture["vectors"].as_array().ok_or("vectors")?;
+        let origin = PublicOrigin::parse("http://127.0.0.1:18080")?;
         assert_eq!(vectors.len(), 5);
         assert!(
             vectors
@@ -287,11 +279,7 @@ mod tests {
 
         for vector in vectors {
             let name = vector["name"].as_str().ok_or("name")?;
-            let mut headers = HeaderMap::new();
-            let host = vector["headers"]["host"].as_str().ok_or("host")?;
-            headers.insert(HOST, host.parse()?);
-            let target: Uri = vector["target"].as_str().ok_or("target")?.parse()?;
-            let target_uri = target_uri(&target, &headers).map_err(|()| "target URI")?;
+            let target_uri = origin.target_uri(vector["target"].as_str().ok_or("target")?);
             assert_eq!(
                 Some(target_uri.as_str()),
                 vector["target_uri"].as_str(),

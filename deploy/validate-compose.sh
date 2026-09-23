@@ -38,6 +38,7 @@ jq -e '
     and (.services.topup.environment | has("DATABASE_URL"))
     and (.services.topup.environment | has("TOPUP_ADMIN_KID"))
     and (.services.topup.environment | has("TOPUP_ADMIN_PUBLIC_KEY"))
+    and (.services.topup.environment | has("TOPUP_PUBLIC_ORIGIN"))
     and (.services.topup.environment | has("TOPUP_RPC_PROVIDER_A_URL"))
 ' "$rendered" >/dev/null || {
     echo "topup command or required runtime environment is misconfigured" >&2

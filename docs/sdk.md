@@ -27,7 +27,9 @@ Product requests are signed with RFC 9421 HTTP Message Signatures using ed25519:
 - `Content-Digest: sha-256=:<base64>:` over the exact body bytes, also for empty bodies;
 - parameters `created` (Unix seconds, accepted within five minutes of the service clock) and
   `keyid`, optionally `alg="ed25519"` and `nonce`, serialized as RFC 8941 structured fields;
-- `@target-uri` is `scheme://host[:port]/path?query` exactly as sent, using the `Host` header.
+- `@target-uri` is `scheme://host[:port]/path?query` exactly as sent. The service rebuilds it
+  from its configured public origin (`TOPUP_PUBLIC_ORIGIN`) and the request path and query, so
+  the client's base URL must be that public origin; a default port is omitted.
 
 Each signature is accepted once. Because ed25519 signatures are deterministic, two identical
 requests signed in the same second would carry the same signature, so the SDK adds a random

@@ -73,7 +73,10 @@ Credential issuance is a human step on both sides.
    uv run --locked topup-sdk keygen --keyid acme/v1 --seed-out ~/acme-sandbox.seed
    ```
 
-   It prints `{"keyid": ..., "public_key": ...}`.
+   It prints `{"keyid": ..., "public_key": ...}`. Use this key only for the sandbox and create
+   a separate key for every other deployment: each deployment records used signatures in its
+   own database, so a request signed with a shared key could be replayed within the five-minute
+   freshness window against another deployment that shares the same public origin.
 2. Send the operator, through the agreed support channel: the product slug you want (lowercase
    letters, digits, and dashes), the printed key id and public key, and public HTTPS URLs for
    your settlement endpoint and webhook receiver. Never send the seed.
@@ -117,16 +120,11 @@ gas from a public faucet.
 
 4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment whose
-   RPC providers point at Sepolia.
-
-   **Known risk, verify before opening the sandbox to integrators:** the service rebuilds the
-   signed `@target-uri` from the `Host` header and uses `http` unless the request carries
-   `X-Forwarded-Proto` (`crates/topup/src/api/auth.rs`). Integrators sign the `https://` URL
-   they call, so if the dstack gateway terminates TLS without forwarding
-   `X-Forwarded-Proto: https`, every product request fails with `401`. Run
-   `sdk/examples/phala_cloud_integration.py` against the deployed sandbox URL first. If it fails
-   this way, keep the sandbox closed until the service can be configured with its public origin
-   (tracked in #77).
+   RPC providers point at Sepolia and whose `TOPUP_PUBLIC_ORIGIN` is the sandbox's public gateway
+   URL (for example `https://sandbox.topup.example`, no path). Integrators sign the URL they
+   call and the service verifies `@target-uri` against this origin, so a wrong value makes every
+   signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
+   deployed sandbox URL before opening it to integrators.
 5. **HUMAN-ONLY:** issue the product through the sandbox's administrative database access
    (there is deliberately no product-creation API):
 

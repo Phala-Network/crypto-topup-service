@@ -20,6 +20,7 @@ export DATABASE_URL=postgres://wp_d5_app:wp_d5_app@127.0.0.1:55436/wp_d5_locks
 export DSTACK_SIMULATOR_ENDPOINT=/tmp/wp-d5-ex/dstack/dstack.sock
 export TOPUP_ADMIN_KID=local-admin/v1
 export TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+export TOPUP_PUBLIC_ORIGIN=http://127.0.0.1:18089
 target/debug/topup run --bind 127.0.0.1:18089 --route /tmp/wp-d5-ex/route.yaml \
   > /tmp/wp-d5-ex/service.log 2>&1 &
 ```

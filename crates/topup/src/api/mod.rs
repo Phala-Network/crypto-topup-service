@@ -25,6 +25,7 @@ use utoipa_axum::routes;
 
 pub use attestation::{AttestationError, AttestationFuture, Attestor, UnavailableAttestor};
 pub use auth::VerificationKey;
+pub use topup_adapters::http_signature::PublicOrigin;
 
 /// Shared state for all API handlers.
 #[derive(Clone)]
@@ -35,6 +36,8 @@ pub struct AppState {
     pub routes: Arc<Vec<RouteFile>>,
     /// Separately configured administrative verification key.
     pub admin_key: VerificationKey,
+    /// Public origin used to rebuild the signed `@target-uri` of every request.
+    pub public_origin: PublicOrigin,
     /// Current attestation provider.
     pub attestor: Arc<dyn Attestor>,
     /// Validated current-price provider for rate-lock creation.
@@ -119,7 +122,13 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .get_or_insert_default()
         .add_security_scheme(
             "http_message_signature",
-            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("Signature"))),
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                "Signature",
+                "RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and \
+                 `idempotency-key` when sent. `@target-uri` is the service's configured public \
+                 origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign \
+                 the public URL you call; `Host` and `X-Forwarded-*` headers are ignored.",
+            ))),
         );
     let documented = documented.route("/healthz", get(healthz));
     let (router, openapi) = documented.with_state(state).split_for_parts();
@@ -186,6 +195,8 @@ mod tests {
                 &STANDARD.encode(admin_key.verifying_key().as_bytes()),
             )
             .expect("admin key is valid"),
+            public_origin: super::PublicOrigin::parse("http://api.test")
+                .expect("test origin is valid"),
             attestor: Arc::new(UnavailableAttestor),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
         };
@@ -222,6 +233,8 @@ mod tests {
                 &STANDARD.encode(admin_key.verifying_key().as_bytes()),
             )
             .expect("admin key is valid"),
+            public_origin: super::PublicOrigin::parse("http://api.test")
+                .expect("test origin is valid"),
             attestor: Arc::new(UnavailableAttestor),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
         };
