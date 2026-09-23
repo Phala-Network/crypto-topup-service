@@ -17,7 +17,7 @@ Every step that deploys contracts, changes a CVM, or writes to the sandbox datab
 | `deploy-test-contracts.sh` | Deploys the test token (A1 `MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
 | `issue-product.sh` | Registers a product's slug, public key, and webhook URL, with an audit row. The key id and settlement URL come only from the attested route. |
 | `docker-compose.sepolia.yml`, `render-sepolia-compose.sh` | Overlay for `deploy/docker-compose.yml` and the renderer that inlines the sandbox route into the attested compose. |
-| `docker-compose.local.yml`, `run-local.sh` | Local stack (`deploy/local` plus Anvil) and the end-to-end driver. |
+| `docker-compose.local.yml`, `run-local.sh` | Local stack (the attested compose with the `deploy/local` overlay, plus Anvil) and the end-to-end driver. |
 | `scenarios/docker_restart.py` | The local `restart_command`: restarts the service container through the Docker API. |
 | `scenarios/` | Scripted scenarios; `run.py` runs them against any configured stack. |
 

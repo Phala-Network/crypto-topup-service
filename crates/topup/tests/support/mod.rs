@@ -67,10 +67,10 @@ pub async fn ensure_app_role(admin_pool: &PgPool) -> Result<()> {
 
 impl TestDatabase {
     pub async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
+        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL")? else {
             return Ok(None);
         };
-        let Some(app_template) = required_url("DATABASE_URL") else {
+        let Some(app_template) = required_url("DATABASE_URL")? else {
             return Ok(None);
         };
 
@@ -349,12 +349,19 @@ fn signature_parameters(
         .expect("signature parameter inner list must not be empty")
 }
 
-fn required_url(name: &str) -> Option<String> {
+fn required_url(name: &str) -> Result<Option<String>> {
     match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping integration test: {name} is not set");
-            None
-        }
+        Some(value) => Ok(Some(value)),
+        None => skip(&format!("{name} is not set")).map(|()| None),
     }
+}
+
+/// Prints a skip message, or fails when `CI=true` (set by GitHub Actions), where every
+/// integration test must run.
+pub fn skip(reason: &str) -> Result<()> {
+    if env::var("CI").is_ok_and(|value| value == "true") {
+        anyhow::bail!("CI=true but {reason}; integration tests must not skip in CI");
+    }
+    eprintln!("skipping integration test: {reason}");
+    Ok(())
 }

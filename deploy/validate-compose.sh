@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 compose="$root/deploy/docker-compose.yml"
+local_compose="$root/deploy/local/docker-compose.yml"
 rendered=$(mktemp)
 rendered_tools=$(mktemp)
 compose_envs=$(mktemp)
@@ -107,4 +108,30 @@ cmp -s "$staging_envs" "$allowed_envs" || {
     exit 1
 }
 
-echo "attested compose config and allowed_envs validation passed"
+# The local stack is an overlay on the attested compose; check every combination the scripts use.
+local_stack() {
+    docker compose -f "$compose" -f "$local_compose" "$@" --profile tools config --format json
+}
+local_stack >"$rendered_tools"
+local_stack -f "$root/deploy/sandbox/docker-compose.local.yml" |
+    jq -e '[.services[].ports[]?.published] | index("19464") == null' >/dev/null || {
+    echo "the sandbox stack must not publish the fixed metrics port" >&2
+    exit 1
+}
+jq -e '[.services[].volumes[]? | select(.source == "/var/run/dstack.sock")] | length == 0' \
+    "$rendered_tools" >/dev/null || {
+    echo "the local overlay must replace the host dstack socket with the simulator's" >&2
+    exit 1
+}
+local_stack -f "$root/deploy/local/restore-drill.compose.yml" >"$rendered"
+jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$rendered" >/dev/null || {
+    echo "the restore-drill stack bind-mounts a host path; CI's Docker daemon cannot see it" >&2
+    exit 1
+}
+# Drills run concurrently with each other and with sandbox runs on one host.
+jq -e '[.services[].ports[]?] | length == 0' "$rendered" >/dev/null || {
+    echo "the restore-drill stack must not publish host ports" >&2
+    exit 1
+}
+
+echo "attested compose config, allowed_envs, and local overlay validation passed"

@@ -339,8 +339,15 @@ and a restore drill per [RESTORE.md](RESTORE.md) has passed.
 
 ## Local verification
 
-The local stack builds dstack's simulator from the pinned source revision and shares its
-`/var/run/dstack.sock` with `topup`.
+The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`
+overlay, which adds MinIO, the dstack simulator, and a mock product, builds the images from the
+checkout, and replaces secrets, ports, and host paths with local values. It builds dstack's
+simulator from the pinned source revision and shares its `/var/run/dstack.sock` with `topup`. Pass
+both files to any manual command:
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml ps
+```
 
 ```sh
 make up

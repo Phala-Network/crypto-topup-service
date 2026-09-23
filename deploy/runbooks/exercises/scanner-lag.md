@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#95): `deploy/local/docker-compose.yml` is an overlay; pass
+`-f deploy/docker-compose.yml -f deploy/local/docker-compose.yml`. The commands below are recorded
+as run.
+
 Status: partial; blocked on a controllable finalized-chain fixture and PR #56 alert rules.
 
 G2 exercised once: [ ]

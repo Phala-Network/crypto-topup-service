@@ -4,7 +4,8 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
-compose="$root/deploy/local/docker-compose.yml"
+compose="$root/deploy/docker-compose.yml"
+local_compose="$root/deploy/local/docker-compose.yml"
 # No bind mounts: CI's Docker daemon cannot see the checkout (see restore-drill.compose.yml).
 drill_compose="$root/deploy/local/restore-drill.compose.yml"
 mode=${1:-all}
@@ -34,7 +35,7 @@ samples_file=
 routes_dir=
 seed_container="$project-seed"
 dc() {
-    docker compose -p "$project" -f "$compose" -f "$drill_compose" "$@"
+    docker compose -p "$project" -f "$compose" -f "$local_compose" -f "$drill_compose" "$@"
 }
 
 cleanup() {
@@ -276,7 +277,7 @@ storage_listing() {
 # Creates the overlay's project volumes and copies the drill inputs into them through the API.
 seed_drill_volumes() {
     local volume
-    for volume in drill_postgres_init drill_routes drill_mock_product; do
+    for volume in drill_routes drill_mock_product; do
         docker volume create \
             --label "com.docker.compose.project=$project" \
             --label "com.docker.compose.volume=$volume" \
@@ -284,11 +285,9 @@ seed_drill_volumes() {
     done
     docker create --name "$seed_container" \
         --label "com.docker.compose.project=$project" \
-        --volume "${project}_drill_postgres_init:/seed/postgres-init" \
         --volume "${project}_drill_routes:/seed/routes" \
         --volume "${project}_drill_mock_product:/seed/mock-product" \
         --entrypoint /bin/true "$TOPUP_LOCAL_POSTGRES_IMAGE" >/dev/null
-    docker cp "$root/deploy/postgres-init/10-topup-role.sh" "$seed_container:/seed/postgres-init/"
     docker cp "$routes_dir/phala-cloud-sepolia-pha.yaml" "$seed_container:/seed/routes/"
     docker cp "$root/deploy/local/mock-product.py" "$seed_container:/seed/mock-product/"
     docker rm "$seed_container" >/dev/null

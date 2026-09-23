@@ -3,11 +3,11 @@
 ## Setup
 
 The committed `rust-toolchain.toml` selects Rust 1.98 with the formatting and lint components.
-Install that toolchain, Foundry v1.8.3 for contract work, and cargo-deny 0.20.2 for dependency
-policy checks:
+Install that toolchain (rustup 1.28 or newer reads it when given no toolchain name), Foundry v1.8.3
+for contract work, and cargo-deny 0.20.2 for dependency policy checks:
 
 ```sh
-rustup toolchain install 1.98 --profile minimal --component rustfmt,clippy
+rustup toolchain install
 foundryup --install v1.8.3
 cargo install cargo-deny --version 0.20.2 --locked
 ```
@@ -21,6 +21,10 @@ make test
 make lint
 make image
 ```
+
+CI's `lint` job runs `make lint`. Its `test` job runs the whole workspace once with PostgreSQL and
+Foundry. There, database, Anvil, and conformance tests fail instead of skipping: the test helpers
+check `CI=true` and the conformance suite checks `CONFORMANCE_REQUIRE_TOOLS=1`.
 
 ## Branches and pull requests
 
