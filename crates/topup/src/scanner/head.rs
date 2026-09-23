@@ -44,7 +44,7 @@ pub async fn head_scan_once(
     if crate::reconciler::chain_is_blocked(pool, chain_id).await? {
         return Ok(None);
     }
-    let finalized = reader.finalized_head().await?;
+    let finalized = reader.finalized_head().await?.number;
     let latest = reader.latest_head().await?;
     let from_block = finalized
         .saturating_add(1)

@@ -31,9 +31,11 @@ class RateLockResponse:
         eip681_uri (str): EIP-681 payment URI.
         expires_at (datetime.datetime): Lock expiry time.
         price_scaled (str): Locked eight-decimal scaled price.
-        remaining_seconds (int): Whole seconds remaining while the lock is open.
+        remaining_seconds (int): Whole seconds remaining in the payment window; zero once `expires_at` has passed.
         salt_inputs (RateLockSaltInputs): Inputs needed to recompute a rate-lock CREATE2 address.
-        status (str): Stable lifecycle status.
+        status (str): Stable lifecycle status: `open`, `consumed`, `expired`, or `cancelled`. A lock stays `open`
+            after its window closes until the finalized chain passes `expires_at`, so a payment mined
+            inside the window is never reported as expired.
         payment (None | RateLockPayment | Unset):
     """
 

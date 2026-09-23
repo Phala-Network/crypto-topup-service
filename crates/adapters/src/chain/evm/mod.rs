@@ -50,6 +50,15 @@ pub struct TransferLog {
     pub amount: AtomicAmount,
 }
 
+/// The provider's current finalized block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FinalizedHead {
+    /// Finalized block number.
+    pub number: u64,
+    /// Timestamp of the finalized block.
+    pub time: DateTime<Utc>,
+}
+
 /// Failure while reading or validating EVM chain data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainError {
@@ -126,8 +135,8 @@ impl Error for ChainError {}
 
 /// Chain reads required by the scanner and confirm step.
 pub trait ChainReader: Send + Sync {
-    /// Returns the provider's current finalized block number.
-    fn finalized_head(&self) -> impl Future<Output = Result<u64, ChainError>> + Send;
+    /// Returns the provider's current finalized block number and time.
+    fn finalized_head(&self) -> impl Future<Output = Result<FinalizedHead, ChainError>> + Send;
 
     /// Returns ERC-20 transfers to any supplied recipient in the inclusive block range.
     fn transfer_logs_to(
@@ -255,11 +264,7 @@ impl EvmChain {
                 ChainError::Transport(self.endpoint.rpc_error("block timestamp fetch", &error))
             })?
             .ok_or(ChainError::MissingField("block"))?;
-        let timestamp = block.header.inner.timestamp;
-        let time = i64::try_from(timestamp)
-            .ok()
-            .and_then(|value| DateTime::from_timestamp(value, 0))
-            .ok_or(ChainError::InvalidTimestamp(timestamp))?;
+        let time = utc_timestamp(block.header.inner.timestamp)?;
         self.block_times
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -347,6 +352,13 @@ impl EvmChain {
     }
 }
 
+fn utc_timestamp(timestamp: u64) -> Result<DateTime<Utc>, ChainError> {
+    i64::try_from(timestamp)
+        .ok()
+        .and_then(|value| DateTime::from_timestamp(value, 0))
+        .ok_or(ChainError::InvalidTimestamp(timestamp))
+}
+
 fn decode_transfer_log(
     log: &Log,
     block_time: DateTime<Utc>,
@@ -397,7 +409,7 @@ fn decode_transfer_log(
 }
 
 impl ChainReader for EvmChain {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         {
             let health = self
                 .health
@@ -416,11 +428,15 @@ impl ChainReader for EvmChain {
             })?
             .ok_or(ChainError::MissingField("finalized block"))?;
         let current = block.header.inner.number;
+        let time = utc_timestamp(block.header.inner.timestamp)?;
         self.health
             .lock()
             .map_err(|_| ChainError::HealthStateUnavailable)?
             .observe(current)?;
-        Ok(current)
+        Ok(FinalizedHead {
+            number: current,
+            time,
+        })
     }
 
     async fn transfer_logs_to(

@@ -113,7 +113,11 @@ pub(crate) async fn get_rate_lock(
     responses(
         (status = 200, body = CancelRateLockResponse),
         (status = 404, body = ErrorResponse),
-        (status = 409, body = ErrorResponse)
+        (
+            status = 409,
+            body = ErrorResponse,
+            description = "`conflict`: the lock is consumed or expired; `window_closed`: the payment window has closed while the lock awaits chain-time expiry; `pending_payment`: the lock address already received a payment."
+        )
     ),
     security(("http_message_signature" = [])),
     tag = "rate-locks"
@@ -190,7 +194,7 @@ fn response(
         price_scaled: lock.price.value().to_string(),
         credit_minor: lock.credit_minor.value().to_string(),
         expires_at: lock.expires_at,
-        status: lock.visible_status(now).code().to_owned(),
+        status: lock.status.code().to_owned(),
         remaining_seconds: lock.remaining_seconds(now),
         eip681_uri: format!(
             "ethereum:{:#x}@{}/transfer?address={:#x}&uint256={}",
@@ -235,6 +239,7 @@ fn map_error(error: RateLockError) -> ApiError {
         RateLockError::ExposureCap(scope) => ApiError::exposure_cap(scope),
         RateLockError::NotFound => ApiError::not_found(),
         RateLockError::NotOpen => ApiError::conflict("rate lock is not open"),
+        RateLockError::WindowClosed => ApiError::window_closed(),
         RateLockError::PendingPayment => ApiError::pending_payment(),
         RateLockError::IdempotencyMismatch => ApiError::idempotency_mismatch(),
         RateLockError::Arithmetic | RateLockError::DatabaseInvariant => ApiError::internal(),

@@ -29,7 +29,9 @@ class LimitsResponse:
         product_open_minor (int): Per-product open rate-lock cap in minor units.
         route (str): Route name.
         remaining_account_minor (int | None | Unset): Remaining account exposure.
-        reset_at (datetime.datetime | None | Unset): Earliest open-lock expiry, when any exposure is reserved.
+        reset_at (datetime.datetime | None | Unset): Earliest payment-window close among open reserved locks; it can be
+            in the past, because
+            exposure is released only at chain finality, about 15 minutes after the window closes.
     """
 
     account_open_minor: int

@@ -1,4 +1,5 @@
 use alloy_primitives::Address as EvmAddress;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
@@ -132,6 +133,11 @@ pub async fn list_scan_addresses(
 /// Commits deposits, backfill markers, and an optional cursor advance atomically. A cursor
 /// advance also deletes the display-only pending rows it now covers.
 ///
+/// `scanned_block_time` is the block time of `scanned_block` when the advance reaches the
+/// finalized head the scanner observed; it is ignored without a cursor advance. The stored time
+/// never moves backwards and stays a lower bound on the cursor block's time, so rate-lock expiry
+/// (§9) can rely on every block up to that time being committed.
+///
 /// A deposit born `rejected` (no route for its asset) never passes through a pump step, so its
 /// `deposit.rejected` event is written here, in the same transaction and only on first insert.
 pub async fn commit_scan(
@@ -140,6 +146,7 @@ pub async fn commit_scan(
     deposits: &[NewDeposit],
     backfilled_address_ids: &[Uuid],
     scanned_block: Option<u64>,
+    scanned_block_time: Option<DateTime<Utc>>,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let mut inserted = 0_u64;
@@ -172,15 +179,19 @@ pub async fn commit_scan(
         let scanned_block = to_i64(scanned_block, "cursors.scanned_block")?;
         sqlx::query(
             r#"
-            INSERT INTO cursors (chain_id, scanned_block)
-            VALUES ($1, $2)
+            INSERT INTO cursors (chain_id, scanned_block, scanned_block_time)
+            VALUES ($1, $2, $3)
             ON CONFLICT (chain_id) DO UPDATE
-            SET scanned_block = EXCLUDED.scanned_block
+            SET scanned_block = EXCLUDED.scanned_block,
+                scanned_block_time = GREATEST(
+                    cursors.scanned_block_time, EXCLUDED.scanned_block_time
+                )
             WHERE cursors.scanned_block <= EXCLUDED.scanned_block
             "#,
         )
         .bind(chain_id)
         .bind(scanned_block)
+        .bind(scanned_block_time)
         .execute(&mut *transaction)
         .await?;
         super::pending::delete_finalized_in(&mut transaction, chain_id, scanned_block).await?;
