@@ -19,8 +19,9 @@ use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
-use topup_adapters::attestation::{DstackAttestor, report_data};
+use topup_adapters::attestation::report_data;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::deposit::DepositState;

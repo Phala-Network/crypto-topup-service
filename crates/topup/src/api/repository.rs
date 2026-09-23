@@ -13,11 +13,8 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
 use topup_core::address::{forwarder_address, persistent_salt};
 use topup_core::money::AtomicAmount;
-use topup_core::refund::{
-    RefundAccountStatus, RefundAddressKind, RefundDeposit, refund_eligibility,
-};
+use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
-use topup_core::valuation::UnixSeconds;
 use uuid::Uuid;
 
 use crate::db::{Account, Address, AddressKind, Product};
@@ -325,9 +322,6 @@ pub async fn request_refund(
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
-               deposit.block_time, account.status AS account_status, account.closed_at,
-               address.kind AS address_kind,
-               rate_lock.amount_atomic::text AS lock_amount_atomic,
                COALESCE(deposit.route, $3) AS effective_route,
                account.paused_scopes AS account_scopes,
                product.paused_scopes AS product_scopes,
@@ -335,8 +329,6 @@ pub async fn request_refund(
         FROM deposits AS deposit
         JOIN accounts AS account ON account.id = deposit.account_id
         JOIN products AS product ON product.id = account.product_id
-        JOIN addresses AS address ON address.id = deposit.address_id
-        LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
         LEFT JOIN route_pauses AS route_pause ON route_pause.route = COALESCE(deposit.route, $3)
         WHERE deposit.id = $1 AND product.id = $2
         FOR UPDATE OF deposit, account
@@ -1249,41 +1241,12 @@ fn parse_atomic(value: String) -> Result<U256, ApiError> {
 fn refund_deposit_from_row(row: &PgRow, route: &RouteFile) -> Result<RefundDeposit, ApiError> {
     let state: String = row.try_get("state")?;
     let reason: Option<String> = row.try_get("reason")?;
-    let account_status = match row.try_get::<String, _>("account_status")?.as_str() {
-        "active" => RefundAccountStatus::Active,
-        "closed" => RefundAccountStatus::Closed,
-        _ => return Err(ApiError::internal()),
-    };
-    let address_kind = match row.try_get::<String, _>("address_kind")?.as_str() {
-        "persistent" => RefundAddressKind::Persistent,
-        "lock" => RefundAddressKind::Lock,
-        _ => return Err(ApiError::internal()),
-    };
-    let lock_amount = row
-        .try_get::<Option<String>, _>("lock_amount_atomic")?
-        .map(parse_atomic)
-        .transpose()?
-        .map(AtomicAmount::new);
-    let block_time: DateTime<Utc> = row.try_get("block_time")?;
-    let account_closed_at: Option<DateTime<Utc>> = row.try_get("closed_at")?;
     Ok(RefundDeposit {
         state: crate::db::parse_state(&state).map_err(|_| ApiError::internal())?,
         reason: crate::db::parse_reason(reason.as_deref()).map_err(|_| ApiError::internal())?,
         amount: AtomicAmount::new(parse_atomic(row.try_get("amount_atomic")?)?),
         min_refund: route.asset.min_refund_atomic,
-        account_status,
-        block_time: refund_unix_seconds(block_time)?,
-        account_closed_at: account_closed_at.map(refund_unix_seconds).transpose()?,
-        address_kind,
-        lock_amount,
-        lock_tolerance: route.rate_lock.lock_tolerance_bps,
     })
-}
-
-fn refund_unix_seconds(value: DateTime<Utc>) -> Result<UnixSeconds, ApiError> {
-    u64::try_from(value.timestamp())
-        .map(UnixSeconds::new)
-        .map_err(|_| ApiError::internal())
 }
 
 async fn refund_admin_row(
@@ -1311,15 +1274,10 @@ async fn refund_approval_eligibility(
 ) -> Result<RefundDeposit, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
-               deposit.block_time, account.status AS account_status, account.closed_at,
-               address.kind AS address_kind,
-               rate_lock.amount_atomic::text AS lock_amount_atomic
+        SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason
         FROM refunds AS refund
         JOIN deposits AS deposit ON deposit.id = refund.deposit_id
         JOIN accounts AS account ON account.id = deposit.account_id
-        JOIN addresses AS address ON address.id = deposit.address_id
-        LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
         WHERE refund.id = $1
         FOR UPDATE OF deposit, account
         "#,

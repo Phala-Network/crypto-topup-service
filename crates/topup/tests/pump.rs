@@ -3,9 +3,6 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::env;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -14,8 +11,7 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
 use topup::db::{
@@ -27,145 +23,16 @@ use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
-use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
+use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
-
-struct TestContext {
-    admin_pool: PgPool,
-    owner_pool: PgPool,
-    app_pool: PgPool,
-    database_name: String,
-    app_role: String,
-}
-
-impl TestContext {
-    async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL") else {
-            return Ok(None);
-        };
-        let Some(app_template) = required_url("DATABASE_URL") else {
-            return Ok(None);
-        };
-
-        let mut admin_url =
-            Url::parse(&owner_template).context("MIGRATE_DATABASE_URL must be a PostgreSQL URL")?;
-        admin_url.set_path("/postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await
-            .context("connect to the PostgreSQL maintenance database")?;
-        support::ensure_app_role(&admin_pool).await?;
-        sqlx::query("SELECT pg_advisory_lock(704_202_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c2_{suffix}");
-        let app_role = format!("topup_c2_app_{suffix}");
-        let password = format!("c2_{suffix}");
-        admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
-            .await
-            .context("create isolated test database")?;
-
-        let mut owner_url = Url::parse(&owner_template)?;
-        owner_url.set_path(&format!("/{database_name}"));
-        let owner_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(owner_url.as_str())
-            .await
-            .context("connect to isolated test database as owner")?;
-        db::migrate(&owner_pool).await.context("apply migrations")?;
-
-        admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
-            .await
-            .context("create isolated application login role")?;
-
-        let mut app_url = Url::parse(&app_template).context("DATABASE_URL must be a URL")?;
-        app_url
-            .set_username(&app_role)
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application username"))?;
-        app_url
-            .set_password(Some(&password))
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application password"))?;
-        app_url.set_path(&format!("/{database_name}"));
-        let app_pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(app_url.as_str())
-            .await
-            .context("connect to isolated test database as application role")?;
-
-        sqlx::query("SELECT pg_advisory_unlock(704_202_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        Ok(Some(Self {
-            admin_pool,
-            owner_pool,
-            app_pool,
-            database_name,
-            app_role,
-        }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.app_pool.close().await;
-        self.owner_pool.close().await;
-        self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
-            .await
-            .context("drop isolated test database")?;
-        self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
-            .await
-            .context("drop isolated application login role")?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
-}
-
-fn required_url(name: &str) -> Option<String> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping pump integration test: {name} is not set");
-            None
-        }
-    }
-}
-
-async fn with_database<F>(test: F) -> Result<()>
-where
-    F: for<'a> FnOnce(&'a TestContext) -> TestFuture<'a>,
-{
-    let Some(context) = TestContext::create().await? else {
-        return Ok(());
-    };
-    let result = test(&context).await;
-    let cleanup = context.cleanup().await;
-    result.and(cleanup)
-}
+use support::with_database;
 
 #[tokio::test]
 async fn two_pumps_racing_on_one_deposit_apply_exactly_one_transition() -> Result<()> {
@@ -644,6 +511,15 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                 .fetch_one(&context.app_pool)
                 .await?;
                 ensure!(account_open == if consumed { "0" } else { "777" }, "{name}");
+
+                // The confirmed deposit stays claimable; move it out of the queue so the next
+                // case's pump cannot claim it ahead of that case's deposit on a slow setup.
+                sqlx::query(
+                    "UPDATE deposits SET next_attempt_at = now() + interval '1 day' WHERE id = $1",
+                )
+                .bind(deposit_id)
+                .execute(&context.app_pool)
+                .await?;
             }
             Ok(())
         })
@@ -652,7 +528,7 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
 }
 
 #[tokio::test]
-async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()> {
+async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 23).await?;
@@ -693,7 +569,15 @@ async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()
                     .await?;
             }
 
-            ensure!(topup::locks::expire_once(&context.app_pool).await? == 1);
+            // The scanner has committed through a finalized block past the window, and with it
+            // the in-window payment, which still awaits the confirm step.
+            sqlx::query(
+                "INSERT INTO cursors (chain_id, scanned_block, scanned_block_time) VALUES (1, 0, $1)",
+            )
+            .bind(Utc::now())
+            .execute(&context.app_pool)
+            .await?;
+            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
             let deposit = db::get_deposit(&context.app_pool, deposit_id)
                 .await?
                 .context("expiry-race deposit")?;
@@ -726,6 +610,13 @@ async fn in_window_payment_consumes_lock_after_expiry_worker_runs() -> Result<()
                     .fetch_all(&context.app_pool)
                     .await?;
             ensure!(exposure == ["0", "0", "0"]);
+            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
+            let expired_events: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
+            )
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(expired_events == 0);
             Ok(())
         })
     })
@@ -1278,11 +1169,14 @@ struct ConfirmChain {
 }
 
 impl ChainReader for ConfirmChain {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         if let Some(barrier) = &self.barrier {
             barrier.wait().await;
         }
-        Ok(u64::MAX)
+        Ok(FinalizedHead {
+            number: u64::MAX,
+            time: DateTime::UNIX_EPOCH,
+        })
     }
 
     async fn transfer_logs_to(

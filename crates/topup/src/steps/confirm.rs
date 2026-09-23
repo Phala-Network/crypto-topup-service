@@ -164,7 +164,7 @@ where
     R: ChainReader + Send + Sync,
 {
     async fn finalized_head(&self) -> Result<u64, ChainError> {
-        ChainReader::finalized_head(self).await
+        Ok(ChainReader::finalized_head(self).await?.number)
     }
 
     async fn transfer_log_by_identity(
@@ -987,6 +987,7 @@ mod tests {
     use std::future::ready;
     use std::time::Duration;
 
+    use topup_adapters::chain::evm::FinalizedHead;
     use topup_adapters::pricing::{Observation, PriceError};
     use topup_core::route::PricingMode;
     use topup_core::valuation::SourceId;
@@ -1003,8 +1004,11 @@ mod tests {
     impl ChainReader for MockChain {
         fn finalized_head(
             &self,
-        ) -> impl std::future::Future<Output = Result<u64, ChainError>> + Send {
-            ready(self.head.clone())
+        ) -> impl std::future::Future<Output = Result<FinalizedHead, ChainError>> + Send {
+            ready(self.head.clone().map(|number| FinalizedHead {
+                number,
+                time: DateTime::UNIX_EPOCH,
+            }))
         }
 
         async fn transfer_logs_to(

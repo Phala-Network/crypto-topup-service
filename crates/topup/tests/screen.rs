@@ -3,11 +3,7 @@
 mod support;
 
 use std::env;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
 use std::process::Command;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -16,8 +12,7 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
@@ -26,110 +21,10 @@ use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, W
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
-use url::Url;
 use uuid::Uuid;
 
-/// Waits out transient `max_connections` exhaustion when many test databases share one
-/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
-const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-const ANVIL_PRIVATE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
-
-struct TestContext {
-    admin_pool: PgPool,
-    owner_pool: PgPool,
-    app_pool: PgPool,
-    database_name: String,
-    app_role: String,
-}
-
-impl TestContext {
-    async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_env("MIGRATE_DATABASE_URL") else {
-            return Ok(None);
-        };
-        let Some(app_template) = required_env("DATABASE_URL") else {
-            return Ok(None);
-        };
-
-        let mut admin_url = Url::parse(&owner_template)?;
-        admin_url.set_path("/postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(admin_url.as_str())
-            .await?;
-        support::ensure_app_role(&admin_pool).await?;
-        sqlx::query("SELECT pg_advisory_lock(704_205_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database_name = format!("topup_c5_{suffix}");
-        let app_role = format!("topup_c5_app_{suffix}");
-        let password = format!("c5_{suffix}");
-        admin_pool
-            .execute(format!("CREATE DATABASE \"{database_name}\"").as_str())
-            .await?;
-
-        let mut owner_url = Url::parse(&owner_template)?;
-        owner_url.set_path(&format!("/{database_name}"));
-        let owner_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(owner_url.as_str())
-            .await?;
-        db::migrate(&owner_pool).await?;
-
-        admin_pool
-            .execute(
-                format!("CREATE ROLE \"{app_role}\" LOGIN PASSWORD '{password}' IN ROLE topup_app")
-                    .as_str(),
-            )
-            .await?;
-
-        let mut app_url = Url::parse(&app_template)?;
-        app_url
-            .set_username(&app_role)
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application username"))?;
-        app_url
-            .set_password(Some(&password))
-            .map_err(|()| anyhow::anyhow!("DATABASE_URL cannot accept an application password"))?;
-        app_url.set_path(&format!("/{database_name}"));
-        let app_pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
-            .connect(app_url.as_str())
-            .await?;
-
-        sqlx::query("SELECT pg_advisory_unlock(704_205_001)")
-            .execute(&admin_pool)
-            .await?;
-
-        Ok(Some(Self {
-            admin_pool,
-            owner_pool,
-            app_pool,
-            database_name,
-            app_role,
-        }))
-    }
-
-    async fn cleanup(self) -> Result<()> {
-        self.app_pool.close().await;
-        self.owner_pool.close().await;
-        self.admin_pool
-            .execute(format!("DROP DATABASE \"{}\" WITH (FORCE)", self.database_name).as_str())
-            .await?;
-        self.admin_pool
-            .execute(format!("DROP ROLE \"{}\"", self.app_role).as_str())
-            .await?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
-}
+use support::chain::{ANVIL_PRIVATE_KEY, forge_create};
+use support::with_database;
 
 fn required_env(name: &str) -> Option<String> {
     match env::var(name).ok().filter(|value| !value.is_empty()) {
@@ -139,18 +34,6 @@ fn required_env(name: &str) -> Option<String> {
             None
         }
     }
-}
-
-async fn with_database<F>(test: F) -> Result<()>
-where
-    F: for<'a> FnOnce(&'a TestContext) -> TestFuture<'a>,
-{
-    let Some(context) = TestContext::create().await? else {
-        return Ok(());
-    };
-    let result = test(&context).await;
-    let cleanup = context.cleanup().await;
-    result.and(cleanup)
 }
 
 struct MockSanctionsSource {
@@ -278,7 +161,11 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
     let Some(rpc_url) = required_env("ANVIL_RPC_URL") else {
         return Ok(());
     };
-    let oracle = deploy_oracle(&rpc_url)?;
+    let oracle = forge_create(
+        &rpc_url,
+        "test/mocks/MockSanctionsOracle.sol:MockSanctionsOracle",
+        &[],
+    )?;
     let account = Address::repeat_byte(0x22);
     let recorded_block = current_block(&rpc_url)?;
     let source = Arc::new(SanctionsOracle::new(
@@ -477,38 +364,6 @@ async fn transition_evidence(pool: &PgPool, deposit_id: Uuid) -> Result<Value> {
             .await?
             .try_get("evidence")?,
     )
-}
-
-fn contracts_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts")
-}
-
-fn deploy_oracle(rpc_url: &str) -> Result<Address> {
-    let output = Command::new("forge")
-        .current_dir(contracts_dir())
-        .args([
-            "create",
-            "--rpc-url",
-            rpc_url,
-            "--private-key",
-            ANVIL_PRIVATE_KEY,
-            "--broadcast",
-            "--json",
-            "test/mocks/MockSanctionsOracle.sol:MockSanctionsOracle",
-        ])
-        .output()
-        .context("deploy MockSanctionsOracle with forge")?;
-    ensure!(
-        output.status.success(),
-        "forge create failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: Value = serde_json::from_slice(&output.stdout)?;
-    let deployed = response["deployedTo"]
-        .as_str()
-        .context("forge create omitted deployedTo")?;
-    Address::from_str(deployed).context("forge returned an invalid deployment address")
 }
 
 fn set_sanctioned(
