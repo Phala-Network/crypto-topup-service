@@ -97,7 +97,7 @@ jobs:
             tee "$RUNNER_TEMP/cargo-test.log"
       - name: Fail if any database, Anvil, or conformance test was skipped
         run: |
-          if grep -E 'skipping (screen )?integration test|skipping conformance test' \
+          if grep -E 'skipping integration test|skipping conformance test' \
             "$RUNNER_TEMP/cargo-test.log"; then
             echo "integration tests must not skip in CI" >&2
             exit 1

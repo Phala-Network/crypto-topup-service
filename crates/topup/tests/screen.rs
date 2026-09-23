@@ -2,7 +2,6 @@
 
 mod support;
 
-use std::env;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -23,18 +22,8 @@ use topup_core::money::AtomicAmount;
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
 
-use support::chain::{ANVIL_PRIVATE_KEY, forge_create};
+use support::chain::{ANVIL_PRIVATE_KEY, Anvil, forge_create};
 use support::with_database;
-
-fn required_env(name: &str) -> Option<String> {
-    match env::var(name).ok().filter(|value| !value.is_empty()) {
-        Some(value) => Some(value),
-        None => {
-            eprintln!("skipping screen integration test: {name} is not set");
-            None
-        }
-    }
-}
 
 struct MockSanctionsSource {
     sanctioned: Address,
@@ -158,9 +147,10 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
 
 #[tokio::test]
 async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()> {
-    let Some(rpc_url) = required_env("ANVIL_RPC_URL") else {
+    let Some(anvil) = Anvil::start_if_available(&[]).await? else {
         return Ok(());
     };
+    let rpc_url = anvil.rpc_url.clone();
     let oracle = forge_create(
         &rpc_url,
         "test/mocks/MockSanctionsOracle.sol:MockSanctionsOracle",
