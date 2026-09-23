@@ -34,9 +34,9 @@ const ESTIMATED_FINALITY_DELAY: TimeDelta = TimeDelta::minutes(15);
         ("ext" = String, Path, description = "Product-owned account identifier")
     ),
     responses(
-        (status = 200, body = PendingDepositsResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 200, description = "OK", body = PendingDepositsResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "deposits"

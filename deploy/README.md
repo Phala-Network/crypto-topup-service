@@ -6,7 +6,9 @@ are documented in [RESTORE.md](RESTORE.md).
 
 Every command that changes a registry, Phala Cloud, a CVM, a Safe, an on-chain contract, or secret
 state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against dstack commit
-`721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22.
+`721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22; the SDK and the
+simulator now pin the `v0.6.0-rc5` release commit `ad92cfeb4ab6960275498c31b66004b9bb1df068`, whose
+SDK and linked documents are identical to that commit.
 
 ## First staging deploy checklist
 
@@ -74,10 +76,9 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
    ```
 
 5. Render the compose: `deploy/render-compose.sh > deploy/docker-compose.staging.yml`.
-6. Choose the OS image. The service's pinned dstack SDK (0.6.0 at `721df1b`) calls the
-   `dstack.guest.v1` API at `/v1`, which pre-0.6 guest agents do not serve, so the image must be
-   dstack 0.6.0; `v0.6.0-rc5` has the same guest agent API and SDK as `721df1b` (their only
-   guest-agent difference is a certificate-validity bound). Pick a non-dev name that the KMS
+6. Choose the OS image. The service's pinned dstack SDK (0.6.0 at the `v0.6.0-rc5`
+   release commit `ad92cfe`) calls the `dstack.guest.v1` API at `/v1`, which pre-0.6 guest agents
+   do not serve, so the image must be dstack 0.6.0, preferably `0.6.0-rc5`. Pick a non-dev name that the KMS
    contract allows:
 
    ```sh
@@ -119,7 +120,7 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
   1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
 - `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
   compose and the compose hash reported for the CVM.
-- `Dockerfile.postgres-walg` supplies PostgreSQL 16 plus WAL-G and the D3 wrappers for encrypted,
+- `Dockerfile.postgres-walg` supplies PostgreSQL 18 plus WAL-G and the D3 wrappers for encrypted,
   key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
 - `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
   Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and is served on the
@@ -153,7 +154,7 @@ secret. PostgreSQL uses `walg-cron wal-push %p` as its archive command, so the 6
 `archive_timeout` drives the two-minute alert. `archive_timeout` only switches a segment that
 contains new WAL; the `heartbeat` service commits one row every minute, so an idle database still
 archives a segment and refreshes the marker every minute. The `backup` service requests one
-`CHECKPOINT` per postmaster start because PostgreSQL 15+ otherwise ignores `archive_timeout` until
+`CHECKPOINT` per postmaster start because PostgreSQL 15+ (re-checked on 18.6) otherwise ignores `archive_timeout` until
 the checkpointer first wakes, up to `checkpoint_timeout` after startup. The measured
 compose shares `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and
 `backup`, and read-only with `topup`. The service exports the marker value as
@@ -508,6 +509,13 @@ make infra-smoke
 SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 ```
 
+A local stack created before the PostgreSQL 18 upgrade keeps a PostgreSQL 16 volume mounted at the
+old path, which the new image does not read. Remove it (local data only) before `make up`:
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml down -v
+```
+
 `infra-smoke.sh` tests migrations, route-template validation, simulator attestation, the running
 backup service, WAL-G dry-run commands, and PostgreSQL archive settings, then removes its containers
 and volumes. `service-smoke.sh` is opt-in and requires `topup run --help` to expose the unified
@@ -533,7 +541,8 @@ starts it with a `.env` holding exactly the `staging.env.example` names.
 (in place of the host socket), MinIO, and Anvil. The run asserts that `migrate` exits 0, `topup`
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 through the simulator, the backup marker is fresh, and one quote-first deposit is credited end to
-end against the reference product, then prints the workload's memory and checks that no
+end against the reference product with a lock priced from the live HTTPS sources (so the image's
+TLS verification with system roots works), then prints the workload's memory and checks that no
 container, volume, network, or image of the run is left. It needs Foundry with `contracts/lib`, the
 Docker host's loopback (for the registry and Anvil), and internet access for the live price
 sources; it bind-mounts nothing.
@@ -541,14 +550,14 @@ sources; it bind-mounts nothing.
 ## Pinned upstream references
 
 - dstack boundaries and encrypted env:
-  <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/security/cvm-boundaries.md>
+  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/security/cvm-boundaries.md>
 - dstack socket, gateway, and simulator usage:
-  <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/usage.md>
+  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/usage.md>
 - dstack verification:
-  <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/docs/verification.md>
+  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/verification.md>
 - Phala CLI 1.1.22 deploy implementation:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts>
 - Phala CLI 1.1.22 flags:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts>
 - dstack `DstackApp` authorization contract:
-  <https://github.com/Dstack-TEE/dstack/blob/721df1b93fd93884224f2261c37dd86ca250432f/dstack/kms/auth-eth/contracts/DstackApp.sol>
+  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/dstack/kms/auth-eth/contracts/DstackApp.sol>

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{PgPool, Row as _};
+use sqlx::{AssertSqlSafe, PgPool, Row as _};
 
 use crate::db::MIGRATOR;
 use crate::heartbeat::RPO_SECONDS;
@@ -282,7 +282,7 @@ async fn row_counts(pool: &PgPool) -> Result<BTreeMap<&'static str, i64>, String
         .map(|table| format!("(SELECT count(*) FROM {table})::bigint AS {table}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let row = sqlx::query(&format!("SELECT {columns}"))
+    let row = sqlx::query(AssertSqlSafe(format!("SELECT {columns}")))
         .fetch_one(pool)
         .await
         .map_err(|_| "failed to read durable table counts".to_owned())?;

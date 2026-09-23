@@ -26,13 +26,13 @@ type ApiResult<T> = Result<T, ApiError>;
     params(("p" = String, Path), ("ext" = String, Path)),
     request_body = CreateRateLockRequest,
     responses(
-        (status = 200, body = RateLockResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 409, body = ErrorResponse),
-        (status = 423, body = ErrorResponse),
-        (status = 429, body = ErrorResponse),
-        (status = 503, body = ErrorResponse)
+        (status = 200, description = "OK", body = RateLockResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 409, description = "Conflict", body = ErrorResponse),
+        (status = 423, description = "Locked", body = ErrorResponse),
+        (status = 429, description = "Too Many Requests", body = ErrorResponse),
+        (status = 503, description = "Service Unavailable", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "rate-locks"
@@ -86,8 +86,8 @@ pub(crate) async fn create_rate_lock(
     path = "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}",
     params(("p" = String, Path), ("ext" = String, Path), ("ref" = String, Path)),
     responses(
-        (status = 200, body = RateLockResponse),
-        (status = 404, body = ErrorResponse)
+        (status = 200, description = "OK", body = RateLockResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "rate-locks"
@@ -111,8 +111,8 @@ pub(crate) async fn get_rate_lock(
     path = "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}",
     params(("p" = String, Path), ("ext" = String, Path), ("ref" = String, Path)),
     responses(
-        (status = 200, body = CancelRateLockResponse),
-        (status = 404, body = ErrorResponse),
+        (status = 200, description = "OK", body = CancelRateLockResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
         (
             status = 409,
             body = ErrorResponse,

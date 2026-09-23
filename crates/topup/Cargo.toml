@@ -52,7 +52,7 @@ zeroize.workspace = true
 anyhow = "=1.0.104"
 sfv.workspace = true
 tower.workspace = true
-tracing-test = { version = "=0.2.5", features = ["no-env-filter"] }
+tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }
 
 [lints.rust]
 unsafe_code = "forbid"

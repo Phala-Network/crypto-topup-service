@@ -17,14 +17,14 @@ use crate::routes::RouteSet;
 
 /// `ForwarderFactory` runtime code hash with its immutable words zeroed.
 const FACTORY_RUNTIME_TEMPLATE_HASH: B256 =
-    b256!("3bcaca09de50292271a29ea682474bfef177d16fea1a20ab25092ac34dc8ff1a");
+    b256!("7abfec3082d6440476f52c9cc04b271dfe4b802e47feeb39f69670253523f0ee");
 
 /// Byte offsets of the 32-byte `implementation` words in `ForwarderFactory` runtime code.
 const FACTORY_IMPLEMENTATION_OFFSETS: &[usize] = &[303, 750, 1150];
 
 /// `Forwarder` runtime code hash with its immutable words zeroed.
 const FORWARDER_RUNTIME_TEMPLATE_HASH: B256 =
-    b256!("0d75243426ce4c396cb01f2586db90ca041e6708235c1a902679efa4f7fbed28");
+    b256!("1fa01f51e22b763abd13dfc194dd43ee02355f68b534985877bf6b08de7e2029");
 
 /// Byte offsets of the 32-byte `treasury` words in `Forwarder` runtime code.
 const FORWARDER_TREASURY_OFFSETS: &[usize] = &[82, 356, 650, 783, 843];

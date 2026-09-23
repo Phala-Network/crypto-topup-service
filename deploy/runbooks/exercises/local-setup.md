@@ -4,12 +4,14 @@ Date: 2026-09-22. This is the shared environment for the exercises in this direc
 touches a live environment; every container, process, and database is task-scoped and removed
 afterward.
 
-PostgreSQL 16 and Anvil:
+PostgreSQL 18 and Anvil (the exercises were recorded on PostgreSQL 16; CI now runs their integration
+tests on 18):
 
 ```sh
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 docker run -d --rm --name wp-d5-exercise-pg -e POSTGRES_PASSWORD=postgres \
-  -p 127.0.0.1:55436:5432 postgres:16
+  -p 127.0.0.1:55436:5432 \
+  postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
 mkdir -p /tmp/wp-d5-ex
 anvil --port 8547 --chain-id 31337 --silent > /tmp/wp-d5-ex/anvil.log 2>&1 &
 echo "$!" > /tmp/wp-d5-ex/anvil.pid

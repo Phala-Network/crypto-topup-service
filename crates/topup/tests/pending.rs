@@ -402,11 +402,11 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
         .bind(&address)
         .execute(pool)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, \
              expires_at, status, closed_at) VALUES ($1, 'r', 1, 1, 1, {expires}, $2, \
              CASE WHEN $2 = 'open' THEN NULL ELSE now() END)"
-        ))
+        )))
         .bind(address_id)
         .bind(status)
         .execute(pool)

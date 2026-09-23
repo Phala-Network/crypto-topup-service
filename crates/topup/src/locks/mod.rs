@@ -13,7 +13,7 @@ use alloy_primitives::{Address as EvmAddress, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{AssertSqlSafe, FromRow, PgPool, Postgres, Row, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::address::{forwarder_address, lock_salt};
@@ -745,7 +745,7 @@ const EXPECTED_EXPOSURE: &str = r#"
 /// this commit. Only one counter row is held at a time, so this cannot deadlock with writers
 /// that lock several rows in key order.
 pub async fn repair_exposure(pool: &PgPool) -> Result<Vec<ExposureRepair>, RateLockError> {
-    let drifted: Vec<String> = sqlx::query_scalar(&format!(
+    let drifted: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
         r#"
         WITH expected AS ({EXPECTED_EXPOSURE})
         SELECT coalesce(expected.scope_key, counter.scope_key) AS scope_key
@@ -754,7 +754,7 @@ pub async fn repair_exposure(pool: &PgPool) -> Result<Vec<ExposureRepair>, RateL
         WHERE coalesce(expected.open_minor, 0) <> coalesce(counter.open_minor, 0)
         ORDER BY coalesce(expected.scope_key, counter.scope_key) COLLATE "C"
         "#
-    ))
+    )))
     .fetch_all(pool)
     .await?;
     let mut repairs = Vec::new();
@@ -792,9 +792,9 @@ async fn repair_scope(
     .bind(scope_key)
     .fetch_one(&mut *transaction)
     .await?;
-    let expected: Option<String> = sqlx::query_scalar(&format!(
+    let expected: Option<String> = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT open_minor::text FROM ({EXPECTED_EXPOSURE}) AS expected WHERE scope_key = $1"
-    ))
+    )))
     .bind(scope_key)
     .fetch_optional(&mut *transaction)
     .await?;

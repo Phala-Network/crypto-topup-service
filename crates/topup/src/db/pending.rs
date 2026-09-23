@@ -6,7 +6,7 @@
 
 use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Transaction};
 use topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -395,7 +395,7 @@ pub async fn list_account_pending(
         "{PENDING_SELECT} AND address.account_id = $1 AND address.kind = 'persistent' \
          ORDER BY pending.block_number, pending.log_index"
     );
-    let records = sqlx::query_as::<_, PendingRecord>(&query)
+    let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
         .bind(account_id)
         .fetch_all(pool)
         .await?;
@@ -411,7 +411,7 @@ pub async fn list_address_pending(
         "{PENDING_SELECT} AND pending.address_id = $1 \
          ORDER BY pending.block_number, pending.log_index"
     );
-    let records = sqlx::query_as::<_, PendingRecord>(&query)
+    let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
         .bind(address_id)
         .fetch_all(pool)
         .await?;

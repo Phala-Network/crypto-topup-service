@@ -76,7 +76,7 @@ Alert names are from `deploy/alerts/prometheus-rules.yml`.
 
 ## Exercise status
 
-Exercises ran against a task-scoped PostgreSQL 16 container and local Anvil, with real `topup` CLI
+Exercises ran against a task-scoped PostgreSQL 16 container (the setup now uses 18) and local Anvil, with real `topup` CLI
 invocations or the repository's PostgreSQL/Anvil integration tests. A box is checked only when the
 runbook's service-side procedure ran end to end with seeded, non-empty data. Human-only Safe,
 Compliance, and publication steps are never exercised locally, and alert firing is not evidence

@@ -478,7 +478,7 @@ async fn postgres_reference_passes_across_a_real_reconnect() -> Result<()> {
     let manifest = anvil.prepare().await?;
     let admin = sqlx::PgPool::connect(&admin_url).await?;
     let database = format!("conformance_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {database}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
         .execute(&admin)
         .await?;
     let mut url = url::Url::parse(&admin_url)?;
@@ -508,9 +508,11 @@ async fn postgres_reference_passes_across_a_real_reconnect() -> Result<()> {
         report
     }
     .await;
-    sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
-        .execute(&admin)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database} WITH (FORCE)"
+    )))
+    .execute(&admin)
+    .await?;
     let report = result?;
     assert!(report.passed, "{:#?}", report.tests);
     Ok(())

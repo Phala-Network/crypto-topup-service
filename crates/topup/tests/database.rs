@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use tokio::sync::Mutex;
 use topup::db::{
     self, AddressKind, ApplyTransitionResult, FlushedEvent, NewAccount, NewAddress, NewDeposit,
@@ -1237,10 +1237,12 @@ async fn set_destination(
 }
 
 async fn count_where(pool: &PgPool, table: &str, column: &str, id: Uuid) -> Result<i64> {
-    let row = sqlx::query(format!("SELECT count(*) FROM {table} WHERE {column} = $1").as_str())
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
+    let row = sqlx::query(AssertSqlSafe(format!(
+        "SELECT count(*) FROM {table} WHERE {column} = $1"
+    )))
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
     Ok(row.try_get(0)?)
 }
 

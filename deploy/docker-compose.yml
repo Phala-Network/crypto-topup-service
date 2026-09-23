@@ -45,7 +45,7 @@ services:
       TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - walg_key:/run/wal-g:ro
       - observability:/run/topup-observability
     configs:
@@ -138,7 +138,7 @@ services:
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
-      - pgdata:/var/lib/postgresql/data:ro
+      - pgdata:/var/lib/postgresql:ro
       - walg_key:/run/wal-g:ro
       - observability:/run/topup-observability
     healthcheck:
@@ -163,7 +163,7 @@ services:
       PGDATA: /var/lib/postgresql/data
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - walg_key:/run/wal-g:ro
     restart: "no"
 
