@@ -93,13 +93,20 @@ for entry in "${rpcs[@]}"; do
         expected_fallback_handler="$(lower "$(jq -r '.fallback_handler' <<<"$expected")")"
         modules_json='"error"'
         modules_ok=false
+        modules_error=""
         if modules_call="$(cast call "$address" 'getModulesPaginated(address,uint256)(address[],address)' \
             "$SENTINEL_MODULES" "$MODULES_PAGE_SIZE" --json --rpc-url "$TARGET_RPC_URL" 2>/dev/null)"; then
             modules_json="$(jq -c '.[0] | map(ascii_downcase) | sort' <<<"$modules_call")"
             # A next pointer other than the sentinel means the list did not fit in one page.
-            [[ "$(lower "$(jq -r '.[1]' <<<"$modules_call")")" == "$SENTINEL_MODULES" &&
-                "$modules_json" == "$expected_modules" ]] && modules_ok=true
+            if [[ "$(lower "$(jq -r '.[1]' <<<"$modules_call")")" != "$SENTINEL_MODULES" ]]; then
+                modules_error="module list did not end at the sentinel (more than $MODULES_PAGE_SIZE modules)"
+            elif [[ "$modules_json" != "$expected_modules" ]]; then
+                modules_error="modules $modules_json do not match $expected_modules"
+            fi
+        else
+            modules_error="getModulesPaginated failed; the enabled modules cannot be read"
         fi
+        [[ -n "$modules_error" ]] || modules_ok=true
         guard_actual="error"
         if slot="$(cast storage "$address" "$GUARD_STORAGE_SLOT" --rpc-url "$TARGET_RPC_URL" 2>/dev/null)"; then
             guard_actual="$(lower "0x${slot: -40}")"
@@ -140,8 +147,7 @@ for entry in "${rpcs[@]}"; do
         [[ "$owners_ok" == true ]] || fail "$address owners $owners_json do not match $expected_owners"
         [[ "$threshold_ok" == true ]] || \
             fail "$address threshold $threshold_actual does not match $expected_threshold"
-        [[ "$modules_ok" == true ]] || \
-            fail "$address modules $modules_json do not match $expected_modules"
+        [[ "$modules_ok" == true ]] || fail "$address $modules_error"
         [[ "$guard_ok" == true ]] || fail "$address guard $guard_actual does not match $expected_guard"
         [[ "$fallback_handler_ok" == true ]] || \
             fail "$address fallback handler $fallback_handler_actual does not match $expected_fallback_handler"

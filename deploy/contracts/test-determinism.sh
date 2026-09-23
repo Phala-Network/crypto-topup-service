@@ -24,9 +24,15 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    # An anvil that start_anvil spawned but has not returned yet is not in pids.
+    if [[ -n "${ANVIL_PID:-}" ]]; then
+        kill "$ANVIL_PID" 2>/dev/null || true
+        wait "$ANVIL_PID" 2>/dev/null || true
+    fi
     rm -rf "$tmp_dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 rpcs=()
 chain_ids=(31337 31338)
@@ -221,6 +227,13 @@ jq --arg module "$safe_module" --arg guard "$safe_guard" --arg handler "$safe_fa
     "$safe_expectations" >"$approved_drift_expectations"
 "$DEPLOY_CONTRACTS_DIR/verify-safe.sh" --expectations "$approved_drift_expectations" \
     --rpc "anvil-31337=${rpcs[0]}" >/dev/null || die "approved modules, guard, and fallback handler were rejected"
+# Clearing the module list head (MockSafeBase `modules` is slot 4) makes getModulesPaginated
+# revert, as on an uninitialized Safe v1.4.1; an unreadable module list is rejected.
+cast rpc --rpc-url "${rpcs[0]}" anvil_setStorageAt "$treasury" \
+    "$(cast index address 0x0000000000000000000000000000000000000001 4)" "$ZERO_HASH" >/dev/null
+expect_rejection unreadable_modules_verify "$DEPLOY_CONTRACTS_DIR/verify-safe.sh" \
+    --expectations "$approved_drift_expectations" --rpc "anvil-31337=${rpcs[0]}"
+require_error unreadable_modules_verify "getModulesPaginated failed"
 cast rpc --rpc-url "${rpcs[0]}" evm_revert "$snapshot" >/dev/null
 
 # The same proxy code, owners, and threshold in front of another singleton is rejected.

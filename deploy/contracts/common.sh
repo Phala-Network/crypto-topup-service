@@ -67,6 +67,7 @@ code_hash() {
 # Starts a local anvil in the background on a port the kernel picks (--port 0) and reads the
 # bound address from its log, so concurrent jobs on a shared runner cannot race for a port.
 # Call it directly, not in $(...): it sets ANVIL_PID and ANVIL_RPC_URL in the caller's shell.
+# ANVIL_PID is set as soon as anvil is spawned so a caller's signal trap can stop it.
 # Usage: start_anvil LOG_FILE [ANVIL_ARGS...]
 start_anvil() {
     local log="$1"

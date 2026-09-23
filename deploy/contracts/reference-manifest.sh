@@ -22,18 +22,18 @@ require_command forge
 require_command jq
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-reference.XXXXXX")"
-anvil_pid=""
+ANVIL_PID=""
 cleanup() {
-    if [[ -n "$anvil_pid" ]]; then
-        kill "$anvil_pid" 2>/dev/null || true
-        wait "$anvil_pid" 2>/dev/null || true
+    if [[ -n "$ANVIL_PID" ]]; then
+        kill "$ANVIL_PID" 2>/dev/null || true
+        wait "$ANVIL_PID" 2>/dev/null || true
     fi
     rm -rf "$tmp_dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 start_anvil "$tmp_dir/anvil.log" --disable-default-create2-deployer --chain-id 31337
-anvil_pid="$ANVIL_PID"
 rpc_url="$ANVIL_RPC_URL"
 
 "$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$rpc_url" --local-fund --broadcast >&2
