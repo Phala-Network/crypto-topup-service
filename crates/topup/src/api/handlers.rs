@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
@@ -11,7 +12,7 @@ use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
 use crate::db::{Account, Product};
-use crate::flusher::{AlloyChainClient, ChainClient};
+use crate::routes::{ProviderError, RouteSet};
 
 use super::AppState;
 use super::attestation::AttestationError;
@@ -412,7 +413,7 @@ pub(crate) async fn approve_refund(
         repository::approve_refund(
             &state.pool,
             refund_id,
-            state.routes.as_ref(),
+            state.routes.routes(),
             &admin_actor(&state),
         )
         .await?,
@@ -456,45 +457,46 @@ pub(crate) async fn daily_report(
     State(state): State<AppState>,
 ) -> ApiResult<Json<DailyReportResponse>> {
     let mut report =
-        repository::daily_report(&state.pool, &state.routes, chrono::Utc::now()).await?;
+        repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
     populate_treasury_balances(&state.routes, &mut report).await;
     Ok(Json(report))
 }
 
-async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyReportResponse) {
+async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportResponse) {
     for route_report in &mut report.routes {
         let Some(route) = routes
+            .routes()
             .iter()
             .filter(|route| route.route == route_report.route)
             .max_by_key(|route| route.version)
         else {
             continue;
         };
-        let Some(provider) = route.chain.rpc_providers.first() else {
-            route_report.treasury_balance_note =
-                "treasury balance unavailable: route has no RPC provider".to_owned();
-            continue;
-        };
-        let url = match crate::rpc_provider::configured_provider_url(provider) {
-            Ok(url) => url,
-            Err(environment) => {
+        let chain_id = route.chain.chain_id;
+        let client = match routes.provider(chain_id, 0) {
+            Ok(client) => client,
+            Err(ProviderError::MissingUrl { environment, .. }) => {
                 route_report.treasury_balance_note =
                     format!("treasury balance unavailable: {environment} is not configured");
                 continue;
             }
-        };
-        let Ok(client) = AlloyChainClient::connect_http_with_policy(
-            &url,
-            crate::rpc_provider::RPC_TIMEOUT,
-            crate::rpc_provider::BALANCE_BATCH_SIZE,
-        )
-        .map(|client| client.with_provider(crate::rpc_provider::provider_label(provider, 0))) else {
-            route_report.treasury_balance_note =
-                "treasury balance unavailable: RPC client configuration is invalid".to_owned();
-            continue;
+            Err(ProviderError::Unconfigured { .. }) => {
+                route_report.treasury_balance_note =
+                    "treasury balance unavailable: route has no RPC provider".to_owned();
+                continue;
+            }
+            Err(ProviderError::InvalidUrl { .. }) => {
+                route_report.treasury_balance_note =
+                    "treasury balance unavailable: RPC client configuration is invalid".to_owned();
+                continue;
+            }
         };
         match client
-            .token_balances(route.asset.contract, &[route.chain.contracts.treasury])
+            .token_balances(
+                route.asset.contract,
+                &[route.chain.contracts.treasury],
+                BlockNumberOrTag::Latest,
+            )
             .await
         {
             Ok(balances) => match balances.into_iter().next() {
@@ -632,6 +634,7 @@ async fn mutate_route_scopes(
 ) -> ApiResult<Json<RoutePauseResponse>> {
     if !state
         .routes
+        .routes()
         .iter()
         .any(|candidate| candidate.route == route)
     {

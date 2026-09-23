@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -13,14 +12,13 @@ use serde_json::json;
 use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
-use topup_core::route::RouteFile;
 use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
 use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
 use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::routes::{ProviderError, RouteSet};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RouteKey {
@@ -92,21 +90,14 @@ impl ScreenRoute {
 /// Failure while constructing the route-to-screening registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScreenStepConfigError {
-    /// One route did not provide two RPC provider entries.
-    MissingRpcProviders {
+    /// One of the route's first two RPC providers is unusable.
+    Provider {
         /// Stable route name.
         route: String,
         /// Immutable route version.
         version: u64,
-    },
-    /// A provider id did not have its required RPC URL environment variable.
-    MissingProviderUrl {
-        /// Stable route name.
-        route: String,
-        /// Immutable route version.
-        version: u64,
-        /// Non-secret environment variable that must contain the URL.
-        environment: String,
+        /// Non-secret provider failure.
+        source: ProviderError,
     },
     /// A route's sanctions-oracle client could not be configured.
     InvalidOracle {
@@ -129,20 +120,11 @@ pub enum ScreenStepConfigError {
 impl Display for ScreenStepConfigError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingRpcProviders { route, version } => {
-                write!(
-                    formatter,
-                    "route `{route}` version {version} requires two RPC provider entries"
-                )
-            }
-            Self::MissingProviderUrl {
+            Self::Provider {
                 route,
                 version,
-                environment,
-            } => write!(
-                formatter,
-                "route `{route}` version {version} requires {environment}"
-            ),
+                source,
+            } => write!(formatter, "route `{route}` version {version}: {source}"),
             Self::InvalidOracle {
                 route,
                 version,
@@ -161,10 +143,9 @@ impl Display for ScreenStepConfigError {
 impl Error for ScreenStepConfigError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Provider { source, .. } => Some(source),
             Self::InvalidOracle { source, .. } => Some(source),
-            Self::MissingRpcProviders { .. }
-            | Self::MissingProviderUrl { .. }
-            | Self::DuplicateRoute { .. } => None,
+            Self::DuplicateRoute { .. } => None,
         }
     }
 }
@@ -197,56 +178,27 @@ impl ScreenStep {
         })
     }
 
-    /// Creates route-specific Alloy clients from the first two provider entries.
-    ///
-    /// HTTP URLs are accepted directly. Provider ids resolve through the same
-    /// `TOPUP_RPC_<ID>_URL` convention used by the scanner.
-    pub fn from_routes(
-        pool: PgPool,
-        routes: &[RouteFile],
-        request_timeout: Duration,
-    ) -> Result<Self, ScreenStepConfigError> {
-        let mut screening_routes = Vec::with_capacity(routes.len());
-        for route in routes {
-            let Some(provider_a) = route.chain.rpc_providers.first() else {
-                return Err(ScreenStepConfigError::MissingRpcProviders {
-                    route: route.route.clone(),
-                    version: route.version,
-                });
+    /// Creates route-specific sanctions checks on each route chain's first two providers.
+    pub fn from_routes(pool: PgPool, routes: &RouteSet) -> Result<Self, ScreenStepConfigError> {
+        let mut screening_routes = Vec::with_capacity(routes.routes().len());
+        for route in routes.routes() {
+            let provider = |index| {
+                routes
+                    .provider(route.chain.chain_id, index)
+                    .map(Arc::clone)
+                    .map_err(|source| ScreenStepConfigError::Provider {
+                        route: route.route.clone(),
+                        version: route.version,
+                        source,
+                    })
             };
-            let Some(provider_b) = route.chain.rpc_providers.get(1) else {
-                return Err(ScreenStepConfigError::MissingRpcProviders {
-                    route: route.route.clone(),
-                    version: route.version,
-                });
-            };
-            let provider_ids = (provider_label(provider_a, 0), provider_label(provider_b, 1));
-            let provider_a = configured_provider_url(provider_a).map_err(|environment| {
-                ScreenStepConfigError::MissingProviderUrl {
-                    route: route.route.clone(),
-                    version: route.version,
-                    environment,
-                }
-            })?;
-            let provider_b = configured_provider_url(provider_b).map_err(|environment| {
-                ScreenStepConfigError::MissingProviderUrl {
-                    route: route.route.clone(),
-                    version: route.version,
-                    environment,
-                }
-            })?;
-            let oracle = SanctionsOracle::new(
-                &provider_a,
-                &provider_b,
-                route.screening.sanctions_oracle,
-                request_timeout,
-            )
-            .map_err(|source| ScreenStepConfigError::InvalidOracle {
-                route: route.route.clone(),
-                version: route.version,
-                source,
-            })?
-            .with_provider_ids(provider_ids.0, provider_ids.1);
+            let oracle =
+                SanctionsOracle::new(provider(0)?, provider(1)?, route.screening.sanctions_oracle)
+                    .map_err(|source| ScreenStepConfigError::InvalidOracle {
+                        route: route.route.clone(),
+                        version: route.version,
+                        source,
+                    })?;
             screening_routes.push(ScreenRoute::new(
                 route.route.clone(),
                 route.version,

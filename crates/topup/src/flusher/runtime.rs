@@ -21,12 +21,10 @@ use topup_core::route::RouteFile;
 use tracing::Instrument as _;
 
 use super::{
-    AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
-    PriceError, PriceSource, RunResult,
+    AlertSink, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner, PriceError, PriceSource,
+    RunResult,
 };
-use crate::rpc_provider::{
-    BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
-};
+use crate::routes::RouteSet;
 
 /// Interval between confirmation, replacement, and operator-role maintenance iterations.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
@@ -68,6 +66,12 @@ impl FlusherTask {
         self
     }
 
+    /// Returns `{chain_id}:{route}`, the task's loop instance and log name.
+    #[must_use]
+    pub fn instance(&self) -> String {
+        format!("{}:{}", self.route.chain.chain_id, self.route.route)
+    }
+
     /// Runs startup recovery, scheduled planning, and periodic lifecycle maintenance.
     ///
     /// New flushes are planned and sent only while the configured operator holds
@@ -76,7 +80,7 @@ impl FlusherTask {
     /// checked on every maintenance tick, the first of which is immediate; without it, the task
     /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
-        let instance = format!("{}:{}", self.route.chain.chain_id, self.route.route);
+        let instance = self.instance();
         crate::observability::register_loop("flusher", instance.clone());
         crate::observability::heartbeat("flusher", instance.clone());
         let mut authorized = false;
@@ -251,30 +255,19 @@ impl FlusherTask {
 /// `operator_signer` starts one signer per distinct version.
 pub fn configure_tasks(
     pool: PgPool,
-    routes: &[RouteFile],
+    routes: &RouteSet,
     mut operator_signer: impl FnMut(NonZeroU32) -> io::Result<SignerHandle>,
 ) -> Result<Vec<FlusherTask>, String> {
     let latest = latest_routes(routes)?;
     let mut signers = BTreeMap::new();
     let mut tasks = Vec::with_capacity(latest.len());
     for route in latest {
-        let provider = route
-            .chain
-            .rpc_providers
-            .first()
-            .ok_or_else(|| format!("route `{}` has no RPC provider", route.route))?;
-        let url = configured_provider_url(provider).map_err(|environment| {
-            format!(
-                "{environment} is required for flusher route `{}`",
-                route.route
-            )
-        })?;
-        let url = crate::observability::Redacted::parse(&url).map_err(|_| {
-            format!(
-                "flusher route `{}` has an invalid provider URL",
-                route.route
-            )
-        })?;
+        let chain_id = route.chain.chain_id;
+        let chain = Arc::clone(
+            routes
+                .provider(chain_id, 0)
+                .map_err(|error| format!("flusher route `{}`: {error}", route.route))?,
+        );
         let version = route
             .chain
             .operator_key_version()
@@ -289,16 +282,6 @@ pub fn configure_tasks(
                 signer
             }
         };
-        let timeout = RPC_TIMEOUT;
-        let chain = Arc::new(
-            AlloyChainClient::connect_http_with_policy(
-                url.expose().as_str(),
-                timeout,
-                BALANCE_BATCH_SIZE,
-            )
-            .map_err(|_| format!("failed to configure flusher provider {url}"))?
-            .with_provider(provider_label(provider, 0)),
-        );
         let prices: Arc<dyn PriceSource> = Arc::new(CoinMetricsPriceSource::for_route(&route)?);
         let alerts: Arc<dyn AlertSink> = Arc::new(TracingAlertSink);
         let planner = Planner::new(
@@ -320,20 +303,10 @@ pub fn configure_tasks(
 }
 
 /// Selects the newest route version per chain/token and requires one operator key per chain.
-fn latest_routes(routes: &[RouteFile]) -> Result<Vec<RouteFile>, String> {
-    let mut latest = BTreeMap::new();
-    for route in routes {
-        latest
-            .entry((route.chain.chain_id, route.asset.contract))
-            .and_modify(|current: &mut RouteFile| {
-                if route.version > current.version {
-                    *current = route.clone();
-                }
-            })
-            .or_insert_with(|| route.clone());
-    }
+fn latest_routes(routes: &RouteSet) -> Result<Vec<RouteFile>, String> {
+    let latest = routes.current().cloned().collect::<Vec<_>>();
     let mut versions = BTreeMap::new();
-    for route in latest.values() {
+    for route in &latest {
         let chain_id = route.chain.chain_id;
         let version = route.chain.operator_key_version;
         if let Some((other, other_version)) = versions.insert(chain_id, (&route.route, version))
@@ -346,7 +319,7 @@ fn latest_routes(routes: &[RouteFile]) -> Result<Vec<RouteFile>, String> {
             ));
         }
     }
-    Ok(latest.into_values().collect())
+    Ok(latest)
 }
 
 /// Coin Metrics `ReferenceRateUSD` sources for the route token and the chain's native gas asset.
@@ -375,12 +348,8 @@ impl PriceSource for CoinMetricsPriceSource {
         let source = self
             .0
             .get(asset)
-            .ok_or_else(|| PriceError(format!("no Coin Metrics source for `{asset}`")))?;
-        source
-            .observe()
-            .await
-            .map(|observation| observation.price)
-            .map_err(|error| PriceError(error.to_string()))
+            .ok_or_else(|| PriceError::UnconfiguredAsset(asset.to_owned()))?;
+        source.observe().await.map(|observation| observation.price)
     }
 }
 
@@ -412,6 +381,7 @@ mod tests {
     use topup_core::route::RouteFile;
 
     use super::latest_routes;
+    use crate::routes::RouteSet;
 
     fn route(name: &str, version: u64, token: u8, operator_key_version: u32) -> RouteFile {
         let mut route: RouteFile =
@@ -426,11 +396,12 @@ mod tests {
 
     #[test]
     fn current_routes_on_one_chain_must_share_the_operator_key_version() {
-        let rotated = latest_routes(&[
+        let routes = |routes| RouteSet::new(routes).expect("routes load");
+        let rotated = latest_routes(&routes(vec![
             route("a", 1, 1, 1),
             route("a", 2, 1, 2),
             route("b", 1, 2, 2),
-        ])
+        ]))
         .expect("historical versions may keep the previous operator key");
         assert_eq!(
             rotated
@@ -440,13 +411,13 @@ mod tests {
             [("a", 2), ("b", 1)]
         );
 
-        let error = latest_routes(&[route("a", 2, 1, 2), route("b", 1, 2, 1)])
+        let error = latest_routes(&routes(vec![route("a", 2, 1, 2), route("b", 1, 2, 1)]))
             .expect_err("current routes on one chain must agree");
         assert!(error.contains("operator_key_version"), "{error}");
 
         let mut other_chain = route("b", 1, 2, 1);
         other_chain.chain.chain_id = 10;
-        latest_routes(&[route("a", 2, 1, 2), other_chain])
+        latest_routes(&routes(vec![route("a", 2, 1, 2), other_chain]))
             .expect("different chains may rotate independently");
     }
 }

@@ -21,25 +21,26 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST;
+use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
 use topup_adapters::settlement::http::{SettlementAnswer, SettlementClient, SettlementClientError};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{DepositState, StepOutcome, TransitionKind, next};
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::{RouteFile, product_destination};
+use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use crate::db::{self, ApplyTransitionError, ApplyTransitionResult, ScanAddress};
 use crate::locks::{self, RateLockError};
 use crate::pump::StepResult;
+use crate::routes::RouteSet;
 use crate::scanner::{
-    ChainRoutes, MAX_SCAN_WINDOW, ScannerError, configure_routes, resolve_logs_for_reconciliation,
+    ChainRoutes, MAX_SCAN_WINDOW, ScannerError, chain_routes, resolve_logs_for_reconciliation,
 };
 use crate::steps::settle::{SettleStepError, adopt_answer, validate_answer_identity};
 
 use store::{CustodyCursor, state_code};
 
-pub use chain::{ReconciliationChain, RpcReconciliationChain};
+pub use chain::ReconciliationChain;
 pub use store::{
     LeaseOwnerLock, blocked_addresses, chain_is_blocked, frozen_chains, hold_lease_owner_lock,
 };
@@ -144,12 +145,6 @@ impl From<topup_adapters::chain::evm::ChainError> for ReconciliationError {
     }
 }
 
-impl From<crate::flusher::ChainError> for ReconciliationError {
-    fn from(error: crate::flusher::ChainError) -> Self {
-        Self::Chain(error.to_string())
-    }
-}
-
 impl From<ScannerError> for ReconciliationError {
     fn from(error: ScannerError) -> Self {
         Self::Chain(error.to_string())
@@ -237,70 +232,52 @@ impl ProductDecision {
 /// Runs every §13 check against configured routes and dependencies.
 pub struct Reconciler {
     pool: PgPool,
-    routes: Vec<RouteFile>,
+    routes: Arc<RouteSet>,
     scanner_routes: BTreeMap<u64, ChainRoutes>,
     chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
     settlement: Arc<dyn SettlementLookup>,
 }
 
 impl Reconciler {
-    /// Builds production reconciliation dependencies from attested route files.
+    /// Builds production reconciliation dependencies on each chain's provider A.
     pub fn from_routes(
         pool: PgPool,
-        routes: Vec<RouteFile>,
+        routes: Arc<RouteSet>,
         signer: SignerHandle,
     ) -> Result<Self, ReconciliationError> {
         let mut chains = BTreeMap::<u64, Arc<dyn ReconciliationChain>>::new();
-        for route in &routes {
-            if chains.contains_key(&route.chain.chain_id) {
-                continue;
-            }
-            let provider = route.chain.rpc_providers.first().ok_or_else(|| {
-                ReconciliationError::Configuration(format!(
-                    "route `{}` has no reconciliation RPC provider",
-                    route.route
-                ))
+        for chain_id in routes.chain_ids() {
+            let client = routes.provider(chain_id, 0).map_err(|error| {
+                ReconciliationError::Configuration(format!("reconciler chain {chain_id}: {error}"))
             })?;
-            let url =
-                crate::rpc_provider::configured_provider_url(provider).map_err(|environment| {
-                    ReconciliationError::Configuration(format!(
-                        "{environment} is required for reconciler route `{}`",
-                        route.route
-                    ))
-                })?;
-            let chain = RpcReconciliationChain::connect(
-                &url,
-                crate::rpc_provider::RPC_TIMEOUT,
-                crate::rpc_provider::BALANCE_BATCH_SIZE,
-            )?
-            .with_provider(&crate::rpc_provider::provider_label(provider, 0));
-            chains.insert(route.chain.chain_id, Arc::new(chain));
+            chains.insert(chain_id, Arc::new(FinalizedReader::new(Arc::clone(client))));
         }
         let settlement = Arc::new(SignedSettlementLookup {
             signer,
             timeout: Duration::from_secs(30),
         });
-        Self::with_dependencies(pool, routes, chains, settlement)
+        Ok(Self::with_dependencies(pool, routes, chains, settlement))
     }
 
     /// Builds a reconciler with explicit dependencies for integration tests.
+    #[must_use]
     pub fn with_dependencies(
         pool: PgPool,
-        routes: Vec<RouteFile>,
+        routes: Arc<RouteSet>,
         chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
         settlement: Arc<dyn SettlementLookup>,
-    ) -> Result<Self, ReconciliationError> {
-        let scanner_routes = configure_routes(&routes)?
+    ) -> Self {
+        let scanner_routes = chain_routes(&routes)
             .into_iter()
             .map(|route| (route.chain.chain_id, route))
             .collect();
-        Ok(Self {
+        Self {
             pool,
             routes,
             scanner_routes,
             chains,
             settlement,
-        })
+        }
     }
 
     /// Runs all regular reconciliation checks once.
@@ -687,13 +664,9 @@ impl Reconciler {
         product: &str,
         key: &str,
     ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-        let destination = product_destination(&self.routes, product)
-            .map_err(|error| ReconciliationError::Configuration(error.to_string()))?
-            .ok_or_else(|| {
-                ReconciliationError::Configuration(format!(
-                    "no loaded route names product `{product}`"
-                ))
-            })?;
+        let destination = self.routes.destination(product).ok_or_else(|| {
+            ReconciliationError::Configuration(format!("no loaded route names product `{product}`"))
+        })?;
         self.settlement
             .get_by_key(&destination.settlement_url, key)
             .await
@@ -1253,29 +1226,19 @@ impl Reconciler {
 
     fn route_index(&self) -> BTreeMap<(String, u64), &RouteFile> {
         self.routes
+            .routes()
             .iter()
             .map(|route| ((route.route.clone(), route.version), route))
             .collect()
     }
 
     fn latest_asset_routes(&self) -> Vec<&RouteFile> {
-        let mut latest = BTreeMap::<(u64, Address), &RouteFile>::new();
-        for route in &self.routes {
-            latest
-                .entry((route.chain.chain_id, route.asset.contract))
-                .and_modify(|current| {
-                    if route.version > current.version {
-                        *current = route;
-                    }
-                })
-                .or_insert(route);
-        }
-        latest.into_values().collect()
+        self.routes.current().collect()
     }
 
     fn chain_factories(&self) -> Result<Vec<(u64, Address)>, ReconciliationError> {
         let mut factories = BTreeMap::new();
-        for route in &self.routes {
+        for route in self.routes.routes() {
             match factories.insert(
                 route.chain.chain_id,
                 route.chain.contracts.forwarder_factory,

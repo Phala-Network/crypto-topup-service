@@ -1,9 +1,10 @@
-//! RFC 9421 HTTP Message Signatures verification shared by every inbound verifier.
+//! RFC 9421 HTTP Message Signatures: the one signing and verification profile.
 //!
-//! The service authenticates product and admin requests with this profile, and the settlement
-//! conformance reference uses the same code to verify service-signed settlement requests. Header
-//! values are parsed as RFC 8941 Structured Fields, so any signature label, any parameter order,
-//! and an optional `alg="ed25519"` parameter are accepted.
+//! The settlement client signs with [`sign`]; the service authenticates product and admin
+//! requests with [`verify`], and the settlement conformance reference uses it to verify
+//! service-signed settlement requests. Both build the same signature base, and every header
+//! value is serialized or parsed as an RFC 8941 Structured Field, so a verifier accepts any
+//! signature label, any parameter order, and an optional `alg="ed25519"` parameter.
 //!
 //! A verifier reconstructs `@target-uri` (RFC 9421 section 2.2.2) from its own configured
 //! [`PublicOrigin`] and the request's path and query, never from `Host` or `X-Forwarded-*`
@@ -13,8 +14,12 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use sfv::{BareItem, Dictionary, FieldType as _, List, ListEntry, Parser, Version};
+use sfv::{
+    BareItem, Dictionary, FieldType as _, ItemSerializer, List, ListEntry, Parser, StringRef,
+    Version,
+};
 use sha2::{Digest, Sha256};
+use topup_core::{Signer, SignerError};
 
 /// Components every signature must cover, in order.
 const REQUIRED_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-digest"];
@@ -22,6 +27,8 @@ const REQUIRED_COMPONENTS: [&str; 3] = ["@method", "@target-uri", "content-diges
 const IDEMPOTENCY_COMPONENT: &str = "idempotency-key";
 /// Maximum distance between `created` and the verifier's clock.
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
+/// Label of every signature this service produces.
+const SIGNATURE_LABEL: &str = "sig1";
 
 /// The scheme and authority a verifier is publicly reachable at, such as
 /// `https://topup.example`.
@@ -127,6 +134,72 @@ impl std::fmt::Display for VerificationFailed {
 
 impl std::error::Error for VerificationFailed {}
 
+/// The covered components of one outbound request, as their header values will be sent.
+#[derive(Clone, Copy, Debug)]
+pub struct Components<'a> {
+    /// HTTP method, for example `POST`.
+    pub method: &'a str,
+    /// Absolute target URI.
+    pub target_uri: &'a str,
+    /// `Content-Digest` header value, as produced by [`content_digest`].
+    pub content_digest: &'a str,
+    /// `Idempotency-Key` header value, as produced by [`structured_string`], when covered.
+    pub idempotency_key: Option<&'a str>,
+}
+
+impl<'a> Components<'a> {
+    /// Returns the covered `(identifier, value)` pairs in profile order.
+    fn lines(&self) -> Vec<(&'static str, &'a str)> {
+        let mut lines = REQUIRED_COMPONENTS
+            .into_iter()
+            .zip([self.method, self.target_uri, self.content_digest])
+            .collect::<Vec<_>>();
+        if let Some(idempotency_key) = self.idempotency_key {
+            lines.push((IDEMPOTENCY_COMPONENT, idempotency_key));
+        }
+        lines
+    }
+}
+
+/// Returns the `Content-Digest` header value of `body`.
+#[must_use]
+pub fn content_digest(body: &[u8]) -> String {
+    format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body)))
+}
+
+/// Serializes `value` as an RFC 8941 String, or `None` when it is not representable.
+#[must_use]
+pub fn structured_string(value: &str) -> Option<String> {
+    let value = StringRef::from_str(value).ok()?;
+    Some(ItemSerializer::new().bare_item(value).finish())
+}
+
+/// Signs `components` as `keyid` at Unix time `created` with the settlement key.
+///
+/// Returns the `Signature-Input` and `Signature` header values. `keyid` must be an RFC 8941
+/// String without `"` or `\`, as `SettlementClient` checks when it is built.
+pub async fn sign<S: Signer>(
+    signer: &S,
+    components: &Components<'_>,
+    created: i64,
+    keyid: &str,
+) -> Result<(String, String), SignerError> {
+    let lines = components.lines();
+    let covered = lines
+        .iter()
+        .map(|(identifier, _)| format!("\"{identifier}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let parameters = format!("({covered});created={created};keyid=\"{keyid}\"");
+    let signature = signer
+        .sign_settlement(signature_base(&lines, &parameters).as_bytes())
+        .await?;
+    Ok((
+        format!("{SIGNATURE_LABEL}={parameters}"),
+        format!("{SIGNATURE_LABEL}=:{}:", STANDARD.encode(signature.0)),
+    ))
+}
+
 /// Verifies one request against a pinned `(keyid, public key)` pair at Unix time `now`.
 ///
 /// Every dictionary member of `Signature-Input` is tried; the first entry which covers exactly
@@ -159,13 +232,13 @@ pub fn verify(
         let Ok(signature) = Signature::from_slice(signature_bytes) else {
             continue;
         };
-        let base = signature_base(
-            message.method,
-            message.target_uri,
-            message.content_digest.trim(),
+        let components = Components {
+            method: message.method,
+            target_uri: message.target_uri,
+            content_digest: message.content_digest.trim(),
             idempotency_key,
-            &parsed.parameters,
-        );
+        };
+        let base = signature_base(&components.lines(), &parsed.parameters);
         if key.verify_strict(base.as_bytes(), &signature).is_ok() {
             return Ok(VerifiedSignature {
                 keyid: parsed.keyid,
@@ -271,30 +344,29 @@ fn signature_bytes(entry: Option<&ListEntry>) -> Option<&[u8]> {
     Some(bytes)
 }
 
-fn signature_base(
-    method: &str,
-    target_uri: &str,
-    content_digest: &str,
-    idempotency_key: Option<&str>,
-    parameters: &str,
-) -> String {
-    let mut base = format!(
-        "\"@method\": {method}\n\"@target-uri\": {target_uri}\n\"content-digest\": {content_digest}"
-    );
-    if let Some(idempotency_key) = idempotency_key {
-        base.push_str("\n\"idempotency-key\": ");
-        base.push_str(idempotency_key);
+/// Formats the RFC 9421 section 2.5 signature base; signing and verification both use it.
+fn signature_base(components: &[(&str, &str)], parameters: &str) -> String {
+    let mut base = String::new();
+    for (identifier, value) in components {
+        base.push('"');
+        base.push_str(identifier);
+        base.push_str("\": ");
+        base.push_str(value);
+        base.push('\n');
     }
-    base.push_str("\n\"@signature-params\": ");
+    base.push_str("\"@signature-params\": ");
     base.push_str(parameters);
     base
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ed25519_dalek::{Signer as _, SigningKey};
+    use topup_core::SecretKey32;
 
     use super::*;
+    use crate::signer::DevSigner;
 
     #[test]
     fn public_origin_is_normalized_and_validated() {
@@ -348,13 +420,14 @@ mod tests {
     fn sign(label: &str, components: &str, parameters: &str, idempotency: bool) -> Signed {
         let key = SigningKey::from_bytes(&[5; 32]);
         let signature_params = format!("({components}){parameters}");
-        let base = signature_base(
-            "POST",
-            URI,
-            &digest(),
-            idempotency.then_some(KEY),
-            &signature_params,
-        );
+        let digest = digest();
+        let components = Components {
+            method: "POST",
+            target_uri: URI,
+            content_digest: &digest,
+            idempotency_key: idempotency.then_some(KEY),
+        };
+        let base = signature_base(&components.lines(), &signature_params);
         let signature = STANDARD.encode(key.sign(base.as_bytes()).to_bytes());
         Signed {
             input: format!("{label}={signature_params}"),
@@ -529,5 +602,116 @@ mod tests {
             NOW,
         );
         assert_eq!(result, Err(VerificationFailed));
+    }
+
+    #[tokio::test]
+    async fn signed_headers_have_the_profile_shape_and_verify() {
+        let digest = content_digest(BODY);
+        assert_eq!(digest, self::digest());
+        let key = structured_string("deposit:abc").expect("key is an SFV string");
+        assert_eq!(key, KEY);
+        for idempotency in [true, false] {
+            let (signature_input, signature) = super::sign(
+                &DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([5; 32])),
+                &Components {
+                    method: "POST",
+                    target_uri: URI,
+                    content_digest: &digest,
+                    idempotency_key: idempotency.then_some(KEY),
+                },
+                NOW,
+                "settlement/v1",
+            )
+            .await
+            .expect("request signs");
+            let components = if idempotency {
+                SETTLEMENT_COMPONENTS
+            } else {
+                "\"@method\" \"@target-uri\" \"content-digest\""
+            };
+            assert_eq!(
+                signature_input,
+                format!("sig1=({components});created={NOW};keyid=\"settlement/v1\"")
+            );
+            let signed = Signed {
+                input: signature_input,
+                signature,
+            };
+            assert!(check(&signed, idempotency).is_ok());
+        }
+    }
+
+    #[test]
+    fn settlement_profile_signature_base_has_exact_components() {
+        assert_eq!(
+            signature_base(
+                &Components {
+                    method: "POST",
+                    target_uri: "https://product.example/settlements",
+                    content_digest: "sha-256=:YWJj:",
+                    idempotency_key: Some("\"deposit:123\""),
+                }
+                .lines(),
+                "(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=1618884473;keyid=\"settlement/v1\"",
+            ),
+            concat!(
+                "\"@method\": POST\n",
+                "\"@target-uri\": https://product.example/settlements\n",
+                "\"content-digest\": sha-256=:YWJj:\n",
+                "\"idempotency-key\": \"deposit:123\"\n",
+                "\"@signature-params\": (\"@method\" \"@target-uri\" ",
+                "\"content-digest\" \"idempotency-key\");created=1618884473;",
+                "keyid=\"settlement/v1\""
+            )
+        );
+    }
+
+    #[test]
+    fn rfc_9421_ed25519_example_matches_base_and_signature() {
+        let components = [
+            ("date", "Tue, 20 Apr 2021 02:07:55 GMT"),
+            ("@method", "POST"),
+            ("@path", "/foo"),
+            ("@authority", "example.com"),
+            ("content-type", "application/json"),
+            ("content-length", "18"),
+        ];
+        let parameters = concat!(
+            "(\"date\" \"@method\" \"@path\" \"@authority\" ",
+            "\"content-type\" \"content-length\");created=1618884473;",
+            "keyid=\"test-key-ed25519\""
+        );
+        let base = signature_base(&components, parameters);
+        let private = URL_SAFE_NO_PAD
+            .decode("n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU")
+            .expect("RFC key is valid base64url");
+        let private: [u8; 32] = private.try_into().expect("RFC key is 32 bytes");
+        let key = SigningKey::from_bytes(&private);
+        let signature = key.sign(base.as_bytes());
+        assert_eq!(
+            STANDARD.encode(signature.to_bytes()),
+            concat!(
+                "wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1",
+                "u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw=="
+            )
+        );
+        assert!(
+            key.verifying_key()
+                .verify_strict(base.as_bytes(), &signature)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn idempotency_key_is_a_quoted_structured_field_string() {
+        assert_eq!(
+            structured_string("deposit:123").expect("key is valid"),
+            "\"deposit:123\""
+        );
+        assert_eq!(
+            structured_string("quoted\"slash\\").expect("key is escapable"),
+            "\"quoted\\\"slash\\\\\""
+        );
+        assert!(structured_string("line\nbreak").is_none());
     }
 }

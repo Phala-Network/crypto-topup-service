@@ -19,9 +19,8 @@ use tokio_util::sync::CancellationToken;
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
-    AlertSink, AlloyChainClient, ChainClient, ChainError, ChainReceipt, FeeQuote, FlushAlert,
-    Flusher, FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError, PriceSource,
-    RunResult,
+    AlertSink, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote, FlushAlert, Flusher,
+    FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError, PriceSource, RunResult,
 };
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -53,7 +52,7 @@ struct FixedPrice;
 #[async_trait]
 impl PriceSource for FixedPrice {
     async fn price_usd(&self, _asset: &str) -> Result<ScaledPrice, PriceError> {
-        ScaledPrice::new(25_000_000, PRICE_SCALE).map_err(|error| PriceError(error.to_string()))
+        ScaledPrice::new(25_000_000, PRICE_SCALE).map_err(|_| PriceError::InvalidPrice)
     }
 }
 
@@ -118,7 +117,7 @@ impl ChainClient for StubChain {
         _factory: Address,
         _operator: Address,
     ) -> Result<bool, ChainError> {
-        Err(ChainError::rpc("not used by the stub"))
+        Err(ChainError::Rpc("not used by the stub"))
     }
 
     async fn pending_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
@@ -127,7 +126,7 @@ impl ChainClient for StubChain {
     }
 
     async fn confirmed_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
-        Err(ChainError::rpc("not used by the stub"))
+        Err(ChainError::Rpc("not used by the stub"))
     }
 
     async fn latest_block(&self) -> Result<u64, ChainError> {
@@ -135,7 +134,7 @@ impl ChainClient for StubChain {
     }
 
     async fn finalized_block(&self) -> Result<u64, ChainError> {
-        Err(ChainError::rpc("not used by the stub"))
+        Err(ChainError::Rpc("not used by the stub"))
     }
 
     async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
@@ -151,7 +150,7 @@ impl ChainClient for StubChain {
     }
 
     async fn receipt(&self, _hash: B256) -> Result<Option<ChainReceipt>, ChainError> {
-        Err(ChainError::rpc("not used by the stub"))
+        Err(ChainError::Rpc("not used by the stub"))
     }
 
     async fn receipt_by_sender_nonce(
@@ -161,7 +160,7 @@ impl ChainClient for StubChain {
         _from_block: u64,
         _max_blocks: u64,
     ) -> Result<NonceReceiptSearch, ChainError> {
-        Err(ChainError::rpc("not used by the stub"))
+        Err(ChainError::Rpc("not used by the stub"))
     }
 }
 
@@ -462,10 +461,9 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
                 }
             });
             let route = test_route(Address::from([1; 20]), Address::from([2; 20]))?;
-            let chain = Arc::new(AlloyChainClient::connect_http_with_policy(
+            let chain = Arc::new(EvmClient::with_timeout(
                 &endpoint,
                 StdDuration::from_millis(50),
-                10,
             )?);
             let signer = signer_handle(OPERATOR_KEY)?;
             let flusher = Flusher::new(
@@ -516,7 +514,7 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             let route = test_route(factory, token)?;
             let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
             let address = &seeded[0];
-            let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
+            let chain = Arc::new(EvmClient::new(&anvil.rpc_url)?);
             let alerts = Arc::new(Alerts::default());
             let signer = signer_handle(OPERATOR_KEY)?;
             let planner = Planner::new(
@@ -724,7 +722,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 },
             )
             .await?;
-            let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
+            let chain = Arc::new(EvmClient::new(&anvil.rpc_url)?);
             let alerts = Arc::new(Alerts::default());
             let signer = signer_handle(OPERATOR_KEY)?;
             let planner = Planner::new(
@@ -1167,7 +1165,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     &[&format!("{address:#x}"), TOKEN_AMOUNT],
                 )
             };
-            let chain = Arc::new(AlloyChainClient::connect_http(&anvil.rpc_url)?);
+            let chain = Arc::new(EvmClient::new(&anvil.rpc_url)?);
             let alerts = Arc::new(Alerts::default());
             let components = |signer: &SignerHandle| {
                 (

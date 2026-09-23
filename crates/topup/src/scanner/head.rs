@@ -8,7 +8,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{ChainReader as _, EvmChain};
+use topup_adapters::chain::evm::{ChainReader as _, FinalizedReader};
 
 use super::ChainRoutes;
 
@@ -37,7 +37,7 @@ pub struct HeadScan {
 /// reconciliation has frozen the chain.
 pub async fn head_scan_once(
     pool: &PgPool,
-    reader: &EvmChain,
+    reader: &FinalizedReader,
     routes: &ChainRoutes,
 ) -> Result<Option<HeadScan>, ScannerError> {
     let chain_id = routes.chain.chain_id;
@@ -95,7 +95,7 @@ pub async fn head_scan_once(
 /// finalized scanner is woken instead of waiting for its poll interval.
 pub(super) async fn run_head_loop(
     pool: &PgPool,
-    reader: &EvmChain,
+    reader: &FinalizedReader,
     routes: &ChainRoutes,
     interval: Duration,
     finalized_advanced: &Notify,

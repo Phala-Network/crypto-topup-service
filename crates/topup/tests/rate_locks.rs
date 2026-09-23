@@ -73,9 +73,14 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         other_route.destination.product = other.slug.clone();
         other_route.route = "builder-ethereum-pha-usd".to_owned();
         other_route.destination.product_kid = "builder/v1".to_owned();
+        // One chain asset has one route name, so the second product routes another token.
+        other_route.asset.contract = alloy_primitives::Address::repeat_byte(0x42);
         let app = topup::api::router(AppState {
             pool: database.app_pool.clone(),
-            routes: Arc::new(vec![route.clone(), other_route]),
+            routes: Arc::new(
+                topup::routes::RouteSet::new(vec![route.clone(), other_route])
+                    .map_err(anyhow::Error::msg)?,
+            ),
             admin_key: VerificationKey::from_base64(
                 ADMIN_KID.to_owned(),
                 &public_key_base64(&admin_key),
@@ -1326,10 +1331,10 @@ async fn every_lock_exposure_repair_leaves_a_finding_and_an_audit_row() -> Resul
 
         let reconciler = Reconciler::with_dependencies(
             database.app_pool.clone(),
-            vec![route],
+            Arc::new(topup::routes::RouteSet::new(vec![route]).map_err(anyhow::Error::msg)?),
             std::collections::BTreeMap::new(),
             Arc::new(NoSettlement),
-        )?;
+        );
         // The same drift twice: every repair must leave its own finding and audit row.
         for _ in 0..2 {
             sqlx::query("UPDATE lock_exposure SET open_minor = 350 WHERE scope_key = $1")

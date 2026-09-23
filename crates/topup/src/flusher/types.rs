@@ -1,20 +1,10 @@
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-
 use alloy_primitives::{Address, B256, Bytes, U256};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use topup_adapters::chain::evm::{ChainError, FeeQuote};
+use topup_adapters::pricing::PriceError;
 use topup_core::money::ScaledPrice;
 use uuid::Uuid;
-
-/// One fee suggestion for an EIP-1559 transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FeeQuote {
-    /// Maximum total fee per gas unit.
-    pub max_fee_per_gas: u128,
-    /// Maximum priority fee per gas unit.
-    pub max_priority_fee_per_gas: u128,
-}
 
 /// One EVM receipt log with the position fields required by custody accounting.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -321,56 +311,3 @@ pub struct FlushCallBinding {
     /// Complete ordered salt parameters as canonical hex.
     pub salts: Vec<String>,
 }
-
-/// Error returned by an EVM chain adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChainError {
-    message: String,
-    estimation_revert: bool,
-}
-
-impl ChainError {
-    /// Creates an ordinary RPC or decoding failure.
-    #[must_use]
-    pub fn rpc(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            estimation_revert: false,
-        }
-    }
-
-    /// Creates an execution revert returned by `eth_estimateGas`.
-    #[must_use]
-    pub fn estimation_revert(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            estimation_revert: true,
-        }
-    }
-
-    /// Returns whether this error is a deterministic estimate execution revert.
-    #[must_use]
-    pub const fn is_estimation_revert(&self) -> bool {
-        self.estimation_revert
-    }
-}
-
-impl Display for ChainError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl Error for ChainError {}
-
-/// Error returned by a price adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PriceError(pub String);
-
-impl Display for PriceError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl Error for PriceError {}

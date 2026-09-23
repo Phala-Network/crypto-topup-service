@@ -2,7 +2,8 @@
 
 mod route;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::future::{Future, IntoFuture as _};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,23 +14,24 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
+use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
+use topup::routes::RouteSet;
 use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
 use topup::steps::screen::ScreenStep;
 use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
-use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::route::{RouteFile, product_destination};
 use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
@@ -289,23 +291,9 @@ async fn backup_key(args: &BackupKeyArgs) -> ExitCode {
 }
 
 async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) if !value.is_empty() => value,
-        Ok(_) | Err(_) => {
-            tracing::error!("DATABASE_URL is required for heartbeat");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("DATABASE_URL", "heartbeat", 1).await {
         Ok(pool) => pool,
-        Err(_) => {
-            tracing::error!("failed to connect to database for heartbeat");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let mut interval = tokio::time::interval(Duration::from_secs(args.interval_s));
     loop {
@@ -349,43 +337,25 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
         }
     };
     // The post-restore gate reads and repairs with owner credentials, never the service login.
-    let Some(database_url) = std::env::var("MIGRATE_DATABASE_URL")
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
-        tracing::error!("MIGRATE_DATABASE_URL is required for restore-check");
-        return ExitCode::FAILURE;
-    };
-    let pool = match PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("MIGRATE_DATABASE_URL", "restore-check", 4).await {
         Ok(pool) => pool,
-        Err(_) => {
-            tracing::error!("failed to connect to restored database");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
-    let signer = match SignerHandle::spawn(
-        DstackSigner::new(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
-        Duration::from_secs(10),
-    ) {
+    let signer = match spawn_signer(None) {
         Ok(signer) => signer,
         Err(error) => {
             tracing::error!(%error, "failed to start restore-check signer actor");
             return ExitCode::FAILURE;
         }
     };
-    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
-    {
-        Ok(reconciler) => reconciler,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure post-restore reconciler");
-            return ExitCode::FAILURE;
-        }
-    };
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure post-restore reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
     let expectations = topup::restore::RestoreExpectations {
         expected_heartbeat_at: args.expected_heartbeat_at,
         expected_lsn: args.expected_lsn.clone(),
@@ -501,24 +471,18 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let age_config = match AgeAlertConfig::from_routes(&routes) {
+    let age_config = match AgeAlertConfig::from_routes(routes.routes()) {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(%error, "invalid age alert configuration");
             return ExitCode::FAILURE;
         }
     };
-    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(&routes) {
+    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(routes.routes())
+    {
         Ok(provider) => Arc::new(provider) as Arc<dyn topup::locks::QuoteProvider>,
         Err(error) => {
             tracing::error!(%error, "invalid rate-lock pricing configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let scanner_routes = match topup::scanner::configure_routes(&routes) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::error!(%error, "invalid scanner route configuration");
             return ExitCode::FAILURE;
         }
     };
@@ -527,13 +491,11 @@ async fn run(args: &RunArgs) -> ExitCode {
         wait_interval: Duration::from_secs(args.wait_interval_s),
         ..PumpConfig::default()
     };
-    let database_url = match required_env("DATABASE_URL") {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(%error, "missing runtime configuration");
-            return ExitCode::FAILURE;
-        }
-    };
+    // Checked before the on-chain contract check; `connect` reads it again below.
+    if let Err(error) = required_env("DATABASE_URL") {
+        tracing::error!(%error, "missing runtime configuration");
+        return ExitCode::FAILURE;
+    }
     let admin_kid = match required_env("TOPUP_ADMIN_KID") {
         Ok(value) => value,
         Err(error) => {
@@ -570,8 +532,9 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!(%error, "on-chain contract check failed");
         return ExitCode::FAILURE;
     }
-    let scanner_count = scanner_routes.len();
-    let route_count = routes.len();
+    let routes = Arc::new(routes);
+    let scanner_count = routes.chain_ids().count();
+    let route_count = routes.routes().len();
     let connection_count = match u32::try_from(PUMPS)
         .ok()
         .zip(u32::try_from(scanner_count).ok())
@@ -585,26 +548,15 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match PgPoolOptions::new()
-        .max_connections(connection_count)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("DATABASE_URL", "run", connection_count).await {
         Ok(pool) => pool,
-        Err(error) => {
-            tracing::error!(%error, "failed to connect to database");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let lease_owner = match wait_for_lease_owner_lock(&pool).await {
         Ok(lock) => lock,
         Err(code) => return code,
     };
-    let signer = match SignerHandle::spawn(
-        DstackSigner::new(),
-        NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
-        Duration::from_secs(15),
-    ) {
+    let signer = match spawn_signer(None) {
         Ok(signer) => signer,
         Err(error) => {
             tracing::error!(%error, "failed to start signer actor");
@@ -639,7 +591,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     let reconciler = match topup::reconciler::Reconciler::from_routes(
         pool.clone(),
-        routes.clone(),
+        Arc::clone(&routes),
         signer.clone(),
     ) {
         Ok(reconciler) => Arc::new(reconciler),
@@ -650,11 +602,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     };
     let flusher_tasks =
         match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
-            SignerHandle::spawn(
-                DstackSigner::new().with_operator_key_version(version),
-                NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
-                Duration::from_secs(15),
-            )
+            spawn_signer(Some(version))
         }) {
             Ok(tasks) => tasks,
             Err(error) => {
@@ -678,7 +626,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     };
     let product_lookup = SettlementProductLookup::new(
         pool.clone(),
-        &routes,
+        Arc::clone(&routes),
         signer.clone(),
         Duration::from_secs(30),
     );
@@ -690,8 +638,7 @@ async fn run(args: &RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
-    {
+    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes) {
         Ok(step) => step,
         Err(error) => {
             tracing::error!(%error, "failed to configure screening step");
@@ -703,7 +650,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         Box::new(screen_step),
         Box::new(SettleStep::new(
             pool.clone(),
-            &routes,
+            Arc::clone(&routes),
             signer,
             Duration::from_secs(30),
         )),
@@ -717,10 +664,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let refund_config = topup::refunds::RefundConfirmationConfig::default();
-    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(
-        &routes,
-        refund_config.request_timeout,
-    ) {
+    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(&routes) {
         Ok(reader) => reader,
         Err(error) => {
             tracing::error!(%error, "failed to configure refund confirmation chain reader");
@@ -730,7 +674,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     let refund_worker = match topup::refunds::RefundConfirmationWorker::new(
         pool.clone(),
         refund_reader,
-        &routes,
+        routes.routes(),
         refund_config,
     ) {
         Ok(worker) => worker,
@@ -739,8 +683,7 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let cancellation = CancellationToken::new();
-    let routes = Arc::new(routes);
+    let mut tasks = ServiceTasks::new();
     let state = topup::api::AppState {
         pool: pool.clone(),
         routes: Arc::clone(&routes),
@@ -750,47 +693,45 @@ async fn run(args: &RunArgs) -> ExitCode {
         rate_lock_quotes,
     };
     let (application, _) = topup::api::router(state);
-    let api_cancellation = cancellation.child_token();
-    let mut api_task = tokio::spawn(async move {
+    tasks.spawn("API server", |cancellation| {
         axum::serve(listener, application)
-            .with_graceful_shutdown(api_cancellation.cancelled_owned())
-            .await
+            .with_graceful_shutdown(cancellation.cancelled_owned())
+            .into_future()
     });
     tracing::info!(bind = %args.bind, "API listening");
-    let metrics_cancellation = cancellation.child_token();
-    let mut metrics_server_task = tokio::spawn(async move {
+    tasks.spawn("metrics server", |cancellation| {
         axum::serve(metrics_listener, topup::observability::metrics_router())
-            .with_graceful_shutdown(metrics_cancellation.cancelled_owned())
-            .await
+            .with_graceful_shutdown(cancellation.cancelled_owned())
+            .into_future()
     });
     tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
+    let scanner_routes = Arc::clone(&routes);
     let scanner_poll_interval = Duration::from_secs(args.scanner_poll_interval_s);
-    let scanner_cancellation = cancellation.child_token();
-    let mut scanner_task = tokio::spawn(async move {
+    tasks.spawn("scanner", |cancellation| async move {
         topup::scanner::run(
             scanner_pool,
-            scanner_routes,
+            &scanner_routes,
             scanner_poll_interval,
-            scanner_cancellation,
+            cancellation,
         )
         .await
     });
-    let refund_cancellation = cancellation.child_token();
-    let mut refund_task = tokio::spawn(async move {
-        refund_worker.run(refund_cancellation).await;
+    tasks.spawn("refund confirmation worker", |cancellation| async move {
+        refund_worker.run(cancellation).await;
     });
-    let mut pump_tasks = Vec::with_capacity(PUMPS);
     for worker in 0..PUMPS {
         let worker_pump = pump.clone();
-        let worker_cancellation = cancellation.child_token();
-        pump_tasks.push(tokio::spawn(async move {
-            tracing::info!(worker, "deposit pump started");
-            worker_pump
-                .run_with_instance(worker.to_string(), worker_cancellation)
-                .await;
-        }));
+        tasks.spawn(
+            format!("deposit pump {worker}"),
+            |cancellation| async move {
+                tracing::info!(worker, "deposit pump started");
+                worker_pump
+                    .run_with_instance(worker.to_string(), cancellation)
+                    .await;
+            },
+        );
     }
     let age_alerter = AgeAlerter::with_reminder_interval(
         pool.clone(),
@@ -798,45 +739,37 @@ async fn run(args: &RunArgs) -> ExitCode {
         AGE_ALERT_INTERVAL,
         AGE_ALERT_REMINDER,
     );
-    let age_cancellation = cancellation.child_token();
-    let age_task = tokio::spawn(async move {
-        age_alerter.run(age_cancellation).await;
+    tasks.spawn("age alerter", |cancellation| async move {
+        age_alerter.run(cancellation).await;
     });
-    let database_metrics_cancellation = cancellation.child_token();
     let metrics_pool = pool.clone();
-    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(&routes);
-    let database_metrics_task = tokio::spawn(async move {
+    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(routes.routes());
+    tasks.spawn("database metrics collector", |cancellation| {
         topup::observability::collect_database_metrics(
             metrics_pool,
             lock_exposure_caps,
-            database_metrics_cancellation,
+            cancellation,
         )
-        .await;
     });
-    let backup_metrics_cancellation = cancellation.child_token();
-    let backup_metrics_task = tokio::spawn(async move {
-        topup::observability::collect_backup_metrics(backup_metrics_cancellation).await;
-    });
+    tasks.spawn(
+        "backup metrics collector",
+        topup::observability::collect_backup_metrics,
+    );
     let expiry_worker = topup::locks::ExpiryWorker::new(pool.clone(), Duration::from_secs(5));
-    let expiry_cancellation = cancellation.child_token();
-    let expiry_task = tokio::spawn(async move {
-        expiry_worker.run(expiry_cancellation).await;
+    tasks.spawn("rate-lock expiry worker", |cancellation| async move {
+        expiry_worker.run(cancellation).await;
     });
-    let (delivery_shutdown, delivery_shutdown_receiver) = tokio::sync::watch::channel(false);
-    let delivery_task = tokio::spawn(async move {
-        delivery_worker.run(delivery_shutdown_receiver).await;
+    tasks.spawn("webhook delivery worker", |cancellation| async move {
+        delivery_worker.run(cancellation).await;
     });
-    let mut flusher_handles = Vec::with_capacity(flusher_tasks.len());
     for task in flusher_tasks {
-        let flusher_cancellation = cancellation.child_token();
-        flusher_handles.push(tokio::spawn(async move {
-            task.run(flusher_cancellation).await;
-        }));
+        tasks.spawn(format!("flusher {}", task.instance()), |cancellation| {
+            task.run(cancellation)
+        });
     }
-    let reconciliation_cancellation = cancellation.child_token();
-    let mut reconciliation_task = tokio::spawn(async move {
+    tasks.spawn("reconciler", |cancellation| async move {
         reconciler
-            .run_loop(RECONCILIATION_INTERVAL, reconciliation_cancellation)
+            .run_loop(RECONCILIATION_INTERVAL, cancellation)
             .await;
     });
 
@@ -845,15 +778,10 @@ async fn run(args: &RunArgs) -> ExitCode {
         scanners = scanner_count,
         "topup service started"
     );
-    let mut lease_owner_task =
-        tokio::spawn(lease_owner.watch(LEASE_OWNER_PING, cancellation.clone()));
+    // The watch cancels every task when the lock connection fails; it is reported below.
+    let mut lease_owner_task = tokio::spawn(lease_owner.watch(LEASE_OWNER_PING, tasks.token()));
     let mut clean_shutdown = true;
     let mut lease_owner_finished = None;
-    let mut api_finished = false;
-    let mut metrics_server_finished = false;
-    let mut scanner_finished = false;
-    let mut reconciliation_finished = false;
-    let mut refund_finished = false;
     tokio::select! {
         signal = wait_for_shutdown_signal() => {
             if let Err(error) = signal {
@@ -861,137 +789,14 @@ async fn run(args: &RunArgs) -> ExitCode {
                 clean_shutdown = false;
             }
         }
-        result = &mut api_task => {
-            api_finished = true;
-            match result {
-                Ok(Ok(())) => tracing::error!("API server stopped before shutdown"),
-                Ok(Err(error)) => tracing::error!(%error, "API server failed"),
-                Err(error) => tracing::error!(%error, "API task failed"),
-            }
-            clean_shutdown = false;
-        }
-        result = &mut scanner_task => {
-            scanner_finished = true;
-            match result {
-                Ok(Ok(())) => tracing::error!("scanner stopped before shutdown"),
-                Ok(Err(error)) => tracing::error!(%error, "scanner task failed"),
-                Err(error) => tracing::error!(%error, "scanner task failed to join"),
-            }
-            clean_shutdown = false;
-        }
-        result = &mut metrics_server_task => {
-            metrics_server_finished = true;
-            match result {
-                Ok(Ok(())) => tracing::error!("metrics server stopped before shutdown"),
-                Ok(Err(error)) => tracing::error!(%error, "metrics server failed"),
-                Err(error) => tracing::error!(%error, "metrics server task failed"),
-            }
-            clean_shutdown = false;
-        }
-        result = &mut reconciliation_task => {
-            reconciliation_finished = true;
-            match result {
-                Ok(()) => tracing::error!("reconciler stopped before shutdown"),
-                Err(error) => tracing::error!(%error, "reconciler task failed"),
-            }
-            clean_shutdown = false;
-        }
-        result = &mut refund_task => {
-            refund_finished = true;
-            match result {
-                Ok(()) => tracing::error!("refund confirmation worker stopped before shutdown"),
-                Err(error) => tracing::error!(%error, "refund confirmation task failed"),
-            }
-            clean_shutdown = false;
-        }
-        // The watch only finishes early when the lock connection fails; it is reported below.
+        () = tasks.first_exit() => clean_shutdown = false,
         result = &mut lease_owner_task => {
             lease_owner_finished = Some(result);
         }
     }
     tracing::info!("shutdown requested; finishing in-flight service work");
-    cancellation.cancel();
-    // A closed receiver means the worker already stopped, which the join below reports.
-    let _ = delivery_shutdown.send(true);
-
-    if !api_finished {
-        match api_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::error!(%error, "API server failed during shutdown");
-                clean_shutdown = false;
-            }
-            Err(error) => {
-                tracing::error!(%error, "API task failed during shutdown");
-                clean_shutdown = false;
-            }
-        }
-    }
-    if !scanner_finished {
-        match scanner_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::error!(%error, "scanner task failed during shutdown");
-                clean_shutdown = false;
-            }
-            Err(error) => {
-                tracing::error!(%error, "scanner task failed to join during shutdown");
-                clean_shutdown = false;
-            }
-        }
-    }
-    if !metrics_server_finished {
-        match metrics_server_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::error!(%error, "metrics server failed during shutdown");
-                clean_shutdown = false;
-            }
-            Err(error) => {
-                tracing::error!(%error, "metrics server task failed during shutdown");
-                clean_shutdown = false;
-            }
-        }
-    }
-    if !reconciliation_finished && let Err(error) = reconciliation_task.await {
-        tracing::error!(%error, "reconciler task failed during shutdown");
+    if !tasks.shutdown().await {
         clean_shutdown = false;
-    }
-    if !refund_finished && let Err(error) = refund_task.await {
-        tracing::error!(%error, "refund confirmation task failed during shutdown");
-        clean_shutdown = false;
-    }
-    for task in pump_tasks {
-        if let Err(error) = task.await {
-            tracing::error!(%error, "deposit pump task failed during shutdown");
-            clean_shutdown = false;
-        }
-    }
-    if let Err(error) = age_task.await {
-        tracing::error!(%error, "age alert task failed during shutdown");
-        clean_shutdown = false;
-    }
-    if let Err(error) = database_metrics_task.await {
-        tracing::error!(%error, "database metrics collector task failed during shutdown");
-        clean_shutdown = false;
-    }
-    if let Err(error) = backup_metrics_task.await {
-        tracing::error!(%error, "backup metrics collector task failed during shutdown");
-        clean_shutdown = false;
-    }
-    if let Err(error) = expiry_task.await {
-        tracing::error!(%error, "rate-lock expiry task failed during shutdown");
-        clean_shutdown = false;
-    }
-    if let Err(error) = delivery_task.await {
-        tracing::error!(%error, "webhook delivery task failed during shutdown");
-        clean_shutdown = false;
-    }
-    for task in flusher_handles {
-        if let Err(error) = task.await {
-            tracing::error!(%error, "flusher task failed during shutdown");
-            clean_shutdown = false;
-        }
     }
     // Release the lease-owner lock only after every lease-holding task has stopped.
     let lease_owner = match lease_owner_finished {
@@ -1035,43 +840,25 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let database_url = match required_env("DATABASE_URL") {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(%error, "missing reconciliation configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("DATABASE_URL", "reconcile", 4).await {
         Ok(pool) => pool,
-        Err(error) => {
-            tracing::error!(%error, "failed to connect to database");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
-    let signer = match SignerHandle::spawn(
-        DstackSigner::new(),
-        NonZeroUsize::new(32).expect("constant signer queue is non-zero"),
-        Duration::from_secs(15),
-    ) {
+    let signer = match spawn_signer(None) {
         Ok(signer) => signer,
         Err(error) => {
             tracing::error!(%error, "failed to start signer actor");
             return ExitCode::FAILURE;
         }
     };
-    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
-    {
-        Ok(reconciler) => reconciler,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure reconciler");
-            return ExitCode::FAILURE;
-        }
-    };
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
     let result = if args.post_restore {
         topup::reconciler::post_restore_once(&reconciler).await
     } else {
@@ -1111,6 +898,109 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             tracing::error!(%error, "reconciliation failed");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Long-running service tasks sharing one cancellation token.
+///
+/// A task that exits before shutdown stops the service: `run` then cancels the rest.
+struct ServiceTasks {
+    set: JoinSet<Result<(), String>>,
+    names: HashMap<tokio::task::Id, String>,
+    cancellation: CancellationToken,
+}
+
+/// Result of a service task, normalized for reporting.
+trait TaskOutcome {
+    fn into_outcome(self) -> Result<(), String>;
+}
+
+impl TaskOutcome for () {
+    fn into_outcome(self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl<E: std::fmt::Display> TaskOutcome for Result<(), E> {
+    fn into_outcome(self) -> Result<(), String> {
+        self.map_err(|error| error.to_string())
+    }
+}
+
+impl ServiceTasks {
+    fn new() -> Self {
+        Self {
+            set: JoinSet::new(),
+            names: HashMap::new(),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    fn spawn<F>(&mut self, name: impl Into<String>, task: impl FnOnce(CancellationToken) -> F)
+    where
+        F: Future + Send + 'static,
+        F::Output: TaskOutcome,
+    {
+        let task = task(self.cancellation.clone());
+        let handle = self.set.spawn(async move { task.await.into_outcome() });
+        self.names.insert(handle.id(), name.into());
+    }
+
+    fn name(&self, id: tokio::task::Id) -> &str {
+        self.names.get(&id).map_or("unknown", String::as_str)
+    }
+
+    /// Waits for the first task to exit and reports it.
+    async fn first_exit(&mut self) {
+        let Some(result) = self.set.join_next_with_id().await else {
+            return std::future::pending().await;
+        };
+        match result {
+            // After a cancellation (a failed lease-owner lock) exits are expected; the cause is
+            // reported separately.
+            Ok((_, Ok(()))) if self.cancellation.is_cancelled() => {}
+            Ok((id, Ok(()))) => {
+                tracing::error!(task = self.name(id), "service task stopped before shutdown");
+            }
+            Ok((id, Err(error))) => {
+                tracing::error!(task = self.name(id), %error, "service task failed");
+            }
+            Err(error) => {
+                tracing::error!(task = self.name(error.id()), %error, "service task failed to join");
+            }
+        }
+    }
+
+    /// Cancels every task and waits for all of them; returns whether each stopped cleanly.
+    async fn shutdown(mut self) -> bool {
+        self.cancellation.cancel();
+        let mut clean = true;
+        while let Some(result) = self.set.join_next_with_id().await {
+            match result {
+                Ok((_, Ok(()))) => {}
+                Ok((id, Err(error))) => {
+                    tracing::error!(
+                        task = self.name(id),
+                        %error,
+                        "service task failed during shutdown"
+                    );
+                    clean = false;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        task = self.name(error.id()),
+                        %error,
+                        "service task failed to join during shutdown"
+                    );
+                    clean = false;
+                }
+            }
+        }
+        clean
     }
 }
 
@@ -1176,7 +1066,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
+fn load_routes(paths: &[PathBuf]) -> Result<RouteSet, String> {
     let routes = paths
         .iter()
         .map(|path| {
@@ -1186,42 +1076,7 @@ fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
                 .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    validate_route_set(&routes)?;
-    Ok(routes)
-}
-
-fn validate_route_set(routes: &[RouteFile]) -> Result<(), String> {
-    let mut versions = std::collections::BTreeSet::new();
-    for route in routes {
-        if !versions.insert((route.route.as_str(), route.version)) {
-            return Err(format!(
-                "duplicate route `{}` version {}",
-                route.route, route.version
-            ));
-        }
-    }
-    // Settlement calls and product authentication read the destination from the routes, so every
-    // route of one product must name the same settlement URL and product key id.
-    let products = routes
-        .iter()
-        .map(|route| route.destination.product.as_str())
-        .collect::<BTreeSet<_>>();
-    for product in products {
-        product_destination(routes, product).map_err(|error| error.to_string())?;
-    }
-    // Rate-lock exposure counters sum credit across routes, so every quote-first route must
-    // count credit in the same destination minor unit.
-    let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
-    if let Some(first) = lock_routes.next()
-        && let Some(other) = lock_routes
-            .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
-    {
-        return Err(format!(
-            "rate-lock routes `{}` and `{}` use different destination.unit_decimals; exposure caps require one unit",
-            first.route, other.route
-        ));
-    }
-    Ok(())
+    RouteSet::new(routes)
 }
 
 fn required_env(name: &'static str) -> Result<String, String> {
@@ -1229,6 +1084,44 @@ fn required_env(name: &'static str) -> Result<String, String> {
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("{name} is required for run"))
+}
+
+/// Connects a pool of at most `max_connections` to the database URL in `environment`.
+async fn connect(
+    environment: &'static str,
+    command: &'static str,
+    max_connections: u32,
+) -> Result<PgPool, ExitCode> {
+    let Some(url) = std::env::var(environment)
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::error!("{environment} is required for {command}");
+        return Err(ExitCode::FAILURE);
+    };
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .connect(&url)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, command, "failed to connect to database");
+            ExitCode::FAILURE
+        })
+}
+
+/// Queue depth of every dstack signer actor.
+const SIGNER_QUEUE: NonZeroUsize =
+    NonZeroUsize::new(32).expect("constant signer queue is non-zero");
+/// Maximum duration of one dstack signing request.
+const SIGNER_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Starts a dstack signer actor, deriving `operator/v{n}` when an operator key version is given.
+fn spawn_signer(operator_key_version: Option<NonZeroU32>) -> std::io::Result<SignerHandle> {
+    let signer = match operator_key_version {
+        Some(version) => DstackSigner::new().with_operator_key_version(version),
+        None => DstackSigner::new(),
+    };
+    SignerHandle::spawn(signer, SIGNER_QUEUE, SIGNER_TIMEOUT)
 }
 
 async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> ExitCode {
@@ -1246,23 +1139,9 @@ async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> Ex
             return ExitCode::FAILURE;
         }
     };
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(value) if !value.is_empty() => value,
-        Ok(_) | Err(_) => {
-            tracing::error!("DATABASE_URL is required for outbox replay");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("DATABASE_URL", "outbox replay", 1).await {
         Ok(pool) => pool,
-        Err(error) => {
-            tracing::error!(%error, "failed to connect to database");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let reason = if force {
         "manual CLI replay with delivered state reset"
@@ -1282,23 +1161,9 @@ async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> Ex
 }
 
 async fn migrate() -> ExitCode {
-    let database_url = match std::env::var("MIGRATE_DATABASE_URL") {
-        Ok(value) if !value.is_empty() => value,
-        Ok(_) | Err(_) => {
-            tracing::error!("MIGRATE_DATABASE_URL is required for migrate");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-    {
+    let pool = match connect("MIGRATE_DATABASE_URL", "migrate", 1).await {
         Ok(pool) => pool,
-        Err(error) => {
-            tracing::error!(%error, "failed to connect to database");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     if let Err(error) = topup::db::migrate(&pool).await {
         tracing::error!(%error, "failed to apply database migrations");
@@ -1338,8 +1203,10 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nonce, validate_route_set};
-    use topup_core::route::RouteFile;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{ServiceTasks, parse_nonce};
 
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
@@ -1358,66 +1225,32 @@ mod tests {
         assert_eq!(parse_nonce("zz"), Err("nonce must be valid hexadecimal"));
     }
 
-    #[test]
-    fn route_loading_accepts_versions_and_rejects_exact_duplicates() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
+    #[tokio::test]
+    async fn an_early_task_exit_is_reported_and_shutdown_stops_every_task() {
+        let mut tasks = ServiceTasks::new();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&stopped);
+        tasks.spawn("long-running", |cancellation| async move {
+            cancellation.cancelled().await;
+            observed.store(true, Ordering::SeqCst);
+        });
+        tasks.spawn("failing", |_| async { Err::<(), _>("boom") });
 
-        assert_eq!(validate_route_set(&[route.clone(), newer]), Ok(()));
-        assert_eq!(
-            validate_route_set(&[route.clone(), route]),
-            Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
-        );
-    }
+        tokio::time::timeout(std::time::Duration::from_secs(5), tasks.first_exit())
+            .await
+            .expect("the failing task exits first");
+        assert!(!stopped.load(Ordering::SeqCst));
+        assert!(tasks.shutdown().await, "the remaining task stops cleanly");
+        assert!(stopped.load(Ordering::SeqCst));
 
-    #[test]
-    fn route_loading_requires_one_settlement_destination_per_product() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
-        newer.destination.settlement_url = "https://other.example/settlements".to_owned();
+        let mut tasks = ServiceTasks::new();
+        tasks.spawn("failing on shutdown", |cancellation| async move {
+            cancellation.cancelled().await;
+            Err::<(), _>("shutdown failure")
+        });
         assert!(
-            validate_route_set(&[route.clone(), newer.clone()])
-                .expect_err("one product must not have two settlement URLs")
-                .contains("destination.settlement_url")
+            !tasks.shutdown().await,
+            "a failure during shutdown is unclean"
         );
-
-        newer.destination.settlement_url = route.destination.settlement_url.clone();
-        newer.destination.product_kid = "phala-cloud/v2".to_owned();
-        assert!(
-            validate_route_set(&[route.clone(), newer.clone()])
-                .expect_err("one product must not have two key ids")
-                .contains("destination.product_kid")
-        );
-
-        newer.route = "builder-route".to_owned();
-        newer.destination.product = "builder".to_owned();
-        newer.destination.settlement_url = "https://builder.example/settlements".to_owned();
-        assert_eq!(validate_route_set(&[route, newer]), Ok(()));
-    }
-
-    #[test]
-    fn route_loading_requires_one_unit_for_rate_lock_exposure() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut other = route.clone();
-        other.route = "other-route".to_owned();
-        other.destination.unit_decimals = route.destination.unit_decimals + 1;
-
-        assert_eq!(
-            validate_route_set(&[route.clone(), other.clone()]),
-            Err(format!(
-                "rate-lock routes `{}` and `other-route` use different destination.unit_decimals; exposure caps require one unit",
-                route.route
-            ))
-        );
-        other.rate_lock.enabled = false;
-        assert_eq!(validate_route_set(&[route, other]), Ok(()));
     }
 }

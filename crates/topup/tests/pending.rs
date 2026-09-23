@@ -19,9 +19,10 @@ use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{NewAccount, NewPendingTransfer, NewProduct};
 use topup::locks::QuoteProvider;
 use topup::locks::pricing::ValidatedQuote;
-use topup::scanner::{configure_routes, head_scan_once, scan_once};
+use topup::routes::RouteSet;
+use topup::scanner::{chain_routes, head_scan_once, scan_once};
 use topup_adapters::attestation::DstackAttestor;
-use topup_adapters::chain::evm::EvmChain;
+use topup_adapters::chain::evm::{EvmClient, FinalizedReader};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use tower::ServiceExt;
@@ -69,7 +70,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     anvil.mine(FINALITY_LAG + 2)?;
 
     let route = test_route(token);
-    let chain_routes = configure_routes(std::slice::from_ref(&route))?
+    let route_set = Arc::new(RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?);
+    let chain_routes = chain_routes(&route_set)
         .into_iter()
         .next()
         .context("one chain")?;
@@ -78,7 +80,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     seed_account(pool, &product_key).await?;
     let app = topup::api::router(AppState {
         pool: pool.clone(),
-        routes: Arc::new(vec![route.clone()]),
+        routes: Arc::clone(&route_set),
         admin_key: VerificationKey::from_base64(
             "admin/v1".to_owned(),
             &public_key_base64(&admin_key),
@@ -94,7 +96,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         key: product_key,
         created: Utc::now().timestamp().into(),
     };
-    let reader = EvmChain::new(&anvil.rpc_url)?;
+    let reader = FinalizedReader::new(Arc::new(EvmClient::new(&anvil.rpc_url)?));
     scan_once(pool, &reader, &chain_routes).await?;
 
     let lock = api

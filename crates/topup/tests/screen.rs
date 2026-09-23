@@ -16,6 +16,7 @@ use sqlx::{PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
+use topup_adapters::chain::evm::EvmClient;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
@@ -169,10 +170,9 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
     let account = Address::repeat_byte(0x22);
     let recorded_block = current_block(&rpc_url)?;
     let source = Arc::new(SanctionsOracle::new(
-        &rpc_url,
-        &rpc_url,
+        client(&rpc_url, StdDuration::from_secs(2))?,
+        client(&rpc_url, StdDuration::from_secs(2))?,
         oracle,
-        StdDuration::from_secs(2),
     )?);
     let before = source.sanctions(account, recorded_block).await;
     ensure!(before.provider_a == SanctionsAnswer::Clear);
@@ -222,10 +222,9 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
             ensure!(rejected.evidence["provider_b"] == "sanctioned");
 
             let down_source = Arc::new(SanctionsOracle::new(
-                &rpc_url,
-                "http://127.0.0.1:1",
+                client(&rpc_url, StdDuration::from_millis(200))?,
+                client("http://127.0.0.1:1", StdDuration::from_millis(200))?,
                 oracle,
-                StdDuration::from_millis(200),
             )?);
             let down_step = ScreenStep::new(
                 context.app_pool.clone(),
@@ -427,4 +426,8 @@ fn wait_steps() -> StepSet {
         Box::new(WaitStep),
         Box::new(WaitStep),
     )
+}
+
+fn client(rpc_url: &str, timeout: StdDuration) -> Result<Arc<EvmClient>> {
+    Ok(Arc::new(EvmClient::with_timeout(rpc_url, timeout)?))
 }

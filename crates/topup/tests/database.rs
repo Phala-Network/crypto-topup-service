@@ -237,13 +237,13 @@ fn restore_reconciler(pool: &PgPool, lookup: &Arc<RestoreLookup>) -> Result<Reco
     let chain_id = route.chain.chain_id;
     Ok(Reconciler::with_dependencies(
         pool.clone(),
-        vec![route],
+        Arc::new(topup::routes::RouteSet::new(vec![route]).map_err(anyhow::Error::msg)?),
         BTreeMap::from([(
             chain_id,
             Arc::new(UnavailableChain) as Arc<dyn ReconciliationChain>,
         )]),
         Arc::clone(lookup) as Arc<dyn SettlementLookup>,
-    )?)
+    ))
 }
 
 #[tokio::test]

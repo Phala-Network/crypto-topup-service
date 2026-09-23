@@ -40,6 +40,12 @@ impl Redacted {
         self
     }
 
+    /// Returns the configured provider label, when one is attached.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
     /// Returns the provider URL for an outbound client. Callers must not log this value.
     #[must_use]
     pub const fn expose(&self) -> &Url {

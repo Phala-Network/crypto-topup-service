@@ -16,7 +16,7 @@ pub mod dstack;
 
 #[cfg(any(test, feature = "dev-signer"))]
 mod dev;
-#[cfg(feature = "dev-signer")]
+#[cfg(any(test, feature = "dev-signer"))]
 pub use dev::DevSigner;
 
 fn operator_signer(secret: &SecretKey32) -> Result<PrivateKeySigner, SignerError> {

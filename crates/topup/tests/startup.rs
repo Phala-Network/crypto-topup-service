@@ -31,14 +31,14 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
     let yaml = route_yaml(&anvil, factory, implementation, TREASURY);
     let route: RouteFile = serde_saphyr::from_str(&yaml)?;
     route.validate().map_err(anyhow::Error::msg)?;
-    topup::contracts::verify_routes(std::slice::from_ref(&route))
+    topup::contracts::verify_routes(&route_set(&route)?)
         .await
         .map_err(anyhow::Error::msg)
         .context("the deployed contracts must match their own route")?;
 
     let mut wrong_implementation = route.clone();
     wrong_implementation.chain.contracts.implementation = Address::from_str(TREASURY)?;
-    let error = topup::contracts::verify_routes(&[wrong_implementation])
+    let error = topup::contracts::verify_routes(&route_set(&wrong_implementation)?)
         .await
         .expect_err("a wrong implementation must fail");
     ensure!(error.contains("implementation()"), "{error}");
@@ -51,7 +51,7 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
             implementation_of(&rpc_url, factory)? == implementation,
             "the getters must still answer"
         );
-        let error = topup::contracts::verify_routes(std::slice::from_ref(&route))
+        let error = topup::contracts::verify_routes(&route_set(&route)?)
             .await
             .expect_err("modified code must fail");
         ensure!(
@@ -60,7 +60,7 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         );
         set_code(&rpc_url, contract, &original)?;
     }
-    topup::contracts::verify_routes(std::slice::from_ref(&route))
+    topup::contracts::verify_routes(&route_set(&route)?)
         .await
         .map_err(anyhow::Error::msg)
         .context("restored code must pass again")?;
@@ -101,6 +101,10 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         "the contract check must run before the database is used: {logs}"
     );
     Ok(())
+}
+
+fn route_set(route: &RouteFile) -> Result<topup::routes::RouteSet> {
+    topup::routes::RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)
 }
 
 fn route_yaml(anvil: &Anvil, factory: Address, implementation: Address, treasury: &str) -> String {

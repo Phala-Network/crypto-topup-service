@@ -5,26 +5,17 @@ use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use reqwest::{Method, Request, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, SignerError};
+use topup_core::{SETTLEMENT_KEY_DOMAIN, SignerError};
 
+use crate::http_signature;
 use crate::redaction::{Redacted, RedactedTransportError};
 use crate::signer::actor::SignerHandle;
 
-const SIGNATURE_LABEL: &str = "sig1";
 const RESPONSE_BODY_LIMIT: usize = 64 * 1024;
 const EVIDENCE_BODY_LIMIT: usize = 4 * 1024;
-const SIGNATURE_COMPONENTS: [&str; 4] = [
-    "@method",
-    "@target-uri",
-    "content-digest",
-    "idempotency-key",
-];
 
 #[derive(Clone, Copy)]
 struct SigningOptions {
@@ -185,7 +176,10 @@ impl SettlementClient {
         if request_timeout.is_zero() {
             return Err(SettlementClientError::InvalidEndpoint);
         }
-        if keyid.is_empty() || keyid.contains(['"', '\\', '\n', '\r']) {
+        if keyid.is_empty()
+            || keyid.contains(['"', '\\'])
+            || http_signature::structured_string(&keyid).is_none()
+        {
             return Err(SettlementClientError::InvalidEndpoint);
         }
         let endpoint =
@@ -222,26 +216,21 @@ impl SettlementClient {
         include_content_type: bool,
         options: SigningOptions,
     ) -> Result<Request, SettlementClientError> {
-        let idempotency_key = structured_field_string(key)?;
-        let content_digest = content_digest(&body);
-        let signature_parameters =
-            signature_parameters(options.created, &self.keyid, options.cover_idempotency_key);
-        let mut components = vec![
-            ("@method", method.as_str()),
-            ("@target-uri", url.as_str()),
-            ("content-digest", content_digest.as_str()),
-        ];
-        if options.cover_idempotency_key {
-            components.push(("idempotency-key", idempotency_key.as_str()));
-        }
-        let signature_base = signature_base(&components, &signature_parameters);
-        let signature = self
-            .signer
-            .sign_settlement(signature_base.as_bytes())
-            .await
-            .map_err(SettlementClientError::Signer)?;
-        let signature_input = format!("{SIGNATURE_LABEL}={signature_parameters}");
-        let signature = format!("{SIGNATURE_LABEL}=:{}:", STANDARD.encode(signature.0));
+        let idempotency_key = http_signature::structured_string(key)
+            .ok_or(SettlementClientError::InvalidIdempotencyKey)?;
+        let content_digest = http_signature::content_digest(&body);
+        let components = http_signature::Components {
+            method: method.as_str(),
+            target_uri: url.as_str(),
+            content_digest: &content_digest,
+            idempotency_key: options
+                .cover_idempotency_key
+                .then_some(idempotency_key.as_str()),
+        };
+        let (signature_input, signature) =
+            http_signature::sign(&self.signer, &components, options.created, &self.keyid)
+                .await
+                .map_err(SettlementClientError::Signer)?;
 
         let mut request = self
             .client
@@ -478,87 +467,15 @@ fn unix_timestamp() -> Result<i64, SettlementClientError> {
     i64::try_from(seconds).map_err(|_| SettlementClientError::InvalidClock)
 }
 
-fn content_digest(body: &[u8]) -> String {
-    format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body)))
-}
-
-fn structured_field_string(value: &str) -> Result<String, SettlementClientError> {
-    let mut encoded = String::with_capacity(value.len().saturating_add(2));
-    encoded.push('"');
-    for character in value.chars() {
-        if !character.is_ascii() || !(' '..='~').contains(&character) {
-            return Err(SettlementClientError::InvalidIdempotencyKey);
-        }
-        if matches!(character, '"' | '\\') {
-            encoded.push('\\');
-        }
-        encoded.push(character);
-    }
-    encoded.push('"');
-    Ok(encoded)
-}
-
-fn signature_parameters(created: i64, keyid: &str, cover_idempotency_key: bool) -> String {
-    let component_count = if cover_idempotency_key {
-        SIGNATURE_COMPONENTS.len()
-    } else {
-        SIGNATURE_COMPONENTS.len().saturating_sub(1)
-    };
-    let components = SIGNATURE_COMPONENTS
-        .get(..component_count)
-        .unwrap_or_default()
-        .iter()
-        .map(|component| format!("\"{component}\""))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("({components});created={created};keyid=\"{keyid}\"")
-}
-
-fn signature_base(components: &[(&str, &str)], parameters: &str) -> String {
-    let mut lines = components
-        .iter()
-        .map(|(identifier, value)| format!("\"{identifier}\": {value}"))
-        .collect::<Vec<_>>();
-    lines.push(format!("\"@signature-params\": {parameters}"));
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use ed25519_dalek::SigningKey;
+    use topup_core::SecretKey32;
 
     use super::*;
-
-    struct FixedSigner(SigningKey);
-
-    impl topup_core::Signer for FixedSigner {
-        async fn sign_operator_tx(
-            &self,
-            _tx: topup_core::TxRequest,
-        ) -> Result<topup_core::SignedTx, SignerError> {
-            Err(SignerError::SigningFailed)
-        }
-
-        async fn sign_settlement(
-            &self,
-            payload: &[u8],
-        ) -> Result<topup_core::Ed25519Signature, SignerError> {
-            Ok(topup_core::Ed25519Signature(
-                self.0.sign(payload).to_bytes(),
-            ))
-        }
-
-        async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
-            Err(SignerError::KeyUnavailable)
-        }
-
-        async fn settlement_public_key(&self) -> Result<topup_core::Ed25519PublicKey, SignerError> {
-            Ok(topup_core::Ed25519PublicKey(
-                self.0.verifying_key().to_bytes(),
-            ))
-        }
-    }
+    use crate::signer::DevSigner;
 
     fn fixture_vector(name: &str, request: &Request) -> serde_json::Value {
         let headers = [
@@ -596,7 +513,7 @@ mod tests {
         let key = SigningKey::from_bytes(&[11; 32]);
         let public_key = STANDARD.encode(key.verifying_key().as_bytes());
         let signer = SignerHandle::spawn(
-            FixedSigner(key),
+            DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([11; 32])),
             std::num::NonZeroUsize::new(2).expect("non-zero queue"),
             Duration::from_secs(5),
         )
@@ -657,78 +574,5 @@ mod tests {
             "update crates/adapters/tests/fixtures/rfc9421-rust-settlement.json to:\n{}",
             serde_json::to_string_pretty(&actual).expect("fixture encodes")
         );
-    }
-
-    #[test]
-    fn settlement_profile_signature_base_has_exact_components() {
-        let parameters = signature_parameters(1_618_884_473, SETTLEMENT_KEY_DOMAIN, true);
-        let components = [
-            ("@method", "POST"),
-            ("@target-uri", "https://product.example/settlements"),
-            ("content-digest", "sha-256=:YWJj:"),
-            ("idempotency-key", "\"deposit:123\""),
-        ];
-        assert_eq!(
-            signature_base(&components, &parameters),
-            concat!(
-                "\"@method\": POST\n",
-                "\"@target-uri\": https://product.example/settlements\n",
-                "\"content-digest\": sha-256=:YWJj:\n",
-                "\"idempotency-key\": \"deposit:123\"\n",
-                "\"@signature-params\": (\"@method\" \"@target-uri\" ",
-                "\"content-digest\" \"idempotency-key\");created=1618884473;",
-                "keyid=\"settlement/v1\""
-            )
-        );
-    }
-
-    #[test]
-    fn rfc_9421_ed25519_example_matches_base_and_signature() {
-        let components = [
-            ("date", "Tue, 20 Apr 2021 02:07:55 GMT"),
-            ("@method", "POST"),
-            ("@path", "/foo"),
-            ("@authority", "example.com"),
-            ("content-type", "application/json"),
-            ("content-length", "18"),
-        ];
-        let parameters = concat!(
-            "(\"date\" \"@method\" \"@path\" \"@authority\" ",
-            "\"content-type\" \"content-length\");created=1618884473;",
-            "keyid=\"test-key-ed25519\""
-        );
-        let base = signature_base(&components, parameters);
-        let private = URL_SAFE_NO_PAD
-            .decode("n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU")
-            .expect("RFC key is valid base64url");
-        let private: [u8; 32] = private.try_into().expect("RFC key is 32 bytes");
-        let key = SigningKey::from_bytes(&private);
-        let signature = key.sign(base.as_bytes());
-        assert_eq!(
-            STANDARD.encode(signature.to_bytes()),
-            concat!(
-                "wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1",
-                "u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw=="
-            )
-        );
-        assert!(
-            key.verifying_key()
-                .verify(base.as_bytes(), &signature)
-                .is_ok()
-        );
-        assert_eq!(Signature::from_bytes(&signature.to_bytes()), signature);
-    }
-
-    #[test]
-    fn idempotency_key_is_a_quoted_structured_field_string() {
-        assert_eq!(
-            structured_field_string("deposit:123").expect("key is valid"),
-            "\"deposit:123\""
-        );
-        assert_eq!(
-            structured_field_string("quoted\"slash\\").expect("key is escapable"),
-            "\"quoted\\\"slash\\\\\""
-        );
-        assert!(structured_field_string("line\nbreak").is_err());
     }
 }
