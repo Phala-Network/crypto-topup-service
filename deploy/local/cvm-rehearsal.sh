@@ -328,6 +328,12 @@ jq -n --arg factory "$factory" --arg implementation "$implementation" --arg toke
       listen_host: "0.0.0.0", listen_port: 8089, public_url: "http://product:8089",
       payer: $payer}' | docker exec -i "$client" sh -c 'cat >/opt/rehearsal.json'
 product_python examples/phala_cloud_integration.py --config /opt/rehearsal.json
+# The route prices only from Coin Metrics, Binance, and Kraken over HTTPS, so a priced lock proves
+# the distroless service image verified those servers with its system CA bundle.
+priced_locks=$(dc exec -T postgres psql -U postgres -d topup -XAtq -c \
+    "SELECT count(*) FROM rate_locks WHERE route = 'phala-cloud-sepolia-pha-usd' AND price_scaled > 0")
+((priced_locks >= 1)) || die "no rate lock was priced from the live HTTPS sources"
+echo "ok: topup priced a lock from live HTTPS price sources (TLS with system roots)"
 
 echo "== workload memory (tdx.medium has 4 GiB)"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \

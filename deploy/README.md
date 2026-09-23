@@ -509,6 +509,13 @@ make infra-smoke
 SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 ```
 
+A local stack created before the PostgreSQL 18 upgrade keeps a PostgreSQL 16 volume mounted at the
+old path, which the new image does not read. Remove it (local data only) before `make up`:
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml down -v
+```
+
 `infra-smoke.sh` tests migrations, route-template validation, simulator attestation, the running
 backup service, WAL-G dry-run commands, and PostgreSQL archive settings, then removes its containers
 and volumes. `service-smoke.sh` is opt-in and requires `topup run --help` to expose the unified
@@ -534,7 +541,8 @@ starts it with a `.env` holding exactly the `staging.env.example` names.
 (in place of the host socket), MinIO, and Anvil. The run asserts that `migrate` exits 0, `topup`
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 through the simulator, the backup marker is fresh, and one quote-first deposit is credited end to
-end against the reference product, then prints the workload's memory and checks that no
+end against the reference product with a lock priced from the live HTTPS sources (so the image's
+TLS verification with system roots works), then prints the workload's memory and checks that no
 container, volume, network, or image of the run is left. It needs Foundry with `contracts/lib`, the
 Docker host's loopback (for the registry and Anvil), and internet access for the live price
 sources; it bind-mounts nothing.

@@ -3,7 +3,7 @@ UV ?= uv
 OPENAPI := ../../crates/topup/openapi.json
 GENERATED := src/topup_client
 
-.PHONY: sync generate check-generated lint test check
+.PHONY: sync generate check-generated lint test test-min-python check
 
 sync:
 	$(UV) sync --locked --all-groups
@@ -30,4 +30,9 @@ lint:
 test:
 	$(UV) run --locked pytest
 
-check: lint test check-generated
+# The development interpreter is the newest (.python-version); this exercises the
+# requires-python floor in a throwaway environment so the project .venv is left alone.
+test-min-python:
+	$(UV) run --locked --isolated --python 3.12 pytest -q
+
+check: lint test test-min-python check-generated

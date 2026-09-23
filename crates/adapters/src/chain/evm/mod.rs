@@ -502,7 +502,7 @@ impl EvmClient {
             .map_err(|error| {
                 if error
                     .as_error_resp()
-                    .is_some_and(|payload| is_execution_revert(&payload.message))
+                    .is_some_and(|payload| is_execution_revert(payload.code, &payload.message))
                 {
                     ChainError::EstimationRevert(self.endpoint.rpc_error(operation, &error))
                 } else {
@@ -637,9 +637,15 @@ fn is_already_known(message: &str) -> bool {
         || lowercase.contains("transaction already imported")
 }
 
-fn is_execution_revert(message: &str) -> bool {
-    let lowercase = message.to_ascii_lowercase();
-    lowercase.contains("execution reverted") || lowercase.contains("revert")
+/// geth, erigon, and Nethermind report a revert as JSON-RPC error 3; geth answers a revert without
+/// return data with its default code and the bare `execution reverted` message. Anything else,
+/// including an HTTP error whose JSON-RPC body merely mentions a revert, stays transient.
+fn is_execution_revert(code: i64, message: &str) -> bool {
+    code == 3
+        || message
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("execution reverted")
 }
 
 /// Finalized-log reader for one consumer of a shared [`EvmClient`].
@@ -1010,32 +1016,64 @@ mod tests {
         assert!(!error.to_string().contains(secret));
     }
 
-    #[tokio::test]
-    async fn node_rejection_reason_reaches_the_operator_without_the_url() {
+    const SECRET: &str = "rpc-secret-token";
+
+    /// Serves every JSON-RPC request with `status` and the JSON-RPC `error` object, behind a
+    /// URL carrying `SECRET` in its credentials and query.
+    async fn mock_node(
+        status: u16,
+        error: &'static str,
+    ) -> (EvmClient, tokio::task::JoinHandle<std::io::Result<()>>) {
         use axum::Router;
-        use axum::http::header;
+        use axum::http::{StatusCode, header};
         use axum::routing::post;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("local listener binds");
         let address = listener.local_addr().expect("listener address");
+        let status = StatusCode::from_u16(status).expect("valid status");
+        let body = format!(r#"{{"jsonrpc":"2.0","id":0,"error":{error}}}"#);
         let node = Router::new().route(
             "/rpc",
-            post(|| async {
-                (
-                    [(header::CONTENT_TYPE, "application/json")],
-                    r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 5"}}"#,
-                )
-            }),
+            post(
+                move || async move { (status, [(header::CONTENT_TYPE, "application/json")], body) },
+            ),
         );
         let server = tokio::spawn(async move { axum::serve(listener, node).await });
-        let secret = "rpc-secret-token";
         let client = EvmClient::new(&format!(
-            "http://user:{secret}@{address}/rpc?api_key={secret}"
+            "http://user:{SECRET}@{address}/rpc?api_key={SECRET}"
         ))
         .expect("production adapter accepts URL")
         .with_provider("provider-a");
+        (client, server)
+    }
+
+    fn assert_redacted(error: &ChainError, client: &EvmClient) {
+        for rendered in [error.to_string(), format!("{error:?} {client:?}")] {
+            assert!(!rendered.contains(SECRET), "{rendered}");
+            assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+        }
+    }
+
+    async fn estimate(status: u16, error: &'static str) -> ChainError {
+        let (client, server) = mock_node(status, error).await;
+        let result = client
+            .estimate_gas(Address::ZERO, Address::ZERO, Bytes::new())
+            .await;
+        server.abort();
+        let error = result.expect_err("node rejects the estimate");
+        assert_redacted(&error, &client);
+        error
+    }
+
+    #[tokio::test]
+    async fn node_rejection_reason_reaches_the_operator_without_the_url() {
+        let (client, server) = mock_node(
+            200,
+            r#"{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 5"}"#,
+        )
+        .await;
 
         let error = client
             .send_raw_transaction(&[0x02])
@@ -1051,9 +1089,57 @@ mod tests {
             ),
             "{display}"
         );
-        for rendered in [display, format!("{error:?} {client:?}")] {
-            assert!(!rendered.contains(secret), "{rendered}");
-            assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+        assert_redacted(&error, &client);
+    }
+
+    // alloy 2 surfaces a JSON-RPC error body on a non-2xx response as that JSON-RPC error, not as
+    // an HTTP error, so the classification must rest on the payload alone.
+    #[tokio::test]
+    async fn http_errors_with_a_json_rpc_body_are_transient_estimate_failures() {
+        let error = estimate(
+            502,
+            r#"{"code":-32603,"message":"upstream failed while tracing a revert"}"#,
+        )
+        .await;
+        assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
+        assert!(
+            error.to_string().contains(
+                "eth_estimateGas failed for provider `provider-a` \
+                 (JSON-RPC error -32603: upstream failed while tracing a revert)"
+            ),
+            "{error}"
+        );
+
+        let error = estimate(
+            429,
+            r#"{"code":-32005,"message":"request rate exceeded; retry after revert window"}"#,
+        )
+        .await;
+        assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
+        assert!(
+            error.to_string().contains(
+                "eth_estimateGas failed for provider `provider-a` \
+                 (JSON-RPC error -32005: request rate exceeded; retry after revert window)"
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_reverts_are_deterministic_estimate_failures() {
+        // geth, erigon, and Nethermind with revert data; geth without it.
+        for body in [
+            r#"{"code":3,"message":"execution reverted: nothing to flush","data":"0x08c379a0"}"#,
+            r#"{"code":-32000,"message":"execution reverted"}"#,
+        ] {
+            let error = estimate(200, body).await;
+            assert!(error.is_estimation_revert(), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("eth_estimateGas failed for provider `provider-a` (JSON-RPC error"),
+                "{error}"
+            );
         }
     }
 }
