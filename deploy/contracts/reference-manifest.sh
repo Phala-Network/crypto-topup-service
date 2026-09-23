@@ -32,12 +32,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-port="$(find_free_port)"
-rpc_url="http://127.0.0.1:$port"
-anvil --silent --disable-default-create2-deployer --port "$port" --chain-id 31337 \
-    >"$tmp_dir/anvil.log" 2>&1 &
-anvil_pid=$!
-wait_for_rpc "$rpc_url"
+start_anvil "$tmp_dir/anvil.log" --disable-default-create2-deployer --chain-id 31337
+anvil_pid="$ANVIL_PID"
+rpc_url="$ANVIL_RPC_URL"
 
 "$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$rpc_url" --local-fund --broadcast >&2
 

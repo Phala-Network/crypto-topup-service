@@ -11,6 +11,12 @@ for name in FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACL
     PRODUCT_SLUG PRODUCT_KID SETTLEMENT_URL; do
     [[ -n "${!name:-}" ]] || { echo "render-route.sh: $name is required" >&2; exit 1; }
 done
+for name in FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE; do
+    [[ "${!name}" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
+        echo "render-route.sh: $name must be a 0x-prefixed 20-byte hex address" >&2
+        exit 1
+    }
+done
 [[ "$PRODUCT_SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || {
     echo "render-route.sh: PRODUCT_SLUG must be lowercase letters, digits, and dashes" >&2
     exit 1

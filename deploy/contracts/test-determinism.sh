@@ -28,19 +28,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-ports=("$(find_free_port)")
-ports+=("$(find_free_port $((ports[0] + 1)))")
-
-rpcs=("http://127.0.0.1:${ports[0]}" "http://127.0.0.1:${ports[1]}")
+rpcs=()
 chain_ids=(31337 31338)
 for index in 0 1; do
-    anvil --silent --disable-default-create2-deployer \
-        --port "${ports[$index]}" --chain-id "${chain_ids[$index]}" \
-        >"$tmp_dir/anvil-$index.log" 2>&1 &
-    pids+=("$!")
+    start_anvil "$tmp_dir/anvil-$index.log" --disable-default-create2-deployer \
+        --chain-id "${chain_ids[$index]}"
+    pids+=("$ANVIL_PID")
+    rpcs+=("$ANVIL_RPC_URL")
 done
-wait_for_rpc "${rpcs[0]}"
-wait_for_rpc "${rpcs[1]}"
 
 factory="$(predicted_factory "$admin" "$treasury")"
 implementation="$(predicted_implementation "$factory")"
@@ -68,12 +63,14 @@ for index in 0 1; do
             --arg code_hash "$(code_hash "$rpc_url" "$treasury")" \
             --arg singleton "$safe_singleton" \
             --arg singleton_code_hash "$(code_hash "$rpc_url" "$safe_singleton")" \
+            --arg zero "$ZERO_ADDRESS" \
             '{configured: true,
               networks: {"anvil-31337": {chain_id: 31337}, "anvil-31338": {chain_id: 31338}},
               admin: $treasury, treasury: $treasury,
               safes: [{address: $treasury, owners: [$owner], threshold: 1,
                        proxy_code_hashes: [$code_hash],
-                       singleton: $singleton, singleton_code_hash: $singleton_code_hash}]}' \
+                       singleton: $singleton, singleton_code_hash: $singleton_code_hash,
+                       modules: [], guard: $zero, fallback_handler: $zero}]}' \
             >"$safe_expectations"
         ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
             "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
@@ -196,6 +193,35 @@ expect_rejection eoa_admin_deploy env ADMIN="$owner" TREASURY="$treasury" \
     PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
     --safe-expectations "$eoa_expectations" --rpc "anvil-31337=${rpcs[0]}"
 require_error eoa_admin_deploy "admin $owner has no code (EOA or undeployed)"
+
+# A module, guard, or fallback handler the expectations do not list is rejected; listing them
+# approves them. The changes go through the Safe itself and are rolled back afterwards.
+snapshot="$(cast rpc --rpc-url "${rpcs[0]}" evm_snapshot | tr -d '"')"
+safe_module="0x1111111111111111111111111111111111111111"
+safe_guard="0x2222222222222222222222222222222222222222"
+safe_fallback_handler="0x3333333333333333333333333333333333333333"
+safe_self_call() {
+    cast send "$treasury" 'exec(address,bytes)' "$treasury" "$(cast calldata "$1" "$2")" \
+        --rpc-url "${rpcs[0]}" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
+}
+safe_self_call 'enableModule(address)' "$safe_module"
+safe_self_call 'setGuard(address)' "$safe_guard"
+safe_self_call 'setFallbackHandler(address)' "$safe_fallback_handler"
+expect_rejection safe_drift_verify "$DEPLOY_CONTRACTS_DIR/verify-safe.sh" \
+    --expectations "$safe_expectations" --rpc "anvil-31337=${rpcs[0]}"
+require_report safe_drift_verify --arg module "$safe_module" --arg guard "$safe_guard" \
+    --arg handler "$safe_fallback_handler" '.chains[0].safes[0] |
+    .modules == [$module] and .guard == $guard and .fallback_handler == $handler and
+    (.checks | (.modules | not) and (.guard | not) and (.fallback_handler | not) and
+    (del(.modules, .guard, .fallback_handler) | all))'
+require_error safe_drift_verify "guard $safe_guard does not match $ZERO_ADDRESS"
+approved_drift_expectations="$tmp_dir/approved-drift-expectations.json"
+jq --arg module "$safe_module" --arg guard "$safe_guard" --arg handler "$safe_fallback_handler" \
+    '.safes[0] += {modules: [$module], guard: $guard, fallback_handler: $handler}' \
+    "$safe_expectations" >"$approved_drift_expectations"
+"$DEPLOY_CONTRACTS_DIR/verify-safe.sh" --expectations "$approved_drift_expectations" \
+    --rpc "anvil-31337=${rpcs[0]}" >/dev/null || die "approved modules, guard, and fallback handler were rejected"
+cast rpc --rpc-url "${rpcs[0]}" evm_revert "$snapshot" >/dev/null
 
 # The same proxy code, owners, and threshold in front of another singleton is rejected.
 nonce="$(cast nonce "$owner" --rpc-url "${rpcs[0]}")"

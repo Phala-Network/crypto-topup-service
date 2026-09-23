@@ -64,29 +64,32 @@ code_hash() {
     fi
 }
 
-# Prints the first local port from FIRST (default 19545) through 19645 that refuses a TCP
-# connection. Uses bash's /dev/tcp so no extra tool is needed.
-find_free_port() {
-    local port
-    for port in $(seq "${1:-19545}" 19645); do
-        if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-            printf '%s\n' "$port"
-            return 0
-        fi
-    done
-    die "could not find a free local port"
-}
+# Starts a local anvil in the background on a port the kernel picks (--port 0) and reads the
+# bound address from its log, so concurrent jobs on a shared runner cannot race for a port.
+# Call it directly, not in $(...): it sets ANVIL_PID and ANVIL_RPC_URL in the caller's shell.
+# Usage: start_anvil LOG_FILE [ANVIL_ARGS...]
+start_anvil() {
+    local log="$1"
+    local address
+    shift
 
-wait_for_rpc() {
-    local rpc_url="$1"
-    local attempt
-    for attempt in $(seq 1 60); do
-        if cast chain-id --rpc-url "$rpc_url" >/dev/null 2>&1; then
+    anvil --host 127.0.0.1 --port 0 "$@" >"$log" 2>&1 &
+    ANVIL_PID=$!
+    ANVIL_RPC_URL=""
+    for _ in $(seq 1 100); do
+        if [[ -z "$ANVIL_RPC_URL" ]]; then
+            address="$(sed -n 's/^Listening on \(127\.0\.0\.1:[0-9][0-9]*\)$/\1/p' "$log")"
+            [[ -z "$address" ]] || ANVIL_RPC_URL="http://$address"
+        fi
+        if [[ -n "$ANVIL_RPC_URL" ]] && cast chain-id --rpc-url "$ANVIL_RPC_URL" >/dev/null 2>&1; then
             return 0
         fi
+        kill -0 "$ANVIL_PID" 2>/dev/null || break
         sleep 0.1
     done
-    die "RPC did not become ready: $rpc_url"
+    kill "$ANVIL_PID" 2>/dev/null || true
+    wait "$ANVIL_PID" 2>/dev/null || true
+    die "anvil did not become ready; last log lines: $(tail -n 5 "$log")"
 }
 
 is_address() {
@@ -107,6 +110,7 @@ load_expectations() {
     problems="$(jq -r --arg zero_address "$ZERO_ADDRESS" --arg zero_hash "$ZERO_HASH" '
         def address: type == "string" and test("^0x[0-9a-fA-F]{40}$") and ascii_downcase != $zero_address;
         def hash: type == "string" and test("^0x[0-9a-fA-F]{64}$") and ascii_downcase != $zero_hash;
+        def address_or_zero: type == "string" and test("^0x[0-9a-fA-F]{40}$");
         def safe_entries($target): [.safes[] | select(.address | ascii_downcase == ($target | ascii_downcase))];
         if (.networks | type) != "object" or (.networks | length) == 0 or
             any(.networks[]; (.chain_id | type) != "number" or .chain_id <= 0 or .chain_id != (.chain_id | floor))
@@ -120,9 +124,12 @@ load_expectations() {
                     (.owners | map(ascii_downcase) | unique | length) == (.owners | length) and
                     (.threshold | type == "number") and .threshold > 0 and .threshold <= (.owners | length) and
                     (.proxy_code_hashes | type == "array" and length > 0 and all(hash)) and
-                    (.singleton | address) and (.singleton_code_hash | hash)
+                    (.singleton | address) and (.singleton_code_hash | hash) and
+                    (.modules | type == "array" and all(address)) and
+                    (.modules | map(ascii_downcase) | unique | length) == (.modules | length) and
+                    (.guard | address_or_zero) and (.fallback_handler | address_or_zero)
                 then empty
-                else "invalid Safe entry \(.address | tostring): need address, unique owners, 0 < threshold <= owners, proxy_code_hashes, singleton, and singleton_code_hash"
+                else "invalid Safe entry \(.address | tostring): need address, unique owners, 0 < threshold <= owners, proxy_code_hashes, singleton, singleton_code_hash, unique modules (may be empty), guard, and fallback_handler (zero address for none)"
                 end),
             if (.admin | address) and (safe_entries(.admin) | length) != 1
             then "admin must match exactly one approved Safe entry" else empty end,
