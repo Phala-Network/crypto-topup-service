@@ -58,7 +58,10 @@ route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS
 15 seconds.
 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
-address.
+address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as
+`https://topup.example` (no path). Request signatures are verified against this origin plus the
+request path and query, so behind the dstack gateway it must be the gateway URL, not the internal
+address; `Host` and `X-Forwarded-*` headers are never trusted.
 
 ## Status
 

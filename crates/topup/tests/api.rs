@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 #[cfg(feature = "dev-signer")]
 use topup::api::models::AttestationResponse;
-use topup::api::{AppState, Attestor, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, Attestor, PublicOrigin, UnavailableAttestor, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
@@ -33,8 +33,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::{
-    SignatureOptions, SignatureParameter, TestDatabase, public_key_base64, signed_request,
-    signed_request_with_options,
+    SignatureOptions, SignatureParameter, TEST_ORIGIN, TestDatabase, public_key_base64,
+    signed_request, signed_request_with_options,
 };
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
@@ -274,6 +274,66 @@ async fn signature_verification_vectors() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
         ensure!(response_json(response).await?["error"]["code"] == "signature_replayed");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Behind the gateway `Host` and `X-Forwarded-*` describe the internal hop; only the configured
+/// public origin determines `@target-uri`.
+#[tokio::test]
+async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[7; 32]);
+        let admin_key = SigningKey::from_bytes(&[9; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let path = format!("/v1/products/{}/accounts", product.slug);
+        let now = Utc::now().timestamp();
+        let request = |external_id: &str, origin: &str| -> Result<_> {
+            let mut request = signed_request_with_options(
+                Method::POST,
+                &path,
+                serde_json::to_vec(&json!({"external_id": external_id}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+                &SignatureOptions {
+                    origin_form: true,
+                    origin: origin.to_owned(),
+                    ..SignatureOptions::default()
+                },
+            );
+            let headers = request.headers_mut();
+            headers.insert("host", "topup-internal:8080".parse()?);
+            headers.insert("x-forwarded-proto", "https".parse()?);
+            headers.insert("x-forwarded-host", "attacker.example".parse()?);
+            Ok(request)
+        };
+
+        let response = app
+            .clone()
+            .oneshot(request("public-origin", TEST_ORIGIN)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
+        for (external_id, origin) in [
+            ("internal-host", "http://topup-internal:8080"),
+            ("forwarded-proto", "https://api.test"),
+            ("forwarded-host", "https://attacker.example"),
+        ] {
+            let response = app.clone().oneshot(request(external_id, origin)?).await?;
+            ensure!(
+                response.status() == StatusCode::UNAUTHORIZED,
+                "a signature for {origin} must not verify"
+            );
+        }
         Ok(())
     }
     .await;
@@ -748,6 +808,7 @@ fn app_state_with_attestor(
             &public_key_base64(admin_key),
         )
         .expect("admin key is valid"),
+        public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor,
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
     }

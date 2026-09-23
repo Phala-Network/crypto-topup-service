@@ -318,6 +318,15 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let public_origin = match required_env("TOPUP_PUBLIC_ORIGIN").and_then(|value| {
+        topup::api::PublicOrigin::parse(&value).map_err(|error| error.to_string())
+    }) {
+        Ok(origin) => origin,
+        Err(error) => {
+            tracing::error!(%error, "invalid TOPUP_PUBLIC_ORIGIN");
+            return ExitCode::FAILURE;
+        }
+    };
     let scanner_count = scanner_routes.len();
     let route_count = routes.len();
     let connection_count = match u32::try_from(args.pumps.get())
@@ -480,6 +489,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         pool: pool.clone(),
         routes: Arc::clone(&routes),
         admin_key,
+        public_origin,
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes,
     };

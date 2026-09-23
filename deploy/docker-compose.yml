@@ -64,6 +64,7 @@ services:
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TOPUP_ADMIN_KID: ${TOPUP_ADMIN_KID:-}
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
+      TOPUP_PUBLIC_ORIGIN: ${TOPUP_PUBLIC_ORIGIN:-}
       TOPUP_CHAINS_DIR: /etc/topup/chains
       TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:

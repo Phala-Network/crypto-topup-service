@@ -117,16 +117,11 @@ gas from a public faucet.
 
 4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment whose
-   RPC providers point at Sepolia.
-
-   **Known risk, verify before opening the sandbox to integrators:** the service rebuilds the
-   signed `@target-uri` from the `Host` header and uses `http` unless the request carries
-   `X-Forwarded-Proto` (`crates/topup/src/api/auth.rs`). Integrators sign the `https://` URL
-   they call, so if the dstack gateway terminates TLS without forwarding
-   `X-Forwarded-Proto: https`, every product request fails with `401`. Run
-   `sdk/examples/phala_cloud_integration.py` against the deployed sandbox URL first. If it fails
-   this way, keep the sandbox closed until the service can be configured with its public origin
-   (tracked in #77).
+   RPC providers point at Sepolia and whose `TOPUP_PUBLIC_ORIGIN` is the sandbox's public gateway
+   URL (for example `https://sandbox.topup.example`, no path). Integrators sign the URL they
+   call and the service verifies `@target-uri` against this origin, so a wrong value makes every
+   signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
+   deployed sandbox URL before opening it to integrators.
 5. **HUMAN-ONLY:** issue the product through the sandbox's administrative database access
    (there is deliberately no product-creation API):
 

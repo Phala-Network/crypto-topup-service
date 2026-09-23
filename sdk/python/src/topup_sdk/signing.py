@@ -151,7 +151,8 @@ class RequestSigner:
         """Returns the `Content-Digest`, `Signature-Input`, and `Signature` headers.
 
         `target_uri` is the absolute URI exactly as the verifier reconstructs it:
-        `scheme://host[:port]/path?query`, using the `Host` header the request carries.
+        `scheme://host[:port]/path?query`, where `scheme://host[:port]` is the service's public
+        origin (the URL the client calls), not an internal address behind a gateway.
         `idempotency_key` is the raw `Idempotency-Key` header value when one is sent.
         `created` defaults to the clock and `nonce` to a fresh random value; pass them only to
         reproduce fixed test vectors.

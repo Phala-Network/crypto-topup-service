@@ -282,6 +282,10 @@ The result must expose only `topup` TCP port 8080; `postgres`, `migrate`, and `b
 ports. **HUMAN-ONLY, external network access required:** derive the port-8080 TLS hostname from the
 returned gateway domain, request `/openapi.json`, validate its certificate, and confirm connection
 attempts to PostgreSQL are rejected. Record the exact URL and results in the deployment ticket.
+The encrypted `TOPUP_PUBLIC_ORIGIN` must be exactly this URL's scheme and authority (no path):
+the service verifies every signed `@target-uri` against it and ignores `Host` and
+`X-Forwarded-*`. Confirm it before issuing product credentials; a correctly signed admin request
+returning `401` usually means the two differ.
 
 dstack app-compose has no hostname egress allow-list. **HUMAN-ONLY, cloud network authority
 required:** restrict outbound access to the two RPC hosts, configured price-source hosts, object

@@ -2375,7 +2375,8 @@
       "http_message_signature": {
         "type": "apiKey",
         "in": "header",
-        "name": "Signature"
+        "name": "Signature",
+        "description": "RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign the public URL you call; `Host` and `X-Forwarded-*` headers are ignored."
       }
     }
   }

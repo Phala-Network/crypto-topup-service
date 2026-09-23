@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::api::{AppState, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, PublicOrigin, UnavailableAttestor, VerificationKey};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup::refunds::{
     EvmRefundChainReader, RefundChainReader, RefundCheck, RefundConfirmationConfig,
@@ -34,7 +34,7 @@ use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
 
-use support::{TestDatabase, public_key_base64, signed_request};
+use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
 const OTHER_KID: &str = "builder/v1";
@@ -1290,6 +1290,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
             &public_key_base64(admin_key),
         )
         .expect("admin key is valid"),
+        public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor: Arc::new(UnavailableAttestor),
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
     };

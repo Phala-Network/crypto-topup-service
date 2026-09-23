@@ -13,7 +13,7 @@ use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
-use topup::api::{AppState, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, PublicOrigin, UnavailableAttestor, VerificationKey};
 use topup::db::{NewAccount, NewProduct};
 use topup::locks::pricing::ValidatedQuote;
 use topup::locks::{self, QuoteProvider, RateLockError, RequestedAmount};
@@ -25,7 +25,7 @@ use topup_core::valuation::{SourceId, UnixSeconds};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::{TestDatabase, public_key_base64, signed_request};
+use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
@@ -78,6 +78,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
                 &public_key_base64(&admin_key),
             )
             .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
             attestor: Arc::new(UnavailableAttestor),
             rate_lock_quotes: Arc::new(FixedQuote),
         })

@@ -57,6 +57,51 @@ fn run_requires_a_database_url() {
 }
 
 #[test]
+fn run_requires_a_valid_public_origin() {
+    let route = format!(
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    for (origin, message) in [
+        (None, "TOPUP_PUBLIC_ORIGIN is required for run"),
+        (
+            Some("https://topup.example/v1"),
+            "public origin must not include a path, query, or fragment",
+        ),
+        (
+            Some("ftp://topup.example"),
+            "public origin scheme must be http or https",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_topup"));
+        command
+            .args(["run", "--route", &route])
+            .env(
+                "DATABASE_URL",
+                "postgres://unused:unused@127.0.0.1:1/unused",
+            )
+            .env("TOPUP_ADMIN_KID", "admin/v1")
+            .env(
+                "TOPUP_ADMIN_PUBLIC_KEY",
+                "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+            )
+            .env_remove("TOPUP_PUBLIC_ORIGIN");
+        if let Some(origin) = origin {
+            command.env("TOPUP_PUBLIC_ORIGIN", origin);
+        }
+        let output = command.output().expect("topup process should start");
+
+        assert!(!output.status.success(), "{origin:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains(message) || stderr.contains(message),
+            "{origin:?}: expected {message:?}\n{stdout}\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn attest_requires_a_hex_nonce() {
     let missing = topup(&["attest"]);
     assert!(!missing.status.success());

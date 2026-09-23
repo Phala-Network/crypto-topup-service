@@ -340,7 +340,9 @@ Product requests use the same signature scheme with the product's key; paths use
 `external_id`; every request is checked for tenant ownership. Address responses include the
 salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the product can
 recompute any address without the service. The admin key can only pause and resume; each
-call writes `audit`.
+call writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
+(`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
+`X-Forwarded-*`, so signers sign the public URL they call.
 
 ```text
 POST   /v1/products/{p}/accounts
@@ -436,6 +438,10 @@ services:
                         "-c", "archive_command=wal-g wal-push %p"] }
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }
 ```
+
+`TOPUP_PUBLIC_ORIGIN` is the service's public scheme and authority behind the gateway (for
+example `https://<app-id>-8080.<gateway-domain>`, no path); `topup run` refuses to start without a
+valid value.
 
 Postgres on the CVM's encrypted disk; WAL-G daily base backups and continuous WAL with
 `archive_timeout=60`, encrypted with `get_key("backup/v1")` before leaving the CVM (RPO ≤ 1
