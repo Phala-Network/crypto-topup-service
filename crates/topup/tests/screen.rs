@@ -280,10 +280,8 @@ async fn seed_account(pool: &PgPool) -> Result<Seed> {
     let product = NewProduct {
         id: Uuid::new_v4(),
         slug: "product-c5".to_owned(),
-        settlement_url: "https://product.test/settlements".to_owned(),
         webhook_url: "https://product.test/webhooks".to_owned(),
         pubkey: "public-key-c5".to_owned(),
-        kid: "product/c5".to_owned(),
         paused_scopes: Vec::new(),
     };
     db::create_product(pool, &product).await?;

@@ -152,13 +152,9 @@ pub struct ValidatedQuote {
 
 fn price_source(source: &str, route: &RouteFile) -> Result<Arc<dyn PriceSource>, String> {
     match source {
-        "coinmetrics" => CoinMetrics::new(
-            route.pricing.primary.asset.clone(),
-            route.pricing.primary.metric.clone(),
-            route.pricing.primary.frequency.clone(),
-        )
-        .map(|source| Arc::new(source) as Arc<dyn PriceSource>)
-        .map_err(|error| error.to_string()),
+        "coinmetrics" => CoinMetrics::new(route.pricing.primary.asset.clone())
+            .map(|source| Arc::new(source) as Arc<dyn PriceSource>)
+            .map_err(|error| error.to_string()),
         "binance" => {
             let check = route
                 .pricing

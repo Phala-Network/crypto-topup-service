@@ -20,6 +20,9 @@ use super::types::{
 };
 use super::{FlusherError, map_chain, map_price, map_signer};
 
+/// Seconds before a singleton excluded by a reverting gas estimate is planned again.
+const ESTIMATION_RETRY_AFTER_S: i64 = 3_600;
+
 /// Scheduled per-route flush planner.
 pub struct Planner {
     pool: PgPool,
@@ -261,10 +264,8 @@ impl Planner {
                 let (address, _) = group
                     .first()
                     .ok_or(FlusherError::Invariant("estimate group is empty"))?;
-                let delay = i64::try_from(route.chain.flush.estimation_retry_after_s)
-                    .map_err(|_| FlusherError::Arithmetic)?;
                 let retry_after = Utc::now()
-                    .checked_add_signed(Duration::seconds(delay))
+                    .checked_add_signed(Duration::seconds(ESTIMATION_RETRY_AFTER_S))
                     .ok_or(FlusherError::Arithmetic)?;
                 let reason = error.to_string();
                 db::upsert_flush_exclusion(

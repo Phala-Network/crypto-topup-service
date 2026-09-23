@@ -78,7 +78,9 @@ printf '%s\n' "$settings" | grep -Fx 'archive_mode=on' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_timeout=60' >/dev/null
 echo "postgres archive settings passed"
 
-# No manual WAL switch: the backup keepalive must refresh the marker on an idle database.
+# No manual WAL switch: the heartbeat's one row per minute must refresh the marker on an otherwise
+# idle database.
+docker compose -p "$project" -f "$compose" up -d heartbeat
 wait_for backup-marker docker compose -p "$project" -f "$compose" \
     exec -T postgres test -s /run/topup-observability/last-backup-unix-seconds
 marker_age() {
@@ -88,8 +90,10 @@ marker_age() {
 idle_checks=16
 while [ "$idle_checks" -gt 0 ]; do
     age=$(marker_age)
-    if [ "$age" -gt 120 ]; then
-        echo "idle backup marker is ${age}s old; TopupBackupTooOld would fire" >&2
+    # Worst case for an idle database is about two archive_timeout periods plus the upload; see
+    # the idle-database note in deploy/runbooks/backup-age.md.
+    if [ "$age" -gt 150 ]; then
+        echo "idle backup marker is ${age}s old; beyond the idle worst case" >&2
         exit 1
     fi
     idle_checks=$((idle_checks - 1))

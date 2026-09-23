@@ -142,7 +142,7 @@ append-only. Physical addresses belong to an account and a chain; routes are sel
 deposit by `(chain_id, asset_contract)`.
 
 ```text
-products      id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes text[]
+products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- settlement URL, key id: route (§14)
 accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
               -- scopes: quotes | addresses | settlement | flush | refunds; empty = active
 addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
@@ -212,7 +212,7 @@ from any contract in windows ≤ 2 000 blocks and ≤ 1 000 addresses; insert wi
 `ON CONFLICT DO NOTHING`; advance the cursor after commit. New addresses backfill from
 creation (the chain's committed cursor when the address is issued); retired and lock addresses
 stay in the filter. Native ETH is a balance check at
-flush time. Each chain's finality rule is declared in its chain file (Ethereum: `finalized`);
+flush time. Each chain's finality rule is declared in the route's `chain` settings (Ethereum: `finalized`);
 a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the finality observation
@@ -271,7 +271,7 @@ pub trait Signer {
 ```
 
 `signer::dstack` derives `operator/v{n}` (secp256k1) and `settlement/v1` (ed25519) on demand
-and zeroizes them; `n` is the chain file's attested `operator_key_version` (≥ 1, initially 1),
+and zeroizes them; `n` is the route's attested `chain.operator_key_version` (≥ 1, initially 1),
 and a chain's flusher plans and sends only while that operator holds `OPERATOR_ROLE` on the
 factory.
 
@@ -378,7 +378,7 @@ GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
-GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, exposure, PnL vs valuation
+GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, global lock exposure
 ```
 
 Signatures are single-use within the acceptance window. `rotate` is idempotent on
@@ -466,10 +466,13 @@ product's own pre-finality view of the transaction, when it offers one.
 
 ## 14. Configuration and deployment
 
-One chain file and one route file per pair, in the compose, hence attested: chain and its
-finality rule, RPC provider ids, factory and implementation addresses, treasury, token, unit,
-settlement URL, product key id, and every threshold and spread. Changing a value is a new
-version and compose hash; deposits keep the version that created them. Bumping
+One route file per chain and asset pair, with its chain settings inline, in the compose, hence
+attested: chain and its finality rule, RPC provider ids, factory and implementation addresses,
+treasury, token, unit decimals, settlement URL, product key id, and every threshold and spread.
+Changing a value is a new version and compose hash; deposits keep the version that created them.
+The route is the only source of a product's settlement URL and of the key id its requests are
+verified against; the database stores only the product's slug, webhook URL, and public key, and
+every loaded route that names one product must agree on both values or startup fails. Bumping
 `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
 new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Secrets
 arrive as dstack encrypted environment variables. Startup refuses to run without the dstack
@@ -481,12 +484,14 @@ scanned only while it has a loaded route, and its rate locks expire only by its 
 (§9), so a route version or a chain's last route is removed only after its open locks and
 in-flight deposits have resolved (`deploy/runbooks/route-retirement.md`).
 
-The attested chain file also owns the complete flush execution policy: the planning cron,
-`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, replacement bump and
-delay, gas-limit buffer, RPC timeout, balance batch cap, bounded recovery window, estimation
-exclusion retry delay, and maintenance interval. Gas policy compares gas-token value and token
-balance value in USD using separate reference rates. Changing any of these fields requires a new
-attested configuration version.
+The route's attested `chain.flush` settings own the flush policy: the planning cron,
+`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, and replacement fee bump.
+Gas policy compares gas-token value and token balance value in USD using separate reference
+rates. Changing any of these fields requires a new attested configuration version. Engineering
+limits that do not decide money are code constants: RPC timeout, balance batch size, replacement
+delay (3 blocks), gas-limit buffer, nonce-recovery window, estimation exclusion retry delay, and
+maintenance interval. The price scale (8) and the Coin Metrics metric (`ReferenceRateUSD`, 1m)
+are fixed by §8 and §11, not configured.
 
 ```yaml
 services:

@@ -35,17 +35,13 @@ class RouteDailyReport:
         asset_contract (str): Route asset contract.
         chain_id (int): EVM chain identifier.
         deposits_by_state (RouteDailyReportDepositsByState): Deposit counts keyed by state.
-        exposure_minor_reason (str): Reason destination exposure is unavailable.
         open_rate_lock_exposure_atomic (str): Sum of unconsumed rate-lock token amounts.
-        pnl_minor_reason (str): Reason route PnL is unavailable.
         refunds_by_status (RouteDailyReportRefundsByStatus): Refund counts keyed by status.
         rejected_holds_atomic (str): Rejected token amount still held after confirmed refunds.
         route (str): Stable route name.
         settlements_by_status (RouteDailyReportSettlementsByStatus): Settlement counts keyed by status.
         treasury_balance_note (str): Balance source or explicit reason the treasury balance is unavailable.
         unflushed_balance_atomic (str): Sum of deposits not linked to a confirmed flush.
-        exposure_minor (None | str | Unset): Open lock exposure in destination minor units, when available.
-        pnl_minor (None | str | Unset): Route PnL in destination minor units, when available.
         treasury_balance_atomic (None | str | Unset): Latest treasury token balance in atomic units, when the chain read
             succeeds.
     """
@@ -54,17 +50,13 @@ class RouteDailyReport:
     asset_contract: str
     chain_id: int
     deposits_by_state: RouteDailyReportDepositsByState
-    exposure_minor_reason: str
     open_rate_lock_exposure_atomic: str
-    pnl_minor_reason: str
     refunds_by_status: RouteDailyReportRefundsByStatus
     rejected_holds_atomic: str
     route: str
     settlements_by_status: RouteDailyReportSettlementsByStatus
     treasury_balance_note: str
     unflushed_balance_atomic: str
-    exposure_minor: None | str | Unset = UNSET
-    pnl_minor: None | str | Unset = UNSET
     treasury_balance_atomic: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -86,11 +78,7 @@ class RouteDailyReport:
 
         deposits_by_state = self.deposits_by_state.to_dict()
 
-        exposure_minor_reason = self.exposure_minor_reason
-
         open_rate_lock_exposure_atomic = self.open_rate_lock_exposure_atomic
-
-        pnl_minor_reason = self.pnl_minor_reason
 
         refunds_by_status = self.refunds_by_status.to_dict()
 
@@ -103,18 +91,6 @@ class RouteDailyReport:
         treasury_balance_note = self.treasury_balance_note
 
         unflushed_balance_atomic = self.unflushed_balance_atomic
-
-        exposure_minor: None | str | Unset
-        if isinstance(self.exposure_minor, Unset):
-            exposure_minor = UNSET
-        else:
-            exposure_minor = self.exposure_minor
-
-        pnl_minor: None | str | Unset
-        if isinstance(self.pnl_minor, Unset):
-            pnl_minor = UNSET
-        else:
-            pnl_minor = self.pnl_minor
 
         treasury_balance_atomic: None | str | Unset
         if isinstance(self.treasury_balance_atomic, Unset):
@@ -130,9 +106,7 @@ class RouteDailyReport:
                 "asset_contract": asset_contract,
                 "chain_id": chain_id,
                 "deposits_by_state": deposits_by_state,
-                "exposure_minor_reason": exposure_minor_reason,
                 "open_rate_lock_exposure_atomic": open_rate_lock_exposure_atomic,
-                "pnl_minor_reason": pnl_minor_reason,
                 "refunds_by_status": refunds_by_status,
                 "rejected_holds_atomic": rejected_holds_atomic,
                 "route": route,
@@ -141,10 +115,6 @@ class RouteDailyReport:
                 "unflushed_balance_atomic": unflushed_balance_atomic,
             }
         )
-        if exposure_minor is not UNSET:
-            field_dict["exposure_minor"] = exposure_minor
-        if pnl_minor is not UNSET:
-            field_dict["pnl_minor"] = pnl_minor
         if treasury_balance_atomic is not UNSET:
             field_dict["treasury_balance_atomic"] = treasury_balance_atomic
 
@@ -172,11 +142,7 @@ class RouteDailyReport:
 
         deposits_by_state = RouteDailyReportDepositsByState.from_dict(d.pop("deposits_by_state"))
 
-        exposure_minor_reason = d.pop("exposure_minor_reason")
-
         open_rate_lock_exposure_atomic = d.pop("open_rate_lock_exposure_atomic")
-
-        pnl_minor_reason = d.pop("pnl_minor_reason")
 
         refunds_by_status = RouteDailyReportRefundsByStatus.from_dict(d.pop("refunds_by_status"))
 
@@ -191,24 +157,6 @@ class RouteDailyReport:
         treasury_balance_note = d.pop("treasury_balance_note")
 
         unflushed_balance_atomic = d.pop("unflushed_balance_atomic")
-
-        def _parse_exposure_minor(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        exposure_minor = _parse_exposure_minor(d.pop("exposure_minor", UNSET))
-
-        def _parse_pnl_minor(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        pnl_minor = _parse_pnl_minor(d.pop("pnl_minor", UNSET))
 
         def _parse_treasury_balance_atomic(data: object) -> None | str | Unset:
             if data is None:
@@ -226,17 +174,13 @@ class RouteDailyReport:
             asset_contract=asset_contract,
             chain_id=chain_id,
             deposits_by_state=deposits_by_state,
-            exposure_minor_reason=exposure_minor_reason,
             open_rate_lock_exposure_atomic=open_rate_lock_exposure_atomic,
-            pnl_minor_reason=pnl_minor_reason,
             refunds_by_status=refunds_by_status,
             rejected_holds_atomic=rejected_holds_atomic,
             route=route,
             settlements_by_status=settlements_by_status,
             treasury_balance_note=treasury_balance_note,
             unflushed_balance_atomic=unflushed_balance_atomic,
-            exposure_minor=exposure_minor,
-            pnl_minor=pnl_minor,
             treasury_balance_atomic=treasury_balance_atomic,
         )
 

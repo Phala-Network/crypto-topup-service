@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`, and `products` no
+longer has `settlement_url` or `kid`. The commands below are recorded as run; use the current
+[runbook](../reconciliation-mismatch.md).
+
 Status: complete local CLI scenario against PostgreSQL 16 and Anvil (see
 [local setup](local-setup.md), database `wp_d5_recon2`).
 
@@ -41,7 +45,7 @@ INSERT INTO deposits (id,chain_id,tx_hash,log_index,block_number,block_hash,bloc
 
 One reconciliation pass with the application role:
 
-```sh
+```text
 topup reconcile --once --route /tmp/wp-d5-ex/route.yaml
 ```
 

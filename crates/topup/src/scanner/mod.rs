@@ -346,9 +346,9 @@ pub async fn scan_once<R: ChainReader>(
 pub async fn run(
     pool: PgPool,
     chains: Vec<ChainRoutes>,
+    poll_interval: Duration,
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
-    let poll_interval = poll_interval_from_env()?;
     let mut tasks = JoinSet::new();
     for routes in chains {
         let provider_id = routes
@@ -549,28 +549,6 @@ fn record_committed(
         .increment(committed.unsupported_inserted);
     }
     Ok(())
-}
-
-fn poll_interval_from_env() -> Result<Duration, ScannerError> {
-    let seconds = match std::env::var("TOPUP_SCANNER_POLL_INTERVAL_SECONDS") {
-        Ok(value) => value.parse::<u64>().map_err(|error| {
-            ScannerError::Configuration(format!(
-                "TOPUP_SCANNER_POLL_INTERVAL_SECONDS must be an integer: {error}"
-            ))
-        })?,
-        Err(std::env::VarError::NotPresent) => 15,
-        Err(error) => {
-            return Err(ScannerError::Configuration(format!(
-                "TOPUP_SCANNER_POLL_INTERVAL_SECONDS is invalid: {error}"
-            )));
-        }
-    };
-    if seconds == 0 {
-        return Err(ScannerError::Configuration(
-            "TOPUP_SCANNER_POLL_INTERVAL_SECONDS must be positive".to_owned(),
-        ));
-    }
-    Ok(Duration::from_secs(seconds))
 }
 
 fn address_index(addresses: &[ScanAddress]) -> BTreeMap<Address, ScanAddress> {

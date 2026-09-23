@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod backup;
+pub mod contracts;
 pub mod db;
 pub mod flusher;
 pub mod heartbeat;

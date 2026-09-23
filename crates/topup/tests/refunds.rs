@@ -38,7 +38,6 @@ use uuid::Uuid;
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
-const OTHER_KID: &str = "builder/v1";
 const ADMIN_KID: &str = "admin/v1";
 const REFUND_DESTINATION: &str = "0x4444444444444444444444444444444444444444";
 const REFUND_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -54,8 +53,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         let other_key = SigningKey::from_bytes(&[42; 32]);
         let admin_key = SigningKey::from_bytes(&[43; 32]);
         let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
-        let other = seed_product(&database.app_pool, "builder", OTHER_KID, &other_key).await?;
+            seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let other = seed_product(&database.app_pool, "builder", &other_key).await?;
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "refund-account", 150).await?;
         let other_deposit =
@@ -397,8 +396,7 @@ async fn refund_request_requires_rejection_and_approval_rechecks_current_state()
     let result = async {
         let product_key = SigningKey::from_bytes(&[61; 32]);
         let admin_key = SigningKey::from_bytes(&[62; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let pending = seed_deposit(
             &database.app_pool,
             product.id,
@@ -543,8 +541,7 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
     let result = async {
         let product_key = SigningKey::from_bytes(&[63; 32]);
         let admin_key = SigningKey::from_bytes(&[64; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "unsupported-refund", 100)
                 .await?;
@@ -624,7 +621,7 @@ async fn one_transfer_log_confirms_only_one_refund() -> Result<()> {
     };
     let result = async {
         let key = SigningKey::from_bytes(&[44; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &key).await?;
         let first = seed_rejected_deposit(&database.app_pool, product.id, "claim-one", 100).await?;
         let second =
             seed_rejected_deposit(&database.app_pool, product.id, "claim-two", 100).await?;
@@ -683,8 +680,7 @@ async fn corrected_hash_rejects_stale_observation_then_confirms_replacement() ->
     let result = async {
         let product_key = SigningKey::from_bytes(&[45; 32]);
         let admin_key = SigningKey::from_bytes(&[46; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "correction", 100).await?;
         let refund_id = seed_approved_refund(&database.app_pool, deposit, 100).await?;
@@ -789,8 +785,7 @@ async fn support_lookup_uses_tenant_scoped_keyset_pages() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[47; 32]);
         let admin_key = SigningKey::from_bytes(&[48; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let address = seed_same_address_deposits(&database.app_pool, product.id, 52).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
@@ -923,7 +918,7 @@ async fn worker_shutdown_cancels_a_hung_observation() -> Result<()> {
     };
     let result = async {
         let key = SigningKey::from_bytes(&[49; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &key).await?;
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "hung-worker", 100).await?;
         seed_sent_refund(&database.app_pool, deposit, 100, REFUND_TX).await?;
@@ -962,7 +957,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[51; 32]);
         let admin_key = SigningKey::from_bytes(&[52; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let rejected = seed_rejected_deposit(&database.app_pool, product.id, "report-rejected", 100).await?;
         let unsupported =
             seed_rejected_deposit(&database.app_pool, product.id, "report-unsupported", 25).await?;
@@ -1006,6 +1001,10 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         seed_open_lock(&database.app_pool, product.id).await?;
         seed_expired_lock(&database.app_pool, product.id).await?;
         seed_refund_row(&database.app_pool, rejected, 20).await?;
+        // The report reads the global counter that lock creation maintains.
+        sqlx::query("INSERT INTO lock_exposure (scope_key, open_minor) VALUES ('global', 50)")
+            .execute(&database.app_pool)
+            .await?;
 
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
@@ -1047,6 +1046,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let report = response_json(response).await?;
+        ensure!(report["exposure_minor"] == "50");
         let routes = report["routes"].as_array().context("report routes")?;
         let route = routes
             .iter()
@@ -1060,16 +1060,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .contains("not configured"));
         ensure!(route["unflushed_balance_atomic"] == "300");
         ensure!(route["open_rate_lock_exposure_atomic"] == "50");
-        ensure!(route["exposure_minor"].is_null());
-        ensure!(route["exposure_minor_reason"]
-            .as_str()
-            .context("exposure reason")?
-            .contains("not per route"));
-        ensure!(route["pnl_minor"].is_null());
-        ensure!(route["pnl_minor_reason"]
-            .as_str()
-            .context("PnL reason")?
-            .contains("valuation inputs"));
         ensure!(route["rejected_holds_atomic"] == "100");
         ensure!(route["deposits_by_state"]["rejected"] == 1);
         ensure!(route["deposits_by_state"]["credited"] == 1);
@@ -1308,7 +1298,6 @@ fn route_fixture() -> RouteFile {
 async fn seed_product(
     pool: &sqlx::PgPool,
     slug: &str,
-    kid: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
     Ok(topup::db::create_product(
@@ -1316,10 +1305,8 @@ async fn seed_product(
         &NewProduct {
             id: Uuid::new_v4(),
             slug: slug.to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: public_key_base64(key),
-            kid: kid.to_owned(),
             paused_scopes: Vec::new(),
         },
     )

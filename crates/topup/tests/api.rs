@@ -50,7 +50,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
         let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+            seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let path = format!("/v1/products/{}/accounts", product.slug);
         let body = serde_json::to_vec(&json!({"external_id": "signed-account"}))?;
@@ -292,8 +292,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let path = format!("/v1/products/{}/accounts", product.slug);
         let now = Utc::now().timestamp();
@@ -362,8 +361,8 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[17; 32]);
         let other_key = SigningKey::from_bytes(&[18; 32]);
         let admin_key = SigningKey::from_bytes(&[19; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
-        let other = seed_product(&database.app_pool, "builder", "builder/v1", &other_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let other = seed_product(&database.app_pool, "builder", &other_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
@@ -534,7 +533,7 @@ async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()>
         let product_key = SigningKey::from_bytes(&[23; 32]);
         let admin_key = SigningKey::from_bytes(&[24; 32]);
         let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+            seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         topup::db::create_account(
             &database.app_pool,
             &NewAccount {
@@ -597,8 +596,7 @@ async fn route_pause_controls_address_routes() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[27; 32]);
         let admin_key = SigningKey::from_bytes(&[28; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let account = topup::db::create_account(
             &database.app_pool,
             &NewAccount {
@@ -741,8 +739,7 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[31; 32]);
         let admin_key = SigningKey::from_bytes(&[32; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         topup::db::create_account(
             &database.app_pool,
             &NewAccount {
@@ -962,7 +959,6 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
 async fn seed_product(
     pool: &sqlx::PgPool,
     slug: &str,
-    kid: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
     Ok(topup::db::create_product(
@@ -970,10 +966,8 @@ async fn seed_product(
         &NewProduct {
             id: Uuid::new_v4(),
             slug: slug.to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: public_key_base64(key),
-            kid: kid.to_owned(),
             paused_scopes: Vec::new(),
         },
     )

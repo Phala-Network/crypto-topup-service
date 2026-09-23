@@ -1187,11 +1187,12 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     ),
                 )
             };
-            let spawn_task = |route: &RouteFile, signer: &SignerHandle| {
+            let spawn_task = |route: &RouteFile, signer: &SignerHandle, interval: StdDuration| {
                 let (planner, flusher) = components(signer);
                 let cancellation = CancellationToken::new();
                 let task = FlusherTask::new(route.clone(), planner, flusher, alerts.clone())
-                    .map_err(anyhow::Error::msg)?;
+                    .map_err(anyhow::Error::msg)?
+                    .with_maintenance_interval(interval);
                 let handle = tokio::spawn(task.run(cancellation.clone()));
                 Ok::<_, anyhow::Error>((handle, cancellation))
             };
@@ -1216,7 +1217,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             };
             // A missing role must not end the task: it re-checks and alerts at every interval.
             let waits_for_role = |route: &RouteFile, signer: &SignerHandle, operator: Address| {
-                let task = spawn_task(route, signer);
+                let task = spawn_task(route, signer, StdDuration::from_secs(1));
                 let before = role_alerts(operator);
                 async move {
                     let task = task?;
@@ -1229,8 +1230,7 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                 }
             };
 
-            let mut route_v1 = test_route(factory, token)?;
-            route_v1.chain.flush.maintenance_interval_s = 1;
+            let route_v1 = test_route(factory, token)?;
             ensure!(route_v1.chain.operator_key_version()? == NonZeroU32::MIN);
             let (signer_v1, operator_v1) = versioned_signer(&route_v1).await?;
             let mut route_v2 = route_v1.clone();
@@ -1370,11 +1370,10 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
 
             // Revoking the operator of a running, authorized task stops its queued sends at the
             // next maintenance tick instead of letting them revert on chain.
-            let mut slow_v2 = route_v2.clone();
-            slow_v2.chain.flush.maintenance_interval_s = 3;
+            let slow_v2 = route_v2.clone();
             ensure!(flusher_v2.operator_role(&slow_v2).await?.granted);
             let before = role_alerts(operator_v2);
-            let task_v2 = spawn_task(&slow_v2, &signer_v2)?;
+            let task_v2 = spawn_task(&slow_v2, &signer_v2, StdDuration::from_secs(3))?;
             // Polls instead of sleeping so a loaded host only slows the test down; the task's
             // ticks interleave with the test on the single-threaded runtime.
             let wait_for_role_alerts = |count: usize, reason: &'static str| {
@@ -1607,10 +1606,8 @@ async fn seed_addresses(
     let product = NewProduct {
         id: Uuid::new_v4(),
         slug: "c7-product".to_owned(),
-        settlement_url: "https://product.test/settlements".to_owned(),
         webhook_url: "https://product.test/webhooks".to_owned(),
         pubkey: "test-key".to_owned(),
-        kid: "test/v1".to_owned(),
         paused_scopes: Vec::new(),
     };
     topup::db::create_product(pool, &product).await?;

@@ -208,6 +208,9 @@ impl AlertSink for NoopAlertSink {
 }
 
 /// Runtime fee and replacement policy.
+///
+/// The fee cap and replacement bump come from the attested route; the other fields are
+/// engineering constants whose defaults production uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FlusherPolicy {
     /// Blocks to wait before replacing an unmined transaction.

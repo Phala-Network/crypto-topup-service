@@ -86,7 +86,7 @@ Run one pass and require exit `0`, no new `address_derivation` finding, and no `
 row afterward:
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --once --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
 psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT count(*) FROM reconciliation_blocks WHERE scope='chain' AND chain_id=:chain_id; COMMIT;"
 ```
 

@@ -1,7 +1,6 @@
 //! Typed API handlers for the routes in architecture §12.
 
 use std::str::FromStr;
-use std::time::Duration;
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
@@ -484,15 +483,12 @@ async fn populate_treasury_balances(routes: &[RouteFile], report: &mut DailyRepo
                 continue;
             }
         };
-        let Ok(batch_size) = usize::try_from(route.chain.flush.balance_batch_size) else {
-            route_report.treasury_balance_note =
-                "treasury balance unavailable: configured batch size is invalid".to_owned();
-            continue;
-        };
-        let timeout = Duration::from_millis(route.chain.flush.rpc_timeout_ms);
-        let Ok(client) = AlloyChainClient::connect_http_with_policy(&url, timeout, batch_size)
-            .map(|client| client.with_provider(crate::rpc_provider::provider_label(provider, 0)))
-        else {
+        let Ok(client) = AlloyChainClient::connect_http_with_policy(
+            &url,
+            crate::rpc_provider::RPC_TIMEOUT,
+            crate::rpc_provider::BALANCE_BATCH_SIZE,
+        )
+        .map(|client| client.with_provider(crate::rpc_provider::provider_label(provider, 0))) else {
             route_report.treasury_balance_note =
                 "treasury balance unavailable: RPC client configuration is invalid".to_owned();
             continue;

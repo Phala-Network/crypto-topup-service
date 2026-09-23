@@ -164,14 +164,12 @@ CREATE TABLE restore_drill_marker (
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
-INSERT INTO products (id, slug, settlement_url, webhook_url, pubkey, kid)
+INSERT INTO products (id, slug, webhook_url, pubkey)
 VALUES (
     '11111111-1111-1111-1111-111111111111',
     'restore-drill',
-    'http://mock-product:8081/settlements',
     'http://mock-product:8081/webhooks',
-    'restore-drill-key',
-    'product/restore-drill'
+    'restore-drill-key'
 );
 INSERT INTO accounts (id, product_id, external_id)
 VALUES (
@@ -278,7 +276,7 @@ storage_listing() {
 # Creates the overlay's project volumes and copies the drill inputs into them through the API.
 seed_drill_volumes() {
     local volume
-    for volume in drill_postgres_init drill_chains drill_routes drill_mock_product; do
+    for volume in drill_postgres_init drill_routes drill_mock_product; do
         docker volume create \
             --label "com.docker.compose.project=$project" \
             --label "com.docker.compose.volume=$volume" \
@@ -287,12 +285,10 @@ seed_drill_volumes() {
     docker create --name "$seed_container" \
         --label "com.docker.compose.project=$project" \
         --volume "${project}_drill_postgres_init:/seed/postgres-init" \
-        --volume "${project}_drill_chains:/seed/chains" \
         --volume "${project}_drill_routes:/seed/routes" \
         --volume "${project}_drill_mock_product:/seed/mock-product" \
         --entrypoint /bin/true "$TOPUP_LOCAL_POSTGRES_IMAGE" >/dev/null
     docker cp "$root/deploy/postgres-init/10-topup-role.sh" "$seed_container:/seed/postgres-init/"
-    docker cp "$root/deploy/config/chains/." "$seed_container:/seed/chains/"
     docker cp "$routes_dir/phala-cloud-sepolia-pha.yaml" "$seed_container:/seed/routes/"
     docker cp "$root/deploy/local/mock-product.py" "$seed_container:/seed/mock-product/"
     docker rm "$seed_container" >/dev/null
@@ -442,7 +438,12 @@ export TOPUP_BACKUP_KEY_VERSION=2
 export TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=1,0
 
 routes_dir=$(mktemp -d)
-sed 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
+# The seeded deposit belongs to the `restore-drill` product; the attested route is the only source
+# of its settlement endpoint, so the drill route names that product and the mock product.
+sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
+    -e 's|^  product: .*|  product: restore-drill|' \
+    -e 's|^  settlement_url: .*|  settlement_url: "http://mock-product:8081/settlements"|' \
+    -e 's|^  product_kid: .*|  product_kid: product/restore-drill|' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
 chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"
@@ -603,10 +604,8 @@ wait_for "archive recovery promotion" recovery_promoted
 
 set +e
 restore_output=$(dc run --rm --no-deps restore-check \
-    topup restore-check \
     --expected-heartbeat-at "$expected_heartbeat_at" \
-    --expected-lsn "$expected_lsn" \
-    --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml)
+    --expected-lsn "$expected_lsn")
 restore_status=$?
 set -e
 if [ "$restore_status" -ne 0 ]; then

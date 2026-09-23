@@ -50,7 +50,7 @@ Deposits keep being detected, settled, and credited while flushing is paused.
 
 After the revocation, the chain's running flusher logs `flusher paused: the configured operator does
 not hold OPERATOR_ROLE` and raises the `OperatorRoleMissing` flusher alert at every maintenance
-interval (`chain.flush.maintenance_interval_s`) until the replacement version is deployed. This is
+interval (5 seconds) until the replacement version is deployed. This is
 expected: it plans and sends nothing and keeps maintaining already sent flushes.
 
 Stop the service container only if the CVM itself is suspected of leaking the key. That halts
@@ -106,8 +106,8 @@ cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$NEW_OPE
 cast balance "$NEW_OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 ```
 
-4. Set `operator_key_version: $NEW_OPERATOR_KEY_VERSION` in the attested chain file and in a new
-   `version` of every current route file on the chain (current routes on one chain must share it),
+4. Set `chain.operator_key_version: $NEW_OPERATOR_KEY_VERSION` in a new `version` of every current
+   route file on the chain (current routes on one chain must share it),
    validate, then upgrade through the attested path in [deploy/README.md](../README.md): new
    compose hash, allow-list, deploy.
 
@@ -157,7 +157,7 @@ For a scheduled rotation with no compromise, use the architecture's short overla
    step 1).
 2. **HUMAN-ONLY:** grant it `OPERATOR_ROLE` through the Finance Safe.
 3. Fund it with native gas on every chain.
-4. Bump `operator_key_version` in the chain file and every current route file, then deploy the new
+4. Bump `chain.operator_key_version` in every current route file, then deploy the new
    compose hash (Remediation step 4).
 5. Verify the `flusher operator holds OPERATOR_ROLE` log line, both roles, the new operator nonce,
    one successful flush, and any C7 plan-rebind audits.

@@ -338,14 +338,6 @@ pub struct RouteDailyReport {
     pub unflushed_balance_atomic: String,
     /// Sum of unconsumed rate-lock token amounts.
     pub open_rate_lock_exposure_atomic: String,
-    /// Open lock exposure in destination minor units, when available.
-    pub exposure_minor: Option<String>,
-    /// Reason destination exposure is unavailable.
-    pub exposure_minor_reason: String,
-    /// Route PnL in destination minor units, when available.
-    pub pnl_minor: Option<String>,
-    /// Reason route PnL is unavailable.
-    pub pnl_minor_reason: String,
     /// Rejected token amount still held after confirmed refunds.
     pub rejected_holds_atomic: String,
     /// Deposit counts keyed by state.
@@ -363,6 +355,10 @@ pub struct RouteDailyReport {
 pub struct DailyReportResponse {
     /// Report snapshot time.
     pub generated_at: DateTime<Utc>,
+    /// Open rate-lock credit across all products in destination minor units, from the global
+    /// exposure counter the global cap is enforced against. This service always sends it; it is
+    /// optional in the schema so clients also parse reports from servers that predate it.
+    pub exposure_minor: Option<String>,
     /// SQL-computed metrics for each configured route.
     pub routes: Vec<RouteDailyReport>,
 }

@@ -2,6 +2,9 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`. The commands below
+are recorded as run; use the current [runbook](../lock-expiry-worker-failure.md).
+
 Status: complete local scenario with a running `topup run` service, the dstack simulator, Anvil,
 and PostgreSQL 16 (see [local setup](local-setup.md)). It uses the seeded locks database from the
 [lock exposure exercise](lock-exposure-near-cap.md), re-created after merging #70 and #72, with the

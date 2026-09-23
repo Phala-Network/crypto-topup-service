@@ -77,7 +77,7 @@ Then run the ledger query in [Lock exposure near cap](lock-exposure-near-cap.md)
   is below the release` naming the `scope_key` and `release_minor`: a release would drive that
   counter below zero, so the batch rolls back each time and a restart will not help. The
   reconciler's `lock_exposure` check repairs the counter on its next round
-  (`--reconciliation-interval-s`, default 600 s) and `TopupLockExposureDrift` fires; run the
+  (every 10 minutes) and `TopupLockExposureDrift` fires; run the
   in-service repair below to fix it now. Treat any drift as a reconciliation incident: it means a
   writer bypassed the counter, so preserve logs and escalate to Engineering.
 - `TopupLockExposureDrift` alone, with no expiry failures: the counter was too high (a capacity
@@ -106,13 +106,13 @@ take the row's lock, so the recompute sees every committed change and a writer s
 applies its own change after the repair. It is safe while the service runs and is idempotent:
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --once --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
 ```
 
 Each repair commits a `repair_lock_exposure` audit row in the same transaction as the counter
 change, and is then stored as a `lock_exposure` finding with `repair_applied = true`, `observed`
 (before) and `expected` (after), and a unique `repair_id`. These rows, not the alert, are the record
-of a repair: `topup reconcile --once` runs in its own process, which Prometheus does not scrape, so
+of a repair: `topup reconcile` runs in its own process, which Prometheus does not scrape, so
 `TopupLockExposureDrift` fires only for repairs made by the service's own reconciler loop. Record
 every repair in the incident:
 
@@ -135,7 +135,7 @@ SQL
 ## Verification
 
 Within a minute of recovery, the overdue-lock count is zero, `rate_lock.expired` events appear for
-the drained locks, the ledger equals the recomputation, a second `topup reconcile --once` records no
+the drained locks, the ledger equals the recomputation, a second `topup reconcile` records no
 new `lock_exposure` finding, no new `rate-lock expiry scan failed` lines appear, and
 `TopupLockExpiryFailing` resolves. Resume `quotes` if it was paused.
 

@@ -14,6 +14,7 @@ use topup_adapters::settlement::http::{
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::PRICE_SCALE;
+use topup_core::route::{RouteFile, product_destination};
 use uuid::Uuid;
 
 use crate::db::{self, OutboxEvent, SettlementIntent, SettlementStatus};
@@ -24,17 +25,24 @@ use crate::pump::{Step, StepResult};
 #[derive(Clone)]
 pub struct SettleStep {
     pool: PgPool,
+    routes: Arc<[RouteFile]>,
     client_timeout: Duration,
     signer: SignerHandle,
     client_override: Option<Arc<dyn SettlementApi>>,
 }
 
 impl SettleStep {
-    /// Creates a settlement step backed by PostgreSQL and one product client.
+    /// Creates a settlement step that calls each product at its attested route destination.
     #[must_use]
-    pub fn new(pool: PgPool, signer: SignerHandle, client_timeout: Duration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        routes: &[RouteFile],
+        signer: SignerHandle,
+        client_timeout: Duration,
+    ) -> Self {
         Self {
             pool,
+            routes: routes.into(),
             client_timeout,
             signer,
             client_override: None,
@@ -46,6 +54,7 @@ impl SettleStep {
     pub fn with_api(pool: PgPool, signer: SignerHandle, client: Arc<dyn SettlementApi>) -> Self {
         Self {
             pool,
+            routes: Arc::new([]),
             client_timeout: Duration::from_secs(1),
             signer,
             client_override: Some(client),
@@ -64,14 +73,19 @@ impl SettleStep {
             .ok_or(SettleStepError::MissingProduct)?;
         let client: Arc<dyn SettlementApi> = match &self.client_override {
             Some(client) => Arc::clone(client),
-            None => Arc::new(
-                SettlementClient::new(
-                    &product.settlement_url,
-                    self.signer.clone(),
-                    self.client_timeout,
+            None => {
+                let destination = product_destination(self.routes.iter(), &product.slug)
+                    .map_err(|_| SettleStepError::Destination)?
+                    .ok_or(SettleStepError::Destination)?;
+                Arc::new(
+                    SettlementClient::new(
+                        &destination.settlement_url,
+                        self.signer.clone(),
+                        self.client_timeout,
+                    )
+                    .map_err(SettleStepError::Client)?,
                 )
-                .map_err(SettleStepError::Client)?,
-            ),
+            }
         };
         let lock_ref = settlement_lock_ref(deposit, address.lock_ref.as_deref());
         let payload = SettlementPayload::from_deposit(
@@ -370,6 +384,7 @@ pub(crate) enum SettleStepError {
     MissingAccount,
     MissingAddress,
     MissingProduct,
+    Destination,
     MissingField(&'static str),
     InvalidProductPayload(&'static str),
     InvalidStoredAnswer(&'static str),
@@ -387,6 +402,7 @@ impl SettleStepError {
             Self::MissingAccount
             | Self::MissingAddress
             | Self::MissingProduct
+            | Self::Destination
             | Self::MissingField(_)
             | Self::InvalidProductPayload(_)
             | Self::InvalidStoredAnswer(_)
@@ -401,6 +417,7 @@ impl SettleStepError {
             Self::MissingAccount => "settlement_account_missing",
             Self::MissingAddress => "settlement_address_missing",
             Self::MissingProduct => "settlement_product_missing",
+            Self::Destination => "settlement_destination_unconfigured",
             Self::MissingField(_) => "settlement_input_missing",
             Self::InvalidProductPayload(_) => "settlement_product_payload_invalid",
             Self::InvalidStoredAnswer(_) => "settlement_stored_answer_invalid",
@@ -417,6 +434,8 @@ impl std::fmt::Display for SettleStepError {
             Self::MissingAccount => formatter.write_str("settlement account is missing"),
             Self::MissingAddress => formatter.write_str("settlement address is missing"),
             Self::MissingProduct => formatter.write_str("settlement product is missing"),
+            Self::Destination => formatter
+                .write_str("no single attested route destination is configured for the product"),
             Self::MissingField(field) => write!(formatter, "settlement field `{field}` is missing"),
             Self::InvalidProductPayload(field) => {
                 write!(

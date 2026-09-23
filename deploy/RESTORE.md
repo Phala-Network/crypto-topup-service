@@ -336,24 +336,22 @@ steps using Phala Cloud credentials and the Finance Safe.
 6. Run the dedicated signer-enabled service. **Run it only while `topup`, `heartbeat`, and `backup`
    are stopped:** its post-restore reconciliation claims every deposit at or beyond `cleared` and
    adopts product answers, which must not race the service's own settlement pumps. It refuses to
-   start with `lease_owner_lock_held` while `topup run` or `topup reconcile --once` is connected
+   start with `lease_owner_lock_held` while `topup run` or `topup reconcile` is connected
    to this database; the lock only sees processes connected to this PostgreSQL, so stopping the
    old instance remains the control. It mounts the dstack socket, the attested route files, and
    uses owner credentials:
 
    ```sh
    dc run --rm --no-deps restore-check \
-     topup restore-check \
      --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" \
-     --expected-lsn "$EXPECTED_LSN" \
-     --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+     --expected-lsn "$EXPECTED_LSN"
    ```
 
    A staging drill stops after this step; see [Staging restore drill](#staging-restore-drill).
 
    `status` must be `ok`. The check verifies migration checksums, WAL state and distance, externally
    anchored RPO, and table counts, then runs the same library post-restore round as
-   `topup reconcile --once --post-restore` (architecture section 13): every deposit in `cleared`,
+   `topup reconcile --post-restore` (architecture section 13): every deposit in `cleared`,
    `credited`, or `swept`, plus deposits rejected by the product after reaching `cleared`, is queried
    by signed product GET and the product answer is adopted. A product lookup that fails, is not
    found, is still processing, fails identity verification, or would need an unsafe transition marks

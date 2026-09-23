@@ -29,6 +29,20 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
   pinned Prometheus image.
 
+## Service startup checks
+
+`topup run` refuses to start until every RPC provider of every route shows the route's factory,
+`implementation()`, `treasury()`, `factory()`, `addressOf(sample salt)`, and the recorded
+contract code (architecture §4, §14). The check runs before the service touches the database, so
+an outage of any single configured provider blocks restarts by design; a running service is not
+affected. Restore the provider or wait for it; do not remove it from the route to get past the
+check, since the route is attested.
+
+Two routes that name the same product must agree on `destination.settlement_url` and
+`destination.product_kid`, or startup fails. The `restore-check` tools service pins one route
+file (`phala-cloud-sepolia-pha.yaml`) in its entrypoint, so adding a second route or product also
+requires adding that route to `restore-check` and to the `topup run` command in the compose.
+
 ## Backup age marker contract
 
 After a successful `walg-wal-push` (key-versioned WAL upload and metadata) or `walg-base-backup`,
@@ -36,10 +50,10 @@ After a successful `walg-wal-push` (key-versioned WAL upload and metadata) or `w
 `TOPUP_BACKUP_TIMESTAMP_FILE` with mode `0644`; the marker is operational metadata and contains no
 secret. PostgreSQL uses `walg-cron wal-push %p` as its archive command, so the 60-second
 `archive_timeout` drives the two-minute alert. `archive_timeout` only switches a segment that
-contains new WAL, so the `backup` service also commits one `txid_current()` transaction every 30
-seconds, and requests one `CHECKPOINT` per postmaster start because PostgreSQL 15+ otherwise ignores
-`archive_timeout` until the checkpointer first wakes, up to `checkpoint_timeout` after startup. An
-idle database therefore still archives a segment and refreshes the marker every minute. The measured
+contains new WAL; the `heartbeat` service commits one row every minute, so an idle database still
+archives a segment and refreshes the marker every minute. The `backup` service requests one
+`CHECKPOINT` per postmaster start because PostgreSQL 15+ otherwise ignores `archive_timeout` until
+the checkpointer first wakes, up to `checkpoint_timeout` after startup. The measured
 compose shares `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and
 `backup`, and read-only with `topup`. The service exports the marker value as
 `topup_backup_last_success_unixtime_seconds`; a missing or malformed marker exports zero so the

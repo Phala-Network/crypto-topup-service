@@ -752,10 +752,8 @@ async fn seed_cleared(pool: &PgPool, number: u8) -> Result<Uuid> {
         &NewProduct {
             id: product_id,
             slug: format!("product-{number}"),
-            settlement_url: "http://product.test/settlements".to_owned(),
             webhook_url: "http://product.test/webhooks".to_owned(),
             pubkey: "test".to_owned(),
-            kid: "product/v1".to_owned(),
             paused_scopes: Vec::new(),
         },
     )
