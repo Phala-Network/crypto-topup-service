@@ -5,6 +5,8 @@ shopt -s inherit_errexit
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 compose="$root/deploy/local/docker-compose.yml"
+# No bind mounts: CI's Docker daemon cannot see the checkout (see restore-drill.compose.yml).
+drill_compose="$root/deploy/local/restore-drill.compose.yml"
 mode=${1:-all}
 
 case "$mode" in
@@ -30,8 +32,9 @@ export TOPUP_LOCAL_DSTACK_IMAGE="crypto-topup-dstack-simulator:$project"
 writer_pid=
 samples_file=
 routes_dir=
+seed_container="$project-seed"
 dc() {
-    docker compose -p "$project" -f "$compose" "$@"
+    docker compose -p "$project" -f "$compose" -f "$drill_compose" "$@"
 }
 
 cleanup() {
@@ -42,6 +45,7 @@ cleanup() {
     if [ -n "$samples_file" ]; then
         rm -f "$samples_file"
     fi
+    docker rm -f "$seed_container" >/dev/null 2>&1 || true
     dc --profile tools down --volumes --remove-orphans >/dev/null 2>&1 || true
     docker image rm "$TOPUP_LOCAL_SERVICE_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
         "$TOPUP_LOCAL_DSTACK_IMAGE" >/dev/null 2>&1 || true
@@ -271,6 +275,29 @@ storage_listing() {
     dc run --rm --no-deps restore 'wal-g st ls -r' | sort
 }
 
+# Creates the overlay's project volumes and copies the drill inputs into them through the API.
+seed_drill_volumes() {
+    local volume
+    for volume in drill_postgres_init drill_chains drill_routes drill_mock_product; do
+        docker volume create \
+            --label "com.docker.compose.project=$project" \
+            --label "com.docker.compose.volume=$volume" \
+            "${project}_$volume" >/dev/null
+    done
+    docker create --name "$seed_container" \
+        --label "com.docker.compose.project=$project" \
+        --volume "${project}_drill_postgres_init:/seed/postgres-init" \
+        --volume "${project}_drill_chains:/seed/chains" \
+        --volume "${project}_drill_routes:/seed/routes" \
+        --volume "${project}_drill_mock_product:/seed/mock-product" \
+        --entrypoint /bin/true "$TOPUP_LOCAL_POSTGRES_IMAGE" >/dev/null
+    docker cp "$root/deploy/postgres-init/10-topup-role.sh" "$seed_container:/seed/postgres-init/"
+    docker cp "$root/deploy/config/chains/." "$seed_container:/seed/chains/"
+    docker cp "$routes_dir/phala-cloud-sepolia-pha.yaml" "$seed_container:/seed/routes/"
+    docker cp "$root/deploy/local/mock-product.py" "$seed_container:/seed/mock-product/"
+    docker rm "$seed_container" >/dev/null
+}
+
 remove_pgdata_volume() {
     pg_volume=$(docker volume ls -q \
         --filter "label=com.docker.compose.project=$project" \
@@ -418,11 +445,21 @@ routes_dir=$(mktemp -d)
 sed 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
-chmod 0755 "$routes_dir"
 chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"
-export TOPUP_LOCAL_ROUTES_DIR="$routes_dir"
+
+compose_version=$(docker compose version --short)
+if [ "$(printf '%s\n' 2.24.4 "$compose_version" | sort -V | head -1)" != 2.24.4 ]; then
+    echo "Docker Compose $compose_version is too old; the drill overlay needs 2.24.4+ (!override)" >&2
+    exit 1
+fi
+dc --profile tools config --format json |
+    jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' >/dev/null || {
+    echo "the drill stack bind-mounts a host path; CI's Docker daemon cannot see it" >&2
+    exit 1
+}
 
 dc build postgres dstack-simulator topup
+seed_drill_volumes
 dc up -d backup-key minio-init mock-product
 wait_for backup-key dc exec -T backup-key topup backup-key --check --output /run/wal-g/backup.key
 export TOPUP_BACKUP_KEY_VERSION=1

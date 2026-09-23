@@ -256,6 +256,8 @@ jobs:
         run: |
           deploy/validate-compose.sh
           docker compose -f deploy/local/docker-compose.yml config >/dev/null
+          docker compose -f deploy/local/docker-compose.yml \
+            -f deploy/local/restore-drill.compose.yml config >/dev/null
       - name: Validate Prometheus rules and alert behavior
         run: |
           image=prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
