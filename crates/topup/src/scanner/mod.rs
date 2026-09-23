@@ -245,7 +245,8 @@ pub async fn scan_once<R: ChainReader>(
             ..ScanStats::default()
         });
     }
-    let finalized = reader.finalized_head().await?;
+    let head = reader.finalized_head().await?;
+    let finalized = head.number;
     if finalized < cursor {
         return Err(ScannerError::FinalizedBehindCursor { cursor, finalized });
     }
@@ -270,7 +271,7 @@ pub async fn scan_once<R: ChainReader>(
                     .transfer_logs_to(&[address.address], from_block, to_block)
                     .await?;
                 let deposits = resolve_logs(logs, &address_index, routes)?;
-                db::commit_scan(pool, chain_id, &deposits, &[], None)
+                db::commit_scan(pool, chain_id, &deposits, &[], None, None)
                     .await
                     .map_err(ScannerError::from)
             }
@@ -278,7 +279,7 @@ pub async fn scan_once<R: ChainReader>(
             .await?;
             record_committed(chain_id, &mut stats, committed)?;
         }
-        db::commit_scan(pool, chain_id, &[], &[address.id], None).await?;
+        db::commit_scan(pool, chain_id, &[], &[address.id], None, None).await?;
         stats.record_backfilled(1)?;
     }
 
@@ -307,7 +308,7 @@ pub async fn scan_once<R: ChainReader>(
             let committed = async {
                 let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
                 let deposits = resolve_logs(logs, &address_index, routes)?;
-                db::commit_scan(pool, chain_id, &deposits, &[], None)
+                db::commit_scan(pool, chain_id, &deposits, &[], None, None)
                     .await
                     .map_err(ScannerError::from)
             }
@@ -320,7 +321,18 @@ pub async fn scan_once<R: ChainReader>(
             .filter(|(_, created_block)| **created_block <= to_block)
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
-        db::commit_scan(pool, chain_id, &[], &backfilled, Some(to_block)).await?;
+        // Only the finalized head's time is known without another RPC; intermediate windows keep
+        // the previous time, a lower bound on the cursor block's time.
+        let scanned_block_time = (to_block == finalized).then_some(head.time);
+        db::commit_scan(
+            pool,
+            chain_id,
+            &[],
+            &backfilled,
+            Some(to_block),
+            scanned_block_time,
+        )
+        .await?;
         stats.record_backfilled(backfilled.len())?;
         for id in &backfilled {
             pending_backfill_marks.remove(id);

@@ -24,7 +24,7 @@ use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
     SettlementLookup, frozen_chains, hold_lease_owner_lock,
 };
-use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
+use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
 use topup_adapters::settlement::http::SettlementAnswer;
 use topup_core::deposit::{DepositState, RejectReason, StepOutcome};
 use topup_core::identity::deposit_id;
@@ -274,7 +274,7 @@ async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
         ensure!(chain.log_requests.lock().unwrap().is_empty());
 
         // The scanner cursor does not cover an address still awaiting its backfill.
-        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(6)).await?;
+        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(6), None).await?;
         ensure!(
             reconciler
                 .check(CheckName::MissingDeposit)
@@ -284,7 +284,7 @@ async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
         ensure!(chain.log_requests.lock().unwrap().is_empty());
 
         // A transfer the scanner has not reached yet is not reported as missing.
-        db::commit_scan(&pool, CHAIN_ID, &[], &[seed.address_id], None).await?;
+        db::commit_scan(&pool, CHAIN_ID, &[], &[seed.address_id], None, None).await?;
         ensure!(
             reconciler
                 .check(CheckName::MissingDeposit)
@@ -293,7 +293,7 @@ async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
         );
         ensure!(chain.log_requests.lock().unwrap().as_slice() == [(0, 6)]);
 
-        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(9)).await?;
+        db::commit_scan(&pool, CHAIN_ID, &[], &[], Some(9), None).await?;
         let missing = reconciler.check(CheckName::MissingDeposit).await?;
         ensure!(missing.len() == 1 && missing[0].repair_applied);
         ensure!(chain.log_requests.lock().unwrap().last() == Some(&(7, 9)));
@@ -960,7 +960,7 @@ impl Step for AdvanceStep {
 struct UnreachableReader;
 
 impl ChainReader for UnreachableReader {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         Err(ChainError::ProviderUnhealthy)
     }
 
@@ -1205,7 +1205,7 @@ async fn scanned_through(pool: &PgPool, block: u64) -> Result<()> {
         .into_iter()
         .map(|address| address.id)
         .collect::<Vec<_>>();
-    db::commit_scan(pool, CHAIN_ID, &[], &ids, Some(block)).await?;
+    db::commit_scan(pool, CHAIN_ID, &[], &ids, Some(block), None).await?;
     Ok(())
 }
 

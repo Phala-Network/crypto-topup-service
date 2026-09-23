@@ -2008,7 +2008,7 @@ async fn insert_deposit(
         reason,
         next_attempt_at: Utc::now() - Duration::seconds(1),
     };
-    let committed = topup::db::commit_scan(pool, 31_337, &[deposit], &[], None).await?;
+    let committed = topup::db::commit_scan(pool, 31_337, &[deposit], &[], None, None).await?;
     ensure!(committed.inserted == 1);
     Ok(deposit_id(31_337, tx_hash, log_index))
 }
