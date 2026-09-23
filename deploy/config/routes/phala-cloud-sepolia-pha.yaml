@@ -1,13 +1,13 @@
-# Deployment template. Replace every placeholder and validate without --template before enabling it.
+# Staging route on Sepolia (test contracts). The settlement URL is a non-routable placeholder until a staging product exists.
 chain:
   chain_id: 11155111
   finality: finalized
   rpc_providers: [provider-a, provider-b]
   operator_key_version: 1
   contracts:
-    forwarder_factory: "0x0000000000000000000000000000000000000000"
-    implementation: "0x0000000000000000000000000000000000000000"
-    treasury: "0x0000000000000000000000000000000000000000"
+    forwarder_factory: "0x2407bE5Be2b632F5b166872A49E4946a70CCa531"
+    implementation: "0x70B714508BFa441449DC09f790Ca03Baa5170360"
+    treasury: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
   flush:
     schedule: "0 */6 * * *"
     max_gas_ratio_bps: 200
@@ -19,7 +19,7 @@ route: phala-cloud-sepolia-pha-usd
 version: 1
 
 asset:
-  contract: "0x1111111111111111111111111111111111111111"
+  contract: "0x8F40e7E99678F44c88158f049E62817580ab113B"
   decimals: 18
   min_flush_atomic: "20000000000000000000000"
   min_refund_atomic: "20000000000000000000"
@@ -27,7 +27,7 @@ asset:
 destination:
   product: phala-cloud
   unit_decimals: 2
-  settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
+  settlement_url: "https://settlement.staging.invalid/internal/crypto-topup/settlements"
   product_kid: phala-cloud/v1
 
 pricing:
@@ -39,7 +39,7 @@ pricing:
   max_fx_deviation_bps: 50
 
 screening:
-  sanctions_oracle: "0x2222222222222222222222222222222222222222"
+  sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6"
   min_deposit_atomic: "20000000000000000000"
   max_deposit_atomic: "200000000000000000000000"
   min_credit_minor: 100

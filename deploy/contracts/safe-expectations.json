@@ -1,19 +1,27 @@
 {
-  "configured": false,
+  "configured": true,
   "networks": {
-    "sepolia": { "chain_id": 11155111 },
-    "mainnet": { "chain_id": 1 }
+    "sepolia": {
+      "chain_id": 11155111
+    },
+    "mainnet": {
+      "chain_id": 1
+    }
   },
-  "admin": "0x0000000000000000000000000000000000000000",
-  "treasury": "0x0000000000000000000000000000000000000000",
+  "admin": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+  "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
   "safes": [
     {
-      "address": "0x0000000000000000000000000000000000000000",
-      "owners": [],
-      "threshold": 0,
-      "proxy_code_hashes": [],
-      "singleton": "0x0000000000000000000000000000000000000000",
-      "singleton_code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "address": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "owners": [
+        "0x016a227d4eA58914D5b3EA0790B955BFEa55b737"
+      ],
+      "threshold": 1,
+      "proxy_code_hashes": [
+        "0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"
+      ],
+      "singleton": "0x41675C099F32341bf84BFc5382aF534df5C7461a",
+      "singleton_code_hash": "0x1fe2df852ba3299d6534ef416eefa406e56ced995bca886ab7a553e6d0c5e1c4",
       "modules": [],
       "guard": "0x0000000000000000000000000000000000000000",
       "fallback_handler": "0x0000000000000000000000000000000000000000"

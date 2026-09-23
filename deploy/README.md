@@ -42,10 +42,12 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
 
    ```sh
    cast wallet import staging-deployer --interactive
-   read -rsp "Keystore password: " ETH_PASSWORD && printf '\n' && export ETH_PASSWORD
-   deploy/sandbox/deploy-test-contracts.sh \
+   # Foundry reads ETH_PASSWORD as the path of a password file, not the password itself.
+   ETH_PASSWORD_FILE=$(mktemp) && chmod 600 "$ETH_PASSWORD_FILE"
+   read -rsp "Keystore password: " pw && printf '%s' "$pw" > "$ETH_PASSWORD_FILE" && unset pw && printf '\n'
+   ETH_PASSWORD="$ETH_PASSWORD_FILE" deploy/sandbox/deploy-test-contracts.sh \
      --rpc-url "$SEPOLIA_RPC_A" --account staging-deployer > sepolia-test-contracts.json
-   unset ETH_PASSWORD
+   rm -f "$ETH_PASSWORD_FILE"
    ```
 
 2. Route PR: copy `factory` and `implementation` from `sepolia-contract-verification.json`, the
