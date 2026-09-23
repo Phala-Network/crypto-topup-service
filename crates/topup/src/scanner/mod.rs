@@ -19,9 +19,9 @@ use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::retry::backoff;
 use topup_core::route::{ChainConfig, RouteFile};
 use tracing::Instrument as _;
-use uuid::Uuid;
 
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
+use crate::jitter::{JitterSource as _, OsJitter};
 use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// Maximum inclusive block count scanned in one window.
@@ -428,7 +428,7 @@ async fn run_chain(
         cancellation,
         || scan_once(&pool, &reader, &routes),
         tokio::time::sleep,
-        retry_jitter,
+        || OsJitter.next_u64(),
     )
     .await
 }
@@ -520,11 +520,6 @@ where
             () = sleep(delay) => {}
         }
     }
-}
-
-fn retry_jitter() -> u64 {
-    let value = Uuid::new_v4().as_u128() & u128::from(u64::MAX);
-    u64::try_from(value).unwrap_or_default()
 }
 
 fn record_committed(

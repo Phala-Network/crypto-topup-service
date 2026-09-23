@@ -22,9 +22,9 @@ use topup::db::{
     self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
     SettlementIntent, StoredValuation, TransitionEffects,
 };
+use topup::jitter::JitterSource;
 use topup::pump::{
-    AgeAlertConfig, AgeAlerter, JitterSource, Pump, PumpConfig, RunOnceResult, Step, StepResult,
-    StepSet,
+    AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};

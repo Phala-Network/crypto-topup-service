@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::db::{
     self, ApplyTransitionError, ApplyTransitionResult, Deposit, OutboxEvent, TransitionUpdate,
 };
+use crate::jitter::{JitterSource, OsJitter};
 
 pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter};
 
@@ -197,21 +198,6 @@ impl Display for PumpConfigError {
 
 impl Error for PumpConfigError {}
 
-/// Entropy source used by full-jitter retry scheduling.
-pub trait JitterSource: Send + Sync {
-    /// Returns one value spanning the complete `u64` range.
-    fn next_u64(&self) -> u64;
-}
-
-/// UUID-v4-backed jitter source used by production pumps.
-pub struct UuidJitter;
-
-impl JitterSource for UuidJitter {
-    fn next_u64(&self) -> u64 {
-        Uuid::new_v4().as_u64_pair().0
-    }
-}
-
 /// Result of one claim-and-process attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunOnceResult {
@@ -244,13 +230,13 @@ pub struct Pump {
 }
 
 impl Pump {
-    /// Creates a pump with UUID-v4 retry jitter.
+    /// Creates a pump with operating-system retry jitter.
     pub fn new(
         pool: PgPool,
         steps: Arc<StepSet>,
         config: PumpConfig,
     ) -> Result<Self, PumpConfigError> {
-        Self::with_jitter(pool, steps, config, Arc::new(UuidJitter))
+        Self::with_jitter(pool, steps, config, Arc::new(OsJitter))
     }
 
     /// Creates a pump with an explicit jitter source.
