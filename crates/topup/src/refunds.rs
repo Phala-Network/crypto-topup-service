@@ -17,6 +17,8 @@ use topup_core::route::RouteFile;
 use url::Url;
 use uuid::Uuid;
 
+use crate::routes::{ProviderError, RouteSet};
+
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
 }
@@ -114,24 +116,22 @@ pub struct EvmRefundChainReader {
 impl EvmRefundChainReader {
     /// Creates one provider per configured chain using provider A.
     pub fn from_routes(
-        routes: &[RouteFile],
+        routes: &RouteSet,
         request_timeout: Duration,
     ) -> Result<Self, RefundReadError> {
         let mut urls = BTreeMap::new();
-        for route in routes {
-            if urls.contains_key(&route.chain.chain_id) {
-                continue;
-            }
-            let provider_id = route
-                .chain
-                .rpc_providers
-                .first()
-                .ok_or(RefundReadError::MissingField("chain.rpc_providers[0]"))?;
-            let rpc_url = crate::rpc_provider::configured_provider_url(provider_id)
-                .map_err(|_| RefundReadError::MissingField("refund RPC environment"))?;
-            let url = Url::parse(&rpc_url)
-                .map_err(|error| RefundReadError::InvalidUrl(error.to_string()))?;
-            urls.insert(route.chain.chain_id, url);
+        for chain_id in routes.chain_ids() {
+            let url = routes
+                .provider_url(chain_id, 0)
+                .map_err(|error| match error {
+                    ProviderError::InvalidUrl { .. } => {
+                        RefundReadError::InvalidUrl(error.to_string())
+                    }
+                    ProviderError::MissingUrl { .. } | ProviderError::Unconfigured { .. } => {
+                        RefundReadError::MissingField("refund RPC environment")
+                    }
+                })?;
+            urls.insert(chain_id, url.expose().clone());
         }
         Self::from_chain_urls(urls, request_timeout)
     }

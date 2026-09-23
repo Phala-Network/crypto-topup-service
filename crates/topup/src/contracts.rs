@@ -8,9 +8,8 @@ use topup_core::address::forwarder_address;
 use topup_core::route::RouteFile;
 
 use crate::flusher::AlloyChainClient;
-use crate::rpc_provider::{
-    BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
-};
+use crate::routes::RouteSet;
+use crate::rpc_provider::{BALANCE_BATCH_SIZE, RPC_TIMEOUT};
 
 // The build fingerprints below are recorded by `deploy/contracts/check-build.sh --write` in
 // `deploy/contracts/expected-codehashes.json`; a unit test keeps these copies equal to that file,
@@ -40,9 +39,9 @@ pub fn sample_salt() -> B256 {
 }
 
 /// Checks every route's contracts on every configured RPC provider before the service starts.
-pub async fn verify_routes(routes: &[RouteFile]) -> Result<(), String> {
+pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
     let mut checked = BTreeSet::new();
-    for route in routes {
+    for route in routes.routes() {
         let contracts = &route.chain.contracts;
         for (index, provider) in route.chain.rpc_providers.iter().enumerate() {
             let key = (
@@ -55,13 +54,17 @@ pub async fn verify_routes(routes: &[RouteFile]) -> Result<(), String> {
             if !checked.insert(key) {
                 continue;
             }
-            let label = provider_label(provider, index);
-            let url = configured_provider_url(provider)
-                .map_err(|environment| format!("{environment} is required for `{label}`"))?;
-            let client =
-                AlloyChainClient::connect_http_with_policy(&url, RPC_TIMEOUT, BALANCE_BATCH_SIZE)
-                    .map_err(|_| format!("provider `{label}` has an invalid URL"))?
-                    .with_provider(label.clone());
+            let label = routes.provider_label(route.chain.chain_id, index);
+            let url = routes
+                .provider_url(route.chain.chain_id, index)
+                .map_err(|error| error.to_string())?;
+            let client = AlloyChainClient::connect_http_with_policy(
+                url.expose().as_str(),
+                RPC_TIMEOUT,
+                BALANCE_BATCH_SIZE,
+            )
+            .map_err(|_| format!("provider `{label}` has an invalid URL"))?
+            .with_provider(label.clone());
             verify_on(&client, route)
                 .await
                 .map_err(|error| format!("route `{}` via `{label}`: {error}", route.route))?;

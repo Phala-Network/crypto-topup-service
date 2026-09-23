@@ -248,7 +248,7 @@ fn product_accepts(
     chain_id: u64,
     asset_contract: EvmAddress,
 ) -> bool {
-    state.routes.iter().any(|route| {
+    state.routes.routes().iter().any(|route| {
         route.destination.product == product.slug
             && route.chain.chain_id == chain_id
             && route.asset.contract == asset_contract

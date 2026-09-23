@@ -15,7 +15,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
-use topup::scanner::{ChainRoutes, configure_routes, scan_once};
+use topup::routes::RouteSet;
+use topup::scanner::{ChainRoutes, chain_routes, scan_once};
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, FinalizedHead, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
@@ -213,7 +214,7 @@ impl RouteFixture {
 /// Loads a route file through the same validation and grouping `topup run` uses.
 fn scanner_route(path: &Path) -> Result<ChainRoutes> {
     let route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(path)?)?;
-    configure_routes(&[route])?
+    chain_routes(&RouteSet::new(vec![route]).map_err(anyhow::Error::msg)?)
         .into_iter()
         .next()
         .context("one chain route")

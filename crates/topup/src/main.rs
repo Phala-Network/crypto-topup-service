@@ -16,6 +16,7 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
 use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
+use topup::routes::RouteSet;
 use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
 use topup::steps::screen::ScreenStep;
 use topup::steps::settle::SettleStep;
@@ -29,7 +30,6 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::route::{RouteFile, product_destination};
 use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
@@ -378,14 +378,14 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
-    {
-        Ok(reconciler) => reconciler,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure post-restore reconciler");
-            return ExitCode::FAILURE;
-        }
-    };
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure post-restore reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
     let expectations = topup::restore::RestoreExpectations {
         expected_heartbeat_at: args.expected_heartbeat_at,
         expected_lsn: args.expected_lsn.clone(),
@@ -501,24 +501,18 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let age_config = match AgeAlertConfig::from_routes(&routes) {
+    let age_config = match AgeAlertConfig::from_routes(routes.routes()) {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(%error, "invalid age alert configuration");
             return ExitCode::FAILURE;
         }
     };
-    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(&routes) {
+    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(routes.routes())
+    {
         Ok(provider) => Arc::new(provider) as Arc<dyn topup::locks::QuoteProvider>,
         Err(error) => {
             tracing::error!(%error, "invalid rate-lock pricing configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let scanner_routes = match topup::scanner::configure_routes(&routes) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::error!(%error, "invalid scanner route configuration");
             return ExitCode::FAILURE;
         }
     };
@@ -570,8 +564,9 @@ async fn run(args: &RunArgs) -> ExitCode {
         tracing::error!(%error, "on-chain contract check failed");
         return ExitCode::FAILURE;
     }
-    let scanner_count = scanner_routes.len();
-    let route_count = routes.len();
+    let routes = Arc::new(routes);
+    let scanner_count = routes.chain_ids().count();
+    let route_count = routes.routes().len();
     let connection_count = match u32::try_from(PUMPS)
         .ok()
         .zip(u32::try_from(scanner_count).ok())
@@ -639,7 +634,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     let reconciler = match topup::reconciler::Reconciler::from_routes(
         pool.clone(),
-        routes.clone(),
+        Arc::clone(&routes),
         signer.clone(),
     ) {
         Ok(reconciler) => Arc::new(reconciler),
@@ -678,7 +673,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     };
     let product_lookup = SettlementProductLookup::new(
         pool.clone(),
-        &routes,
+        Arc::clone(&routes),
         signer.clone(),
         Duration::from_secs(30),
     );
@@ -703,7 +698,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         Box::new(screen_step),
         Box::new(SettleStep::new(
             pool.clone(),
-            &routes,
+            Arc::clone(&routes),
             signer,
             Duration::from_secs(30),
         )),
@@ -730,7 +725,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     let refund_worker = match topup::refunds::RefundConfirmationWorker::new(
         pool.clone(),
         refund_reader,
-        &routes,
+        routes.routes(),
         refund_config,
     ) {
         Ok(worker) => worker,
@@ -740,7 +735,6 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let cancellation = CancellationToken::new();
-    let routes = Arc::new(routes);
     let state = topup::api::AppState {
         pool: pool.clone(),
         routes: Arc::clone(&routes),
@@ -766,12 +760,13 @@ async fn run(args: &RunArgs) -> ExitCode {
     tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
+    let scanner_routes = Arc::clone(&routes);
     let scanner_poll_interval = Duration::from_secs(args.scanner_poll_interval_s);
     let scanner_cancellation = cancellation.child_token();
     let mut scanner_task = tokio::spawn(async move {
         topup::scanner::run(
             scanner_pool,
-            scanner_routes,
+            &scanner_routes,
             scanner_poll_interval,
             scanner_cancellation,
         )
@@ -804,7 +799,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     });
     let database_metrics_cancellation = cancellation.child_token();
     let metrics_pool = pool.clone();
-    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(&routes);
+    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(routes.routes());
     let database_metrics_task = tokio::spawn(async move {
         topup::observability::collect_database_metrics(
             metrics_pool,
@@ -1064,14 +1059,14 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let reconciler = match topup::reconciler::Reconciler::from_routes(pool.clone(), routes, signer)
-    {
-        Ok(reconciler) => reconciler,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure reconciler");
-            return ExitCode::FAILURE;
-        }
-    };
+    let reconciler =
+        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
+            Ok(reconciler) => reconciler,
+            Err(error) => {
+                tracing::error!(%error, "failed to configure reconciler");
+                return ExitCode::FAILURE;
+            }
+        };
     let result = if args.post_restore {
         topup::reconciler::post_restore_once(&reconciler).await
     } else {
@@ -1176,7 +1171,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
+fn load_routes(paths: &[PathBuf]) -> Result<RouteSet, String> {
     let routes = paths
         .iter()
         .map(|path| {
@@ -1186,42 +1181,7 @@ fn load_routes(paths: &[PathBuf]) -> Result<Vec<RouteFile>, String> {
                 .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    validate_route_set(&routes)?;
-    Ok(routes)
-}
-
-fn validate_route_set(routes: &[RouteFile]) -> Result<(), String> {
-    let mut versions = std::collections::BTreeSet::new();
-    for route in routes {
-        if !versions.insert((route.route.as_str(), route.version)) {
-            return Err(format!(
-                "duplicate route `{}` version {}",
-                route.route, route.version
-            ));
-        }
-    }
-    // Settlement calls and product authentication read the destination from the routes, so every
-    // route of one product must name the same settlement URL and product key id.
-    let products = routes
-        .iter()
-        .map(|route| route.destination.product.as_str())
-        .collect::<BTreeSet<_>>();
-    for product in products {
-        product_destination(routes, product).map_err(|error| error.to_string())?;
-    }
-    // Rate-lock exposure counters sum credit across routes, so every quote-first route must
-    // count credit in the same destination minor unit.
-    let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
-    if let Some(first) = lock_routes.next()
-        && let Some(other) = lock_routes
-            .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
-    {
-        return Err(format!(
-            "rate-lock routes `{}` and `{}` use different destination.unit_decimals; exposure caps require one unit",
-            first.route, other.route
-        ));
-    }
-    Ok(())
+    RouteSet::new(routes)
 }
 
 fn required_env(name: &'static str) -> Result<String, String> {
@@ -1338,8 +1298,7 @@ fn validate_route(file: &Path, template: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nonce, validate_route_set};
-    use topup_core::route::RouteFile;
+    use super::parse_nonce;
 
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
@@ -1356,68 +1315,5 @@ mod tests {
         );
         assert_eq!(parse_nonce("0"), Err("nonce must be valid hexadecimal"));
         assert_eq!(parse_nonce("zz"), Err("nonce must be valid hexadecimal"));
-    }
-
-    #[test]
-    fn route_loading_accepts_versions_and_rejects_exact_duplicates() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
-
-        assert_eq!(validate_route_set(&[route.clone(), newer]), Ok(()));
-        assert_eq!(
-            validate_route_set(&[route.clone(), route]),
-            Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
-        );
-    }
-
-    #[test]
-    fn route_loading_requires_one_settlement_destination_per_product() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
-        newer.destination.settlement_url = "https://other.example/settlements".to_owned();
-        assert!(
-            validate_route_set(&[route.clone(), newer.clone()])
-                .expect_err("one product must not have two settlement URLs")
-                .contains("destination.settlement_url")
-        );
-
-        newer.destination.settlement_url = route.destination.settlement_url.clone();
-        newer.destination.product_kid = "phala-cloud/v2".to_owned();
-        assert!(
-            validate_route_set(&[route.clone(), newer.clone()])
-                .expect_err("one product must not have two key ids")
-                .contains("destination.product_kid")
-        );
-
-        newer.route = "builder-route".to_owned();
-        newer.destination.product = "builder".to_owned();
-        newer.destination.settlement_url = "https://builder.example/settlements".to_owned();
-        assert_eq!(validate_route_set(&[route, newer]), Ok(()));
-    }
-
-    #[test]
-    fn route_loading_requires_one_unit_for_rate_lock_exposure() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut other = route.clone();
-        other.route = "other-route".to_owned();
-        other.destination.unit_decimals = route.destination.unit_decimals + 1;
-
-        assert_eq!(
-            validate_route_set(&[route.clone(), other.clone()]),
-            Err(format!(
-                "rate-lock routes `{}` and `other-route` use different destination.unit_decimals; exposure caps require one unit",
-                route.route
-            ))
-        );
-        other.rate_lock.enabled = false;
-        assert_eq!(validate_route_set(&[route, other]), Ok(()));
     }
 }

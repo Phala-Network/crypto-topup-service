@@ -55,13 +55,12 @@ pub async fn authenticate_product(
         Err(error) => return error.into_response(),
     };
     // The key id is attested in the route; a product no loaded route names cannot authenticate.
-    let kid = match topup_core::route::product_destination(state.routes.iter(), &product.slug) {
-        Ok(Some(destination)) => destination.product_kid.clone(),
-        Ok(None) => return ApiError::unauthorized().into_response(),
-        Err(error) => {
-            tracing::error!(product_id = %product.id, %error, "product routes disagree");
-            return ApiError::unauthorized().into_response();
-        }
+    let Some(kid) = state
+        .routes
+        .destination(&product.slug)
+        .map(|destination| destination.product_kid.clone())
+    else {
+        return ApiError::unauthorized().into_response();
     };
     let key = match VerificationKey::from_base64(kid, &product.pubkey) {
         Ok(key) => key,

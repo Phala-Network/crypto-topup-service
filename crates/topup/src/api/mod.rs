@@ -12,6 +12,7 @@ mod repository;
 use std::sync::Arc;
 
 use crate::locks::QuoteProvider;
+use crate::routes::RouteSet;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::middleware;
@@ -34,7 +35,7 @@ pub struct AppState {
     /// Application-role PostgreSQL connection pool.
     pub pool: PgPool,
     /// Attested route configurations.
-    pub routes: Arc<Vec<RouteFile>>,
+    pub routes: Arc<RouteSet>,
     /// Separately configured administrative verification key.
     pub admin_key: VerificationKey,
     /// Public origin used to rebuild the signed `@target-uri` of every request.
@@ -52,6 +53,7 @@ impl AppState {
     ) -> Result<&'a RouteFile, error::ApiError> {
         let mut routes = self
             .routes
+            .routes()
             .iter()
             .filter(|route| route.destination.product == product.slug);
         let first = routes.next().ok_or_else(error::ApiError::not_found)?;
@@ -173,7 +175,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use tower::ServiceExt as _;
 
-    use super::{AppState, VerificationKey};
+    use super::{AppState, RouteSet, VerificationKey};
     use crate::db::Product;
     use topup_core::route::RouteFile;
     use uuid::Uuid;
@@ -191,7 +193,7 @@ mod tests {
         let admin_key = SigningKey::from_bytes(&[1; 32]);
         let state = AppState {
             pool,
-            routes: Arc::new(vec![newer.clone(), route]),
+            routes: Arc::new(RouteSet::new(vec![newer.clone(), route]).expect("routes load")),
             admin_key: VerificationKey::from_base64(
                 "admin/v1".to_owned(),
                 &STANDARD.encode(admin_key.verifying_key().as_bytes()),
@@ -227,7 +229,7 @@ mod tests {
         let admin_key = SigningKey::from_bytes(&[1; 32]);
         let state = AppState {
             pool,
-            routes: Arc::new(Vec::new()),
+            routes: Arc::default(),
             admin_key: VerificationKey::from_base64(
                 "admin/v1".to_owned(),
                 &STANDARD.encode(admin_key.verifying_key().as_bytes()),

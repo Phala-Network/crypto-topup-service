@@ -886,7 +886,7 @@ fn app_state_with_attestor(
     route.validate().expect("route fixture validates");
     AppState {
         pool,
-        routes: Arc::new(vec![route]),
+        routes: Arc::new(topup::routes::RouteSet::new(vec![route]).expect("route loads")),
         admin_key: VerificationKey::from_base64(
             ADMIN_KID.to_owned(),
             &public_key_base64(admin_key),

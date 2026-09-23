@@ -22,12 +22,12 @@ use topup_adapters::chain::evm::{
 };
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::retry::backoff;
-use topup_core::route::{ChainConfig, RouteFile};
+use topup_core::route::ChainConfig;
 use tracing::Instrument as _;
 
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
 use crate::jitter::{JitterSource as _, OsJitter};
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::routes::RouteSet;
 
 /// Maximum inclusive block count scanned in one window.
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
@@ -176,60 +176,32 @@ impl ScanStats {
     }
 }
 
-/// Selects the highest supplied route version for each chain and asset.
-pub fn configure_routes(routes: &[RouteFile]) -> Result<Vec<ChainRoutes>, ScannerError> {
-    if routes.is_empty() {
-        return Err(ScannerError::Configuration(
-            "at least one route is required".to_owned(),
-        ));
-    }
-    let mut chains = BTreeMap::<u64, ChainRoutes>::new();
-    for route in routes {
-        route.validate().map_err(|error| {
-            ScannerError::Configuration(format!(
-                "route `{}` version {} failed validation: {error}",
-                route.route, route.version
-            ))
-        })?;
-        if route.chain.finality != "finalized" {
-            return Err(ScannerError::Configuration(format!(
-                "route `{}` version {} uses unsupported finality rule `{}`",
-                route.route, route.version, route.chain.finality
-            )));
-        }
-
-        let chain_id = route.chain.chain_id;
-        let chain_routes = chains.entry(chain_id).or_insert_with(|| ChainRoutes {
-            chain: route.chain.clone(),
-            routes: BTreeMap::new(),
-        });
-        if chain_routes.chain.finality != route.chain.finality
-            || chain_routes.chain.rpc_providers != route.chain.rpc_providers
-        {
-            return Err(ScannerError::Configuration(format!(
-                "route `{}` version {} disagrees with another chain {chain_id} scanner configuration",
-                route.route, route.version
-            )));
-        }
-        let selection = RouteSelection {
-            name: route.route.clone(),
-            version: route.version,
-        };
-        match chain_routes.routes.get_mut(&route.asset.contract) {
-            Some(current) if current.name != selection.name => {
-                return Err(ScannerError::Configuration(format!(
-                    "routes `{}` and `{}` both select chain {chain_id} asset {:#x}",
-                    current.name, selection.name, route.asset.contract
-                )));
-            }
-            Some(current) if selection.version > current.version => *current = selection,
-            Some(_) => {}
-            None => {
-                chain_routes.routes.insert(route.asset.contract, selection);
-            }
-        }
-    }
-    Ok(chains.into_values().collect())
+/// Groups the current route version of each chain asset by chain.
+#[must_use]
+pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
+    routes
+        .chain_ids()
+        .filter_map(|chain_id| {
+            let chain = routes.chain(chain_id)?.clone();
+            let selected = routes
+                .current()
+                .filter(|route| route.chain.chain_id == chain_id)
+                .map(|route| {
+                    (
+                        route.asset.contract,
+                        RouteSelection {
+                            name: route.route.clone(),
+                            version: route.version,
+                        },
+                    )
+                })
+                .collect();
+            Some(ChainRoutes {
+                chain,
+                routes: selected,
+            })
+        })
+        .collect()
 }
 
 /// Scans one chain through its current finalized head and commits durable progress.
@@ -350,28 +322,18 @@ pub async fn scan_once<R: ChainReader>(
 /// Runs every configured chain scanner until cancellation or all chains stop.
 pub async fn run(
     pool: PgPool,
-    chains: Vec<ChainRoutes>,
+    route_set: &RouteSet,
     poll_interval: Duration,
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
     let mut tasks = JoinSet::new();
-    for routes in chains {
-        let provider_id = routes
-            .chain
-            .rpc_providers
-            .first()
-            .ok_or_else(|| ScannerError::Configuration("chain has no provider A".to_owned()))?;
-        let rpc_url = configured_provider_url(provider_id).map_err(|environment| {
-            ScannerError::Configuration(format!("{environment} is required for provider A"))
-        })?;
-        let rpc_url = crate::observability::Redacted::parse(&rpc_url).map_err(|_| {
-            ScannerError::Configuration(format!(
-                "provider `{}` does not contain a valid URL",
-                provider_label(provider_id, 0)
-            ))
-        })?;
-        let reader =
-            EvmChain::new(rpc_url.expose().as_str())?.with_provider(provider_label(provider_id, 0));
+    for routes in chain_routes(route_set) {
+        let chain_id = routes.chain.chain_id;
+        let rpc_url = route_set
+            .provider_url(chain_id, 0)
+            .map_err(|error| ScannerError::Configuration(error.to_string()))?;
+        let reader = EvmChain::new(rpc_url.expose().as_str())?
+            .with_provider(route_set.provider_label(chain_id, 0));
         let chain_pool = pool.clone();
         let chain_cancellation = cancellation.child_token();
         tasks.spawn(async move {
@@ -663,6 +625,7 @@ mod tests {
     use alloy_primitives::{B256, U256};
     use chrono::DateTime;
     use topup_core::money::AtomicAmount;
+    use topup_core::route::RouteFile;
     use uuid::Uuid;
 
     use super::*;
@@ -730,7 +693,7 @@ mod tests {
         let mut newer = older.clone();
         newer.version = 2;
 
-        let chains = configure_routes(&[newer, older]).expect("versioned routes");
+        let chains = chain_routes(&RouteSet::new(vec![newer, older]).expect("versioned routes"));
         let chain = chains.first().expect("one chain");
         let selected = chain.routes.get(&token).expect("selected route");
 

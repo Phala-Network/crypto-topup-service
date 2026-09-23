@@ -15,6 +15,7 @@ mod tests {
         CheckName, Reconciler, ReconciliationChain, ReconciliationError, RpcReconciliationChain,
         SettlementLookup,
     };
+    use crate::routes::RouteSet;
 
     use super::Redacted;
 
@@ -57,11 +58,10 @@ mod tests {
             .expect("lazy pool URL is valid");
         let reconciler = Reconciler::with_dependencies(
             pool,
-            vec![route],
+            Arc::new(RouteSet::new(vec![route]).expect("route loads")),
             BTreeMap::from([(chain_id, Arc::new(chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(NoSettlement),
-        )
-        .expect("reconciler configures");
+        );
 
         reconciler
             .check(CheckName::MissingDeposit)

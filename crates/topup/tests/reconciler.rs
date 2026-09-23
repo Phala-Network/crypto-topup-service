@@ -393,13 +393,13 @@ async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Res
         .await?;
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
-            vec![route],
+            route_set(route)?,
             BTreeMap::from([(
                 CHAIN_ID,
                 Arc::new(MockChain::at(0)) as Arc<dyn ReconciliationChain>,
             )]),
             settlement,
-        )?;
+        );
 
         let findings = reconciler.check(CheckName::SentSettlement).await?;
         ensure!(findings.len() == 2, "unexpected findings: {findings:?}");
@@ -722,10 +722,10 @@ async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> R
         chain.fail_derivation.store(true, Ordering::SeqCst);
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
-            vec![route],
+            route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-        )?;
+        );
 
         let failed = reconciler.run_once().await?;
         ensure!(failed.failed_checks == [CheckName::AddressDerivation]);
@@ -901,10 +901,10 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             .push((0, U256::from(7_u8)));
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
-            vec![route],
+            route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-        )?;
+        );
         let first = reconciler.run_once().await?;
         ensure!(has_check(&first, CheckName::CreditRecomputation));
         ensure!(first.findings.iter().any(|finding| {
@@ -994,7 +994,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
             DepositSeed::new(101, DepositState::Detected),
         )
         .await?;
-        ensure!(frozen_chains(&pool, std::slice::from_ref(&route)).await?.is_empty());
+        ensure!(frozen_chains(&pool, &*route_set(route.clone())?).await?.is_empty());
         sqlx::query(
             r#"
             INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
@@ -1004,7 +1004,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
         .execute(&pool)
         .await?;
         ensure!(
-            frozen_chains(&pool, std::slice::from_ref(&route)).await?
+            frozen_chains(&pool, &*route_set(route.clone())?).await?
                 == BTreeSet::from([CHAIN_ID])
         );
 
@@ -1028,7 +1028,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
         .await?;
         ensure!(reason.as_deref() == Some("chain_frozen"));
 
-        let scanner_routes = topup::scanner::configure_routes(std::slice::from_ref(&route))?;
+        let scanner_routes = topup::scanner::chain_routes(&*route_set(route)?);
         let stats =
             topup::scanner::scan_once(&pool, &UnreachableReader, &scanner_routes[0]).await?;
         ensure!(stats.inserted == 0);
@@ -1094,7 +1094,7 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
                 "{statement} must be denied"
             );
         }
-        ensure!(frozen_chains(&pool, &[route()?]).await? == BTreeSet::from([CHAIN_ID]));
+        ensure!(frozen_chains(&pool, &*route_set(route()?)?).await? == BTreeSet::from([CHAIN_ID]));
         Ok(())
     })
     .await
@@ -1115,10 +1115,10 @@ async fn loop_respects_cancellation() -> Result<()> {
         });
         let reconciler = Arc::new(Reconciler::with_dependencies(
             pool.clone(),
-            vec![route],
+            route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-        )?);
+        ));
         let cancellation = CancellationToken::new();
         let task = tokio::spawn({
             let reconciler = Arc::clone(&reconciler);
@@ -1185,10 +1185,10 @@ fn reconciler(
 ) -> Result<Reconciler> {
     Ok(Reconciler::with_dependencies(
         pool.clone(),
-        vec![route],
+        route_set(route)?,
         BTreeMap::from([(CHAIN_ID, chain as Arc<dyn ReconciliationChain>)]),
         settlement,
-    )?)
+    ))
 }
 
 fn has_check(report: &ReconciliationReport, check: CheckName) -> bool {
@@ -1489,4 +1489,10 @@ async fn settlement_payload(pool: &PgPool, id: Uuid) -> Result<Value> {
             "lock_ref": null
         }
     }))
+}
+
+fn route_set(route: RouteFile) -> Result<Arc<topup::routes::RouteSet>> {
+    topup::routes::RouteSet::new(vec![route])
+        .map(Arc::new)
+        .map_err(anyhow::Error::msg)
 }

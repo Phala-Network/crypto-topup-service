@@ -14,18 +14,18 @@ use topup_adapters::settlement::http::{
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::PRICE_SCALE;
-use topup_core::route::{RouteFile, product_destination};
 use uuid::Uuid;
 
 use crate::db::{self, OutboxEvent, SettlementIntent, SettlementStatus};
 use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
+use crate::routes::RouteSet;
 
 /// Product settlement operation for a deposit in `cleared`.
 #[derive(Clone)]
 pub struct SettleStep {
     pool: PgPool,
-    routes: Arc<[RouteFile]>,
+    routes: Arc<RouteSet>,
     client_timeout: Duration,
     signer: SignerHandle,
     client_override: Option<Arc<dyn SettlementApi>>,
@@ -36,13 +36,13 @@ impl SettleStep {
     #[must_use]
     pub fn new(
         pool: PgPool,
-        routes: &[RouteFile],
+        routes: Arc<RouteSet>,
         signer: SignerHandle,
         client_timeout: Duration,
     ) -> Self {
         Self {
             pool,
-            routes: routes.into(),
+            routes,
             client_timeout,
             signer,
             client_override: None,
@@ -54,7 +54,7 @@ impl SettleStep {
     pub fn with_api(pool: PgPool, signer: SignerHandle, client: Arc<dyn SettlementApi>) -> Self {
         Self {
             pool,
-            routes: Arc::new([]),
+            routes: Arc::default(),
             client_timeout: Duration::from_secs(1),
             signer,
             client_override: Some(client),
@@ -74,8 +74,9 @@ impl SettleStep {
         let client: Arc<dyn SettlementApi> = match &self.client_override {
             Some(client) => Arc::clone(client),
             None => {
-                let destination = product_destination(self.routes.iter(), &product.slug)
-                    .map_err(|_| SettleStepError::Destination)?
+                let destination = self
+                    .routes
+                    .destination(&product.slug)
                     .ok_or(SettleStepError::Destination)?;
                 Arc::new(
                     SettlementClient::new(

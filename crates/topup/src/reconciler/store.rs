@@ -7,10 +7,10 @@ use sqlx::{Connection as _, PgConnection, PgPool, Row};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::deposit::{DepositState, RejectReason};
-use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
+use crate::routes::RouteSet;
 
 use super::types::record_mismatch;
 use super::{Finding, ReconciliationError};
@@ -141,16 +141,9 @@ pub async fn chain_is_blocked(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx
 }
 
 /// Returns the configured chains which reconciliation has frozen.
-pub async fn frozen_chains(
-    pool: &PgPool,
-    routes: &[RouteFile],
-) -> Result<BTreeSet<u64>, sqlx::Error> {
-    let configured = routes
-        .iter()
-        .map(|route| route.chain.chain_id)
-        .collect::<BTreeSet<_>>();
+pub async fn frozen_chains(pool: &PgPool, routes: &RouteSet) -> Result<BTreeSet<u64>, sqlx::Error> {
     let mut frozen = BTreeSet::new();
-    for chain_id in configured {
+    for chain_id in routes.chain_ids() {
         if chain_is_blocked(pool, chain_id).await? {
             frozen.insert(chain_id);
         }

@@ -18,7 +18,7 @@ use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, Settleme
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::{RouteFile, product_destination};
+use topup_core::route::RouteFile;
 use topup_core::valuation::{
     LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
 };
@@ -30,7 +30,7 @@ use crate::db::{
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::routes::RouteSet;
 
 /// Authoritative prior answer returned by the destination product.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,7 +65,7 @@ pub trait ProductLookup: Send + Sync {
 /// Signed product lookup resolved from the deposit's owning product.
 pub struct SettlementProductLookup {
     pool: PgPool,
-    routes: Arc<[RouteFile]>,
+    routes: Arc<RouteSet>,
     signer: SignerHandle,
     request_timeout: Duration,
 }
@@ -75,13 +75,13 @@ impl SettlementProductLookup {
     #[must_use]
     pub fn new(
         pool: PgPool,
-        routes: &[RouteFile],
+        routes: Arc<RouteSet>,
         signer: SignerHandle,
         request_timeout: Duration,
     ) -> Self {
         Self {
             pool,
-            routes: routes.into(),
+            routes,
             signer,
             request_timeout,
         }
@@ -110,8 +110,9 @@ impl ProductLookup for SettlementProductLookup {
         .await
         .map_err(|_| ProductLookupError)?
         .ok_or(ProductLookupError)?;
-        let destination = product_destination(self.routes.iter(), &product)
-            .map_err(|_| ProductLookupError)?
+        let destination = self
+            .routes
+            .destination(&product)
             .ok_or(ProductLookupError)?;
         let client = SettlementClient::new(
             &destination.settlement_url,
@@ -208,77 +209,51 @@ pub struct ConfirmStep {
 }
 
 impl ConfirmStep {
-    /// Builds production adapters from route files and provider URL environment variables.
+    /// Builds production adapters for every loaded route version and each chain's providers.
     pub fn from_routes(
         pool: PgPool,
-        routes: &[RouteFile],
+        routes: &RouteSet,
         product_lookup: Arc<dyn ProductLookup>,
     ) -> Result<Self, ConfirmConfigError> {
         let mut runtimes = BTreeMap::new();
-        let mut asset_routes = BTreeMap::new();
-        let mut chains = BTreeMap::new();
-        for route in routes {
-            route
-                .validate()
-                .map_err(|error| ConfirmConfigError(error.to_string()))?;
-            let key = (route.route.clone(), route.version);
-            if runtimes.contains_key(&key) {
-                return Err(ConfirmConfigError(format!(
-                    "duplicate route `{}` version {}",
-                    route.route, route.version
-                )));
-            }
+        for route in routes.routes() {
             let pricing = PricingRuntime::configured(route).map_err(ConfirmConfigError)?;
             runtimes.insert(
-                key.clone(),
+                (route.route.clone(), route.version),
                 RouteRuntime {
                     route: route.clone(),
                     pricing,
                 },
             );
-            let asset_key = (route.chain.chain_id, route.asset.contract);
-            match asset_routes.get(&asset_key) {
-                Some((name, _)) if name != &route.route => {
-                    return Err(ConfirmConfigError(format!(
-                        "routes `{name}` and `{}` both select chain {} asset {:#x}",
-                        route.route, route.chain.chain_id, route.asset.contract
-                    )));
-                }
-                Some((_, version)) if *version >= route.version => {}
-                _ => {
-                    asset_routes.insert(asset_key, key);
-                }
-            }
-
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                chains.entry(route.chain.chain_id)
-            {
-                let mut providers = route.chain.rpc_providers.iter();
-                let first = providers.next().ok_or_else(|| {
-                    ConfirmConfigError("chain has no primary RPC provider".to_owned())
-                })?;
-                let second = providers.next().ok_or_else(|| {
-                    ConfirmConfigError("chain has no secondary RPC provider".to_owned())
-                })?;
-                let primary_url = configured_provider_url(first).map_err(|environment| {
-                    ConfirmConfigError(format!("{environment} is required"))
-                })?;
-                let secondary_url = configured_provider_url(second).map_err(|environment| {
-                    ConfirmConfigError(format!("{environment} is required"))
-                })?;
-                entry.insert(ChainPair {
-                    primary: Arc::new(
-                        EvmChain::new(&primary_url)
-                            .map_err(|error| ConfirmConfigError(error.to_string()))?
-                            .with_provider(provider_label(first, 0)),
-                    ),
-                    secondary: Arc::new(
-                        EvmChain::new(&secondary_url)
-                            .map_err(|error| ConfirmConfigError(error.to_string()))?
-                            .with_provider(provider_label(second, 1)),
-                    ),
-                });
-            }
+        }
+        let asset_routes = routes
+            .current()
+            .map(|route| {
+                (
+                    (route.chain.chain_id, route.asset.contract),
+                    (route.route.clone(), route.version),
+                )
+            })
+            .collect();
+        let mut chains = BTreeMap::new();
+        for chain_id in routes.chain_ids() {
+            let reader = |index| -> Result<Arc<dyn FinalityReader>, ConfirmConfigError> {
+                let url = routes
+                    .provider_url(chain_id, index)
+                    .map_err(|error| ConfirmConfigError(error.to_string()))?;
+                Ok(Arc::new(
+                    EvmChain::new(url.expose().as_str())
+                        .map_err(|error| ConfirmConfigError(error.to_string()))?
+                        .with_provider(routes.provider_label(chain_id, index)),
+                ))
+            };
+            chains.insert(
+                chain_id,
+                ChainPair {
+                    primary: reader(0)?,
+                    secondary: reader(1)?,
+                },
+            );
         }
         Ok(Self {
             context_lookup: Arc::new(PostgresContextLookup(pool)),

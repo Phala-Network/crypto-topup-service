@@ -1275,7 +1275,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
     let route = route_fixture();
     let state = AppState {
         pool: pool.clone(),
-        routes: Arc::new(vec![route]),
+        routes: Arc::new(topup::routes::RouteSet::new(vec![route]).expect("route loads")),
         admin_key: VerificationKey::from_base64(
             ADMIN_KID.to_owned(),
             &public_key_base64(admin_key),
