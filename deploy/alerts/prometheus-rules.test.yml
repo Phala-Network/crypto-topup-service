@@ -151,27 +151,53 @@ tests:
             exp_annotations:
               summary: Reconciliation repaired a drifted rate-lock exposure counter
 
-  - name: one transient lock expiry failure does not page
+  - name: isolated lock expiry failures between successful scans do not page
     interval: 1m
     input_series:
+      # Two failures four minutes apart while other scans keep succeeding.
       - series: 'topup_lock_expiry_failures_total{producer_enabled="true"}'
-        values: '0 1 1 1 1 1 1 1 1 1 1 1'
+        values: '0 1 1 1 1 2 2 2 2 2 2 2'
+      - series: 'topup_loop_progress_unixtime_seconds{loop="lock_expiry",loop_instance="0",producer_enabled="true"}'
+        values: '0+60x11'
     alert_rule_test:
-      - eval_time: 11m
+      - eval_time: 5m
         alertname: TopupLockExpiryFailing
         exp_alerts: []
-
-  - name: lock expiry failing on every scan pages
-    interval: 1m
-    input_series:
-      # A drifted counter fails the scan every five seconds: twelve failures per minute.
-      - series: 'topup_lock_expiry_failures_total{producer_enabled="true"}'
-        values: '0+12x12'
-    alert_rule_test:
-      - eval_time: 4m
+      - eval_time: 6m
         alertname: TopupLockExpiryFailing
         exp_alerts: []
       - eval_time: 7m
+        alertname: TopupLockExpiryFailing
+        exp_alerts: []
+
+  - name: lock expiry failing on every scan without progress pages
+    interval: 1m
+    input_series:
+      # A drifted counter fails the scan every five seconds; the last success was at 0.
+      - series: 'topup_lock_expiry_failures_total{producer_enabled="true"}'
+        values: '0+12x14'
+      - series: 'topup_loop_progress_unixtime_seconds{loop="lock_expiry",loop_instance="0",producer_enabled="true"}'
+        values: '0x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TopupLockExpiryFailing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: TopupLockExpiryFailing
+        exp_alerts:
+          - exp_labels:
+              producer_enabled: "true"
+              severity: page
+            exp_annotations:
+              summary: Rate-lock expiry scans keep failing
+
+  - name: lock expiry failing since startup pages without any progress series
+    interval: 1m
+    input_series:
+      - series: 'topup_lock_expiry_failures_total{producer_enabled="true"}'
+        values: '0+12x8'
+    alert_rule_test:
+      - eval_time: 6m
         alertname: TopupLockExpiryFailing
         exp_alerts:
           - exp_labels:

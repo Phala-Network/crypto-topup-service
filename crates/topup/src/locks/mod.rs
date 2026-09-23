@@ -730,6 +730,8 @@ impl ExpiryWorker {
 /// One `lock_exposure` counter corrected by [`repair_exposure`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExposureRepair {
+    /// Identifier shared by the repair's audit row and its reconciliation finding.
+    pub id: Uuid,
     /// Scope key: `account:<id>`, `product:<id>`, or `global`.
     pub scope_key: String,
     /// Counter value observed under the row lock; zero when the row was missing.
@@ -829,8 +831,27 @@ async fn repair_scope(
     .bind(after_minor.to_string())
     .execute(&mut *transaction)
     .await?;
+    // The audit row commits with the change, so every repair is recorded even if the caller
+    // never persists its finding.
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO audit (id, actor, action, subject, reason) VALUES ($1, 'reconciler', 'repair_lock_exposure', $2, $3)",
+    )
+    .bind(id)
+    .bind(format!("lock_exposure:{scope_key}"))
+    .bind(
+        json!({
+            "repair_id": id,
+            "before_minor": before_minor.to_string(),
+            "after_minor": after_minor.to_string(),
+        })
+        .to_string(),
+    )
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(Some(ExposureRepair {
+        id,
         scope_key: scope_key.to_owned(),
         before_minor,
         after_minor,

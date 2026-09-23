@@ -50,7 +50,7 @@ groups:
         annotations:
           summary: Reconciliation repaired a drifted rate-lock exposure counter
       - alert: TopupLockExpiryFailing
-        expr: increase(topup_lock_expiry_failures_total{producer_enabled="true"}[5m]) > 0
+        expr: increase(topup_lock_expiry_failures_total{producer_enabled="true"}[5m]) > 0 unless on (instance, job) (time() - topup_loop_progress_unixtime_seconds{loop="lock_expiry",producer_enabled="true"} <= 300)
         for: 5m
         labels: { severity: page }
         annotations:

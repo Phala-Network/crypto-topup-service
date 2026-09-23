@@ -978,11 +978,13 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
         let repairs = locks::repair_exposure(&database.app_pool).await?;
         ensure!(
             repairs
-                == [locks::ExposureRepair {
-                    scope_key: "global".to_owned(),
-                    before_minor: 40,
-                    after_minor: 100,
-                }],
+                .iter()
+                .map(|repair| (
+                    repair.scope_key.as_str(),
+                    repair.before_minor,
+                    repair.after_minor
+                ))
+                .eq([("global", 40, 100)]),
             "{repairs:?}"
         );
         for _ in 0..400 {
@@ -1136,7 +1138,7 @@ async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_ex
 }
 
 #[tokio::test]
-async fn reconciler_repairs_lock_exposure_drift_with_an_audit_row() -> Result<()> {
+async fn every_lock_exposure_repair_leaves_a_finding_and_an_audit_row() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -1160,10 +1162,6 @@ async fn reconciler_repairs_lock_exposure_drift_with_an_audit_row() -> Result<()
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         create_lock(&database, &quotes, &product, &account, &route, "r-1").await?;
         let product_key = format!("product:{}", product.id);
-        sqlx::query("UPDATE lock_exposure SET open_minor = 350 WHERE scope_key = $1")
-            .bind(&product_key)
-            .execute(&database.app_pool)
-            .await?;
 
         let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Reconciler::with_dependencies(
@@ -1173,29 +1171,44 @@ async fn reconciler_repairs_lock_exposure_drift_with_an_audit_row() -> Result<()
             Arc::new(NoSettlement),
             Arc::clone(&metrics),
         )?;
-        let report = reconciler.run_once().await?;
-        ensure!(!report.failed_checks.contains(&CheckName::LockExposure));
-        let repaired = report
-            .findings
-            .iter()
-            .filter(|finding| finding.check == CheckName::LockExposure)
-            .collect::<Vec<_>>();
-        ensure!(repaired.len() == 1, "{repaired:?}");
-        ensure!(repaired[0].repair_applied);
-        ensure!(repaired[0].subjects.get("scope_key") == Some(&product_key));
-        ensure!(repaired[0].observed == json!({"open_minor": "350"}));
-        ensure!(repaired[0].expected == json!({"open_minor": "100"}));
-        ensure!(exposure(&database.app_pool, &product_key).await? == 100);
-        let audit: String = sqlx::query_scalar(
-            "SELECT reason FROM audit WHERE action = 'reconciliation_repair' AND subject LIKE '%' || $1 || '%'",
+        // The same drift twice: every repair must leave its own finding and audit row.
+        for _ in 0..2 {
+            sqlx::query("UPDATE lock_exposure SET open_minor = 350 WHERE scope_key = $1")
+                .bind(&product_key)
+                .execute(&database.app_pool)
+                .await?;
+            let report = reconciler.run_once().await?;
+            ensure!(!report.failed_checks.contains(&CheckName::LockExposure));
+            let repaired = report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == CheckName::LockExposure)
+                .collect::<Vec<_>>();
+            ensure!(repaired.len() == 1, "{repaired:?}");
+            ensure!(repaired[0].repair_applied);
+            ensure!(repaired[0].subjects.get("scope_key") == Some(&product_key));
+            ensure!(repaired[0].observed == json!({"open_minor": "350"}));
+            ensure!(repaired[0].expected == json!({"open_minor": "100"}));
+            ensure!(exposure(&database.app_pool, &product_key).await? == 100);
+        }
+        let findings: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reconciliation_findings WHERE check_name = 'lock_exposure'",
         )
-        .bind(&product_key)
         .fetch_one(&database.app_pool)
         .await?;
-        let audit: Value = serde_json::from_str(&audit)?;
-        ensure!(audit["check"] == "lock_exposure");
-        ensure!(audit["observed"]["open_minor"] == "350");
-        ensure!(audit["expected"]["open_minor"] == "100");
+        ensure!(findings == 2);
+        let audits: Vec<String> = sqlx::query_scalar(
+            "SELECT reason FROM audit WHERE action = 'repair_lock_exposure' AND subject = $1",
+        )
+        .bind(format!("lock_exposure:{product_key}"))
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(audits.len() == 2, "{audits:?}");
+        for audit in audits {
+            let audit: Value = serde_json::from_str(&audit)?;
+            ensure!(audit["before_minor"] == "350");
+            ensure!(audit["after_minor"] == "100");
+        }
         ensure!(reconciler.check(CheckName::LockExposure).await?.is_empty());
         Ok(())
     }

@@ -316,6 +316,9 @@ impl Reconciler {
     }
 
     /// Runs one check without persisting its findings.
+    ///
+    /// Safe repairs still apply: `missing_deposit`, `missing_flush_link`, `sent_settlement`,
+    /// and `lock_exposure` write the ledger exactly as a full round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
         let mut findings = Vec::new();
         self.run_check(check, &mut FinalizedHeads::new(), &mut findings)
@@ -1024,7 +1027,11 @@ impl Reconciler {
         for repair in repairs {
             findings.push(Finding::new(
                 CheckName::LockExposure,
-                subjects([("scope_key", repair.scope_key)]),
+                // The repair id keeps a recurring identical drift from deduplicating into one row.
+                subjects([
+                    ("scope_key", repair.scope_key),
+                    ("repair_id", repair.id.to_string()),
+                ]),
                 json!({"open_minor": repair.after_minor.to_string()}),
                 json!({"open_minor": repair.before_minor.to_string()}),
                 true,

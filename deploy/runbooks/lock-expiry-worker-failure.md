@@ -2,8 +2,9 @@
 
 ## Trigger
 
-Trigger on `TopupLockExpiryFailing` (`topup_lock_expiry_failures_total` increasing for five
-minutes), `TopupLockExposureDrift` (the reconciler repaired a `lock_exposure` counter),
+Trigger on `TopupLockExpiryFailing` (expiry scans failing with no successful scan for more than
+five minutes, held for five minutes), `TopupLockExposureDrift` (the service's reconciler loop
+repaired a `lock_exposure` counter), a new `repair_lock_exposure` audit row,
 `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` errors in the service log,
 open rate locks more than a minute past `expires_at`, missing `rate_lock.expired` events, or
 `overdue_locks > 0` persisting in the [Lock exposure near cap](lock-exposure-near-cap.md) query.
@@ -84,13 +85,21 @@ applies its own change after the repair. It is safe while the service runs and i
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --once --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
 ```
 
-Each repaired counter is a `lock_exposure` finding with `repair_applied = true`, `observed` (before)
-and `expected` (after), plus a `reconciliation_repair` audit row. Record them in the incident:
+Each repair commits a `repair_lock_exposure` audit row in the same transaction as the counter
+change, and is then stored as a `lock_exposure` finding with `repair_applied = true`, `observed`
+(before) and `expected` (after), and a unique `repair_id`. These rows, not the alert, are the record
+of a repair: `topup reconcile --once` runs in its own process, which Prometheus does not scrape, so
+`TopupLockExposureDrift` fires only for repairs made by the service's own reconciler loop. Record
+every repair in the incident:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN TRANSACTION READ ONLY;
-SELECT created_at, subjects->>'scope_key' AS scope_key,
+SELECT created_at, subject, reason
+FROM audit
+WHERE action = 'repair_lock_exposure'
+ORDER BY created_at DESC LIMIT 20;
+SELECT created_at, subjects->>'scope_key' AS scope_key, subjects->>'repair_id' AS repair_id,
        observed->>'open_minor' AS before_minor, expected->>'open_minor' AS after_minor
 FROM reconciliation_findings
 WHERE check_name = 'lock_exposure'

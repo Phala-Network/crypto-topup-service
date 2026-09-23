@@ -23,7 +23,7 @@ metric. Mismatches act by check:
 | `missing_flush_link` | Repair: link the deposit to its confirmed `flushed` row | One deposit |
 | `sent_settlement` | Repair: adopt the product's GET answer under a lease | One deposit |
 | `post_restore_settlement` | Restore gate stays incomplete | Every restored settlement |
-| `lock_exposure` | Repair: recompute the `lock_exposure` counter under its row lock; `TopupLockExposureDrift` fires; follow [Lock expiry worker failure](lock-expiry-worker-failure.md) | One exposure scope |
+| `lock_exposure` | Repair: recompute the `lock_exposure` counter under its row lock and write a `repair_lock_exposure` audit row; `TopupLockExposureDrift` fires for repairs by the service loop only (not `reconcile --once`); follow [Lock expiry worker failure](lock-expiry-worker-failure.md) | One exposure scope |
 
 ## First 5 minutes
 
