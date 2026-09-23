@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -35,7 +35,9 @@ use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, Bps, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
-use topup_core::{SecretKey32, Signer as _};
+use topup_core::{
+    Ed25519PublicKey, Ed25519Signature, SecretKey32, SignedTx, Signer, SignerError, TxRequest,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -154,21 +156,21 @@ impl AlertSink for Alerts {
     }
 }
 
-/// Planner-only chain double that records which addresses were read.
+/// Node-free chain double for planning and sending that records which addresses were read.
 #[derive(Default)]
-struct PlannerChain {
+struct StubChain {
     calls: Mutex<usize>,
     balance_reads: Mutex<Vec<Address>>,
 }
 
-impl PlannerChain {
+impl StubChain {
     fn record_call(&self) {
         *self.calls.lock().expect("call mutex is available") += 1;
     }
 }
 
 #[async_trait]
-impl ChainClient for PlannerChain {
+impl ChainClient for StubChain {
     async fn token_balances(
         &self,
         _token: Address,
@@ -206,7 +208,7 @@ impl ChainClient for PlannerChain {
         _factory: Address,
         _operator: Address,
     ) -> Result<bool, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Err(ChainError::rpc("not used by the stub"))
     }
 
     async fn pending_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
@@ -215,15 +217,15 @@ impl ChainClient for PlannerChain {
     }
 
     async fn confirmed_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Err(ChainError::rpc("not used by the stub"))
     }
 
     async fn latest_block(&self) -> Result<u64, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Ok(1)
     }
 
     async fn finalized_block(&self) -> Result<u64, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Err(ChainError::rpc("not used by the stub"))
     }
 
     async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
@@ -234,12 +236,12 @@ impl ChainClient for PlannerChain {
         })
     }
 
-    async fn send_raw_transaction(&self, _raw: &[u8]) -> Result<B256, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+    async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, ChainError> {
+        Ok(keccak256(raw))
     }
 
     async fn receipt(&self, _hash: B256) -> Result<Option<ChainReceipt>, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Err(ChainError::rpc("not used by the stub"))
     }
 
     async fn receipt_by_sender_nonce(
@@ -249,7 +251,7 @@ impl ChainClient for PlannerChain {
         _from_block: u64,
         _max_blocks: u64,
     ) -> Result<NonceReceiptSearch, ChainError> {
-        Err(ChainError::rpc("not used by the planner"))
+        Err(ChainError::rpc("not used by the stub"))
     }
 }
 
@@ -260,7 +262,7 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
             let factory = Address::from([0x51; 20]);
             let route = test_route(factory, Address::from([0x52; 20]))?;
             let seeded = seed_addresses(&database.pool, factory, Address::from([0x53; 20])).await?;
-            let chain = Arc::new(PlannerChain::default());
+            let chain = Arc::new(StubChain::default());
             let planner = Planner::new(
                 database.pool.clone(),
                 chain.clone(),
@@ -320,6 +322,174 @@ async fn planner_skips_frozen_chains_and_blocked_addresses() -> Result<()> {
 }
 
 #[tokio::test]
+async fn paused_route_plan_is_voided_so_later_plans_on_the_chain_still_send() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x61; 20]);
+            let paused = test_route(factory, Address::from([0x62; 20]))?;
+            let mut other = test_route(factory, Address::from([0x63; 20]))?;
+            other.route = "other-route".to_owned();
+            seed_addresses(&database.pool, factory, Address::from([0x64; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let paused_plan = planner.plan(&paused).await?.context("plan paused route")?;
+            let other_plan = planner.plan(&other).await?.context("plan other route")?;
+            ensure!(flush_nonce(&database.pool, paused_plan).await? == 0);
+            ensure!(flush_nonce(&database.pool, other_plan).await? == 1);
+
+            set_route_flush_pause(&database.pool, &paused.route, true).await?;
+            ensure!(
+                flusher.send_next(&other).await?
+                    == RunResult::Sent {
+                        flush_id: other_plan
+                    }
+            );
+            ensure!(flush_nonce(&database.pool, other_plan).await? == 0);
+            ensure!(
+                voided_reason(&database.pool, paused_plan)
+                    .await?
+                    .contains(&format!("route `{}`", paused.route))
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x71; 20]);
+            let route = test_route(factory, Address::from([0x72; 20]))?;
+            let seeded = seed_addresses(&database.pool, factory, Address::from([0x73; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let batch = planner.plan(&route).await?.context("plan batch")?;
+            ensure!(planned_address_ids(&database.pool, batch).await?.len() == 2);
+
+            set_account_flush_pause(&database.pool, seeded[0].account_id, true).await?;
+            ensure!(flusher.send_next(&route).await? == RunResult::Idle);
+            ensure!(
+                voided_reason(&database.pool, batch)
+                    .await?
+                    .contains(&format!("account {}", seeded[0].account_id))
+            );
+            let replan = planner
+                .plan(&route)
+                .await?
+                .context("replan without paused")?;
+            ensure!(replan != batch);
+            ensure!(planned_address_ids(&database.pool, replan).await? == [seeded[1].id]);
+            ensure!(flush_nonce(&database.pool, replan).await? == 0);
+            ensure!(flusher.send_next(&route).await? == RunResult::Sent { flush_id: replan });
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x81; 20]);
+            let route = test_route(factory, Address::from([0x82; 20]))?;
+            let seeded = seed_addresses(&database.pool, factory, Address::from([0x83; 20])).await?;
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let gated = SignerHandle::spawn(
+                GatedSigner {
+                    inner: dev_signer(OPERATOR_KEY)?,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                },
+                NonZeroUsize::new(8).context("queue is non-zero")?,
+                StdDuration::from_secs(10),
+            )?;
+            let (planner, flusher) = stub_flusher(&database.pool, gated);
+            let batch = planner.plan(&route).await?.context("plan batch")?;
+
+            let pause_while_signing = async {
+                entered.notified().await;
+                let paused = tokio::time::timeout(
+                    StdDuration::from_secs(2),
+                    set_account_flush_pause(&database.pool, seeded[0].account_id, true),
+                )
+                .await;
+                release.notify_one();
+                paused.context("account pause blocked behind an in-flight signature")?
+            };
+            let (sent, paused) = tokio::join!(flusher.send_next(&route), pause_while_signing);
+            paused?;
+            // The pause committed while the signer ran is still honored before the plan is sent.
+            ensure!(sent? == RunResult::Idle);
+            ensure!(
+                voided_reason(&database.pool, batch)
+                    .await?
+                    .contains(&format!("account {}", seeded[0].account_id))
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn first_route_pause_waits_for_a_send_that_passed_the_route_check() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let factory = Address::from([0x91; 20]);
+            let route = test_route(factory, Address::from([0x92; 20]))?;
+            let seeded = seed_addresses(&database.pool, factory, Address::from([0x93; 20])).await?;
+            let (planner, flusher) = stub_flusher(&database.pool, signer_handle(OPERATOR_KEY)?);
+            let batch = planner.plan(&route).await?.context("plan batch")?;
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM route_pauses")
+                .fetch_one(&database.pool)
+                .await?;
+            ensure!(rows == 0, "the route must not have a pause row yet");
+
+            // Hold the sender between its route check and its account check.
+            let mut account_lock = database.pool.begin().await?;
+            sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
+                .bind(seeded[0].account_id)
+                .execute(&mut *account_lock)
+                .await?;
+            let first_pause = async {
+                wait_for_lock_wait(&database.pool, "FOR SHARE OF account, product").await?;
+                let mut pause = database.pool.begin().await?;
+                sqlx::query("SET LOCAL lock_timeout = '300ms'")
+                    .execute(&mut *pause)
+                    .await?;
+                let paused = sqlx::query(
+                    "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, '{flush}') \
+                     ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes",
+                )
+                .bind(&route.route)
+                .execute(&mut *pause)
+                .await;
+                pause.rollback().await?;
+                account_lock.rollback().await?;
+                anyhow::Ok(paused)
+            };
+            let (sent, paused) = tokio::join!(flusher.send_next(&route), first_pause);
+            let error = paused?
+                .err()
+                .context("first route pause committed while a send was past its route check")?;
+            ensure!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref()
+                    == Some("55P03"),
+                "unexpected pause error: {error}"
+            );
+            ensure!(sent? == RunResult::Sent { flush_id: batch });
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
@@ -363,7 +533,8 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
 }
 
 #[tokio::test]
-async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() -> Result<()> {
+async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confirmation()
+-> Result<()> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     // The current-thread test runtime polls every flusher call on this thread.
@@ -422,31 +593,31 @@ async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() 
                 .context("plan before route pause")?;
             set_route_flush_pause(&database.pool, &route.route, true).await?;
             for _ in 0..2 {
-                ensure!(planner.plan(&route).await? == Some(route_plan));
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
-                ensure!(flush_status(&database.pool, route_plan).await? == "planned");
+                ensure!(planner.plan(&route).await?.is_none());
             }
+            ensure!(
+                voided_reason(&database.pool, route_plan)
+                    .await?
+                    .contains(&format!("route `{}`", route.route))
+            );
             let send_paused = format!(
-                "topup_flush_send_paused{{chain=\"{}\",producer_enabled=\"true\"}}",
+                "topup_flush_send_paused_total{{chain=\"{}\",producer_enabled=\"true\"}}",
                 route.chain.chain_id
             );
             ensure!(metrics.render().contains(&format!("{send_paused} 1")));
-            let pause_audits: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM audit WHERE action = 'flush.send_paused' AND subject = $1",
-            )
-            .bind(route_plan.to_string())
-            .fetch_one(&database.pool)
-            .await?;
-            ensure!(pause_audits == 1);
 
             set_route_flush_pause(&database.pool, &route.route, false).await?;
+            let route_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan after route resume")?;
             ensure!(
                 flusher.run_once(&route).await?
                     == RunResult::Sent {
                         flush_id: route_plan
                     }
             );
-            ensure!(metrics.render().contains(&format!("{send_paused} 0")));
             set_route_flush_pause(&database.pool, &route.route, true).await?;
             finalize(&anvil.rpc_url)?;
             ensure!(
@@ -472,11 +643,19 @@ async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() 
                 .context("plan after product resume")?;
             set_product_flush_pause(&database.pool, address.product_id, true).await?;
             for _ in 0..2 {
-                ensure!(planner.plan(&route).await? == Some(product_plan));
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
-                ensure!(flush_status(&database.pool, product_plan).await? == "planned");
+                ensure!(planner.plan(&route).await?.is_none());
             }
+            ensure!(
+                voided_reason(&database.pool, product_plan)
+                    .await?
+                    .contains(&format!("product {}", address.product_id))
+            );
             set_product_flush_pause(&database.pool, address.product_id, false).await?;
+            let product_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan after product resume")?;
             ensure!(
                 flusher.run_once(&route).await?
                     == RunResult::Sent {
@@ -506,11 +685,19 @@ async fn flush_pauses_gate_planning_and_sending_without_blocking_confirmation() 
                 .context("plan after account resume")?;
             set_account_flush_pause(&database.pool, address.account_id, true).await?;
             for _ in 0..2 {
-                ensure!(planner.plan(&route).await? == Some(account_plan));
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
-                ensure!(flush_status(&database.pool, account_plan).await? == "planned");
+                ensure!(planner.plan(&route).await?.is_none());
             }
+            ensure!(
+                voided_reason(&database.pool, account_plan)
+                    .await?
+                    .contains(&format!("account {}", address.account_id))
+            );
             set_account_flush_pause(&database.pool, address.account_id, false).await?;
+            let account_plan = planner
+                .plan(&route)
+                .await?
+                .context("plan after account resume")?;
             ensure!(
                 flusher.run_once(&route).await?
                     == RunResult::Sent {
@@ -1592,13 +1779,119 @@ async fn set_account_flush_pause(pool: &PgPool, account_id: Uuid, paused: bool) 
     Ok(())
 }
 
-async fn flush_status(pool: &PgPool, flush_id: Uuid) -> Result<String> {
-    Ok(
-        sqlx::query_scalar("SELECT status FROM flushes WHERE id = $1")
-            .bind(flush_id)
-            .fetch_one(pool)
-            .await?,
+/// Wraps the dev signer and blocks operator signing until the test releases it.
+struct GatedSigner {
+    inner: DevSigner,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl Signer for GatedSigner {
+    async fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.sign_operator_tx(tx).await
+    }
+
+    async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
+        self.inner.sign_settlement(payload).await
+    }
+
+    async fn operator_address(&self) -> Result<Address, SignerError> {
+        self.inner.operator_address().await
+    }
+
+    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
+        self.inner.settlement_public_key().await
+    }
+}
+
+fn dev_signer(key: &str) -> Result<DevSigner> {
+    let bytes = hex::decode(key)?;
+    let operator = SecretKey32::from_slice(&bytes).context("operator key has 32 bytes")?;
+    Ok(DevSigner::new(operator, SecretKey32::new([9; 32])))
+}
+
+fn stub_flusher(pool: &PgPool, signer: SignerHandle) -> (Planner, Flusher) {
+    let chain = Arc::new(StubChain::default());
+    let alerts = Arc::new(Alerts::default());
+    let planner = Planner::new(
+        pool.clone(),
+        chain.clone(),
+        signer.clone(),
+        Arc::new(FixedPrice),
+        alerts.clone(),
+    );
+    let flusher = Flusher::new(
+        pool.clone(),
+        chain,
+        signer,
+        alerts,
+        FlusherPolicy::default(),
+    );
+    (planner, flusher)
+}
+
+/// Waits until another session of this test database blocks on a lock inside `statement`.
+async fn wait_for_lock_wait(pool: &PgPool, statement: &str) -> Result<()> {
+    for _ in 0..250 {
+        let waiting: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND strpos(query, $1) > 0
+            )
+            "#,
+        )
+        .bind(statement)
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+    }
+    bail!("no session blocked inside `{statement}`")
+}
+
+async fn flush_nonce(pool: &PgPool, flush_id: Uuid) -> Result<u64> {
+    let nonce: String = sqlx::query_scalar("SELECT nonce::text FROM flushes WHERE id = $1")
+        .bind(flush_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(nonce.parse()?)
+}
+
+async fn planned_address_ids(pool: &PgPool, flush_id: Uuid) -> Result<Vec<Uuid>> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT item->>'address_id' FROM flushes, jsonb_array_elements(receipt->'plan') AS item WHERE id = $1",
     )
+    .bind(flush_id)
+    .fetch_all(pool)
+    .await?;
+    ids.iter().map(|id| Ok(Uuid::parse_str(id)?)).collect()
+}
+
+/// Asserts that a plan was voided by a flush pause and returns the audit reason naming the level.
+async fn voided_reason(pool: &PgPool, flush_id: Uuid) -> Result<String> {
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM flushes WHERE id = $1")
+        .bind(flush_id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(remaining == 0, "paused plan {flush_id} was not voided");
+    let reasons: Vec<String> = sqlx::query_scalar(
+        "SELECT reason FROM audit WHERE action = 'flush.send_paused' AND subject = $1",
+    )
+    .bind(flush_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    ensure!(
+        reasons.len() == 1,
+        "expected one pause audit row for {flush_id}"
+    );
+    Ok(reasons.concat())
 }
 
 async fn completed_flush_count(pool: &PgPool) -> Result<i64> {

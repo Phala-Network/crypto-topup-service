@@ -14,7 +14,7 @@
     {"id": 10, "title": "Backup age", "type": "timeseries", "targets": [{"expr": "time() - topup_backup_last_success_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "seconds"}]},
     {"id": 11, "title": "Reconciliation mismatches", "type": "timeseries", "targets": [{"expr": "increase(topup_reconciliation_mismatches_total{producer_enabled=\"true\"}[15m])", "legendFormat": "{{check}}"}]},
     {"id": 12, "title": "Loop health", "type": "timeseries", "targets": [{"expr": "time() - topup_loop_heartbeat_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{loop_instance}} heartbeat age"}, {"expr": "time() - topup_loop_progress_unixtime_seconds{producer_enabled=\"true\"}", "legendFormat": "{{loop}} {{loop_instance}} progress age"}, {"expr": "clamp_min(topup_loop_wait_until_unixtime_seconds{producer_enabled=\"true\"} - time(), 0)", "legendFormat": "{{loop}} {{loop_instance}} planned wait"}, {"expr": "clamp_min(topup_loop_deadline_unixtime_seconds{producer_enabled=\"true\"} - time(), 0)", "legendFormat": "{{loop}} {{loop_instance}} execution budget"}]},
-    {"id": 13, "title": "Flush send paused", "type": "timeseries", "targets": [{"expr": "topup_flush_send_paused{producer_enabled=\"true\"}", "legendFormat": "chain {{chain}}"}]}
+    {"id": 13, "title": "Flush plans voided by pause", "type": "timeseries", "targets": [{"expr": "increase(topup_flush_send_paused_total{producer_enabled=\"true\"}[1h])", "legendFormat": "chain {{chain}}"}]}
   ],
   "schemaVersion": 39,
   "tags": ["crypto-topup-service"],

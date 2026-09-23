@@ -74,11 +74,6 @@ Until it merges, route the metric or symptom to the same runbook.
 
 ## Known gaps on main
 
-- [#71](https://github.com/Phala-Network/crypto-topup-service/issues/71): since C7b (#70, closing
-  #61) the `flush` pause stops new sends, but a paused plan at the lowest nonce stalls every later
-  flush on its chain until the pause is lifted, and no supported command voids that plan. Runbooks
-  pause before a plan exists for targeted stops and keep the Finance Safe `OPERATOR_ROLE` revocation
-  as the hard chain-wide stop.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
 - [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`

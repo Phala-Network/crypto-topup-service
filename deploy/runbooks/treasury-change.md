@@ -14,19 +14,20 @@ historical deposits.
 ## First 5 minutes
 
 For an emergency migration, pause every scope on the route. Since C7b (#70) the `flush` scope stops
-new sends: paused plans stay `planned` and the lowest-nonce paused plan gets a `flush.send_paused`
-audit record (once per flush id), while an already broadcast transaction still confirms. Snapshot
-the `sent` ids after the pause returns HTTP 200, then verify none were added:
+new sends: since #71 each unsigned plan of the route is voided when the sender reaches it, with one
+`flush.send_paused` audit record naming the paused level, while other routes on the chain keep
+sending and an already broadcast transaction still confirms. Snapshot the route's `sent` ids after
+the pause returns HTTP 200, then verify none were added:
 
 ```sh
 printf '%s' '{"scopes":["quotes","addresses","settlement","flush","refunds"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=route="$ROUTE" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' AND receipt->'binding'->>'route'=:'route' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
 cast call "$FACTORY" 'implementation()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 cast call "$IMPLEMENTATION" 'treasury()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 sleep 15
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-pause
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=route="$ROUTE" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' AND receipt->'binding'->>'route'=:'route' ORDER BY id; COMMIT;" > /tmp/sent-after-pause
 comm -13 /tmp/sent-before-pause /tmp/sent-after-pause > /tmp/new-sent-after-pause
 test ! -s /tmp/new-sent-after-pause
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=route="$ROUTE" <<'SQL'
@@ -42,11 +43,6 @@ WHERE action='flush.send_paused' AND created_at >= (
 COMMIT;
 SQL
 ```
-
-**Caveat ([#71](https://github.com/Phala-Network/crypto-topup-service/issues/71)):** a paused plan at
-the lowest nonce stalls every later flush on the chain, including other routes, until the pause is
-lifted; `main` has no supported command to void it. When the old and new factories share a chain
-and operator, keep the pause short or accept the chain-wide stall.
 
 If the current Safe or operator is suspected compromised, the Finance Safe revoking the operator
 role is the hard stop because it does not depend on the service:

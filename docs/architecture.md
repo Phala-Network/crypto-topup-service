@@ -272,7 +272,10 @@ balance ≥ `min_flush_atomic` and whose share of batch gas ≤ `max_gas_ratio` 
 *(policy)*; write `flushes(planned)`; send one `factory.flush(salts[], token)` under the
 operator nonce lock; replace with a higher fee on the same nonce if needed; confirm at
 `finalized`; write one `flushed` row per `Flushed` event in the receipt with its block number
-and log index. Deposits are then linked by the rule in §7, whatever their state. Recovery after a
+and log index. Deposits are then linked by the rule in §7, whatever their state. A plan whose
+route, product, or account has `flush` paused (§15) when it reaches the front of the operator's
+queue is voided unsigned; later plans move down onto its nonce, and its addresses are planned again
+once the pause lifts, so one pause never stalls the chain. Recovery after a
 crash is by `(operator, nonce)`: if consumed, locate the transaction and read its receipt;
 if reverted, mark the flush `reverted` and plan a new one with a fresh nonce; otherwise
 rebroadcast the same signed transaction. Gas is a service cost and never reduces credit.

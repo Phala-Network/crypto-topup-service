@@ -442,29 +442,65 @@ pub async fn next_planned_flush(
     row.map(parse_flush_row).transpose()
 }
 
-/// Records the first send-time pause observed for a planned flush.
-pub async fn record_flush_send_paused(
+/// Voids an unsigned plan held by a flush pause and moves later plans down onto its nonce.
+///
+/// The caller holds the operator nonce lock and the plan's row lock. The plan's addresses are
+/// planned again once the pause lifts, so a pause on one route, product, or account never holds
+/// the operator nonce needed by every later flush on the chain.
+pub async fn void_paused_plan(
     transaction: &mut Transaction<'_, Postgres>,
-    flush_id: Uuid,
-    route: &str,
-) -> Result<bool, sqlx::Error> {
-    let subject = flush_id.to_string();
-    let result = sqlx::query(
+    plan: &Flush,
+    paused: &str,
+) -> Result<(), sqlx::Error> {
+    let deleted = sqlx::query("DELETE FROM flushes WHERE id = $1 AND status = 'planned'")
+        .bind(plan.id)
+        .execute(&mut **transaction)
+        .await?;
+    require_one(deleted.rows_affected(), "planned flush was not available")?;
+    let chain_id = to_i64(plan.chain_id, "flushes.chain_id")?;
+    let operator = address_hex(plan.operator);
+    let later = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO audit (id, actor, action, subject, reason)
-        SELECT gen_random_uuid(), 'flusher', 'flush.send_paused', $1, $2
-        WHERE NOT EXISTS (
-            SELECT 1 FROM audit WHERE action = 'flush.send_paused' AND subject = $1
-        )
+        SELECT id
+        FROM flushes
+        WHERE chain_id = $1 AND operator = $2 AND status = 'planned' AND nonce > $3::text::numeric
+        ORDER BY nonce, id
+        FOR UPDATE
         "#,
     )
-    .bind(subject)
+    .bind(chain_id)
+    .bind(&operator)
+    .bind(plan.nonce.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut nonce = plan.nonce;
+    for id in &later {
+        sqlx::query("UPDATE flushes SET nonce = $2::text::numeric WHERE id = $1")
+            .bind(id)
+            .bind(nonce.to_string())
+            .execute(&mut **transaction)
+            .await?;
+        nonce = nonce.checked_add(1).ok_or_else(|| {
+            sqlx::Error::Protocol("flush nonce overflowed while voiding a plan".to_owned())
+        })?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO audit (id, actor, action, subject, reason)
+        VALUES ($1, 'flusher', 'flush.send_paused', $2, $3)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(plan.id.to_string())
     .bind(format!(
-        "route `{route}` or one of its planned accounts has the flush scope paused"
+        "voided unsigned plan at operator {operator} nonce {}: {paused} has the flush scope \
+         paused; {} later plan(s) moved down one nonce",
+        plan.nonce,
+        later.len()
     ))
     .execute(&mut **transaction)
     .await?;
-    Ok(result.rows_affected() == 1)
+    Ok(())
 }
 
 /// Marks a planned flush as sent before its raw transaction is broadcast.

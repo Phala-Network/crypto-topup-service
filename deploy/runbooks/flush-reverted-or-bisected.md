@@ -15,30 +15,32 @@ affected token/address set.
 ## First 5 minutes
 
 Pause the `flush` scope on the route. Since C7b (#70) this is a real stop for new sends: the planner
-skips paused addresses, and the sender re-checks the pause under the operator lock, leaves a paused
-plan `planned`, and records `flush.send_paused` in `audit`. A transaction already broadcast (`sent`)
-is not recalled; the flusher keeps confirming or replacing it. Take the `sent` snapshot only after
-the pause request returns HTTP 200. The sender re-checks the pause under the operator lock, so no
-new send should pass afterwards, while a legitimate send just before the pause would otherwise look
-like a failure. The one known exception is the first-ever pause of a route, whose `route_pauses` row
-does not exist yet for the sender to lock
-([#71](https://github.com/Phala-Network/crypto-topup-service/issues/71)); the check below catches it.
+skips paused addresses, and the sender re-checks the pause under the operator lock. Since #71 an
+unsigned plan covered by a route, product, or account `flush` pause is voided when the sender
+reaches it: the `planned` row is removed, one `flush.send_paused` audit row names the flush id and
+the paused level, later plans on the chain move down onto its nonce and keep sending, and the
+addresses are planned again after resume. A transaction already broadcast (`sent`) is not recalled;
+the flusher keeps confirming or replacing it. Take the `sent` snapshot only after the pause request
+returns HTTP 200. The sender re-checks the pause under the operator lock, including a route's first
+pause, so no new send for the route should pass afterwards, while a legitimate send just before the
+pause would otherwise look like a failure. Other routes on the same chain keep sending, so the
+snapshot is filtered to this route.
 
 ```sh
 printf '%s' '{"scopes":["flush"]}' > /tmp/pause.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=route="$ROUTE" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' AND receipt->'binding'->>'route'=:'route' ORDER BY id; COMMIT;" > /tmp/sent-before-pause
 ```
 
 After at least one flusher maintenance interval, verify that no new row became `sent` after the
-pause and read the pause time, the waiting plans, and their `flush.send_paused` audit rows.
+pause and read the pause time, the remaining plans, and the `flush.send_paused` audit rows.
 `flushes` has no creation timestamp, so the id snapshot is the comparison and the pause audit row
 supplies the time:
 
 ```sh
 sleep 15
-psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' ORDER BY id; COMMIT;" > /tmp/sent-after-pause
+psql "$DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=route="$ROUTE" <<< "BEGIN TRANSACTION READ ONLY; SELECT id FROM flushes WHERE chain_id=:chain_id AND status='sent' AND receipt->'binding'->>'route'=:'route' ORDER BY id; COMMIT;" > /tmp/sent-after-pause
 comm -13 /tmp/sent-before-pause /tmp/sent-after-pause > /tmp/new-sent-after-pause
 test ! -s /tmp/new-sent-after-pause
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" --set=route="$ROUTE" <<'SQL'
@@ -55,17 +57,9 @@ COMMIT;
 SQL
 ```
 
-The sent-id difference must be empty. The sender only ever tries the lowest-nonce plan, so expect
-one `flush.send_paused` record for the lowest-nonce paused plan, not one per plan; it is written
-once per flush id and is not repeated if an earlier pause already recorded that plan, so an empty
-result after this pause can be correct when an older row names the same plan.
-
-**Caveat ([#71](https://github.com/Phala-Network/crypto-topup-service/issues/71)):** the sender always
-takes the lowest-nonce plan for the chain and operator. A paused plan at the lowest nonce therefore
-stalls every later flush on that chain, including other routes and accounts, until the pause is
-lifted; `main` has no supported command to void such a plan. For a targeted stop of one account or
-product, pause before a plan containing it exists; if a paused plan already heads the queue, keep
-the stall short or accept it chain-wide.
+The sent-id difference must be empty. Expect one `flush.send_paused` row per plan of this route that
+the sender reached after the pause; plans of the route still `planned` are voided when the sender
+reaches them. An empty audit result is correct when the route had no plan queued.
 
 For an emergency chain-wide stop, including a suspected operator compromise, the Finance Safe
 revoking `OPERATOR_ROLE` remains the hard stop because it does not depend on the service:
@@ -112,7 +106,7 @@ exclusions in SQL.
 
 A new flush row confirms with finalized `Flushed` logs, unaffected addresses are processed, the
 isolated address balance is accounted for, and treasury delta equals stored events. After resume,
-no plan remains `planned` behind a `flush.send_paused` row and later nonces send again.
+the addresses of any voided plan are planned again and their new flush sends.
 
 ## Rollback
 

@@ -27,10 +27,8 @@ SQL
 
 If the balance cannot fund the next bounded attempt, pause the `flush` scope on every route of the
 chain with the signed request in [Flush reverted or bisected](flush-reverted-or-bisected.md) to
-prevent fee-estimation/send churn, and run its no-new-`sent` check. A paused plan at the lowest
-nonce holds every later flush on the chain
-([#71](https://github.com/Phala-Network/crypto-topup-service/issues/71)), which is acceptable here
-because the operator cannot pay for any of them. Revoke `OPERATOR_ROLE` through the Finance Safe
+prevent fee-estimation/send churn, and run its no-new-`sent` check for each route. Unsigned plans
+the sender reaches while paused are voided and planned again after resume. Revoke `OPERATOR_ROLE` through the Finance Safe
 only if unexpected spend points to a compromise.
 
 ## Decision tree
@@ -52,8 +50,8 @@ cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 ## Verification
 
 Both providers show the finalized balance and the pending nonce is expected. Resume the `flush`
-scope, then require flush maintenance to confirm or replace the existing row and send any plan that
-logged `flush.send_paused`.
+scope, then require flush maintenance to confirm or replace the existing row and send new plans for
+the addresses of any plan that logged `flush.send_paused`.
 
 ## Rollback
 
