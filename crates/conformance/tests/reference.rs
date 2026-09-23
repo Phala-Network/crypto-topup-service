@@ -3,7 +3,7 @@
 //! `PATH`; the anvil-backed tests are skipped with a message otherwise, unless
 //! `CONFORMANCE_REQUIRE_TOOLS=1`, which turns every skip into a failure.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
 use std::io::{BufRead as _, BufReader};
 use std::net::SocketAddr;
@@ -64,16 +64,28 @@ impl Anvil {
         let mut child = Command::new("anvil")
             .args(["--port", "0", "--chain-id", "31337"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("start anvil")?;
         let stdout = child.stdout.take().context("anvil stdout")?;
+        let stderr = child.stderr.take().context("anvil stderr")?;
         let mut anvil = Self {
             child,
             rpc_url: String::new(),
         };
+        // Both readers keep draining after start-up so anvil never blocks on a full pipe; the
+        // stderr reader returns its last lines at EOF for the start-up failure message.
+        let stderr_tail = std::thread::spawn(move || {
+            let mut tail = VecDeque::new();
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if tail.len() == 20 {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+            Vec::from(tail).join("\n")
+        });
         let (address_tx, address_rx) = std::sync::mpsc::channel();
-        // Keeps draining stdout after the address line so anvil never blocks on a full pipe.
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(address) = line.strip_prefix("Listening on ") {
@@ -83,14 +95,29 @@ impl Anvil {
         });
         let address = tokio::task::spawn_blocking(move || address_rx.recv_timeout(ANVIL_START))
             .await?
-            .context("anvil did not report its listening address")?;
-        anvil.rpc_url = format!("http://{address}");
+            .context("anvil did not report its listening address");
+        let error = match address {
+            Ok(address) => {
+                anvil.rpc_url = format!("http://{address}");
+                match anvil.wait_for_rpc().await {
+                    Ok(()) => return Ok(Some(anvil)),
+                    Err(error) => error,
+                }
+            }
+            Err(error) => error,
+        };
+        // Stopping anvil closes stderr, so the reader finishes with the complete tail.
+        drop(anvil);
+        let tail = stderr_tail.join().unwrap_or_default();
+        Err(error.context(format!("anvil stderr tail:\n{tail}")))
+    }
 
-        let rpc = Rpc::new(&anvil.rpc_url)?;
+    async fn wait_for_rpc(&self) -> Result<()> {
+        let rpc = Rpc::new(&self.rpc_url)?;
         let deadline = tokio::time::Instant::now() + ANVIL_START;
         loop {
             match rpc.chain_id().await {
-                Ok(_) => return Ok(Some(anvil)),
+                Ok(_) => return Ok(()),
                 Err(error) if tokio::time::Instant::now() >= deadline => {
                     return Err(error.context("anvil did not answer eth_chainId"));
                 }
