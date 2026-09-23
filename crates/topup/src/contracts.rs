@@ -54,10 +54,10 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
             if !checked.insert(key) {
                 continue;
             }
-            let label = routes.provider_label(route.chain.chain_id, index);
             let client = routes
                 .provider(route.chain.chain_id, index)
                 .map_err(|error| error.to_string())?;
+            let label = client.endpoint().provider().unwrap_or_default();
             verify_on(client, route)
                 .await
                 .map_err(|error| format!("route `{}` via `{label}`: {error}", route.route))?;

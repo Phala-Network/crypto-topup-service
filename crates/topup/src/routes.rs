@@ -9,9 +9,7 @@ use alloy_primitives::Address;
 use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::{ChainConfig, DestinationConfig, RouteFile, product_destination};
 
-use crate::rpc_provider::{
-    BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
-};
+use crate::rpc_provider::{configured_provider_url, provider_label};
 
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
@@ -29,13 +27,8 @@ pub struct RouteSet {
 struct ChainEntry {
     /// Chain settings of the first loaded route; every other route on the chain agrees.
     config: ChainConfig,
-    providers: Vec<ProviderEndpoint>,
-}
-
-/// One entry of a chain's `rpc_providers`, resolved when the route set is built.
-#[derive(Debug)]
-struct ProviderEndpoint {
-    client: Result<Arc<EvmClient>, ProviderError>,
+    /// One client per `rpc_providers` entry, or why the entry is unusable.
+    providers: Vec<Result<Arc<EvmClient>, ProviderError>>,
 }
 
 /// A provider entry that cannot be used.
@@ -140,7 +133,7 @@ impl RouteSet {
                     .rpc_providers
                     .iter()
                     .enumerate()
-                    .map(|(position, provider)| ProviderEndpoint::resolve(provider, position))
+                    .map(|(position, provider)| resolve_provider(provider, position))
                     .collect(),
             });
             let first = &chain.config;
@@ -200,24 +193,12 @@ impl RouteSet {
         self.chains.get(&chain_id).map(|chain| &chain.config)
     }
 
-    /// Returns the log-safe label of the provider at `index` in the chain's `rpc_providers`.
-    #[must_use]
-    pub fn provider_label(&self, chain_id: u64, index: usize) -> String {
-        self.chain(chain_id)
-            .and_then(|chain| chain.rpc_providers.get(index))
-            .map_or_else(
-                || format!("rpc_providers[{index}]"),
-                |provider| provider_label(provider, index),
-            )
-    }
-
     /// Returns the shared client of the provider at `index` in the chain's `rpc_providers`.
     pub fn provider(&self, chain_id: u64, index: usize) -> Result<&Arc<EvmClient>, ProviderError> {
         self.chains
             .get(&chain_id)
             .and_then(|chain| chain.providers.get(index))
             .ok_or(ProviderError::Unconfigured { chain_id, index })?
-            .client
             .as_ref()
             .map_err(Clone::clone)
     }
@@ -232,16 +213,13 @@ impl RouteSet {
     }
 }
 
-impl ProviderEndpoint {
-    fn resolve(provider: &str, index: usize) -> Self {
-        let label = provider_label(provider, index);
-        let client = match configured_provider_url(provider) {
-            Ok(url) => EvmClient::with_policy(&url, RPC_TIMEOUT, BALANCE_BATCH_SIZE)
-                .map(|client| Arc::new(client.with_provider(label.clone())))
-                .map_err(|_| ProviderError::InvalidUrl { label }),
-            Err(environment) => Err(ProviderError::MissingUrl { label, environment }),
-        };
-        Self { client }
+fn resolve_provider(provider: &str, index: usize) -> Result<Arc<EvmClient>, ProviderError> {
+    let label = provider_label(provider, index);
+    match configured_provider_url(provider) {
+        Ok(url) => EvmClient::new(&url)
+            .map(|client| Arc::new(client.with_provider(label.clone())))
+            .map_err(|_| ProviderError::InvalidUrl { label }),
+        Err(environment) => Err(ProviderError::MissingUrl { label, environment }),
     }
 }
 

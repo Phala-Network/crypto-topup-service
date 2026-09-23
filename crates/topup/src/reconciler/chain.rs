@@ -157,10 +157,9 @@ mod tests {
         });
         let secret = "rpc-secret-token";
         let chain = FinalizedReader::new(Arc::new(
-            EvmClient::with_policy(
+            EvmClient::with_timeout(
                 &format!("http://user:{secret}@{address}/rpc?api_key={secret}"),
                 Duration::from_secs(5),
-                10,
             )
             .expect("production adapter accepts URL"),
         ));

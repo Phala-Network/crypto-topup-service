@@ -16,7 +16,7 @@ use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
-use crate::routes::{ProviderError, RouteSet};
+use crate::routes::RouteSet;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
@@ -77,8 +77,8 @@ pub enum RefundObservation {
 pub enum RefundReadError {
     /// No RPC reader is configured for the chain.
     UnknownChain(u64),
-    /// A configured provider URL is invalid.
-    InvalidUrl(String),
+    /// The chain's provider A is unusable.
+    Configuration(String),
     /// The RPC request failed during the named operation.
     Rpc(&'static str),
     /// The RPC response omitted a required field.
@@ -91,7 +91,7 @@ impl Display for RefundReadError {
             Self::UnknownChain(chain_id) => {
                 write!(formatter, "no refund reader for chain {chain_id}")
             }
-            Self::InvalidUrl(error) => write!(formatter, "invalid refund RPC URL: {error}"),
+            Self::Configuration(error) => write!(formatter, "refund RPC configuration: {error}"),
             Self::Rpc(operation) => write!(formatter, "refund RPC failed during {operation}"),
             Self::MissingField(field) => write!(formatter, "refund RPC omitted `{field}`"),
         }
@@ -117,12 +117,9 @@ impl EvmRefundChainReader {
     pub fn from_routes(routes: &RouteSet) -> Result<Self, RefundReadError> {
         let mut clients = BTreeMap::new();
         for chain_id in routes.chain_ids() {
-            let client = routes.provider(chain_id, 0).map_err(|error| match error {
-                ProviderError::InvalidUrl { .. } => RefundReadError::InvalidUrl(error.to_string()),
-                ProviderError::MissingUrl { .. } | ProviderError::Unconfigured { .. } => {
-                    RefundReadError::MissingField("refund RPC environment")
-                }
-            })?;
+            let client = routes
+                .provider(chain_id, 0)
+                .map_err(|error| RefundReadError::Configuration(error.to_string()))?;
             clients.insert(chain_id, Arc::clone(client));
         }
         Ok(Self::new(clients))

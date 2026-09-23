@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     fn client(url: &str, timeout: Duration) -> Arc<EvmClient> {
-        Arc::new(EvmClient::with_policy(url, timeout, 1).expect("test URL parses"))
+        Arc::new(EvmClient::with_timeout(url, timeout).expect("test URL parses"))
     }
 
     #[test]

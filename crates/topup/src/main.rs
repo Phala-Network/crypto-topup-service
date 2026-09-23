@@ -723,12 +723,15 @@ async fn run(args: &RunArgs) -> ExitCode {
     });
     for worker in 0..PUMPS {
         let worker_pump = pump.clone();
-        tasks.spawn("deposit pump", |cancellation| async move {
-            tracing::info!(worker, "deposit pump started");
-            worker_pump
-                .run_with_instance(worker.to_string(), cancellation)
-                .await;
-        });
+        tasks.spawn(
+            format!("deposit pump {worker}"),
+            |cancellation| async move {
+                tracing::info!(worker, "deposit pump started");
+                worker_pump
+                    .run_with_instance(worker.to_string(), cancellation)
+                    .await;
+            },
+        );
     }
     let age_alerter = AgeAlerter::with_reminder_interval(
         pool.clone(),
@@ -760,7 +763,9 @@ async fn run(args: &RunArgs) -> ExitCode {
         delivery_worker.run(cancellation).await;
     });
     for task in flusher_tasks {
-        tasks.spawn("flusher", |cancellation| task.run(cancellation));
+        tasks.spawn(format!("flusher {}", task.instance()), |cancellation| {
+            task.run(cancellation)
+        });
     }
     tasks.spawn("reconciler", |cancellation| async move {
         reconciler
@@ -901,7 +906,7 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
 /// A task that exits before shutdown stops the service: `run` then cancels the rest.
 struct ServiceTasks {
     set: JoinSet<Result<(), String>>,
-    names: HashMap<tokio::task::Id, &'static str>,
+    names: HashMap<tokio::task::Id, String>,
     cancellation: CancellationToken,
 }
 
@@ -935,18 +940,18 @@ impl ServiceTasks {
         self.cancellation.clone()
     }
 
-    fn spawn<F>(&mut self, name: &'static str, task: impl FnOnce(CancellationToken) -> F)
+    fn spawn<F>(&mut self, name: impl Into<String>, task: impl FnOnce(CancellationToken) -> F)
     where
         F: Future + Send + 'static,
         F::Output: TaskOutcome,
     {
         let task = task(self.cancellation.clone());
         let handle = self.set.spawn(async move { task.await.into_outcome() });
-        self.names.insert(handle.id(), name);
+        self.names.insert(handle.id(), name.into());
     }
 
-    fn name(&self, id: tokio::task::Id) -> &'static str {
-        self.names.get(&id).copied().unwrap_or("unknown")
+    fn name(&self, id: tokio::task::Id) -> &str {
+        self.names.get(&id).map_or("unknown", String::as_str)
     }
 
     /// Waits for the first task to exit and reports it.

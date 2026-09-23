@@ -1,13 +1,5 @@
 //! Shared RPC provider-id configuration.
 
-use std::time::Duration;
-
-/// Timeout for each chain RPC request of the flusher, reconciler, and daily report.
-pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Maximum addresses in one balance or code JSON-RPC batch.
-pub(crate) const BALANCE_BATCH_SIZE: usize = 500;
-
 /// Resolves either an inline HTTP URL or a provider id through its environment variable.
 pub(crate) fn configured_provider_url(provider: &str) -> Result<String, String> {
     if provider.contains("://") {

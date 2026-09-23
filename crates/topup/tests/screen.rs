@@ -429,5 +429,5 @@ fn wait_steps() -> StepSet {
 }
 
 fn client(rpc_url: &str, timeout: StdDuration) -> Result<Arc<EvmClient>> {
-    Ok(Arc::new(EvmClient::with_policy(rpc_url, timeout, 1)?))
+    Ok(Arc::new(EvmClient::with_timeout(rpc_url, timeout)?))
 }

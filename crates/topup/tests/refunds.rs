@@ -848,10 +848,9 @@ async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Re
     });
     let reader = EvmRefundChainReader::new(BTreeMap::from([(
         1,
-        Arc::new(EvmClient::with_policy(
+        Arc::new(EvmClient::with_timeout(
             &format!("http://{address}"),
             StdDuration::from_millis(50),
-            10,
         )?),
     )]));
     let route = route_fixture();

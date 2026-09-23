@@ -66,6 +66,12 @@ impl FlusherTask {
         self
     }
 
+    /// Returns `{chain_id}:{route}`, the task's loop instance and log name.
+    #[must_use]
+    pub fn instance(&self) -> String {
+        format!("{}:{}", self.route.chain.chain_id, self.route.route)
+    }
+
     /// Runs startup recovery, scheduled planning, and periodic lifecycle maintenance.
     ///
     /// New flushes are planned and sent only while the configured operator holds
@@ -74,7 +80,7 @@ impl FlusherTask {
     /// checked on every maintenance tick, the first of which is immediate; without it, the task
     /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
-        let instance = format!("{}:{}", self.route.chain.chain_id, self.route.route);
+        let instance = self.instance();
         crate::observability::register_loop("flusher", instance.clone());
         crate::observability::heartbeat("flusher", instance.clone());
         let mut authorized = false;

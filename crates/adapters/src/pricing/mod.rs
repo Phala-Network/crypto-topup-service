@@ -43,7 +43,7 @@ pub enum PriceError {
     InvalidPrice,
     /// The observation timestamp was outside the supported Unix range.
     InvalidTimestamp,
-    /// No source is configured for the requested asset identifier.
+    /// No Coin Metrics source is configured for the requested asset identifier.
     UnconfiguredAsset(String),
 }
 
@@ -63,7 +63,9 @@ impl Display for PriceError {
             Self::InvalidTimestamp => {
                 formatter.write_str("price provider returned an invalid timestamp")
             }
-            Self::UnconfiguredAsset(asset) => write!(formatter, "no price source for `{asset}`"),
+            Self::UnconfiguredAsset(asset) => {
+                write!(formatter, "no Coin Metrics source for `{asset}`")
+            }
         }
     }
 }

@@ -51,7 +51,7 @@ mod tests {
                 .expect("route fixture parses");
         let chain_id = route.chain.chain_id;
         let chain = FinalizedReader::new(Arc::new(
-            EvmClient::with_policy(&rpc_url, Duration::from_secs(5), 10)
+            EvmClient::with_timeout(&rpc_url, Duration::from_secs(5))
                 .expect("production adapter accepts URL")
                 .with_provider("provider-a"),
         ));

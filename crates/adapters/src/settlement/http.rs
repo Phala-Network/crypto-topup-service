@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use topup_core::{SETTLEMENT_KEY_DOMAIN, SignerError};
 
-use crate::http_signature::{self, SignError};
+use crate::http_signature;
 use crate::redaction::{Redacted, RedactedTransportError};
 use crate::signer::actor::SignerHandle;
 
@@ -176,7 +176,10 @@ impl SettlementClient {
         if request_timeout.is_zero() {
             return Err(SettlementClientError::InvalidEndpoint);
         }
-        if keyid.is_empty() || http_signature::structured_string(&keyid).is_err() {
+        if keyid.is_empty()
+            || keyid.contains(['"', '\\'])
+            || http_signature::structured_string(&keyid).is_none()
+        {
             return Err(SettlementClientError::InvalidEndpoint);
         }
         let endpoint =
@@ -214,7 +217,7 @@ impl SettlementClient {
         options: SigningOptions,
     ) -> Result<Request, SettlementClientError> {
         let idempotency_key = http_signature::structured_string(key)
-            .map_err(|_| SettlementClientError::InvalidIdempotencyKey)?;
+            .ok_or(SettlementClientError::InvalidIdempotencyKey)?;
         let content_digest = http_signature::content_digest(&body);
         let components = http_signature::Components {
             method: method.as_str(),
@@ -224,20 +227,18 @@ impl SettlementClient {
                 .cover_idempotency_key
                 .then_some(idempotency_key.as_str()),
         };
-        let headers = http_signature::sign(&self.signer, &components, options.created, &self.keyid)
-            .await
-            .map_err(|error| match error {
-                SignError::Signer(error) => SettlementClientError::Signer(error),
-                SignError::InvalidInput => SettlementClientError::InvalidIdempotencyKey,
-            })?;
+        let (signature_input, signature) =
+            http_signature::sign(&self.signer, &components, options.created, &self.keyid)
+                .await
+                .map_err(SettlementClientError::Signer)?;
 
         let mut request = self
             .client
             .request(method, url)
             .header("content-digest", content_digest)
             .header("idempotency-key", idempotency_key)
-            .header("signature-input", headers.signature_input)
-            .header("signature", headers.signature)
+            .header("signature-input", signature_input)
+            .header("signature", signature)
             .body(body);
         if include_content_type {
             request = request.header("content-type", "application/json");
@@ -470,39 +471,11 @@ fn unix_timestamp() -> Result<i64, SettlementClientError> {
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
-    use ed25519_dalek::{Signer as _, SigningKey};
+    use ed25519_dalek::SigningKey;
+    use topup_core::SecretKey32;
 
     use super::*;
-
-    struct FixedSigner(SigningKey);
-
-    impl topup_core::Signer for FixedSigner {
-        async fn sign_operator_tx(
-            &self,
-            _tx: topup_core::TxRequest,
-        ) -> Result<topup_core::SignedTx, SignerError> {
-            Err(SignerError::SigningFailed)
-        }
-
-        async fn sign_settlement(
-            &self,
-            payload: &[u8],
-        ) -> Result<topup_core::Ed25519Signature, SignerError> {
-            Ok(topup_core::Ed25519Signature(
-                self.0.sign(payload).to_bytes(),
-            ))
-        }
-
-        async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
-            Err(SignerError::KeyUnavailable)
-        }
-
-        async fn settlement_public_key(&self) -> Result<topup_core::Ed25519PublicKey, SignerError> {
-            Ok(topup_core::Ed25519PublicKey(
-                self.0.verifying_key().to_bytes(),
-            ))
-        }
-    }
+    use crate::signer::DevSigner;
 
     fn fixture_vector(name: &str, request: &Request) -> serde_json::Value {
         let headers = [
@@ -540,7 +513,7 @@ mod tests {
         let key = SigningKey::from_bytes(&[11; 32]);
         let public_key = STANDARD.encode(key.verifying_key().as_bytes());
         let signer = SignerHandle::spawn(
-            FixedSigner(key),
+            DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([11; 32])),
             std::num::NonZeroUsize::new(2).expect("non-zero queue"),
             Duration::from_secs(5),
         )

@@ -78,8 +78,6 @@ pub struct FinalizedHead {
 pub enum ChainError {
     /// The configured provider URL is invalid.
     InvalidUrl,
-    /// The request timeout or batch size is zero.
-    InvalidPolicy,
     /// The provider returned an RPC failure during the named operation.
     Rpc(&'static str),
     /// The provider transport failed without exposing its configured URL.
@@ -118,9 +116,6 @@ impl Display for ChainError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUrl => formatter.write_str("invalid RPC URL"),
-            Self::InvalidPolicy => {
-                formatter.write_str("RPC timeout and balance batch size must be positive")
-            }
             Self::Rpc(operation) => {
                 write!(formatter, "EVM RPC request failed during {operation}")
             }
@@ -246,10 +241,10 @@ impl BlockTimes {
     }
 }
 
-/// Default timeout for one bounded RPC request.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default maximum calls in one JSON-RPC batch.
-pub const DEFAULT_BATCH_SIZE: usize = 500;
+/// Timeout for one bounded RPC request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum calls in one JSON-RPC batch.
+const BATCH_SIZE: usize = 500;
 
 /// Alloy HTTP client for one RPC provider of one chain, shared by every consumer.
 ///
@@ -261,7 +256,6 @@ pub struct EvmClient {
     provider: RootProvider,
     endpoint: Redacted,
     request_timeout: Duration,
-    batch_size: usize,
 }
 
 impl fmt::Debug for EvmClient {
@@ -270,32 +264,23 @@ impl fmt::Debug for EvmClient {
             .debug_struct("EvmClient")
             .field("endpoint", &self.endpoint)
             .field("request_timeout", &self.request_timeout)
-            .field("batch_size", &self.batch_size)
             .finish_non_exhaustive()
     }
 }
 
 impl EvmClient {
-    /// Creates a client with the default request timeout and batch size.
+    /// Creates a client with the production request timeout.
     pub fn new(rpc_url: &str) -> Result<Self, ChainError> {
-        Self::with_policy(rpc_url, DEFAULT_REQUEST_TIMEOUT, DEFAULT_BATCH_SIZE)
+        Self::with_timeout(rpc_url, REQUEST_TIMEOUT)
     }
 
-    /// Creates a client with an explicit request timeout and maximum batch size.
-    pub fn with_policy(
-        rpc_url: &str,
-        request_timeout: Duration,
-        batch_size: usize,
-    ) -> Result<Self, ChainError> {
-        if request_timeout.is_zero() || batch_size == 0 {
-            return Err(ChainError::InvalidPolicy);
-        }
+    /// Creates a client with an explicit request timeout, for tests.
+    pub fn with_timeout(rpc_url: &str, request_timeout: Duration) -> Result<Self, ChainError> {
         let endpoint = Redacted::parse(rpc_url).map_err(|_| ChainError::InvalidUrl)?;
         Ok(Self {
             provider: RootProvider::new_http(endpoint.expose().clone()),
             endpoint,
             request_timeout,
-            batch_size,
         })
     }
 
@@ -322,14 +307,24 @@ impl EvmClient {
         ChainError::Transport(self.endpoint.rpc_error(operation, error))
     }
 
+    /// Applies the request timeout, leaving the node's own answer to the caller.
+    async fn within<T>(
+        &self,
+        operation: &'static str,
+        request: impl IntoFuture<Output = Result<T, TransportError>>,
+    ) -> Result<Result<T, TransportError>, ChainError> {
+        timeout(self.request_timeout, request)
+            .await
+            .map_err(|_| ChainError::Transport(self.endpoint.timeout_error(operation)))
+    }
+
     async fn bounded<T>(
         &self,
         operation: &'static str,
         request: impl IntoFuture<Output = Result<T, TransportError>>,
     ) -> Result<T, ChainError> {
-        timeout(self.request_timeout, request)
-            .await
-            .map_err(|_| ChainError::Transport(self.endpoint.timeout_error(operation)))?
+        self.within(operation, request)
+            .await?
             .map_err(|error| self.transport(operation, &error))
     }
 
@@ -364,7 +359,7 @@ impl EvmClient {
         decode: impl Fn(&[u8]) -> Result<T, String>,
     ) -> Result<Vec<T>, ChainError> {
         let mut result = Vec::with_capacity(items.len());
-        for chunk in items.chunks(self.batch_size) {
+        for chunk in items.chunks(BATCH_SIZE) {
             let params = chunk
                 .iter()
                 .map(|item| {
@@ -409,7 +404,7 @@ impl EvmClient {
     /// Reads latest native balances in bounded JSON-RPC batches.
     pub async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
         let mut result = Vec::with_capacity(addresses.len());
-        for chunk in addresses.chunks(self.batch_size) {
+        for chunk in addresses.chunks(BATCH_SIZE) {
             let params = chunk
                 .iter()
                 .map(|address| {
@@ -501,24 +496,19 @@ impl EvmClient {
             .from(from)
             .to(to)
             .input(TransactionInput::new(input));
-        match timeout(self.request_timeout, self.provider.estimate_gas(tx)).await {
-            Err(_) => Err(ChainError::Transport(
-                self.endpoint.timeout_error("eth_estimateGas"),
-            )),
-            Ok(Ok(gas)) => Ok(gas),
-            Ok(Err(error)) => {
+        let operation = "eth_estimateGas";
+        self.within(operation, self.provider.estimate_gas(tx))
+            .await?
+            .map_err(|error| {
                 if error
                     .as_error_resp()
                     .is_some_and(|payload| is_execution_revert(&payload.message))
                 {
-                    Err(ChainError::EstimationRevert(
-                        self.endpoint.rpc_error("eth_estimateGas", &error),
-                    ))
+                    ChainError::EstimationRevert(self.endpoint.rpc_error(operation, &error))
                 } else {
-                    Err(self.transport("eth_estimateGas", &error))
+                    self.transport(operation, &error)
                 }
-            }
-        }
+            })
     }
 
     /// Returns the account's nonce including pending transactions.
@@ -568,24 +558,20 @@ impl EvmClient {
 
     /// Broadcasts a signed EIP-2718 transaction; a node that already knows it is success.
     pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, ChainError> {
-        match timeout(
-            self.request_timeout,
-            self.provider.send_raw_transaction(raw),
-        )
-        .await
+        let operation = "send raw transaction";
+        match self
+            .within(operation, self.provider.send_raw_transaction(raw))
+            .await?
         {
-            Err(_) => Err(ChainError::Transport(
-                self.endpoint.timeout_error("send raw transaction"),
-            )),
-            Ok(Ok(pending)) => Ok(*pending.tx_hash()),
-            Ok(Err(error))
+            Ok(pending) => Ok(*pending.tx_hash()),
+            Err(error)
                 if error
                     .as_error_resp()
                     .is_some_and(|payload| is_already_known(&payload.message)) =>
             {
                 Ok(alloy::primitives::keccak256(raw))
             }
-            Ok(Err(error)) => Err(self.transport("send raw transaction", &error)),
+            Err(error) => Err(self.transport(operation, &error)),
         }
     }
 
@@ -1017,17 +1003,11 @@ mod tests {
     }
 
     #[test]
-    fn configuration_rejects_zero_policies_and_never_echoes_the_url() {
+    fn configuration_never_echoes_an_invalid_url() {
         let secret = "not a url with api-key=secret";
         let error = EvmClient::new(secret).expect_err("invalid URL must fail");
         assert_eq!(error, ChainError::InvalidUrl);
         assert!(!error.to_string().contains(secret));
-        for (timeout, batch_size) in [(Duration::ZERO, 1), (DEFAULT_REQUEST_TIMEOUT, 0)] {
-            assert_eq!(
-                EvmClient::with_policy("http://127.0.0.1:8545", timeout, batch_size).map(|_| ()),
-                Err(ChainError::InvalidPolicy)
-            );
-        }
     }
 
     #[tokio::test]

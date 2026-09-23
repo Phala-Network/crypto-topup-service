@@ -461,10 +461,9 @@ async fn timed_out_rpc_does_not_hold_the_operator_lock() -> Result<()> {
                 }
             });
             let route = test_route(Address::from([1; 20]), Address::from([2; 20]))?;
-            let chain = Arc::new(EvmClient::with_policy(
+            let chain = Arc::new(EvmClient::with_timeout(
                 &endpoint,
                 StdDuration::from_millis(50),
-                10,
             )?);
             let signer = signer_handle(OPERATOR_KEY)?;
             let flusher = Flusher::new(
