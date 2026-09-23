@@ -1,5 +1,7 @@
 //! PostgreSQL and Anvil integration coverage for the C5 screen step.
 
+mod support;
+
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
@@ -59,6 +61,7 @@ impl TestContext {
             .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
+        support::ensure_app_role(&admin_pool).await?;
         sqlx::query("SELECT pg_advisory_lock(704_205_001)")
             .execute(&admin_pool)
             .await?;
