@@ -167,8 +167,10 @@ impl ProviderHealth {
     }
 }
 
-/// Bounded block-timestamp cache keyed by block hash, so a reorged block at the same height never
-/// lends its time to a log from another block. Evicts the oldest insertion when full.
+/// Bounded FIFO block-timestamp cache keyed by block hash, so a reorged block at the same height
+/// never lends its time to a log from another block. It evicts the oldest insertion, not the least
+/// recently used entry: a hash's time never changes, and the head scan reads the newest blocks,
+/// which are the newest insertions, so recency tracking would buy nothing.
 #[derive(Debug, Default)]
 struct BlockTimes {
     times: HashMap<B256, DateTime<Utc>>,

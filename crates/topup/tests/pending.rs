@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use axum::body::to_bytes;
@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
-use topup::db::{NewAccount, NewProduct};
+use topup::db::{NewAccount, NewPendingTransfer, NewProduct};
 use topup::locks::QuoteProvider;
 use topup::locks::pricing::ValidatedQuote;
 use topup::scanner::{configure_routes, head_scan_once, scan_once};
@@ -278,7 +278,10 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         );
     }
 
-    // Once a deposit consumed the lock, that deposit is shown, whatever else arrived.
+    // Once a deposit consumed the lock, that deposit is shown, whatever else arrived. The
+    // underpayment is marked as the consumer by hand: an artificial state (the pump would consume
+    // with the exact payment) used only to show the consuming deposit wins over the first
+    // qualifying one.
     anvil.mine(FINALITY_LAG)?;
     scan_once(pool, &reader, &chain_routes).await?;
     let underpayment: Uuid = sqlx::query_scalar(
@@ -438,6 +441,34 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
         "expected only the recently requested persistent address, got {} addresses",
         persistent.len()
     );
+
+    // A head scan from a provider that lags behind a stored row leaves the row alone; the next
+    // scan whose range covers it and does not see it removes it.
+    let address_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM addresses WHERE address = '0x0000000000000000000000000000000000000000'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let row = NewPendingTransfer {
+        chain_id: CHAIN_ID,
+        tx_hash: B256::repeat_byte(0x51),
+        log_index: 0,
+        block_number: 50,
+        block_hash: B256::repeat_byte(0x52),
+        block_time: Utc::now(),
+        address_id,
+        asset_contract: Address::repeat_byte(0x53),
+        from_address: Address::repeat_byte(0x54),
+        amount_atomic: AtomicAmount::new(U256::from(1_u64)),
+    };
+    topup::db::commit_head_scan(pool, CHAIN_ID, 10, 60, std::slice::from_ref(&row)).await?;
+    let lagging = topup::db::commit_head_scan(pool, CHAIN_ID, 10, 40, &[]).await?;
+    ensure!(
+        lagging.removed == 0,
+        "a lagging head deleted a row above it"
+    );
+    let covering = topup::db::commit_head_scan(pool, CHAIN_ID, 10, 60, &[]).await?;
+    ensure!(covering.removed == 1, "an unseen row in range was kept");
     Ok(())
 }
 
