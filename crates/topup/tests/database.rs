@@ -409,6 +409,92 @@ async fn application_role_can_read_but_cannot_mutate_migration_history() -> Resu
     .await
 }
 
+/// Mirrors the grants table in `crates/topup/migrations/README.md`; grants come from default
+/// privileges, so a new table must be listed here with its intended privileges.
+const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
+    ("transitions", &["SELECT", "INSERT"]),
+    ("audit", &["SELECT", "INSERT"]),
+    ("reconciliation_findings", &["SELECT", "INSERT"]),
+    ("heartbeat", &["SELECT", "INSERT"]),
+    ("reconciliation_blocks", &["SELECT", "INSERT"]),
+    (
+        "reconciliation_deposit_cursors",
+        &["SELECT", "INSERT", "UPDATE"],
+    ),
+    (
+        "reconciliation_custody_cursors",
+        &["SELECT", "INSERT", "UPDATE"],
+    ),
+    ("_sqlx_migrations", &["SELECT"]),
+    ("products", OPERATIONAL),
+    ("accounts", OPERATIONAL),
+    ("route_pauses", OPERATIONAL),
+    ("seen_signatures", OPERATIONAL),
+    ("addresses", OPERATIONAL),
+    ("cursors", OPERATIONAL),
+    ("pending_transfers", OPERATIONAL),
+    ("flushes", OPERATIONAL),
+    ("flushed", OPERATIONAL),
+    ("flush_exclusions", OPERATIONAL),
+    ("deposits", OPERATIONAL),
+    ("rate_locks", OPERATIONAL),
+    ("lock_exposure", OPERATIONAL),
+    ("settlements", OPERATIONAL),
+    ("outbox", OPERATIONAL),
+    ("refunds", OPERATIONAL),
+    ("refund_payment_claims", OPERATIONAL),
+];
+const OPERATIONAL: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE"];
+
+#[tokio::test]
+async fn application_role_privileges_match_the_documented_grants() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let tables: Vec<String> = sqlx::query_scalar(
+                "SELECT tablename::text FROM pg_tables WHERE schemaname = 'public' ORDER BY 1",
+            )
+            .fetch_all(&context.owner_pool)
+            .await?;
+            let documented: BTreeMap<&str, &[&str]> = DOCUMENTED_GRANTS.iter().copied().collect();
+            ensure!(documented.len() == DOCUMENTED_GRANTS.len(), "duplicate documented table");
+            let mut listed: Vec<&str> = documented.keys().copied().collect();
+            listed.sort_unstable();
+            ensure!(
+                tables == listed,
+                "public tables differ from the documented grants: tables={tables:?} documented={listed:?}"
+            );
+
+            for table in &tables {
+                let expected = documented
+                    .get(table.as_str())
+                    .context("documented table")?;
+                for privilege in [
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "REFERENCES",
+                    "TRIGGER",
+                ] {
+                    let granted: bool =
+                        sqlx::query_scalar("SELECT has_table_privilege('topup_app', $1, $2)")
+                            .bind(format!("public.{table}"))
+                            .bind(privilege)
+                            .fetch_one(&context.owner_pool)
+                            .await?;
+                    ensure!(
+                        granted == expected.contains(&privilege),
+                        "topup_app {privilege} on {table}: granted={granted}"
+                    );
+                }
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() -> Result<()> {
     with_database(|context| {

@@ -23,10 +23,12 @@ the owner creates; no application table grants `TRUNCATE`. The initial schema na
 | `reconciliation_blocks` | `SELECT`, `INSERT` |
 | `reconciliation_deposit_cursors`, `reconciliation_custody_cursors` | `SELECT`, `INSERT`, `UPDATE` |
 | `_sqlx_migrations` | `SELECT` |
-| every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
+| `products`, `accounts`, `route_pauses`, `seen_signatures`, `addresses`, `cursors`, `pending_transfers`, `flushes`, `flushed`, `flush_exclusions`, `deposits`, `rate_locks`, `lock_exposure`, `settlements`, `outbox`, `refunds`, `refund_payment_claims` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
 A migration adding a table that should not get the full operational grant must narrow it in the
-same migration. `topup_app` also has `USAGE, SELECT` on `heartbeat_id_seq`.
+same migration. `topup_app` also has `USAGE, SELECT` on `heartbeat_id_seq`. The database test
+`application_role_privileges_match_the_documented_grants` checks every `public` table against this
+table, so a new table fails it until it is listed here and in the test.
 
 A repeated reconciliation block is ignored, and an update could rewrite a block's scope or chain,
 so only the database owner can change or lift a block. A `chain` block written by the
