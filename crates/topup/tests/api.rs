@@ -15,12 +15,12 @@ use serde_json::{Value, json};
 use sqlx::Row;
 #[cfg(feature = "dev-signer")]
 use topup::api::models::AttestationResponse;
-use topup::api::{AppState, Attestor, PublicOrigin, UnavailableAttestor, VerificationKey};
+use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 #[cfg(feature = "dev-signer")]
-use topup_adapters::attestation::report_data;
+use topup_adapters::attestation::{DstackAttestor, report_data};
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::deposit::DepositState;
@@ -875,7 +875,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
 }
 
 fn app_state(pool: sqlx::PgPool, admin_key: &SigningKey) -> AppState {
-    app_state_with_attestor(pool, admin_key, Arc::new(UnavailableAttestor))
+    app_state_with_attestor(pool, admin_key, Arc::new(DstackAttestor::new()))
 }
 
 fn app_state_with_attestor(

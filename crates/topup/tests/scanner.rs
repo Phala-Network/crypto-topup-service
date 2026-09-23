@@ -19,8 +19,8 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
 use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
-use topup::pump::{NoopStepSet, Pump, PumpConfig, RunOnceResult, Step};
-use topup::scanner::{load_route_files, scan_once};
+use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
+use topup::scanner::{ChainRoutes, configure_routes, scan_once};
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
 use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
@@ -378,6 +378,15 @@ impl RouteFixture {
     }
 }
 
+/// Loads a route file through the same validation and grouping `topup run` uses.
+fn scanner_route(path: &Path) -> Result<ChainRoutes> {
+    let route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(path)?)?;
+    configure_routes(&[route])?
+        .into_iter()
+        .next()
+        .context("one chain route")
+}
+
 impl Drop for RouteFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -469,10 +478,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     anvil.mine(2)?;
 
     let route_fixture = RouteFixture::create(supported_token)?;
-    let routes = load_route_files(std::slice::from_ref(&route_fixture.path))?
-        .into_iter()
-        .next()
-        .context("one chain route")?;
+    let routes = scanner_route(&route_fixture.path)?;
     let reader = EvmChain::new(&anvil.rpc_url)?;
     let expected_cursor = reader.finalized_head().await?;
     let first = scan_once(&database.app_pool, &reader, &routes).await?;
@@ -613,10 +619,7 @@ async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
         .await?;
 
     let route_fixture = RouteFixture::create(token)?;
-    let routes = load_route_files(std::slice::from_ref(&route_fixture.path))?
-        .into_iter()
-        .next()
-        .context("one chain route")?;
+    let routes = scanner_route(&route_fixture.path)?;
     let reader = BackfillReader::new(recipient, token, 2);
 
     ensure!(
@@ -667,10 +670,7 @@ async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
         .await?;
 
     let route_fixture = RouteFixture::create(token)?;
-    let routes = load_route_files(std::slice::from_ref(&route_fixture.path))?
-        .into_iter()
-        .next()
-        .context("one chain route")?;
+    let routes = scanner_route(&route_fixture.path)?;
     let reader = RecordingReader::new(4_001);
     let stats = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(stats.cursor == 4_001);
@@ -733,10 +733,7 @@ async fn run_confirm_scenario(
     primary_anvil.mine(2)?;
 
     let fixture = RouteFixture::create(token)?;
-    let scanner_routes = load_route_files(std::slice::from_ref(&fixture.path))?
-        .into_iter()
-        .next()
-        .context("one scanner route")?;
+    let scanner_routes = scanner_route(&fixture.path)?;
     let scanner_reader = EvmChain::new(&primary_anvil.rpc_url)?;
     ensure!(
         scan_once(&database.app_pool, &scanner_reader, &scanner_routes)
@@ -768,7 +765,7 @@ async fn run_confirm_scenario(
     );
     let pump = Pump::new(
         database.app_pool.clone(),
-        Arc::new(NoopStepSet::build().with_detected(Box::new(confirm))),
+        Arc::new(wait_steps().with_detected(Box::new(confirm))),
         PumpConfig::default(),
     )?;
     let confirmed_id: Uuid = sqlx::query_scalar("SELECT id FROM deposits LIMIT 1")
@@ -1165,4 +1162,28 @@ async fn remove_insert_failure(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Leaves every deposit waiting so only the step under test advances state.
+struct WaitStep;
+
+#[async_trait]
+impl Step for WaitStep {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        StepResult::new(
+            StepOutcome::Wait {
+                reason: WaitReason::Paused,
+            },
+            serde_json::json!({"outcome": "wait"}),
+        )
+    }
+}
+
+fn wait_steps() -> StepSet {
+    StepSet::new(
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+        Box::new(WaitStep),
+    )
 }

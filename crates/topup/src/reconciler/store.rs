@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::db::{Deposit, OutboxEvent};
 
-use super::{Finding, ReconciliationError, ReconciliationMetrics};
+use super::types::record_mismatch;
+use super::{Finding, ReconciliationError};
 
 /// Persists a finding once and returns whether this call inserted it.
 ///
@@ -20,7 +21,6 @@ use super::{Finding, ReconciliationError, ReconciliationMetrics};
 pub(crate) async fn persist_finding(
     pool: &PgPool,
     finding: &Finding,
-    metrics: &ReconciliationMetrics,
 ) -> Result<bool, ReconciliationError> {
     let mut transaction = pool.begin().await?;
     let inserted = sqlx::query(
@@ -72,7 +72,7 @@ pub(crate) async fn persist_finding(
     }
     transaction.commit().await?;
     if inserted && !finding.repair_applied {
-        metrics.record_mismatch(finding.check);
+        record_mismatch(finding.check);
     }
     Ok(inserted)
 }
