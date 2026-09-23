@@ -30,6 +30,7 @@ use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use crate::db::{self, ApplyTransitionError, ApplyTransitionResult, ScanAddress};
+use crate::locks::{self, RateLockError};
 use crate::pump::StepResult;
 use crate::scanner::{
     ChainRoutes, MAX_SCAN_WINDOW, ScannerError, configure_routes, resolve_logs_for_reconciliation,
@@ -51,13 +52,14 @@ const LOOP_NAME: &str = "reconciler";
 const LOOP_INSTANCE: &str = "0";
 
 /// Order in which a round runs its checks; derivation runs first so a freeze lands early.
-const REGULAR_CHECKS: [CheckName; 6] = [
+const REGULAR_CHECKS: [CheckName; 7] = [
     CheckName::AddressDerivation,
     CheckName::MissingDeposit,
     CheckName::SentSettlement,
     CheckName::CreditRecomputation,
     CheckName::MissingFlushLink,
     CheckName::CustodyBalance,
+    CheckName::LockExposure,
 ];
 
 /// Reconciliation failure which prevents one check or one subject from completing.
@@ -330,6 +332,9 @@ impl Reconciler {
     }
 
     /// Runs one check without persisting its findings.
+    ///
+    /// Safe repairs still apply: `missing_deposit`, `missing_flush_link`, `sent_settlement`,
+    /// and `lock_exposure` write the ledger exactly as a full round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
         let mut findings = Vec::new();
         self.run_check(check, &mut FinalizedHeads::new(), &mut findings)
@@ -397,6 +402,7 @@ impl Reconciler {
             CheckName::MissingFlushLink => self.missing_flush_links(findings).await,
             CheckName::CustodyBalance => self.custody_balances(heads, findings).await,
             CheckName::PostRestoreSettlement => self.post_restore_settlements(findings).await,
+            CheckName::LockExposure => self.lock_exposure(findings).await,
         }
     }
 
@@ -1037,6 +1043,34 @@ impl Reconciler {
                     false,
                 )?);
             }
+        }
+        Ok(())
+    }
+
+    /// Recomputes drifted rate-lock exposure counters from their open reserved locks.
+    ///
+    /// The repair is safe in both directions: it writes the value every writer maintains
+    /// incrementally, computed under the counter's row lock (see [`locks::repair_exposure`]).
+    async fn lock_exposure(&self, findings: &mut Vec<Finding>) -> Result<(), ReconciliationError> {
+        let repairs = locks::repair_exposure(&self.pool)
+            .await
+            .map_err(|error| match error {
+                RateLockError::Database(error) => ReconciliationError::Database(error),
+                _ => ReconciliationError::Invariant("lock exposure is outside u64"),
+            })?;
+        for repair in repairs {
+            findings.push(Finding::new(
+                CheckName::LockExposure,
+                // The repair id keeps a recurring identical drift from deduplicating into one row.
+                subjects([
+                    ("scope_key", repair.scope_key),
+                    ("repair_id", repair.id.to_string()),
+                ]),
+                json!({"open_minor": repair.after_minor.to_string()}),
+                json!({"open_minor": repair.before_minor.to_string()}),
+                true,
+                false,
+            )?);
         }
         Ok(())
     }

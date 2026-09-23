@@ -79,8 +79,10 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${head
   account (`POST /v1/products/{p}/accounts/{ext}/pause`, product-signed), or pause the route as
   above, and investigate the tenant.
 - `overdue_locks > 0` persists: follow [Lock expiry worker failure](lock-expiry-worker-failure.md).
-- Ledger differs from recomputation: treat it as a reconciliation incident, pause `quotes`, and do
-  not raise caps. The only repair is the owner procedure in
+- Ledger differs from recomputation: treat it as a reconciliation incident and do not raise caps.
+  The reconciler's `lock_exposure` check repairs the counter every round, records a
+  `repair_lock_exposure` audit row, and (from the service loop) fires `TopupLockExposureDrift`; to
+  repair now, run the in-service repair in
   [Lock expiry worker failure](lock-expiry-worker-failure.md).
 
 ## Remediation

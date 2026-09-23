@@ -48,11 +48,25 @@ pub(crate) async fn create_rate_lock(
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
     }
+    let requested = parse_requested_amount(&request)?;
+    // A replay creates nothing, so a `quotes` pause does not hide a lock the product already
+    // showed; it answers exactly like `GET`, including the idempotency mismatch check.
+    if let Some(lock) = locks::find_replay(
+        &state.pool,
+        product.id,
+        account.id,
+        &request.product_lock_ref,
+        requested,
+    )
+    .await
+    .map_err(map_error)?
+    {
+        return Ok(Json(response(route, &product, &account, lock)));
+    }
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
     if has_quotes_pause(&product, &account, &route_scopes) {
         return Err(ApiError::paused("rate-lock quotes are paused"));
     }
-    let requested = parse_requested_amount(&request)?;
     let lock = locks::create(
         &state.pool,
         &state.rate_lock_quotes,

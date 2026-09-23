@@ -2,11 +2,14 @@
 
 ## Trigger
 
-Trigger on `rate-lock expiry scan failed` errors in the service log, open rate locks more than a
-minute past `expires_at`, missing `rate_lock.expired` events, or `overdue_locks > 0` persisting in
-the [Lock exposure near cap](lock-exposure-near-cap.md) query, or `TopupLoopStopped{loop="lock_expiry"}`.
+Trigger on `TopupLockExpiryFailing` (expiry scans failing with no successful scan for more than
+five minutes, held for five minutes), `TopupLockExposureDrift` (the service's reconciler loop
+repaired a `lock_exposure` counter), a new `repair_lock_exposure` audit row,
+`TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` errors in the service log,
+open rate locks more than a minute past `expires_at`, missing `rate_lock.expired` events, or
+`overdue_locks > 0` persisting in the [Lock exposure near cap](lock-exposure-near-cap.md) query.
 The loop heartbeat only proves the worker is scanning; a scan that keeps failing still heartbeats,
-so also watch `time() - topup_loop_progress_unixtime_seconds{loop="lock_expiry"}`.
+which is what `TopupLockExpiryFailing` covers.
 
 ## Impact and blast radius
 
@@ -22,7 +25,7 @@ Payment handling does not depend on the worker: the confirm step still judges a 
 ## First 5 minutes
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml logs --no-color --since 30m topup | grep -F 'rate-lock expiry scan failed'
+docker compose -f deploy/docker-compose.staging.yml logs --no-color --since 30m topup | grep -E 'rate-lock expiry scan failed|lock exposure counter'
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN TRANSACTION READ ONLY;
 SELECT count(*) AS overdue_locks,min(expires_at) AS oldest_expiry,
@@ -46,10 +49,15 @@ Then run the ledger query in [Lock exposure near cap](lock-exposure-near-cap.md)
   next tick without a restart.
 - Overdue locks with no error logs: the worker task has stopped; preserve logs and restart the
   service container.
-- Errors say `rate-lock database invariant failed` every tick and the ledger differs from the
-  recomputation: a release would drive a counter below zero, so the batch rolls back each time and a
-  restart will not help. Treat it as a reconciliation incident; pause `quotes` if exposure is near
-  cap, and escalate to Engineering for the owner repair below.
+- Errors say `rate-lock database invariant failed` every tick, preceded by `lock exposure counter
+  is below the release` naming the `scope_key` and `release_minor`: a release would drive that
+  counter below zero, so the batch rolls back each time and a restart will not help. The
+  reconciler's `lock_exposure` check repairs the counter on its next round
+  (`--reconciliation-interval-s`, default 600 s) and `TopupLockExposureDrift` fires; run the
+  in-service repair below to fix it now. Treat any drift as a reconciliation incident: it means a
+  writer bypassed the counter, so preserve logs and escalate to Engineering.
+- `TopupLockExposureDrift` alone, with no expiry failures: the counter was too high (a capacity
+  leak toward the cap) or too low and already repaired. Read the finding as below and escalate.
 
 ## Remediation
 
@@ -60,60 +68,52 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=500 t
 docker compose -f deploy/docker-compose.staging.yml restart topup
 ```
 
-Never set `rate_locks.status` or `exposure_reserved` by hand, and never write a counter value copied
-from an earlier query: create, cancel, consume, and expiry keep changing the counters (`global`
-above all), so a stale value either under-counts (later releases fail the invariant again and
+Never set `rate_locks.status`, `exposure_reserved`, or `lock_exposure.open_minor` by hand:
+create, cancel, consume, and expiry keep changing the counters (`global` above all), so a value
+copied from an earlier query either under-counts (later releases fail the invariant again and
 consuming deposits fail in the confirm step) or over-counts (a permanent leak toward the cap).
 Pausing `quotes` does not stop consume, cancel, or expiry.
 
-**HUMAN-ONLY, database owner, outside the service container:** repair one drifted scope key per
-transaction with the exact SQL below. It locks the counter row first; every writer changes
-`rate_locks` and this row in the same transaction and must take this row's lock, so under the
-default `READ COMMITTED` isolation the recompute (a separate statement with a fresh snapshot) sees
-every committed change and nothing can commit in between. Record the printed before, recomputed,
-and after values in the incident. `$OWNER_DATABASE_URL` is the owner connection from the secret
-manager on an operator host; never place owner credentials in the service container.
+In-service repair: run one reconciliation pass inside the service container with the application
+role. Its `lock_exposure` check finds every counter that differs from the sum of `credit_minor` over
+its scope's open reserved locks, then repairs each one in its own transaction: lock the counter
+row, recompute, update. Every writer changes `rate_locks` and that row in one transaction and must
+take the row's lock, so the recompute sees every committed change and a writer still in flight
+applies its own change after the repair. It is safe while the service runs and is idempotent:
 
 ```sh
-export SCOPE_KEY='product:<product_id>'
-psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 --set=scope_key="$SCOPE_KEY" <<'SQL'
-BEGIN;
-SELECT scope_key,open_minor::text AS before_minor FROM lock_exposure
-WHERE scope_key = :'scope_key' FOR UPDATE;
-SELECT coalesce(sum(rl.credit_minor),0)::text AS recomputed_minor
-FROM rate_locks rl
-JOIN addresses ad ON ad.id = rl.address_id
-JOIN accounts a ON a.id = ad.account_id
-CROSS JOIN LATERAL (VALUES ('account:' || a.id), ('product:' || a.product_id), ('global'))
-  AS k(scope_key)
-WHERE rl.status = 'open' AND rl.consumed_by IS NULL AND rl.exposure_reserved
-  AND k.scope_key = :'scope_key' \gset
-\echo recomputed_minor=:recomputed_minor
-UPDATE lock_exposure SET open_minor = :'recomputed_minor'::numeric, updated_at = now()
-WHERE scope_key = :'scope_key'
-RETURNING scope_key,open_minor::text AS after_minor;
+docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --once --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+```
+
+Each repair commits a `repair_lock_exposure` audit row in the same transaction as the counter
+change, and is then stored as a `lock_exposure` finding with `repair_applied = true`, `observed`
+(before) and `expected` (after), and a unique `repair_id`. These rows, not the alert, are the record
+of a repair: `topup reconcile --once` runs in its own process, which Prometheus does not scrape, so
+`TopupLockExposureDrift` fires only for repairs made by the service's own reconciler loop. Record
+every repair in the incident:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN TRANSACTION READ ONLY;
+SELECT created_at, subject, reason
+FROM audit
+WHERE action = 'repair_lock_exposure'
+ORDER BY created_at DESC LIMIT 20;
+SELECT created_at, subjects->>'scope_key' AS scope_key, subjects->>'repair_id' AS repair_id,
+       observed->>'open_minor' AS before_minor, expected->>'open_minor' AS after_minor
+FROM reconciliation_findings
+WHERE check_name = 'lock_exposure'
+ORDER BY created_at DESC LIMIT 20;
 COMMIT;
 SQL
 ```
 
-The simpler alternative, when a short outage is acceptable, is to stop the service, run the same
-SQL, and start it again:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml stop topup
-# Run the owner repair SQL above for each drifted scope key, then:
-docker compose -f deploy/docker-compose.staging.yml start topup
-```
-
-An in-service repair path and a drift alert are follow-up work in
-[#75](https://github.com/Phala-Network/crypto-topup-service/issues/75), extending
-[#68](https://github.com/Phala-Network/crypto-topup-service/issues/68) item 3.
-
 ## Verification
 
 Within a minute of recovery, the overdue-lock count is zero, `rate_lock.expired` events appear for
-the drained locks, the ledger equals the recomputation, and no new `rate-lock expiry scan failed`
-lines appear. Resume `quotes` if it was paused.
+the drained locks, the ledger equals the recomputation, a second `topup reconcile --once` records no
+new `lock_exposure` finding, no new `rate-lock expiry scan failed` lines appear, and
+`TopupLockExpiryFailing` resolves. Resume `quotes` if it was paused.
 
 ## Rollback
 

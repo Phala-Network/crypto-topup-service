@@ -525,6 +525,70 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[23; 32]);
+        let admin_key = SigningKey::from_bytes(&[24; 32]);
+        let product =
+            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
+        topup::db::create_account(
+            &database.app_pool,
+            &NewAccount {
+                id: Uuid::new_v4(),
+                product_id: product.id,
+                external_id: "cursor-001".to_owned(),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let address_path = format!(
+            "/v1/products/{}/accounts/cursor-001/deposit-address",
+            product.slug
+        );
+
+        sqlx::query("INSERT INTO cursors (chain_id, scanned_block) VALUES (1, 1234)")
+            .execute(&database.app_pool)
+            .await?;
+        let issued = app
+            .clone()
+            .oneshot(signed_request(Method::POST, &address_path, Vec::new(), PRODUCT_KID, &product_key, now))
+            .await?;
+        ensure!(issued.status() == StatusCode::OK);
+
+        sqlx::query("UPDATE cursors SET scanned_block = 5678 WHERE chain_id = 1")
+            .execute(&database.app_pool)
+            .await?;
+        let rotated = app
+            .oneshot(signed_request(
+                Method::POST,
+                &format!("{address_path}/rotate"),
+                serde_json::to_vec(&json!({"from_version": 1}))?,
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(rotated.status() == StatusCode::OK);
+
+        let versions: Vec<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT version, created_block, backfilled FROM addresses WHERE kind = 'persistent' ORDER BY version",
+        )
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(versions == [(1, 1234, false), (2, 5678, false)], "{versions:?}");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
 async fn route_pause_controls_address_routes() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
