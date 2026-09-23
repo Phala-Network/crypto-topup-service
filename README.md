@@ -76,5 +76,5 @@ beyond `cleared`. Run them only while `topup`, `heartbeat`, and `backup` are sto
 ## Status
 
 The service, contracts, and operations tooling in [the plan](docs/plan.md) are implemented on
-`main`. Nothing is deployed to mainnet: the pilot is gated on G2 (audit, product integration, and
-policy sign-off). Production policy values are set by finance, risk, and operations at pilot time.
+`main`. Nothing is deployed to mainnet: the pilot is gated on G2 (product integration and policy
+sign-off). Production policy values are set by finance, risk, and operations at pilot time.
