@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -179,40 +178,27 @@ impl ScreenStep {
         })
     }
 
-    /// Creates route-specific sanctions clients on each route chain's first two providers.
-    pub fn from_routes(
-        pool: PgPool,
-        routes: &RouteSet,
-        request_timeout: Duration,
-    ) -> Result<Self, ScreenStepConfigError> {
+    /// Creates route-specific sanctions checks on each route chain's first two providers.
+    pub fn from_routes(pool: PgPool, routes: &RouteSet) -> Result<Self, ScreenStepConfigError> {
         let mut screening_routes = Vec::with_capacity(routes.routes().len());
         for route in routes.routes() {
-            let chain_id = route.chain.chain_id;
             let provider = |index| {
-                routes.provider_url(chain_id, index).map_err(|source| {
-                    ScreenStepConfigError::Provider {
+                routes
+                    .provider(route.chain.chain_id, index)
+                    .map(Arc::clone)
+                    .map_err(|source| ScreenStepConfigError::Provider {
                         route: route.route.clone(),
                         version: route.version,
                         source,
-                    }
-                })
+                    })
             };
-            let (provider_a, provider_b) = (provider(0)?, provider(1)?);
-            let oracle = SanctionsOracle::new(
-                provider_a.expose().as_str(),
-                provider_b.expose().as_str(),
-                route.screening.sanctions_oracle,
-                request_timeout,
-            )
-            .map_err(|source| ScreenStepConfigError::InvalidOracle {
-                route: route.route.clone(),
-                version: route.version,
-                source,
-            })?
-            .with_provider_ids(
-                routes.provider_label(chain_id, 0),
-                routes.provider_label(chain_id, 1),
-            );
+            let oracle =
+                SanctionsOracle::new(provider(0)?, provider(1)?, route.screening.sanctions_oracle)
+                    .map_err(|source| ScreenStepConfigError::InvalidOracle {
+                        route: route.route.clone(),
+                        version: route.version,
+                        source,
+                    })?;
             screening_routes.push(ScreenRoute::new(
                 route.route.clone(),
                 route.version,

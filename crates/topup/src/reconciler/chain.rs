@@ -1,15 +1,9 @@
-use std::time::Duration;
-
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, U256};
-use alloy_provider::{Provider, RootProvider};
-use alloy_rpc_types_eth::Filter;
 use async_trait::async_trait;
 use tokio::time::timeout;
-use topup_adapters::chain::evm::{ChainReader, EvmChain, TransferLog};
-use topup_adapters::chain::flush::{decode_flushed, flushed_signature};
-use topup_adapters::redaction::Redacted;
+use topup_adapters::chain::evm::{ChainReader, FinalizedReader, TransferLog};
 
-use crate::flusher::AlloyChainClient;
 use crate::scanner::MAX_SCAN_WINDOW;
 
 use super::ReconciliationError;
@@ -53,56 +47,14 @@ pub trait ReconciliationChain: Send + Sync {
     ) -> Result<Vec<Address>, ReconciliationError>;
 }
 
-/// Production reconciliation client composed from the scanner and flusher RPC clients.
-pub struct RpcReconciliationChain {
-    scanner: EvmChain,
-    flusher: AlloyChainClient,
-    provider: RootProvider,
-    endpoint: Redacted,
-    request_timeout: Duration,
-}
-
-impl RpcReconciliationChain {
-    /// Creates one bounded client for a configured RPC provider.
-    pub fn connect(
-        rpc_url: &str,
-        request_timeout: Duration,
-        balance_batch_size: usize,
-    ) -> Result<Self, ReconciliationError> {
-        let endpoint = Redacted::parse(rpc_url).map_err(|_| {
-            ReconciliationError::Configuration("invalid reconciliation RPC URL".to_owned())
-        })?;
-        Ok(Self {
-            scanner: EvmChain::new(rpc_url)?,
-            flusher: AlloyChainClient::connect_http_with_policy(
-                rpc_url,
-                request_timeout,
-                balance_batch_size,
-            )?,
-            provider: RootProvider::new_http(endpoint.expose().clone()),
-            endpoint,
-            request_timeout,
-        })
-    }
-
-    /// Labels every provider error with the configured provider id instead of the URL.
-    #[must_use]
-    pub fn with_provider(self, provider: &str) -> Self {
-        Self {
-            scanner: self.scanner.with_provider(provider),
-            flusher: self.flusher.with_provider(provider),
-            endpoint: self.endpoint.with_provider(provider),
-            ..self
-        }
-    }
-}
-
+/// Production reconciliation reads: finalized logs through the reconciler's own reader, and
+/// balances, `Flushed` events and derived addresses through the shared client.
 #[async_trait]
-impl ReconciliationChain for RpcReconciliationChain {
+impl ReconciliationChain for FinalizedReader {
     async fn finalized_head(&self) -> Result<u64, ReconciliationError> {
         timeout(
-            self.request_timeout,
-            ChainReader::finalized_head(&self.scanner),
+            self.client().request_timeout(),
+            ChainReader::finalized_head(self),
         )
         .await
         .map_err(|_| ReconciliationError::Chain("finalized-head request timed out".to_owned()))?
@@ -117,8 +69,8 @@ impl ReconciliationChain for RpcReconciliationChain {
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ReconciliationError> {
         timeout(
-            self.request_timeout,
-            ChainReader::transfer_logs_to(&self.scanner, addresses, from_block, to_block),
+            self.client().request_timeout(),
+            ChainReader::transfer_logs_to(self, addresses, from_block, to_block),
         )
         .await
         .map_err(|_| ReconciliationError::Chain("transfer-log request timed out".to_owned()))?
@@ -131,8 +83,8 @@ impl ReconciliationChain for RpcReconciliationChain {
         addresses: &[Address],
         block: u64,
     ) -> Result<Vec<U256>, ReconciliationError> {
-        self.flusher
-            .token_balances_at(token, addresses, block)
+        self.client()
+            .token_balances(token, addresses, BlockNumberOrTag::Number(block))
             .await
             .map_err(Into::into)
     }
@@ -150,31 +102,13 @@ impl ReconciliationChain for RpcReconciliationChain {
             let end = start
                 .saturating_add(MAX_SCAN_WINDOW.saturating_sub(1))
                 .min(to_block);
-            let filter = Filter::new()
-                .address(factory)
-                .from_block(start)
-                .to_block(end)
-                .event_signature(flushed_signature())
-                .topic3(token);
-            let logs = timeout(self.request_timeout, self.provider.get_logs(&filter))
-                .await
-                .map_err(|_| {
-                    ReconciliationError::Chain(
-                        self.endpoint.timeout_error("Flushed log fetch").to_string(),
-                    )
-                })?
-                .map_err(|error| {
-                    ReconciliationError::Chain(
-                        self.endpoint
-                            .rpc_error("Flushed log fetch", &error)
-                            .to_string(),
-                    )
-                })?;
-            for log in logs {
-                let decoded = decode_flushed(log.data())
-                    .map_err(|error| ReconciliationError::Chain(error.to_string()))?;
+            for event in self
+                .client()
+                .flushed_events(factory, token, start, end)
+                .await?
+            {
                 total = total
-                    .checked_add(decoded.amount)
+                    .checked_add(event.amount)
                     .ok_or(ReconciliationError::Invariant(
                         "Flushed event total overflowed U256",
                     ))?;
@@ -194,7 +128,7 @@ impl ReconciliationChain for RpcReconciliationChain {
         factory: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ReconciliationError> {
-        self.flusher
+        self.client()
             .factory_addresses(factory, salts)
             .await
             .map_err(Into::into)
@@ -203,6 +137,11 @@ impl ReconciliationChain for RpcReconciliationChain {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use topup_adapters::chain::evm::EvmClient;
+
     use super::*;
 
     #[tokio::test]
@@ -217,12 +156,14 @@ mod tests {
             }
         });
         let secret = "rpc-secret-token";
-        let chain = RpcReconciliationChain::connect(
-            &format!("http://user:{secret}@{address}/rpc?api_key={secret}"),
-            Duration::from_secs(5),
-            10,
-        )
-        .expect("production adapter accepts URL");
+        let chain = FinalizedReader::new(Arc::new(
+            EvmClient::with_policy(
+                &format!("http://user:{secret}@{address}/rpc?api_key={secret}"),
+                Duration::from_secs(5),
+                10,
+            )
+            .expect("production adapter accepts URL"),
+        ));
 
         let error = chain
             .flushed_total(Address::ZERO, Address::ZERO, 1, 1)

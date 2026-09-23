@@ -21,7 +21,7 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST;
+use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
 use topup_adapters::settlement::http::{SettlementAnswer, SettlementClient, SettlementClientError};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{DepositState, StepOutcome, TransitionKind, next};
@@ -40,7 +40,7 @@ use crate::steps::settle::{SettleStepError, adopt_answer, validate_answer_identi
 
 use store::{CustodyCursor, state_code};
 
-pub use chain::{ReconciliationChain, RpcReconciliationChain};
+pub use chain::ReconciliationChain;
 pub use store::{
     LeaseOwnerLock, blocked_addresses, chain_is_blocked, frozen_chains, hold_lease_owner_lock,
 };
@@ -141,12 +141,6 @@ impl From<serde_json::Error> for ReconciliationError {
 
 impl From<topup_adapters::chain::evm::ChainError> for ReconciliationError {
     fn from(error: topup_adapters::chain::evm::ChainError) -> Self {
-        Self::Chain(error.to_string())
-    }
-}
-
-impl From<crate::flusher::ChainError> for ReconciliationError {
-    fn from(error: crate::flusher::ChainError) -> Self {
         Self::Chain(error.to_string())
     }
 }
@@ -253,16 +247,10 @@ impl Reconciler {
     ) -> Result<Self, ReconciliationError> {
         let mut chains = BTreeMap::<u64, Arc<dyn ReconciliationChain>>::new();
         for chain_id in routes.chain_ids() {
-            let url = routes.provider_url(chain_id, 0).map_err(|error| {
+            let client = routes.provider(chain_id, 0).map_err(|error| {
                 ReconciliationError::Configuration(format!("reconciler chain {chain_id}: {error}"))
             })?;
-            let chain = RpcReconciliationChain::connect(
-                url.expose().as_str(),
-                crate::rpc_provider::RPC_TIMEOUT,
-                crate::rpc_provider::BALANCE_BATCH_SIZE,
-            )?
-            .with_provider(&routes.provider_label(chain_id, 0));
-            chains.insert(chain_id, Arc::new(chain));
+            chains.insert(chain_id, Arc::new(FinalizedReader::new(Arc::clone(client))));
         }
         let settlement = Arc::new(SignedSettlementLookup {
             signer,

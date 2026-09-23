@@ -3,14 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
 
 use alloy_primitives::Address;
-use topup_adapters::redaction::Redacted;
+use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::{ChainConfig, DestinationConfig, RouteFile, product_destination};
 
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::rpc_provider::{
+    BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
+};
 
-/// Every loaded route version with its chain providers resolved.
+/// Every loaded route version with one shared RPC client per chain provider.
 ///
 /// Construction checks everything that must agree across routes: unique versions, one finality
 /// rule and provider list per chain, one route name per chain asset, one settlement destination
@@ -32,7 +35,7 @@ struct ChainEntry {
 /// One entry of a chain's `rpc_providers`, resolved when the route set is built.
 #[derive(Debug)]
 struct ProviderEndpoint {
-    url: Result<Redacted, ProviderError>,
+    client: Result<Arc<EvmClient>, ProviderError>,
 }
 
 /// A provider entry that cannot be used.
@@ -78,7 +81,7 @@ impl Display for ProviderError {
 impl Error for ProviderError {}
 
 impl RouteSet {
-    /// Validates the loaded routes and resolves every chain's RPC provider URLs.
+    /// Validates the loaded routes and creates one client per chain provider.
     ///
     /// A provider whose URL is missing or invalid does not fail construction; the consumer that
     /// needs it fails instead, so commands that use only provider A do not require provider B.
@@ -208,13 +211,13 @@ impl RouteSet {
             )
     }
 
-    /// Returns the resolved URL of the provider at `index` in the chain's `rpc_providers`.
-    pub fn provider_url(&self, chain_id: u64, index: usize) -> Result<&Redacted, ProviderError> {
+    /// Returns the shared client of the provider at `index` in the chain's `rpc_providers`.
+    pub fn provider(&self, chain_id: u64, index: usize) -> Result<&Arc<EvmClient>, ProviderError> {
         self.chains
             .get(&chain_id)
             .and_then(|chain| chain.providers.get(index))
             .ok_or(ProviderError::Unconfigured { chain_id, index })?
-            .url
+            .client
             .as_ref()
             .map_err(Clone::clone)
     }
@@ -232,13 +235,13 @@ impl RouteSet {
 impl ProviderEndpoint {
     fn resolve(provider: &str, index: usize) -> Self {
         let label = provider_label(provider, index);
-        let url = match configured_provider_url(provider) {
-            Ok(url) => Redacted::parse(&url)
-                .map(|url| url.with_provider(label.clone()))
+        let client = match configured_provider_url(provider) {
+            Ok(url) => EvmClient::with_policy(&url, RPC_TIMEOUT, BALANCE_BATCH_SIZE)
+                .map(|client| Arc::new(client.with_provider(label.clone())))
                 .map_err(|_| ProviderError::InvalidUrl { label }),
             Err(environment) => Err(ProviderError::MissingUrl { label, environment }),
         };
-        Self { url }
+        Self { client }
     }
 }
 
@@ -359,17 +362,20 @@ mod tests {
         ];
         let set = RouteSet::new(vec![route]).expect("missing provider B does not fail loading");
 
-        let primary = set.provider_url(1, 0).expect("inline URL resolves");
-        assert_eq!(primary.to_string(), "provider `rpc_providers[0]`");
+        let primary = set.provider(1, 0).expect("inline URL resolves");
         assert_eq!(
-            set.provider_url(1, 1).map(|_| ()),
+            primary.endpoint().to_string(),
+            "provider `rpc_providers[0]`"
+        );
+        assert_eq!(
+            set.provider(1, 1).map(|_| ()),
             Err(ProviderError::MissingUrl {
                 label: "r1-routeset-unset-provider".to_owned(),
                 environment: "TOPUP_RPC_R1_ROUTESET_UNSET_PROVIDER_URL".to_owned(),
             })
         );
         assert_eq!(
-            set.provider_url(2, 0).map(|_| ()),
+            set.provider(2, 0).map(|_| ()),
             Err(ProviderError::Unconfigured {
                 chain_id: 2,
                 index: 0

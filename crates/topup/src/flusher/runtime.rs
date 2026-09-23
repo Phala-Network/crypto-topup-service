@@ -21,11 +21,10 @@ use topup_core::route::RouteFile;
 use tracing::Instrument as _;
 
 use super::{
-    AlertSink, AlloyChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner,
-    PriceError, PriceSource, RunResult,
+    AlertSink, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner, PriceError, PriceSource,
+    RunResult,
 };
 use crate::routes::RouteSet;
-use crate::rpc_provider::{BALANCE_BATCH_SIZE, RPC_TIMEOUT};
 
 /// Interval between confirmation, replacement, and operator-role maintenance iterations.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
@@ -258,9 +257,11 @@ pub fn configure_tasks(
     let mut tasks = Vec::with_capacity(latest.len());
     for route in latest {
         let chain_id = route.chain.chain_id;
-        let url = routes
-            .provider_url(chain_id, 0)
-            .map_err(|error| format!("flusher route `{}`: {error}", route.route))?;
+        let chain = Arc::clone(
+            routes
+                .provider(chain_id, 0)
+                .map_err(|error| format!("flusher route `{}`: {error}", route.route))?,
+        );
         let version = route
             .chain
             .operator_key_version()
@@ -275,16 +276,6 @@ pub fn configure_tasks(
                 signer
             }
         };
-        let timeout = RPC_TIMEOUT;
-        let chain = Arc::new(
-            AlloyChainClient::connect_http_with_policy(
-                url.expose().as_str(),
-                timeout,
-                BALANCE_BATCH_SIZE,
-            )
-            .map_err(|_| format!("failed to configure flusher provider {url}"))?
-            .with_provider(routes.provider_label(chain_id, 0)),
-        );
         let prices: Arc<dyn PriceSource> = Arc::new(CoinMetricsPriceSource::for_route(&route)?);
         let alerts: Arc<dyn AlertSink> = Arc::new(TracingAlertSink);
         let planner = Planner::new(
@@ -351,12 +342,8 @@ impl PriceSource for CoinMetricsPriceSource {
         let source = self
             .0
             .get(asset)
-            .ok_or_else(|| PriceError(format!("no Coin Metrics source for `{asset}`")))?;
-        source
-            .observe()
-            .await
-            .map(|observation| observation.price)
-            .map_err(|error| PriceError(error.to_string()))
+            .ok_or_else(|| PriceError::UnconfiguredAsset(asset.to_owned()))?;
+        source.observe().await.map(|observation| observation.price)
     }
 }
 

@@ -7,13 +7,13 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use topup_adapters::chain::evm::{EvmClient, FinalizedReader};
     use topup_adapters::settlement::http::SettlementAnswer;
     use topup_core::route::RouteFile;
     use tracing_test::traced_test;
 
     use crate::reconciler::{
-        CheckName, Reconciler, ReconciliationChain, ReconciliationError, RpcReconciliationChain,
-        SettlementLookup,
+        CheckName, Reconciler, ReconciliationChain, ReconciliationError, SettlementLookup,
     };
     use crate::routes::RouteSet;
 
@@ -50,9 +50,11 @@ mod tests {
             serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
                 .expect("route fixture parses");
         let chain_id = route.chain.chain_id;
-        let chain = RpcReconciliationChain::connect(&rpc_url, Duration::from_secs(5), 10)
-            .expect("production adapter accepts URL")
-            .with_provider("provider-a");
+        let chain = FinalizedReader::new(Arc::new(
+            EvmClient::with_policy(&rpc_url, Duration::from_secs(5), 10)
+                .expect("production adapter accepts URL")
+                .with_provider("provider-a"),
+        ));
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
             .expect("lazy pool URL is valid");

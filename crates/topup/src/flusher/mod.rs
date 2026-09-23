@@ -12,14 +12,14 @@ use std::fmt::{self, Display, Formatter};
 
 use topup_core::SignerError;
 
-pub use chain::AlloyChainClient;
 pub use engine::{Flusher, OperatorRole, RunResult};
 pub use planner::{GasRatioInput, Planner, gas_ratio_allowed};
 pub use sweep::SweepStep;
+pub use topup_adapters::chain::evm::{ChainError, EvmClient, FeeQuote};
+pub use topup_adapters::pricing::PriceError;
 pub use types::{
-    AlertSink, ChainClient, ChainError, ChainLog, ChainReceipt, FeeQuote, FlushAlert,
-    FlushCallBinding, FlushEvidence, FlusherPolicy, NonceReceiptSearch, NoopAlertSink,
-    PlannedAddress, PriceError, PriceSource, SignedVersion,
+    AlertSink, ChainClient, ChainLog, ChainReceipt, FlushAlert, FlushCallBinding, FlushEvidence,
+    FlusherPolicy, NonceReceiptSearch, NoopAlertSink, PlannedAddress, PriceSource, SignedVersion,
 };
 
 /// Failure while running a flusher operation.

@@ -23,7 +23,6 @@ use topup::steps::settle::SettleStep;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
-use topup_adapters::risk::oracle::DEFAULT_REQUEST_TIMEOUT;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -685,8 +684,7 @@ async fn run(args: &RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes, DEFAULT_REQUEST_TIMEOUT)
-    {
+    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes) {
         Ok(step) => step,
         Err(error) => {
             tracing::error!(%error, "failed to configure screening step");
@@ -712,10 +710,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let refund_config = topup::refunds::RefundConfirmationConfig::default();
-    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(
-        &routes,
-        refund_config.request_timeout,
-    ) {
+    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(&routes) {
         Ok(reader) => reader,
         Err(error) => {
             tracing::error!(%error, "failed to configure refund confirmation chain reader");

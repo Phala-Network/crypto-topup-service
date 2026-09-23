@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, TransferLog};
+use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
 use topup_adapters::pricing::PriceSource;
 use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, SettlementClient};
 use topup_adapters::signer::actor::SignerHandle;
@@ -238,14 +238,10 @@ impl ConfirmStep {
         let mut chains = BTreeMap::new();
         for chain_id in routes.chain_ids() {
             let reader = |index| -> Result<Arc<dyn FinalityReader>, ConfirmConfigError> {
-                let url = routes
-                    .provider_url(chain_id, index)
+                let client = routes
+                    .provider(chain_id, index)
                     .map_err(|error| ConfirmConfigError(error.to_string()))?;
-                Ok(Arc::new(
-                    EvmChain::new(url.expose().as_str())
-                        .map_err(|error| ConfirmConfigError(error.to_string()))?
-                        .with_provider(routes.provider_label(chain_id, index)),
-                ))
+                Ok(Arc::new(FinalizedReader::new(Arc::clone(client))))
             };
             chains.insert(
                 chain_id,

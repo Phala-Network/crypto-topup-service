@@ -3,18 +3,17 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::eips::BlockNumberOrTag;
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::sol;
 use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool};
 use tokio_util::sync::CancellationToken;
+use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::RouteFile;
-use url::Url;
 use uuid::Uuid;
 
 use crate::routes::{ProviderError, RouteSet};
@@ -108,67 +107,43 @@ pub trait RefundChainReader: Send + Sync {
     async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError>;
 }
 
-/// Alloy HTTP implementation keyed by EVM chain id.
+/// Refund reads through each chain's shared provider-A client.
 pub struct EvmRefundChainReader {
-    providers: BTreeMap<u64, RootProvider>,
+    clients: BTreeMap<u64, Arc<EvmClient>>,
 }
 
 impl EvmRefundChainReader {
-    /// Creates one provider per configured chain using provider A.
-    pub fn from_routes(
-        routes: &RouteSet,
-        request_timeout: Duration,
-    ) -> Result<Self, RefundReadError> {
-        let mut urls = BTreeMap::new();
+    /// Reads every configured chain through its provider A.
+    pub fn from_routes(routes: &RouteSet) -> Result<Self, RefundReadError> {
+        let mut clients = BTreeMap::new();
         for chain_id in routes.chain_ids() {
-            let url = routes
-                .provider_url(chain_id, 0)
-                .map_err(|error| match error {
-                    ProviderError::InvalidUrl { .. } => {
-                        RefundReadError::InvalidUrl(error.to_string())
-                    }
-                    ProviderError::MissingUrl { .. } | ProviderError::Unconfigured { .. } => {
-                        RefundReadError::MissingField("refund RPC environment")
-                    }
-                })?;
-            urls.insert(chain_id, url.expose().clone());
+            let client = routes.provider(chain_id, 0).map_err(|error| match error {
+                ProviderError::InvalidUrl { .. } => RefundReadError::InvalidUrl(error.to_string()),
+                ProviderError::MissingUrl { .. } | ProviderError::Unconfigured { .. } => {
+                    RefundReadError::MissingField("refund RPC environment")
+                }
+            })?;
+            clients.insert(chain_id, Arc::clone(client));
         }
-        Self::from_chain_urls(urls, request_timeout)
+        Ok(Self::new(clients))
     }
 
-    /// Creates providers from explicit per-chain URLs, primarily for controlled deployments/tests.
-    pub fn from_chain_urls(
-        urls: BTreeMap<u64, Url>,
-        request_timeout: Duration,
-    ) -> Result<Self, RefundReadError> {
-        let client = reqwest::Client::builder()
-            .timeout(request_timeout)
-            .build()
-            .map_err(|_| RefundReadError::Rpc("HTTP client configuration"))?;
-        let providers = urls
-            .into_iter()
-            .map(|(chain_id, url)| {
-                (
-                    chain_id,
-                    ProviderBuilder::new()
-                        .disable_recommended_fillers()
-                        .connect_reqwest(client.clone(), url),
-                )
-            })
-            .collect();
-        Ok(Self { providers })
+    /// Reads through explicit per-chain clients.
+    #[must_use]
+    pub const fn new(clients: BTreeMap<u64, Arc<EvmClient>>) -> Self {
+        Self { clients }
     }
 }
 
 #[async_trait]
 impl RefundChainReader for EvmRefundChainReader {
     async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError> {
-        let provider = self
-            .providers
+        let client = self
+            .clients
             .get(&check.chain_id)
             .ok_or(RefundReadError::UnknownChain(check.chain_id))?;
-        let receipt = provider
-            .get_transaction_receipt(check.tx_hash)
+        let receipt = client
+            .receipt(check.tx_hash)
             .await
             .map_err(|_| RefundReadError::Rpc("transaction receipt fetch"))?;
         let Some(receipt) = receipt else {
@@ -177,18 +152,14 @@ impl RefundChainReader for EvmRefundChainReader {
         let block_number = receipt
             .block_number
             .ok_or(RefundReadError::MissingField("receipt.block_number"))?;
-        let finalized = provider
-            .get_block_by_number(BlockNumberOrTag::Finalized)
+        let finalized = client
+            .finalized_block()
             .await
             .map_err(|_| RefundReadError::Rpc("finalized head fetch"))?
-            .ok_or(RefundReadError::MissingField("finalized block"))?
-            .header
-            .inner
-            .number;
+            .ok_or(RefundReadError::MissingField("finalized block"))?;
         if block_number > finalized {
             return Ok(RefundObservation::Pending);
         }
-
         let mut transfers = Vec::new();
         for log in receipt.logs() {
             if log.address() != check.asset_contract {
@@ -223,8 +194,6 @@ pub struct RefundConfirmationConfig {
     pub poll_interval: Duration,
     /// Delay before a sent refund is eligible for another check.
     pub retry_interval: Duration,
-    /// Maximum duration of one HTTP JSON-RPC request.
-    pub request_timeout: Duration,
     /// Maximum duration of the complete receipt and finality observation.
     pub observe_timeout: Duration,
 }
@@ -234,7 +203,6 @@ impl Default for RefundConfirmationConfig {
         Self {
             poll_interval: Duration::from_secs(5),
             retry_interval: Duration::from_secs(60),
-            request_timeout: Duration::from_secs(10),
             observe_timeout: Duration::from_secs(20),
         }
     }

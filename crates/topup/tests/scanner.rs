@@ -18,7 +18,9 @@ use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
 use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
-use topup_adapters::chain::evm::{ChainError, ChainReader, EvmChain, FinalizedHead, TransferLog};
+use topup_adapters::chain::evm::{
+    ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, TransferLog,
+};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
@@ -311,7 +313,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 
     let route_fixture = RouteFixture::create(supported_token)?;
     let routes = scanner_route(&route_fixture.path)?;
-    let reader = EvmChain::new(&anvil.rpc_url)?;
+    let reader = reader(&anvil.rpc_url)?;
     let expected_cursor = reader.finalized_head().await?.number;
     let first = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(
@@ -575,7 +577,7 @@ async fn run_confirm_scenario(
 
     let fixture = RouteFixture::create(token)?;
     let scanner_routes = scanner_route(&fixture.path)?;
-    let scanner_reader = EvmChain::new(&primary_anvil.rpc_url)?;
+    let scanner_reader = reader(&primary_anvil.rpc_url)?;
     ensure!(
         scan_once(&database.app_pool, &scanner_reader, &scanner_routes)
             .await?
@@ -597,8 +599,8 @@ async fn run_confirm_scenario(
     let confirm = ConfirmStep::single(
         database.app_pool.clone(),
         route.clone(),
-        EvmChain::new(&primary_anvil.rpc_url)?,
-        EvmChain::new(&primary_anvil.rpc_url)?,
+        reader(&primary_anvil.rpc_url)?,
+        reader(&primary_anvil.rpc_url)?,
         Arc::clone(&primary_price),
         Some(Arc::clone(&check_price)),
         Some(Arc::clone(&fx_price)),
@@ -658,8 +660,8 @@ async fn run_confirm_scenario(
     let lagging_confirm = ConfirmStep::single(
         database.app_pool.clone(),
         route,
-        EvmChain::new(&primary_anvil.rpc_url)?,
-        EvmChain::new(&lagging_anvil.rpc_url)?,
+        reader(&primary_anvil.rpc_url)?,
+        reader(&lagging_anvil.rpc_url)?,
         primary_price,
         Some(check_price),
         Some(fx_price),
@@ -958,4 +960,8 @@ fn wait_steps() -> StepSet {
         Box::new(WaitStep),
         Box::new(WaitStep),
     )
+}
+
+fn reader(rpc_url: &str) -> Result<FinalizedReader> {
+    Ok(FinalizedReader::new(Arc::new(EvmClient::new(rpc_url)?)))
 }

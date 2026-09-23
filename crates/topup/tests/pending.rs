@@ -22,7 +22,7 @@ use topup::locks::pricing::ValidatedQuote;
 use topup::routes::RouteSet;
 use topup::scanner::{chain_routes, head_scan_once, scan_once};
 use topup_adapters::attestation::DstackAttestor;
-use topup_adapters::chain::evm::EvmChain;
+use topup_adapters::chain::evm::{EvmClient, FinalizedReader};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use tower::ServiceExt;
@@ -96,7 +96,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         key: product_key,
         created: Utc::now().timestamp().into(),
     };
-    let reader = EvmChain::new(&anvil.rpc_url)?;
+    let reader = FinalizedReader::new(Arc::new(EvmClient::new(&anvil.rpc_url)?));
     scan_once(pool, &reader, &chain_routes).await?;
 
     let lock = api

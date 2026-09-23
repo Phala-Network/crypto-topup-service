@@ -7,9 +7,9 @@ use topup_adapters::chain::flush::ContractAddressGetter;
 use topup_core::address::forwarder_address;
 use topup_core::route::RouteFile;
 
-use crate::flusher::AlloyChainClient;
+use topup_adapters::chain::evm::{ChainError, EvmClient};
+
 use crate::routes::RouteSet;
-use crate::rpc_provider::{BALANCE_BATCH_SIZE, RPC_TIMEOUT};
 
 // The build fingerprints below are recorded by `deploy/contracts/check-build.sh --write` in
 // `deploy/contracts/expected-codehashes.json`; a unit test keeps these copies equal to that file,
@@ -55,17 +55,10 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
                 continue;
             }
             let label = routes.provider_label(route.chain.chain_id, index);
-            let url = routes
-                .provider_url(route.chain.chain_id, index)
+            let client = routes
+                .provider(route.chain.chain_id, index)
                 .map_err(|error| error.to_string())?;
-            let client = AlloyChainClient::connect_http_with_policy(
-                url.expose().as_str(),
-                RPC_TIMEOUT,
-                BALANCE_BATCH_SIZE,
-            )
-            .map_err(|_| format!("provider `{label}` has an invalid URL"))?
-            .with_provider(label.clone());
-            verify_on(&client, route)
+            verify_on(client, route)
                 .await
                 .map_err(|error| format!("route `{}` via `{label}`: {error}", route.route))?;
         }
@@ -76,11 +69,11 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
 /// Compares one provider's view of the contracts with the route. The getters come first so a
 /// mismatch names the differing address; the code hashes then prove the immutables are the only
 /// difference from the audited build.
-async fn verify_on(client: &AlloyChainClient, route: &RouteFile) -> Result<(), String> {
+async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> {
     let contracts = &route.chain.contracts;
     let factory = contracts.forwarder_factory;
     let implementation = contracts.implementation;
-    let read = |error: crate::flusher::ChainError| error.to_string();
+    let read = |error: ChainError| error.to_string();
 
     let actual = client
         .contract_address(factory, ContractAddressGetter::Implementation)

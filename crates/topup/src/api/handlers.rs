@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
@@ -11,7 +12,6 @@ use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
 use crate::db::{Account, Product};
-use crate::flusher::{AlloyChainClient, ChainClient};
 use crate::routes::{ProviderError, RouteSet};
 
 use super::AppState;
@@ -473,8 +473,8 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
             continue;
         };
         let chain_id = route.chain.chain_id;
-        let url = match routes.provider_url(chain_id, 0) {
-            Ok(url) => url,
+        let client = match routes.provider(chain_id, 0) {
+            Ok(client) => client,
             Err(ProviderError::MissingUrl { environment, .. }) => {
                 route_report.treasury_balance_note =
                     format!("treasury balance unavailable: {environment} is not configured");
@@ -491,18 +491,12 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
                 continue;
             }
         };
-        let Ok(client) = AlloyChainClient::connect_http_with_policy(
-            url.expose().as_str(),
-            crate::rpc_provider::RPC_TIMEOUT,
-            crate::rpc_provider::BALANCE_BATCH_SIZE,
-        )
-        .map(|client| client.with_provider(routes.provider_label(chain_id, 0))) else {
-            route_report.treasury_balance_note =
-                "treasury balance unavailable: RPC client configuration is invalid".to_owned();
-            continue;
-        };
         match client
-            .token_balances(route.asset.contract, &[route.chain.contracts.treasury])
+            .token_balances(
+                route.asset.contract,
+                &[route.chain.contracts.treasury],
+                BlockNumberOrTag::Latest,
+            )
             .await
         {
             Ok(balances) => match balances.into_iter().next() {

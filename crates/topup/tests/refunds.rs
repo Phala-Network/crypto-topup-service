@@ -27,12 +27,12 @@ use topup::refunds::{
     RefundConfirmationWorker, RefundObservation, RefundReadError, RefundTransfer,
 };
 use topup_adapters::attestation::DstackAttestor;
+use topup_adapters::chain::evm::EvmClient;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use tower::ServiceExt;
-use url::Url;
 use uuid::Uuid;
 
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
@@ -331,7 +331,6 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             RefundConfirmationConfig {
                 poll_interval: StdDuration::ZERO,
                 retry_interval: StdDuration::ZERO,
-                request_timeout: StdDuration::from_secs(1),
                 observe_timeout: StdDuration::from_secs(1),
             },
         )?;
@@ -847,10 +846,14 @@ async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Re
     let server = tokio::spawn(async move {
         axum::serve(listener, Router::new().route("/", post(refund_rpc))).await
     });
-    let reader = EvmRefundChainReader::from_chain_urls(
-        BTreeMap::from([(1, Url::parse(&format!("http://{address}"))?)]),
-        StdDuration::from_millis(50),
-    )?;
+    let reader = EvmRefundChainReader::new(BTreeMap::from([(
+        1,
+        Arc::new(EvmClient::with_policy(
+            &format!("http://{address}"),
+            StdDuration::from_millis(50),
+            10,
+        )?),
+    )]));
     let route = route_fixture();
     let treasury = route.chain.contracts.treasury;
     let destination = Address::from_str(REFUND_DESTINATION)?;
@@ -932,7 +935,6 @@ async fn worker_shutdown_cancels_a_hung_observation() -> Result<()> {
             RefundConfirmationConfig {
                 poll_interval: StdDuration::from_secs(60),
                 retry_interval: StdDuration::ZERO,
-                request_timeout: StdDuration::from_secs(60),
                 observe_timeout: StdDuration::from_secs(60),
             },
         )?;
@@ -1265,7 +1267,6 @@ fn test_worker<R: RefundChainReader>(
         RefundConfirmationConfig {
             poll_interval: StdDuration::ZERO,
             retry_interval: StdDuration::ZERO,
-            request_timeout: StdDuration::from_secs(1),
             observe_timeout: StdDuration::from_secs(1),
         },
     )?)

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::Address;
@@ -17,7 +18,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
-    ChainError, ChainReader, EvmChain, MAX_ADDRESSES_PER_REQUEST, MAX_BLOCKS_PER_REQUEST,
+    ChainError, ChainReader, FinalizedReader, MAX_ADDRESSES_PER_REQUEST, MAX_BLOCKS_PER_REQUEST,
     TransferLog,
 };
 use topup_core::deposit::{DepositState, RejectReason};
@@ -329,11 +330,10 @@ pub async fn run(
     let mut tasks = JoinSet::new();
     for routes in chain_routes(route_set) {
         let chain_id = routes.chain.chain_id;
-        let rpc_url = route_set
-            .provider_url(chain_id, 0)
+        let client = route_set
+            .provider(chain_id, 0)
             .map_err(|error| ScannerError::Configuration(error.to_string()))?;
-        let reader = EvmChain::new(rpc_url.expose().as_str())?
-            .with_provider(route_set.provider_label(chain_id, 0));
+        let reader = FinalizedReader::new(Arc::clone(client));
         let chain_pool = pool.clone();
         let chain_cancellation = cancellation.child_token();
         tasks.spawn(async move {
@@ -395,7 +395,7 @@ pub async fn run(
 
 async fn run_chain(
     pool: PgPool,
-    reader: EvmChain,
+    reader: FinalizedReader,
     routes: ChainRoutes,
     poll_interval: Duration,
     cancellation: CancellationToken,
