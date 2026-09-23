@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
 from typing import cast
 import datetime
 
@@ -23,21 +24,21 @@ class DailyReportResponse:
     """Daily finance report produced by C12.
 
     Attributes:
-        exposure_minor (str): Open rate-lock credit across all products in destination minor units, from the global
-            exposure counter the global cap is enforced against.
         generated_at (datetime.datetime): Report snapshot time.
         routes (list[RouteDailyReport]): SQL-computed metrics for each configured route.
+        exposure_minor (None | str | Unset): Open rate-lock credit across all products in destination minor units, from
+            the global
+            exposure counter the global cap is enforced against. This service always sends it; it is
+            optional in the schema so clients also parse reports from servers that predate it.
     """
 
-    exposure_minor: str
     generated_at: datetime.datetime
     routes: list[RouteDailyReport]
+    exposure_minor: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
-
-        exposure_minor = self.exposure_minor
 
         generated_at = self.generated_at.isoformat()
 
@@ -46,15 +47,22 @@ class DailyReportResponse:
             routes_item = routes_item_data.to_dict()
             routes.append(routes_item)
 
+        exposure_minor: None | str | Unset
+        if isinstance(self.exposure_minor, Unset):
+            exposure_minor = UNSET
+        else:
+            exposure_minor = self.exposure_minor
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "exposure_minor": exposure_minor,
                 "generated_at": generated_at,
                 "routes": routes,
             }
         )
+        if exposure_minor is not UNSET:
+            field_dict["exposure_minor"] = exposure_minor
 
         return field_dict
 
@@ -63,8 +71,6 @@ class DailyReportResponse:
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
         d = dict(src_dict)
-        exposure_minor = d.pop("exposure_minor")
-
         generated_at = datetime.datetime.fromisoformat(d.pop("generated_at"))
 
         routes = []
@@ -74,10 +80,19 @@ class DailyReportResponse:
 
             routes.append(routes_item)
 
+        def _parse_exposure_minor(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        exposure_minor = _parse_exposure_minor(d.pop("exposure_minor", UNSET))
+
         daily_report_response = cls(
-            exposure_minor=exposure_minor,
             generated_at=generated_at,
             routes=routes,
+            exposure_minor=exposure_minor,
         )
 
         daily_report_response.additional_properties = d

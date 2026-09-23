@@ -1159,6 +1159,7 @@ pub async fn daily_report(
     .fetch_optional(pool)
     .await?
     .unwrap_or_else(|| "0".to_owned());
+    let exposure_minor = Some(exposure_minor);
 
     Ok(DailyReportResponse {
         generated_at,

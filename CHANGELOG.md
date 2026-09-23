@@ -5,11 +5,19 @@ webhook receivers must ignore unknown fields.
 
 ## Unreleased
 
-### Administrative API
+### Added
 
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
-  destination minor units. Route entries no longer carry the always-null `exposure_minor`,
-  `exposure_minor_reason`, `pnl_minor`, and `pnl_minor_reason` fields.
+  destination minor units (#94). The field is optional in the schema so clients also parse reports
+  from servers that predate it.
+
+### Removed
+
+- **Breaking (administrative API):** `GET /v1/admin/report/daily` route entries no longer carry
+  `exposure_minor`, `exposure_minor_reason`, `pnl_minor`, or `pnl_minor_reason` (#94). They were
+  always null placeholders; route exposure now comes from the report-level `exposure_minor`, and
+  PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
+  the endpoint is admin-only and no service has been deployed.
 
 ### Webhooks
 

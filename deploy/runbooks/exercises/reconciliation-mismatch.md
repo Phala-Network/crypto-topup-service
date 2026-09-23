@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`, and `products` no
+longer has `settlement_url` or `kid`. The commands below are recorded as run; use the current
+[runbook](../reconciliation-mismatch.md).
+
 Status: complete local CLI scenario against PostgreSQL 16 and Anvil (see
 [local setup](local-setup.md), database `wp_d5_recon2`).
 
@@ -17,8 +21,8 @@ docker exec -i wp-d5-exercise-pg psql -U postgres -d wp_d5_recon2 -v ON_ERROR_ST
 ```
 
 ```sql
-INSERT INTO products (id,slug,webhook_url,pubkey) VALUES
- ('10000000-0000-0000-0000-000000000001','mock-product','http://127.0.0.1:9/hooks','mock');
+INSERT INTO products (id,slug,settlement_url,webhook_url,pubkey,kid) VALUES
+ ('10000000-0000-0000-0000-000000000001','mock-product','http://127.0.0.1:9/settlements','http://127.0.0.1:9/hooks','mock','mock/v1');
 INSERT INTO accounts (id,product_id,external_id) VALUES
  ('20000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','workspace-1'),
  ('20000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000001','workspace-2');
@@ -41,8 +45,8 @@ INSERT INTO deposits (id,chain_id,tx_hash,log_index,block_number,block_hash,bloc
 
 One reconciliation pass with the application role:
 
-```sh
-topup reconcile --route /tmp/wp-d5-ex/route.yaml
+```text
+topup reconcile --once --route /tmp/wp-d5-ex/route.yaml
 ```
 
 Observed log fields (`jq -c .fields`), exit `0`:

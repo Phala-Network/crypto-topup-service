@@ -90,8 +90,10 @@ marker_age() {
 idle_checks=16
 while [ "$idle_checks" -gt 0 ]; do
     age=$(marker_age)
-    if [ "$age" -gt 120 ]; then
-        echo "idle backup marker is ${age}s old; TopupBackupTooOld would fire" >&2
+    # Worst case for an idle database is about two archive_timeout periods plus the upload; see
+    # the idle-database note in deploy/runbooks/backup-age.md.
+    if [ "$age" -gt 150 ]; then
+        echo "idle backup marker is ${age}s old; beyond the idle worst case" >&2
         exit 1
     fi
     idle_checks=$((idle_checks - 1))

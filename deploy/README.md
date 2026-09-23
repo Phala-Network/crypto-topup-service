@@ -29,6 +29,20 @@ state is marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against 
   `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
   pinned Prometheus image.
 
+## Service startup checks
+
+`topup run` refuses to start until every RPC provider of every route shows the route's factory,
+`implementation()`, `treasury()`, `factory()`, `addressOf(sample salt)`, and the recorded
+contract code (architecture §4, §14). The check runs before the service touches the database, so
+an outage of any single configured provider blocks restarts by design; a running service is not
+affected. Restore the provider or wait for it; do not remove it from the route to get past the
+check, since the route is attested.
+
+Two routes that name the same product must agree on `destination.settlement_url` and
+`destination.product_kid`, or startup fails. The `restore-check` tools service pins one route
+file (`phala-cloud-sepolia-pha.yaml`) in its entrypoint, so adding a second route or product also
+requires adding that route to `restore-check` and to the `topup run` command in the compose.
+
 ## Backup age marker contract
 
 After a successful `walg-wal-push` (key-versioned WAL upload and metadata) or `walg-base-backup`,

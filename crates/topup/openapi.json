@@ -1574,13 +1574,15 @@
         "description": "Daily finance report produced by C12.",
         "required": [
           "generated_at",
-          "exposure_minor",
           "routes"
         ],
         "properties": {
           "exposure_minor": {
-            "type": "string",
-            "description": "Open rate-lock credit across all products in destination minor units, from the global\nexposure counter the global cap is enforced against."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Open rate-lock credit across all products in destination minor units, from the global\nexposure counter the global cap is enforced against. This service always sends it; it is\noptional in the schema so clients also parse reports from servers that predate it."
           },
           "generated_at": {
             "type": "string",

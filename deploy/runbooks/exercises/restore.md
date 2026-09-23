@@ -2,6 +2,10 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`, and
+`restore-check` pins its route in the compose entrypoint. The commands below are recorded as run;
+use the current [runbook](../restore.md).
+
 Status: partial. The C8 post-restore gate ran against seeded data before D3 landed. D3 (#58) now
 implements `topup restore-check` and `deploy/RESTORE.md`, and `deploy/local/restore-drill.sh`
 exercises both end to end locally; the staging drill has not run yet.
@@ -40,8 +44,8 @@ COMMIT
 The post-restore gate ran with the application role against the reconciliation exercise database
 from [local setup](local-setup.md), where no deposit was at or beyond `cleared`:
 
-```sh
-topup reconcile --post-restore --route /tmp/wp-d5-ex/route.yaml
+```text
+topup reconcile --once --post-restore --route /tmp/wp-d5-ex/route.yaml
 ```
 
 ```text

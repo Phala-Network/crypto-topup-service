@@ -79,7 +79,10 @@ it simulates, broadcasts, or derives the reference deployment.
 `expected-codehashes.json` records the pinned compiler profile, canonical proxy hash, fixed salt,
 and build artifact hashes. Runtime template hashes intentionally exclude immutable substitutions;
 the deployment and verification scripts create a temporary local reference deployment with the
-actual constructor arguments to derive exact factory and implementation runtime hashes.
+actual constructor arguments to derive exact factory and implementation runtime hashes. The file
+also records each immutable's 32-byte word offsets (`immutable_offsets`). At startup `topup run`
+requires the route's addresses at exactly those offsets and, with them zeroed, the runtime template
+hash; its compiled-in copies of these values are tested against this file.
 
 ```sh
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"

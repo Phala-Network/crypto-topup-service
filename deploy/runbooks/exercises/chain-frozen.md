@@ -2,6 +2,9 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`. The commands below
+are recorded as run; use the current [runbook](../chain-frozen.md).
+
 Status: complete local CLI scenario against PostgreSQL 16 and Anvil, continuing from the
 [reconciliation mismatch exercise](reconciliation-mismatch.md) in database `wp_d5_recon2`.
 
@@ -46,7 +49,7 @@ the owner without fixing the cause does not unfreeze the chain: the next pass wr
 
 ```text
 owner DELETE chain:31337 -> DELETE 1
-topup reconcile -> exit=0
+topup reconcile --once -> exit=0
 chain blocks for 31337 -> 1
 ```
 
@@ -57,7 +60,7 @@ block, one pass completed and the runbook's verification query returned no chain
 owner UPDATE address, DELETE chain:31337 -> UPDATE 1 DELETE 1
 {"message":"reconciler heartbeat","findings":2,"post_restore":false}
 {"message":"reconciliation completed","findings":2}
-topup reconcile -> exit=0
+topup reconcile --once -> exit=0
 chain blocks for 31337 -> 0
 ```
 

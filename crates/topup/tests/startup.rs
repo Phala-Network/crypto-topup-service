@@ -91,6 +91,28 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         .expect_err("a wrong implementation must fail");
     ensure!(error.contains("implementation()"), "{error}");
 
+    // Correct getters but different runtime code: one unreachable byte appended to each contract.
+    for (contract, name) in [(factory, "factory"), (implementation, "implementation")] {
+        let original = cast(&["code", &format!("{contract:#x}"), "--rpc-url", &rpc_url])?;
+        set_code(&rpc_url, contract, &format!("{original}00"))?;
+        ensure!(
+            implementation_of(&rpc_url, factory)? == implementation,
+            "the getters must still answer"
+        );
+        let error = topup::contracts::verify_routes(std::slice::from_ref(&route))
+            .await
+            .expect_err("modified code must fail");
+        ensure!(
+            error.contains(name) && error.contains("differs from the recorded code hash"),
+            "{error}"
+        );
+        set_code(&rpc_url, contract, &original)?;
+    }
+    topup::contracts::verify_routes(std::slice::from_ref(&route))
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("restored code must pass again")?;
+
     let path = std::env::temp_dir().join(format!("topup-startup-{}.yaml", uuid::Uuid::new_v4()));
     std::fs::write(
         &path,
@@ -180,21 +202,37 @@ fn deploy_factory(rpc_url: &str) -> Result<Address> {
 }
 
 fn implementation_of(rpc_url: &str, factory: Address) -> Result<Address> {
-    let output = Command::new("cast")
-        .args([
-            "call",
-            &format!("{factory:#x}"),
-            "implementation()(address)",
-            "--rpc-url",
-            rpc_url,
-        ])
-        .output()?;
+    let output = cast(&[
+        "call",
+        &format!("{factory:#x}"),
+        "implementation()(address)",
+        "--rpc-url",
+        rpc_url,
+    ])?;
+    Ok(Address::from_str(&output)?)
+}
+
+fn set_code(rpc_url: &str, contract: Address, code: &str) -> Result<()> {
+    cast(&[
+        "rpc",
+        "--rpc-url",
+        rpc_url,
+        "anvil_setCode",
+        &format!("{contract:#x}"),
+        code,
+    ])
+    .map(drop)
+}
+
+fn cast(arguments: &[&str]) -> Result<String> {
+    let output = Command::new("cast").args(arguments).output()?;
     ensure!(
         output.status.success(),
-        "cast call failed: {}",
+        "cast {} failed: {}",
+        arguments.first().copied().unwrap_or_default(),
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(Address::from_str(String::from_utf8(output.stdout)?.trim())?)
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 fn repository_root() -> PathBuf {

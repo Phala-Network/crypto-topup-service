@@ -12,15 +12,26 @@ use crate::rpc_provider::{
     BALANCE_BATCH_SIZE, RPC_TIMEOUT, configured_provider_url, provider_label,
 };
 
-/// `ForwarderFactory` runtime code hash with its `implementation` immutable zeroed, as recorded in
-/// `deploy/contracts/expected-codehashes.json`.
+// The build fingerprints below are recorded by `deploy/contracts/check-build.sh --write` in
+// `deploy/contracts/expected-codehashes.json`; a unit test keeps these copies equal to that file,
+// which the service image does not contain.
+
+/// `ForwarderFactory` runtime code hash with its immutable words zeroed.
 const FACTORY_RUNTIME_TEMPLATE_HASH: B256 =
     b256!("3bcaca09de50292271a29ea682474bfef177d16fea1a20ab25092ac34dc8ff1a");
 
-/// `Forwarder` runtime code hash with its `treasury` and `factory` immutables zeroed, as recorded
-/// in `deploy/contracts/expected-codehashes.json`.
+/// Byte offsets of the 32-byte `implementation` words in `ForwarderFactory` runtime code.
+const FACTORY_IMPLEMENTATION_OFFSETS: &[usize] = &[303, 750, 1150];
+
+/// `Forwarder` runtime code hash with its immutable words zeroed.
 const FORWARDER_RUNTIME_TEMPLATE_HASH: B256 =
     b256!("0d75243426ce4c396cb01f2586db90ca041e6708235c1a902679efa4f7fbed28");
+
+/// Byte offsets of the 32-byte `treasury` words in `Forwarder` runtime code.
+const FORWARDER_TREASURY_OFFSETS: &[usize] = &[82, 356, 650, 783, 843];
+
+/// Byte offsets of the 32-byte `factory` words in `Forwarder` runtime code.
+const FORWARDER_FACTORY_OFFSETS: &[usize] = &[207, 253];
 
 /// Salt used to compare the factory's `addressOf` with local address derivation.
 #[must_use]
@@ -97,19 +108,24 @@ async fn verify_on(client: &AlloyChainClient, route: &RouteFile) -> Result<(), S
         ));
     }
     let factory_code = client.code_at(factory).await.map_err(read)?;
-    if template_hash(&factory_code, &[implementation]) != FACTORY_RUNTIME_TEMPLATE_HASH {
-        return Err(format!(
-            "factory {factory:#x} code hash does not match the ForwarderFactory build"
-        ));
-    }
+    verify_code(
+        &factory_code,
+        &[(implementation, FACTORY_IMPLEMENTATION_OFFSETS)],
+        FACTORY_RUNTIME_TEMPLATE_HASH,
+    )
+    .map_err(|error| format!("factory {factory:#x} {error} of the ForwarderFactory build"))?;
     let implementation_code = client.code_at(implementation).await.map_err(read)?;
-    if template_hash(&implementation_code, &[contracts.treasury, factory])
-        != FORWARDER_RUNTIME_TEMPLATE_HASH
-    {
-        return Err(format!(
-            "implementation {implementation:#x} code hash does not match the Forwarder build"
-        ));
-    }
+    verify_code(
+        &implementation_code,
+        &[
+            (contracts.treasury, FORWARDER_TREASURY_OFFSETS),
+            (factory, FORWARDER_FACTORY_OFFSETS),
+        ],
+        FORWARDER_RUNTIME_TEMPLATE_HASH,
+    )
+    .map_err(|error| {
+        format!("implementation {implementation:#x} {error} of the Forwarder build")
+    })?;
     let sample = client
         .factory_addresses(factory, &[sample_salt()])
         .await
@@ -123,28 +139,33 @@ async fn verify_on(client: &AlloyChainClient, route: &RouteFile) -> Result<(), S
     Ok(())
 }
 
-/// Hashes runtime code after zeroing each 32-byte word that holds one of `immutables`.
+/// Checks runtime code against a build whose immutable words are zeroed.
 ///
-/// Solidity places address immutables as left-padded words; the build records the code hash with
-/// those words zeroed, so the result equals the template hash only when every other byte matches.
-fn template_hash(code: &[u8], immutables: &[Address]) -> B256 {
+/// Each immutable word must hold the route's expected address at exactly the recorded offsets;
+/// after zeroing those words, the code must hash to the recorded template hash.
+fn verify_code(
+    code: &[u8],
+    immutables: &[(Address, &[usize])],
+    template_hash: B256,
+) -> Result<(), &'static str> {
     let mut template = code.to_vec();
-    for immutable in immutables {
-        let word = immutable.into_word();
-        let mut offset = 0;
-        while let Some(found) = template.get(offset..).and_then(|rest| {
-            rest.windows(32)
-                .position(|window| window == word.as_slice())
-        }) {
-            let start = offset.saturating_add(found);
-            let end = start.saturating_add(32);
-            if let Some(slot) = template.get_mut(start..end) {
-                slot.fill(0);
+    for (expected, offsets) in immutables {
+        let word = expected.into_word();
+        for offset in *offsets {
+            let slot = offset
+                .checked_add(32)
+                .and_then(|end| template.get_mut(*offset..end))
+                .ok_or("runtime code is shorter than the immutable references")?;
+            if slot != word.as_slice() {
+                return Err("does not hold the route's addresses in the immutable words");
             }
-            offset = end;
+            slot.fill(0);
         }
     }
-    keccak256(template)
+    if keccak256(&template) != template_hash {
+        return Err("runtime code differs from the recorded code hash");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -169,21 +190,44 @@ mod tests {
     }
 
     #[test]
-    fn template_hash_zeroes_every_immutable_word() {
-        let immutable = Address::repeat_byte(0xab);
-        let mut code = vec![0x60, 0x80];
-        code.extend_from_slice(immutable.into_word().as_slice());
-        code.push(0x5b);
-        code.extend_from_slice(immutable.into_word().as_slice());
-        let mut template = vec![0x60, 0x80];
-        template.extend_from_slice(&[0; 32]);
-        template.push(0x5b);
-        template.extend_from_slice(&[0; 32]);
-
-        assert_eq!(template_hash(&code, &[immutable]), keccak256(&template));
-        assert_ne!(
-            template_hash(&code, &[Address::repeat_byte(0xcd)]),
-            keccak256(&template)
+    fn immutable_offsets_match_the_recorded_contract_build() {
+        let recorded: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../deploy/contracts/expected-codehashes.json"
+        ))
+        .expect("recorded code hashes parse");
+        let offsets = |contract: &str, immutable: &str| -> Vec<usize> {
+            serde_json::from_value(
+                recorded["artifacts"][contract]["immutable_offsets"][immutable].clone(),
+            )
+            .expect("recorded offsets are a list")
+        };
+        assert_eq!(
+            offsets("ForwarderFactory", "implementation"),
+            FACTORY_IMPLEMENTATION_OFFSETS
         );
+        assert_eq!(offsets("Forwarder", "treasury"), FORWARDER_TREASURY_OFFSETS);
+        assert_eq!(offsets("Forwarder", "factory"), FORWARDER_FACTORY_OFFSETS);
+    }
+
+    #[test]
+    fn code_check_uses_exact_immutable_offsets() {
+        let immutable = Address::repeat_byte(0xab);
+        let mut template = vec![0x60; 70];
+        template[2..34].fill(0);
+        let hash = keccak256(&template);
+        let mut code = template.clone();
+        code[2..34].copy_from_slice(immutable.into_word().as_slice());
+        let offsets: &[usize] = &[2];
+
+        assert_eq!(verify_code(&code, &[(immutable, offsets)], hash), Ok(()));
+        // The same address at another offset, a different address, or trailing code all fail.
+        let mut moved = template.clone();
+        moved[36..68].copy_from_slice(immutable.into_word().as_slice());
+        assert!(verify_code(&moved, &[(immutable, offsets)], hash).is_err());
+        assert!(verify_code(&code, &[(Address::repeat_byte(0xcd), offsets)], hash).is_err());
+        let mut extended = code.clone();
+        extended.push(0);
+        assert!(verify_code(&extended, &[(immutable, offsets)], hash).is_err());
+        assert!(verify_code(&code[..20], &[(immutable, offsets)], hash).is_err());
     }
 }

@@ -2,6 +2,9 @@
 
 Date: 2026-09-22.
 
+Commands changed after this exercise (#94): `reconcile` no longer takes `--once`. The commands below
+are recorded as run; use the current [runbook](../lock-expiry-worker-failure.md).
+
 Status: complete local scenario with a running `topup run` service, the dstack simulator, Anvil,
 and PostgreSQL 16 (see [local setup](local-setup.md)). It uses the seeded locks database from the
 [lock exposure exercise](lock-exposure-near-cap.md), re-created after merging #70 and #72, with the
@@ -157,7 +160,7 @@ docker stop wp-d5-exercise-dstack
 ```
 
 The stop-repair-start alternative uses the same SQL without concurrent writers and was not run
-separately. The runbook now repairs drift in service with `topup reconcile` (the
+separately. The runbook now repairs drift in service with `topup reconcile --once` (the
 `lock_exposure` check, #75); its concurrency behaviour is covered by
 `exposure_repair_converges_under_concurrent_create_consume_cancel_and_expire` in
 `crates/topup/tests/rate_locks.rs`, and this owner-SQL exercise has not been re-run against it.

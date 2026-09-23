@@ -44,6 +44,38 @@ mod tests {
     }
 
     #[test]
+    fn route_files_with_removed_keys_fail_with_the_key_name() {
+        for (yaml, key) in [
+            (
+                VALID.replace(
+                    "    replacement_bps: 12500\n",
+                    "    replacement_bps: 12500\n    gas_limit_bps: 12000\n",
+                ),
+                "gas_limit_bps",
+            ),
+            (
+                VALID.replace("  max_age_s: 120\n", "  price_scale: 8\n  max_age_s: 120\n"),
+                "price_scale",
+            ),
+            (
+                VALID.replace(
+                    "  chain_id: 1\n",
+                    "  chain_id: 1\n  name: ethereum-mainnet\n",
+                ),
+                "name",
+            ),
+        ] {
+            assert_ne!(yaml, VALID, "fixture edit for `{key}` must apply");
+            let error =
+                parse_and_validate(&yaml, false).expect_err("removed keys must be rejected");
+            assert!(
+                error.contains("unknown field") && error.contains(&format!("`{key}`")),
+                "unclear error for `{key}`: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn operator_key_version_is_required_and_positive() {
         assert!(
             parse_and_validate(&VALID.replace("  operator_key_version: 1\n", ""), false)

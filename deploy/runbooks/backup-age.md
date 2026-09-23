@@ -28,6 +28,13 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
   for that instance only, and lift them when the restore resumes archiving or the drill CVM is
   destroyed. Never silence them for the live instance.
 
+- Idle-database margin: the only WAL on an idle database is the heartbeat's row every 60 seconds,
+  and `archive_timeout=60` switches a segment only once new WAL exists. If a heartbeat commits just
+  after a switch check, the next switch waits for the following check, so the marker can reach
+  about 120 seconds plus the `wal-push` upload time before it refreshes (usually it refreshes every
+  60 seconds). `TopupBackupTooOld` needs the marker above 120 seconds for a full minute, so this
+  worst case does not page; a marker that stays past 180 seconds does. The local infra smoke
+  bounds the idle marker at 150 seconds.
 - Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
   `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle
   (`SELECT pg_current_wal_lsn()` does not advance across 60 seconds): the `heartbeat` service has
