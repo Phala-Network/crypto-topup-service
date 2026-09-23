@@ -43,6 +43,18 @@ groups:
         labels: { severity: page }
         annotations:
           summary: Open lock exposure is at least 90 percent of cap
+      - alert: TopupLockExposureDrift
+        expr: increase(topup_lock_exposure_drift_total{producer_enabled="true"}[15m]) > 0
+        for: 0m
+        labels: { severity: page }
+        annotations:
+          summary: Reconciliation repaired a drifted rate-lock exposure counter
+      - alert: TopupLockExpiryFailing
+        expr: increase(topup_lock_expiry_failures_total{producer_enabled="true"}[5m]) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: Rate-lock expiry scans keep failing
       - alert: TopupUnsupportedInflows
         expr: sum(increase(topup_unsupported_inflows_total{producer_enabled="true"}[15m])) > 0
         for: 0m

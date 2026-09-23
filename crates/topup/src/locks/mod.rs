@@ -251,7 +251,8 @@ impl From<sqlx::Error> for RateLockError {
 ///
 /// A replay of an existing reference must state the same amount in the same unit as the stored
 /// lock (`amount_atomic` against the locked token amount, `amount_minor` against the locked
-/// credit); any other amount is an idempotency mismatch.
+/// credit); any other amount is an idempotency mismatch. Replays are answered before the
+/// `rate_lock.enabled` check, so disabling a route never hides a lock the product already showed.
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
@@ -261,12 +262,11 @@ pub async fn create(
     lock_ref: &str,
     requested: RequestedAmount,
 ) -> Result<RateLock, RateLockError> {
+    if let Some(existing) = find_replay(pool, product.id, account.id, lock_ref, requested).await? {
+        return Ok(existing);
+    }
     if !route.rate_lock.enabled {
         return Err(RateLockError::Disabled);
-    }
-    validate_lock_ref(lock_ref)?;
-    if let Some(existing) = get(pool, product.id, account.id, lock_ref).await? {
-        return replay(existing, requested);
     }
     // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
     // authoritative check repeats under the account row lock below.
@@ -367,6 +367,24 @@ pub async fn create(
     })
 }
 
+/// Returns the stored lock when `lock_ref` already exists for the account, checked as a replay.
+///
+/// Callers answer a replay before pause and enablement checks: a replay creates nothing, so it
+/// returns the same lock a `GET` would, and a mismatched amount is still an idempotency error.
+pub async fn find_replay(
+    pool: &PgPool,
+    product_id: Uuid,
+    account_id: Uuid,
+    lock_ref: &str,
+    requested: RequestedAmount,
+) -> Result<Option<RateLock>, RateLockError> {
+    validate_lock_ref(lock_ref)?;
+    get(pool, product_id, account_id, lock_ref)
+        .await?
+        .map(|existing| replay(existing, requested))
+        .transpose()
+}
+
 /// Loads one lock only when the account belongs to the authenticated product.
 pub async fn get(
     pool: &PgPool,
@@ -455,6 +473,13 @@ pub async fn cancel(
     if row.status != RateLockStatus::Open || row.expires_at <= Utc::now() {
         return Err(RateLockError::NotOpen);
     }
+    // `FOR UPDATE` conflicts with the `KEY SHARE` lock a scanner deposit insert takes on its
+    // address row, so an uncommitted deposit either commits first and is seen below, or waits
+    // until this cancellation commits.
+    sqlx::query("SELECT 1 FROM addresses WHERE id = $1 FOR UPDATE")
+        .bind(row.address_id)
+        .execute(&mut *transaction)
+        .await?;
     let paid: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1)")
             .bind(row.address_id)
@@ -511,20 +536,12 @@ pub(crate) async fn consume(
             ));
         }
     };
-    let row =
-        sqlx::query("SELECT status, consumed_by FROM rate_locks WHERE address_id = $1 FOR UPDATE")
-            .bind(address_id)
-            .fetch_optional(&mut **transaction)
-            .await?;
-    let Some(row) = row else {
-        return Ok(false);
-    };
-    let status: String = row.try_get("status")?;
-    let consumed_by: Option<Uuid> = row.try_get("consumed_by")?;
-    if status == "consumed" && idempotent && consumed_by == Some(deposit_id) {
+    let status = reservation.status;
+    let consumed_by = reservation.consumed_by;
+    if status == RateLockStatus::Consumed && idempotent && consumed_by == Some(deposit_id) {
         return Ok(true);
     }
-    if !matches!(status.as_str(), "open" | "expired") || consumed_by.is_some() {
+    if !matches!(status, RateLockStatus::Open | RateLockStatus::Expired) || consumed_by.is_some() {
         return Ok(false);
     }
     sqlx::query(
@@ -638,6 +655,7 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
 pub struct ExpiryMetrics {
     heartbeats: AtomicU64,
     expired: AtomicU64,
+    failures: AtomicU64,
 }
 
 impl ExpiryMetrics {
@@ -651,6 +669,12 @@ impl ExpiryMetrics {
     #[must_use]
     pub fn expired(&self) -> u64 {
         self.expired.load(Ordering::Relaxed)
+    }
+
+    /// Returns failed expiry scans in this process.
+    #[must_use]
+    pub fn failures(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
     }
 }
 
@@ -690,13 +714,133 @@ impl ExpiryWorker {
                             self.metrics.expired.fetch_add(expired, Ordering::Relaxed);
                             crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
                         }
-                        Err(error) => tracing::error!(%error, "rate-lock expiry scan failed"),
+                        Err(error) => {
+                            self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                            crate::observability::record_lock_expiry_failure();
+                            tracing::error!(%error, "rate-lock expiry scan failed");
+                        }
                     }
                     crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, self.scan_interval);
                 }
             }
         }
     }
+}
+
+/// One `lock_exposure` counter corrected by [`repair_exposure`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposureRepair {
+    /// Scope key: `account:<id>`, `product:<id>`, or `global`.
+    pub scope_key: String,
+    /// Counter value observed under the row lock; zero when the row was missing.
+    pub before_minor: u64,
+    /// Sum of `credit_minor` over the scope's open reserved locks, now stored in the counter.
+    pub after_minor: u64,
+}
+
+/// Sums open reserved lock credit per scope key, in the same shape the counters are kept.
+const EXPECTED_EXPOSURE: &str = r#"
+    SELECT scope.scope_key, sum(rate_lock.credit_minor) AS open_minor
+    FROM rate_locks AS rate_lock
+    JOIN addresses AS address ON address.id = rate_lock.address_id
+    JOIN accounts AS account ON account.id = address.account_id
+    CROSS JOIN LATERAL (
+        VALUES ('account:' || account.id::text), ('product:' || account.product_id::text),
+               ('global')
+    ) AS scope (scope_key)
+    WHERE rate_lock.status = 'open' AND rate_lock.consumed_by IS NULL
+      AND rate_lock.exposure_reserved
+    GROUP BY scope.scope_key
+"#;
+
+/// Recomputes every drifted `lock_exposure` counter from `rate_locks` and corrects it.
+///
+/// Drift is found from one snapshot, where every writer's lock and counter changes are visible
+/// together. Each drifted key is then repaired in its own transaction: lock the counter row,
+/// recompute, update. Every writer changes `rate_locks` and this row in one transaction and must
+/// take this row's lock, so under `READ COMMITTED` the recompute (a later statement with a fresh
+/// snapshot) sees every committed change, and an in-flight writer applies its own delta after
+/// this commit. Only one counter row is held at a time, so this cannot deadlock with writers
+/// that lock several rows in key order.
+pub async fn repair_exposure(pool: &PgPool) -> Result<Vec<ExposureRepair>, RateLockError> {
+    let drifted: Vec<String> = sqlx::query_scalar(&format!(
+        r#"
+        WITH expected AS ({EXPECTED_EXPOSURE})
+        SELECT coalesce(expected.scope_key, counter.scope_key) AS scope_key
+        FROM expected
+        FULL JOIN lock_exposure AS counter ON counter.scope_key = expected.scope_key
+        WHERE coalesce(expected.open_minor, 0) <> coalesce(counter.open_minor, 0)
+        ORDER BY coalesce(expected.scope_key, counter.scope_key) COLLATE "C"
+        "#
+    ))
+    .fetch_all(pool)
+    .await?;
+    let mut repairs = Vec::new();
+    for scope_key in drifted {
+        if let Some(repair) = repair_scope(pool, &scope_key).await? {
+            tracing::error!(
+                scope_key = %repair.scope_key,
+                before_minor = repair.before_minor,
+                after_minor = repair.after_minor,
+                "lock exposure counter drift repaired"
+            );
+            crate::observability::record_lock_exposure_drift(&repair.scope_key);
+            repairs.push(repair);
+        }
+    }
+    Ok(repairs)
+}
+
+async fn repair_scope(
+    pool: &PgPool,
+    scope_key: &str,
+) -> Result<Option<ExposureRepair>, RateLockError> {
+    let mut transaction = pool.begin().await?;
+    // Creating a missing row the way a reservation does makes the row lock below cover a
+    // concurrent first reservation for the same key.
+    sqlx::query(
+        "INSERT INTO lock_exposure (scope_key, open_minor) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+    )
+    .bind(scope_key)
+    .execute(&mut *transaction)
+    .await?;
+    let before: String = sqlx::query_scalar(
+        "SELECT open_minor::text FROM lock_exposure WHERE scope_key = $1 FOR UPDATE",
+    )
+    .bind(scope_key)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let expected: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT open_minor::text FROM ({EXPECTED_EXPOSURE}) AS expected WHERE scope_key = $1"
+    ))
+    .bind(scope_key)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let before_minor = parse_u64(&before)?;
+    let after_minor = expected.as_deref().map_or(Ok(0), parse_u64)?;
+    if before_minor == after_minor {
+        transaction.commit().await?;
+        return Ok(None);
+    }
+    sqlx::query(
+        "UPDATE lock_exposure SET open_minor = $2::text::numeric, updated_at = now() WHERE scope_key = $1",
+    )
+    .bind(scope_key)
+    .bind(after_minor.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(ExposureRepair {
+        scope_key: scope_key.to_owned(),
+        before_minor,
+        after_minor,
+    }))
+}
+
+fn parse_u64(value: &str) -> Result<u64, RateLockError> {
+    value
+        .parse::<u64>()
+        .map_err(|_| RateLockError::DatabaseInvariant)
 }
 
 fn amounts(
@@ -907,6 +1051,8 @@ struct Reservation {
     product_id: Uuid,
     credit_minor: MinorAmount,
     reserved: bool,
+    status: RateLockStatus,
+    consumed_by: Option<Uuid>,
 }
 
 async fn lock_reservation(
@@ -917,7 +1063,7 @@ async fn lock_reservation(
         r#"
         SELECT address.account_id, account.product_id,
                rate_lock.credit_minor::text AS credit_minor,
-               rate_lock.exposure_reserved
+               rate_lock.exposure_reserved, rate_lock.status, rate_lock.consumed_by
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
         JOIN accounts AS account ON account.id = address.account_id
@@ -930,11 +1076,14 @@ async fn lock_reservation(
     .await?
     .ok_or(RateLockError::NotFound)?;
     let credit: String = row.try_get("credit_minor")?;
+    let status: String = row.try_get("status")?;
     Ok(Reservation {
         account_id: row.try_get("account_id")?,
         product_id: row.try_get("product_id")?,
         credit_minor: parse_minor(&credit)?,
         reserved: row.try_get("exposure_reserved")?,
+        status: RateLockStatus::parse(&status)?,
+        consumed_by: row.try_get("consumed_by")?,
     })
 }
 
@@ -976,6 +1125,11 @@ async fn decrement_exposure(
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() != 1 {
+        tracing::error!(
+            scope_key = key,
+            release_minor = amount,
+            "lock exposure counter is below the release; the reconciler lock_exposure check repairs it"
+        );
         return Err(RateLockError::DatabaseInvariant);
     }
     Ok(())

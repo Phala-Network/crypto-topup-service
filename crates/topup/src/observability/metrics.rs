@@ -21,6 +21,7 @@ use crate::reconciler::CheckName;
 static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
 const DEFAULT_BACKUP_TIMESTAMP_FILE: &str = "/run/topup-observability/last-backup-unix-seconds";
 const COLLECTION_INTERVAL: Duration = Duration::from_secs(15);
+const LOCK_EXPOSURE_SCOPES: [&str; 3] = ["account", "product", "global"];
 const DEPOSIT_STATES: [&str; 6] = [
     "detected",
     "confirmed",
@@ -160,6 +161,14 @@ pub fn register_metrics() {
         "topup_unsupported_inflows_total",
         "Finalized unsupported-asset inflows observed by the scanner"
     );
+    describe_counter!(
+        "topup_lock_expiry_failures_total",
+        "Rate-lock expiry scans that failed and rolled back their batch"
+    );
+    describe_counter!(
+        "topup_lock_exposure_drift_total",
+        "Rate-lock exposure counters found drifted and repaired, grouped by scope kind"
+    );
 
     // Producers owned by later work packages consume these stable names when they merge. Their
     // pending-labelled zero series keep dashboards and alerts reviewable without fake data.
@@ -191,6 +200,11 @@ pub fn register_metrics() {
         counter!("topup_reconciliation_mismatches_total", "check" => check.code(), "producer_enabled" => "true").absolute(0);
     }
     counter!("topup_unsupported_inflows_total", "chain" => "pending", "producer_enabled" => "false").absolute(0);
+    counter!("topup_lock_expiry_failures_total", "producer_enabled" => "true").absolute(0);
+    for scope in LOCK_EXPOSURE_SCOPES {
+        counter!("topup_lock_exposure_drift_total", "scope" => scope, "producer_enabled" => "true")
+            .absolute(0);
+    }
     for loop_name in [
         "pump",
         "scanner",
@@ -342,6 +356,21 @@ impl LockExposureCaps {
 pub fn record_flush_send_paused(chain: u64, paused: bool) {
     gauge!("topup_flush_send_paused", "chain" => chain.to_string(), "producer_enabled" => "true")
         .set(if paused { 1.0 } else { 0.0 });
+}
+
+/// Counts one failed rate-lock expiry scan.
+pub fn record_lock_expiry_failure() {
+    counter!("topup_lock_expiry_failures_total", "producer_enabled" => "true").increment(1);
+}
+
+/// Counts one repaired exposure counter, labelled by scope kind to keep cardinality bounded.
+pub fn record_lock_exposure_drift(scope_key: &str) {
+    let scope = LOCK_EXPOSURE_SCOPES
+        .into_iter()
+        .find(|scope| scope_key.split(':').next() == Some(*scope))
+        .unwrap_or("unknown");
+    counter!("topup_lock_exposure_drift_total", "scope" => scope, "producer_enabled" => "true")
+        .increment(1);
 }
 
 /// Periodically refreshes metrics sourced from PostgreSQL.
@@ -519,6 +548,8 @@ mod tests {
             "topup_backup_age_seconds",
             "topup_backup_last_success_unixtime_seconds",
             "topup_reconciliation_mismatches_total",
+            "topup_lock_expiry_failures_total",
+            "topup_lock_exposure_drift_total",
             "topup_loop_heartbeat_unixtime_seconds",
             "topup_loop_progress_unixtime_seconds",
             "topup_loop_wait_until_unixtime_seconds",

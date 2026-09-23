@@ -1428,11 +1428,17 @@ async fn insert_persistent_address(
 ) -> Result<Address, ApiError> {
     let salt = persistent_salt(product_slug, &account.external_id, version);
     let address = forwarder_address(factory, implementation, salt);
+    // Each version's address is first issued here, so, as for lock addresses, the scanner
+    // covers it from the chain's committed cursor instead of backfilling from genesis.
     let row = sqlx::query_as::<_, AddressRow>(
         r#"
         INSERT INTO addresses
-            (id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at)
-        VALUES ($1, $2, $3, 'persistent', $4, NULL, $5, $6, NULL)
+            (id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at,
+             created_block)
+        VALUES (
+            $1, $2, $3, 'persistent', $4, NULL, $5, $6, NULL,
+            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $3), 0)
+        )
         RETURNING id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
         "#,
     )

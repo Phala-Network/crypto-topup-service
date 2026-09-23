@@ -53,7 +53,7 @@ Until it merges, route the metric or symptom to the same runbook.
 | `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupLockExpiryFailing`, `TopupLockExposureDrift`, `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
 | `TopupBackupTooOld` | [Backup age](backup-age.md) |
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
@@ -81,9 +81,6 @@ Until it merges, route the metric or symptom to the same runbook.
   as the hard chain-wide stop.
 - Alert rules and metric names are pending #56. Its loop list does not include the C10 rate-lock
   expiry worker, so that worker has no heartbeat alert yet.
-- [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75): a drifted `lock_exposure`
-  counter can only be repaired by a human-only owner transaction; an in-service repair path and a
-  drift alert are follow-up work.
 
 ## Exercise status
 
@@ -109,7 +106,7 @@ for any runbook until #56 merges.
 | Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
 | Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
 | Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
-| Lock expiry worker failure | Complete: running service, injected ledger drift, owner repair while running | [x] |
+| Lock expiry worker failure | Partial: running service, injected ledger drift, owner repair while running; the in-service `topup reconcile --once` repair that replaced it is covered by the PostgreSQL integration tests only | [ ] |
 | Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
 | Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |

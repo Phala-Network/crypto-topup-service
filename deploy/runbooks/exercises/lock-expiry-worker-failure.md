@@ -156,5 +156,7 @@ docker stop wp-d5-exercise-dstack
 ```
 
 The stop-repair-start alternative uses the same SQL without concurrent writers and was not run
-separately. An in-service repair path and a heartbeat/drift alert for this loop remain follow-up
-work in [#75](https://github.com/Phala-Network/crypto-topup-service/issues/75).
+separately. The runbook now repairs drift in service with `topup reconcile --once` (the
+`lock_exposure` check, #75); its concurrency behaviour is covered by
+`exposure_repair_converges_under_concurrent_create_consume_cancel_and_expire` in
+`crates/topup/tests/rate_locks.rs`, and this owner-SQL exercise has not been re-run against it.

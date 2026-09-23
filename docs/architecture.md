@@ -210,7 +210,8 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 **Scanner** per chain: read `finalized` from provider A; fetch `Transfer(*, our addresses)`
 from any contract in windows ≤ 2 000 blocks and ≤ 1 000 addresses; insert with
 `ON CONFLICT DO NOTHING`; advance the cursor after commit. New addresses backfill from
-creation; retired and lock addresses stay in the filter. Native ETH is a balance check at
+creation (the chain's committed cursor when the address is issued); retired and lock addresses
+stay in the filter. Native ETH is a balance check at
 flush time. Each chain's finality rule is declared in its chain file (Ethereum: `finalized`);
 a chain is enabled only after its rule is reviewed. Later option: Helios as one provider.
 
@@ -235,7 +236,9 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*;
   when the user states USD, the token amount is rounded up. `expires_at = now + window`
   *(policy)*. Locks count against open-exposure caps per account, per product, and global
-  *(policy)*, reserved atomically at creation; creation is rate-limited per account.
+  *(policy)*, reserved atomically at creation; creation is rate-limited per account. Repeating
+  a `product_lock_ref` returns the stored lock (a different amount is `409
+  idempotency_mismatch`), also while `quotes` is paused or the route disables rate locks.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
   `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
   single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock` and the
@@ -409,6 +412,7 @@ checklist:
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
+| `lock_exposure` counter ≠ Σ `credit_minor` of its scope's open reserved locks | lock the counter row, recompute, correct it; alert |
 | After a restore: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11) |
 
 ## 14. Configuration and deployment
@@ -473,7 +477,7 @@ Spans carry `deposit_id`, `chain`, `state`, `attempt`. Metrics: scanner lag, dep
 state and age, provider disagreements, price deviation, settlement outcomes, outbox backlog,
 unflushed balance, operator gas, open lock exposure, backup age, reconciliation mismatches.
 Alerts on age in state, any mismatch, scanner lag, backup age > 2 min, stopped loop, gas
-reserve, lock exposure near cap.
+reserve, lock exposure near cap, lock exposure drift, repeated lock-expiry failures.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only
