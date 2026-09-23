@@ -26,9 +26,24 @@ for name in PRODUCT_KID SETTLEMENT_URL; do
 done
 [[ ${#PRODUCT_KID} -le 128 ]] || { echo "render-route.sh: PRODUCT_KID is too long" >&2; exit 1; }
 
-rendered="$(envsubst '${FORWARDER_FACTORY} ${IMPLEMENTATION} ${TREASURY} ${TEST_TOKEN}
-    ${SANCTIONS_ORACLE} ${PRODUCT_SLUG} ${PRODUCT_KID} ${SETTLEMENT_URL} ${RATE_LOCK_WINDOW_S}' \
-    <"$template")"
+# Single pass over the template: only allow-listed `${NAME}` placeholders are replaced, and
+# substituted values are never rescanned. Anything else is left for the check below.
+allowed=" FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG \
+PRODUCT_KID SETTLEMENT_URL RATE_LOCK_WINDOW_S "
+rest="$(<"$template")"
+rendered=""
+while [[ "$rest" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+    placeholder=${BASH_REMATCH[0]}
+    name=${BASH_REMATCH[1]}
+    rendered+=${rest%%"$placeholder"*}
+    if [[ "$allowed" == *" $name "* ]]; then
+        rendered+=${!name}
+    else
+        rendered+=$placeholder
+    fi
+    rest=${rest#*"$placeholder"}
+done
+rendered+=$rest
 if grep -q '\${' <<<"$rendered"; then
     echo "render-route.sh: unsubstituted placeholder in output" >&2
     exit 1
