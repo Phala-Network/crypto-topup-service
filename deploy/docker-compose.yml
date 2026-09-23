@@ -2,11 +2,37 @@ x-walg-environment: &walg-environment
   WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
   AWS_ENDPOINT: ${AWS_ENDPOINT:-}
   AWS_REGION: ${AWS_REGION:-}
+  AWS_S3_FORCE_PATH_STYLE: ${AWS_S3_FORCE_PATH_STYLE:-false}
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
   AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+  WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
 services:
+  backup-key:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    user: "999:999"
+    command:
+      - topup
+      - backup-key
+      - --version
+      - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - --fallback-versions
+      - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
+      - --output
+      - /run/wal-g/backup.key
+      - --hold
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - walg_key:/run/wal-g
+    healthcheck:
+      test: ["CMD", "topup", "backup-key", "--check", "--output", "/run/wal-g/backup.key"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   postgres:
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
@@ -15,8 +41,13 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+      - observability:/run/topup-observability
     configs:
       - source: postgres_init_topup_role
         target: /docker-entrypoint-initdb.d/10-topup-role.sh
@@ -26,6 +57,9 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    depends_on:
+      backup-key:
+        condition: service_healthy
     restart: unless-stopped
 
   migrate:
@@ -45,6 +79,8 @@ services:
       - run
       - --bind
       - 0.0.0.0:8080
+      - --metrics-bind
+      - 0.0.0.0:9464
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
@@ -64,10 +100,12 @@ services:
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TOPUP_ADMIN_KID: ${TOPUP_ADMIN_KID:-}
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       TOPUP_CHAINS_DIR: /etc/topup/chains
       TOPUP_ROUTES_DIR: /etc/topup/routes
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - observability:/run/topup-observability:ro
     configs:
       - source: topup_chain_ethereum_sepolia
         target: /etc/topup/chains/ethereum-sepolia.yaml
@@ -75,12 +113,24 @@ services:
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     ports:
       - "8080:8080"
+    expose:
+      - "9464"
     healthcheck:
       test: ["CMD", "topup", "attest", "--nonce", "00"]
       interval: 30s
       timeout: 15s
       retries: 3
       start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  heartbeat:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["topup", "heartbeat", "--interval-s", "60"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -98,20 +148,71 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD:-}
       WALG_RETENTION_FULL: "7"
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql/data:ro
+      - walg_key:/run/wal-g:ro
+      - observability:/run/topup-observability
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
       interval: 60s
       timeout: 10s
       retries: 3
     depends_on:
+      backup-key:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  restore:
+    image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    profiles: ["tools"]
+    user: postgres
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    environment:
+      <<: *walg-environment
+      PGDATA: /var/lib/postgresql/data
+      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - walg_key:/run/wal-g:ro
+    restart: "no"
+
+  restore-check:
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    profiles: ["tools"]
+    command: ["topup", "restore-check"]
+    environment:
+      RESTORE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+      TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
+      RPC_PROVIDER_A_API_KEY: ${RPC_PROVIDER_A_API_KEY:-}
+      TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
+      RPC_PROVIDER_B_API_KEY: ${RPC_PROVIDER_B_API_KEY:-}
+      TOPUP_CHAINS_DIR: /etc/topup/chains
+      TOPUP_ROUTES_DIR: /etc/topup/routes
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    configs:
+      - source: topup_chain_ethereum_sepolia
+        target: /etc/topup/chains/ethereum-sepolia.yaml
+      - source: topup_route_phala_cloud_sepolia_pha
+        target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   pgdata:
+  walg_key:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
+  observability:
 
 configs:
   postgres_init_topup_role:

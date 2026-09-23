@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: walg-backup-fetch PGDATA BACKUP_NAME" >&2
+    exit 64
+fi
+
+walg=${WALG_BIN:-wal-g}
+pgdata=$1
+backup_name=$2
+case "$backup_name" in
+    ''|*[!A-Za-z0-9_.-]*) echo "backup name is invalid" >&2; exit 64 ;;
+esac
+
+tmpdir=$(mktemp -d)
+tmp=$tmpdir/manifest.json
+cleanup() {
+    find "$tmpdir" -depth -delete
+}
+trap cleanup EXIT INT TERM
+
+"$walg" st get "key-versions/base/$backup_name.json" "$tmp" \
+    --no-decompress --no-decrypt
+version=$(jq -er \
+    --arg object "$backup_name" \
+    'select(.format == 1 and .kind == "base" and .object == $object) | .key_version' \
+    "$tmp")
+case "$version" in
+    ''|*[!0-9]*) echo "base backup key version metadata is invalid" >&2; exit 126 ;;
+esac
+key_path=${WALG_KEY_DIR:-/run/wal-g}/backup-v${version}.key
+if [ ! -f "$key_path" ]; then
+    echo "base backup key version $version is unavailable" >&2
+    exit 126
+fi
+WALG_LIBSODIUM_KEY_PATH=$key_path "$walg" backup-fetch "$pgdata" "$backup_name"

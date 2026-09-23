@@ -30,6 +30,8 @@ clap.workspace = true
 croner.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -47,11 +49,13 @@ utoipa.workspace = true
 utoipa-axum.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
 sfv.workspace = true
 tower.workspace = true
+tracing-test = { version = "=0.2.5", features = ["no-env-filter"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -584,6 +584,14 @@ async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Res
         payload["product_id"] == product_id.to_string(),
         "event does not name the owning product: {payload}"
     );
+    ensure!(
+        payload["chain_id"].is_u64() && payload["state"] == "rejected",
+        "event lacks the shared deposit event fields: {payload}"
+    );
+    ensure!(
+        payload.get("route").is_some(),
+        "event lacks the route field: {payload}"
+    );
     Ok(())
 }
 

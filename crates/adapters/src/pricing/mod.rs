@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::redaction::RedactedTransportError;
+
 pub use topup_core::valuation::Observation;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -33,7 +35,7 @@ pub enum PriceError {
     /// A configured endpoint was not a valid URL.
     InvalidUrl,
     /// The provider request failed or timed out.
-    Request(&'static str),
+    Request(RedactedTransportError),
     /// The provider returned a non-success status.
     HttpStatus(u16),
     /// The provider response did not match its documented schema.
@@ -51,9 +53,7 @@ impl Display for PriceError {
                 formatter.write_str("price HTTP client configuration failed")
             }
             Self::InvalidUrl => formatter.write_str("price endpoint URL is invalid"),
-            Self::Request(operation) => {
-                write!(formatter, "price request failed during {operation}")
-            }
+            Self::Request(error) => Display::fmt(error, formatter),
             Self::HttpStatus(status) => write!(formatter, "price provider returned HTTP {status}"),
             Self::MalformedResponse(field) => {
                 write!(formatter, "price provider response has invalid `{field}`")

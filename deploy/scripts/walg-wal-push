@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: walg-wal-push WAL_PATH" >&2
+    exit 64
+fi
+
+walg=${WALG_BIN:-wal-g}
+wal_path=$1
+wal_name=${wal_path##*/}
+version=${TOPUP_BACKUP_KEY_VERSION:-}
+case "$version" in
+    ''|*[!0-9]*) echo "TOPUP_BACKUP_KEY_VERSION must be a decimal integer" >&2; exit 64 ;;
+esac
+key_path=${WALG_KEY_DIR:-/run/wal-g}/backup-v${version}.key
+if [ ! -f "$key_path" ]; then
+    echo "WAL key version $version is unavailable" >&2
+    exit 126
+fi
+
+# wal-push starts a background uploader for adjacent .ready segments with
+# WALG_UPLOAD_CONCURRENCY-1 workers and TOTAL_BG_UPLOADED_LIMIT-1 files; either
+# value of 1 disables it. Keep each archive_command invocation bound to the one
+# segment annotated below so no object is uploaded without key-version metadata.
+WALG_LIBSODIUM_KEY_PATH=$key_path \
+WALG_UPLOAD_CONCURRENCY=1 \
+TOTAL_BG_UPLOADED_LIMIT=1 \
+    "$walg" wal-push "$wal_path"
+walg-key-manifest wal "$wal_name"

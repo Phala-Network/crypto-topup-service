@@ -13,6 +13,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, SignerError};
 
+use crate::redaction::{Redacted, RedactedTransportError};
 use crate::signer::actor::SignerHandle;
 
 const SIGNATURE_LABEL: &str = "sig1";
@@ -89,7 +90,7 @@ pub enum SettlementClientError {
     /// The settlement signer failed.
     Signer(SignerError),
     /// The HTTP request failed or timed out.
-    Transport(reqwest::Error),
+    Transport(RedactedTransportError),
 }
 
 impl Display for SettlementClientError {
@@ -139,7 +140,7 @@ pub trait SettlementApi: Send + Sync {
 /// Rustls-backed RFC 9421 settlement client for one product endpoint.
 #[derive(Clone)]
 pub struct SettlementClient {
-    endpoint: Url,
+    endpoint: Redacted,
     client: reqwest::Client,
     signer: SignerHandle,
     keyid: String,
@@ -187,10 +188,11 @@ impl SettlementClient {
         if keyid.is_empty() || keyid.contains(['"', '\\', '\n', '\r']) {
             return Err(SettlementClientError::InvalidEndpoint);
         }
-        let endpoint = Url::parse(endpoint).map_err(|_| SettlementClientError::InvalidEndpoint)?;
-        if !matches!(endpoint.scheme(), "http" | "https")
-            || endpoint.cannot_be_a_base()
-            || endpoint.fragment().is_some()
+        let endpoint =
+            Redacted::parse(endpoint).map_err(|_| SettlementClientError::InvalidEndpoint)?;
+        if !matches!(endpoint.expose().scheme(), "http" | "https")
+            || endpoint.expose().cannot_be_a_base()
+            || endpoint.expose().fragment().is_some()
         {
             return Err(SettlementClientError::InvalidEndpoint);
         }
@@ -198,7 +200,11 @@ impl SettlementClient {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(request_timeout)
             .build()
-            .map_err(SettlementClientError::Transport)?;
+            .map_err(|error| {
+                SettlementClientError::Transport(
+                    endpoint.request_error("settlement client construction", &error),
+                )
+            })?;
         Ok(Self {
             endpoint,
             client,
@@ -248,7 +254,12 @@ impl SettlementClient {
         if include_content_type {
             request = request.header("content-type", "application/json");
         }
-        request.build().map_err(SettlementClientError::Transport)
+        request.build().map_err(|error| {
+            SettlementClientError::Transport(
+                self.endpoint
+                    .request_error("settlement request construction", &error),
+            )
+        })
     }
 
     /// Builds a fully signed POST request without sending it.
@@ -300,7 +311,7 @@ impl SettlementClient {
             serde_json::to_vec(&request.payload).map_err(|_| SettlementClientError::Encode)?;
         self.signed_request(
             Method::POST,
-            self.endpoint.clone(),
+            self.endpoint.expose().clone(),
             &request.idempotency_key,
             body,
             true,
@@ -326,7 +337,7 @@ impl SettlementClient {
         key: &str,
         options: SigningOptions,
     ) -> Result<Request, SettlementClientError> {
-        let mut url = self.endpoint.clone();
+        let mut url = self.endpoint.expose().clone();
         url.path_segments_mut()
             .map_err(|()| SettlementClientError::InvalidEndpoint)?
             .pop_if_empty()
@@ -343,12 +354,10 @@ impl SettlementApi for SettlementClient {
         request: &SettlementRequest,
     ) -> Result<SettlementAnswer, SettlementClientError> {
         let signed = self.signed_post_request(request).await?;
-        let response = self
-            .client
-            .execute(signed)
-            .await
-            .map_err(SettlementClientError::Transport)?;
-        parse_response(response, Some(&request.payload), false).await
+        let response = self.client.execute(signed).await.map_err(|error| {
+            SettlementClientError::Transport(self.endpoint.request_error("settlement POST", &error))
+        })?;
+        parse_response(&self.endpoint, response, Some(&request.payload), false).await
     }
 
     async fn get_by_key(
@@ -356,15 +365,15 @@ impl SettlementApi for SettlementClient {
         key: &str,
     ) -> Result<Option<SettlementAnswer>, SettlementClientError> {
         let signed = self.signed_get_request(key).await?;
-        let response = self
-            .client
-            .execute(signed)
-            .await
-            .map_err(SettlementClientError::Transport)?;
+        let response = self.client.execute(signed).await.map_err(|error| {
+            SettlementClientError::Transport(self.endpoint.request_error("settlement GET", &error))
+        })?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        parse_response(response, None, true).await.map(Some)
+        parse_response(&self.endpoint, response, None, true)
+            .await
+            .map(Some)
     }
 }
 
@@ -377,12 +386,13 @@ struct ProductAnswer {
 }
 
 async fn parse_response(
+    endpoint: &Redacted,
     mut response: reqwest::Response,
     fallback_payload: Option<&Value>,
     payload_required: bool,
 ) -> Result<SettlementAnswer, SettlementClientError> {
     let status = response.status();
-    let (body, over_limit) = read_response_body(&mut response).await?;
+    let (body, over_limit) = read_response_body(endpoint, &mut response).await?;
     if over_limit {
         return Ok(unknown(status, &body, true));
     }
@@ -425,14 +435,13 @@ async fn parse_response(
 }
 
 async fn read_response_body(
+    endpoint: &Redacted,
     response: &mut reqwest::Response,
 ) -> Result<(Vec<u8>, bool), SettlementClientError> {
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(SettlementClientError::Transport)?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        SettlementClientError::Transport(endpoint.request_error("settlement response body", &error))
+    })? {
         let remaining = RESPONSE_BODY_LIMIT.saturating_sub(body.len());
         if chunk.len() > remaining {
             let retained = chunk.get(..remaining).unwrap_or_default();

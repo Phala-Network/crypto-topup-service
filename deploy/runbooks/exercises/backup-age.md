@@ -2,7 +2,8 @@
 
 Date: 2026-09-22.
 
-Status: blocked on D3 backup/restore automation in #58.
+Status: partial. The output below predates D3; D3 (#58) now provides encrypted base backups, WAL
+key metadata, and `deploy/local/restore-drill.sh`, but this exercise has not been re-run against it.
 
 G2 exercised once: [ ]
 
@@ -19,5 +20,5 @@ No backups found
 2|0|000000010000000000000003
 ```
 
-WAL archiving worked locally, but D3 encrypted base backup, age marker, and restore drill are absent.
-This exercise remains partial and does not satisfy G2.
+WAL archiving worked locally before D3 landed. This exercise remains partial and does not satisfy G2
+until it is re-run with D3 and the #56 alert.

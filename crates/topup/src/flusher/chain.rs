@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::{self, Formatter};
 use std::time::Duration;
 
 use alloy_eips::{BlockId, BlockNumberOrTag};
@@ -6,6 +7,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::BatchRequest;
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+use alloy_transport::TransportError;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::time::timeout;
@@ -13,6 +15,7 @@ use topup_adapters::chain::flush::{
     decode_address_of, decode_balance_of, decode_has_role, encode_address_of, encode_balance_of,
     encode_flush, encode_has_role, operator_role,
 };
+use topup_adapters::redaction::Redacted;
 
 use super::{ChainClient, ChainError, ChainLog, ChainReceipt, FeeQuote, NonceReceiptSearch};
 
@@ -20,11 +23,23 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BALANCE_BATCH_SIZE: usize = 500;
 
 /// Alloy HTTP provider implementation used until the shared C3 EVM client is merged.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AlloyChainClient {
     provider: RootProvider,
+    endpoint: Redacted,
     request_timeout: Duration,
     balance_batch_size: usize,
+}
+
+impl fmt::Debug for AlloyChainClient {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AlloyChainClient")
+            .field("endpoint", &self.endpoint)
+            .field("request_timeout", &self.request_timeout)
+            .field("balance_batch_size", &self.balance_batch_size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AlloyChainClient {
@@ -44,14 +59,20 @@ impl AlloyChainClient {
                 "RPC timeout and balance batch size must be positive",
             ));
         }
-        let url = url
-            .parse()
-            .map_err(|error| ChainError::rpc(format!("invalid RPC URL: {error}")))?;
+        let endpoint = Redacted::parse(url).map_err(|_| ChainError::rpc("invalid RPC URL"))?;
         Ok(Self {
-            provider: RootProvider::new_http(url),
+            provider: RootProvider::new_http(endpoint.expose().clone()),
+            endpoint,
             request_timeout,
             balance_batch_size,
         })
+    }
+
+    /// Labels provider errors with the configured provider id instead of the URL.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.endpoint = self.endpoint.with_provider(provider);
+        self
     }
 
     async fn batch_calls(
@@ -65,23 +86,31 @@ impl AlloyChainClient {
             waiters.push(
                 batch
                     .add_call::<_, Value>(method, value)
-                    .map_err(transport_error)?,
+                    .map_err(|error| self.rpc_error("RPC batch construction", &error))?,
             );
         }
         timeout(self.request_timeout, batch.send())
             .await
-            .map_err(|_| ChainError::rpc("RPC batch timed out"))?
-            .map_err(transport_error)?;
+            .map_err(|_| self.timeout_error("RPC batch send"))?
+            .map_err(|error| self.rpc_error("RPC batch send", &error))?;
         let mut responses = Vec::with_capacity(waiters.len());
         for waiter in waiters {
             responses.push(
                 timeout(self.request_timeout, waiter)
                     .await
-                    .map_err(|_| ChainError::rpc("RPC batch response timed out"))?
-                    .map_err(transport_error)?,
+                    .map_err(|_| self.timeout_error("RPC batch response"))?
+                    .map_err(|error| self.rpc_error("RPC batch response", &error))?,
             );
         }
         Ok(responses)
+    }
+
+    fn rpc_error(&self, operation: &'static str, error: &TransportError) -> ChainError {
+        ChainError::rpc(self.endpoint.rpc_error(operation, error).to_string())
+    }
+
+    fn timeout_error(&self, operation: &'static str) -> ChainError {
+        ChainError::rpc(self.endpoint.timeout_error(operation).to_string())
     }
 
     fn convert_receipt(
@@ -245,14 +274,20 @@ impl ChainClient for AlloyChainClient {
             .to(factory)
             .input(TransactionInput::new(encode_flush(salts.to_vec(), token)));
         match timeout(self.request_timeout, self.provider.estimate_gas(tx)).await {
-            Err(_) => Err(ChainError::rpc("eth_estimateGas timed out")),
+            Err(_) => Err(self.timeout_error("eth_estimateGas")),
             Ok(Ok(gas)) => Ok(gas),
             Ok(Err(error)) => {
-                let message = error.to_string();
-                if is_execution_revert(&message) {
-                    Err(ChainError::estimation_revert(message))
+                if error
+                    .as_error_resp()
+                    .is_some_and(|payload| is_execution_revert(&payload.message))
+                {
+                    Err(ChainError::estimation_revert(
+                        self.endpoint
+                            .rpc_error("eth_estimateGas", &error)
+                            .to_string(),
+                    ))
                 } else {
-                    Err(ChainError::rpc(message))
+                    Err(self.rpc_error("eth_estimateGas", &error))
                 }
             }
         }
@@ -271,8 +306,8 @@ impl ChainClient for AlloyChainClient {
             )));
         let output = timeout(self.request_timeout, self.provider.call(tx))
             .await
-            .map_err(|_| ChainError::rpc("hasRole call timed out"))?
-            .map_err(transport_error)?;
+            .map_err(|_| self.timeout_error("hasRole call"))?
+            .map_err(|error| self.rpc_error("hasRole call", &error))?;
         decode_has_role(&output)
             .map_err(|error| ChainError::rpc(format!("decode hasRole result: {error}")))
     }
@@ -283,8 +318,8 @@ impl ChainClient for AlloyChainClient {
             self.provider.get_transaction_count(operator).pending(),
         )
         .await
-        .map_err(|_| ChainError::rpc("pending nonce RPC timed out"))?
-        .map_err(transport_error)
+        .map_err(|_| self.timeout_error("pending nonce"))?
+        .map_err(|error| self.rpc_error("pending nonce", &error))
     }
 
     async fn confirmed_nonce(&self, operator: Address) -> Result<u64, ChainError> {
@@ -293,15 +328,15 @@ impl ChainClient for AlloyChainClient {
             self.provider.get_transaction_count(operator).latest(),
         )
         .await
-        .map_err(|_| ChainError::rpc("confirmed nonce RPC timed out"))?
-        .map_err(transport_error)
+        .map_err(|_| self.timeout_error("confirmed nonce"))?
+        .map_err(|error| self.rpc_error("confirmed nonce", &error))
     }
 
     async fn latest_block(&self) -> Result<u64, ChainError> {
         timeout(self.request_timeout, self.provider.get_block_number())
             .await
-            .map_err(|_| ChainError::rpc("block number RPC timed out"))?
-            .map_err(transport_error)
+            .map_err(|_| self.timeout_error("latest block"))?
+            .map_err(|error| self.rpc_error("latest block", &error))
     }
 
     async fn finalized_block(&self) -> Result<u64, ChainError> {
@@ -311,16 +346,16 @@ impl ChainClient for AlloyChainClient {
                 .get_block_number_by_id(BlockId::Number(BlockNumberOrTag::Finalized)),
         )
         .await
-        .map_err(|_| ChainError::rpc("finalized block RPC timed out"))?
-        .map_err(transport_error)?
+        .map_err(|_| self.timeout_error("finalized block"))?
+        .map_err(|error| self.rpc_error("finalized block", &error))?
         .ok_or_else(|| ChainError::rpc("finalized block is unavailable"))
     }
 
     async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
         let estimate = timeout(self.request_timeout, self.provider.estimate_eip1559_fees())
             .await
-            .map_err(|_| ChainError::rpc("fee estimate RPC timed out"))?
-            .map_err(transport_error)?;
+            .map_err(|_| self.timeout_error("fee estimate"))?
+            .map_err(|error| self.rpc_error("fee estimate", &error))?;
         Ok(FeeQuote {
             max_fee_per_gas: estimate.max_fee_per_gas,
             max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
@@ -334,12 +369,16 @@ impl ChainClient for AlloyChainClient {
         )
         .await
         {
-            Err(_) => Err(ChainError::rpc("send raw transaction RPC timed out")),
+            Err(_) => Err(self.timeout_error("send raw transaction")),
             Ok(Ok(pending)) => Ok(*pending.tx_hash()),
-            Ok(Err(error)) if is_already_known(&error.to_string()) => {
+            Ok(Err(error))
+                if error
+                    .as_error_resp()
+                    .is_some_and(|payload| is_already_known(&payload.message)) =>
+            {
                 Ok(alloy_primitives::keccak256(raw))
             }
-            Ok(Err(error)) => Err(transport_error(error)),
+            Ok(Err(error)) => Err(self.rpc_error("send raw transaction", &error)),
         }
     }
 
@@ -349,8 +388,8 @@ impl ChainClient for AlloyChainClient {
             self.provider.get_transaction_receipt(hash),
         )
         .await
-        .map_err(|_| ChainError::rpc("receipt RPC timed out"))?
-        .map_err(transport_error)?
+        .map_err(|_| self.timeout_error("transaction receipt"))?
+        .map_err(|error| self.rpc_error("transaction receipt", &error))?
         .map(Self::convert_receipt)
         .transpose()
     }
@@ -376,8 +415,8 @@ impl ChainClient for AlloyChainClient {
                 ),
             )
             .await
-            .map_err(|_| ChainError::rpc("block recovery RPC timed out"))?
-            .map_err(transport_error)?;
+            .map_err(|_| self.timeout_error("block recovery"))?
+            .map_err(|error| self.rpc_error("block recovery", &error))?;
             let Some(transactions) = block.get("transactions").and_then(Value::as_array) else {
                 continue;
             };
@@ -418,10 +457,6 @@ fn parse_quantity(value: &str) -> Option<u64> {
         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
 }
 
-fn transport_error(error: impl std::fmt::Display) -> ChainError {
-    ChainError::rpc(error.to_string())
-}
-
 fn is_already_known(message: &str) -> bool {
     let lowercase = message.to_ascii_lowercase();
     lowercase.contains("already known")
@@ -432,4 +467,57 @@ fn is_already_known(message: &str) -> bool {
 fn is_execution_revert(message: &str) -> bool {
     let lowercase = message.to_ascii_lowercase();
     lowercase.contains("execution reverted") || lowercase.contains("revert")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Router;
+    use axum::http::header;
+    use axum::routing::post;
+    use tokio::net::TcpListener;
+
+    use super::{AlloyChainClient, ChainClient as _};
+
+    #[tokio::test]
+    async fn node_rejection_reason_reaches_the_operator_without_the_url() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let node = Router::new().route(
+            "/rpc",
+            post(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 5"}}"#,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, node).await });
+        let secret = "rpc-secret-token";
+        let client = AlloyChainClient::connect_http(&format!(
+            "http://user:{secret}@{address}/rpc?api_key={secret}"
+        ))
+        .expect("production adapter accepts URL")
+        .with_provider("provider-a");
+
+        let error = client
+            .send_raw_transaction(&[0x02])
+            .await
+            .expect_err("node rejects the transaction");
+        server.abort();
+
+        let display = error.to_string();
+        assert!(
+            display.contains(
+                "send raw transaction failed for provider `provider-a` \
+                 (JSON-RPC error -32000: nonce too low: next nonce 7, tx nonce 5)"
+            ),
+            "{display}"
+        );
+        for rendered in [display, format!("{error:?} {client:?}")] {
+            assert!(!rendered.contains(secret), "{rendered}");
+            assert!(!rendered.contains("127.0.0.1"), "{rendered}");
+        }
+    }
 }

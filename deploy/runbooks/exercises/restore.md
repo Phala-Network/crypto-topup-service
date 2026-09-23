@@ -2,8 +2,9 @@
 
 Date: 2026-09-22.
 
-Status: partial. The C8 post-restore gate ran against seeded data; restore execution is blocked on
-D3's `deploy/RESTORE.md` and an implemented `topup restore-check` in #58.
+Status: partial. The C8 post-restore gate ran against seeded data before D3 landed. D3 (#58) now
+implements `topup restore-check` and `deploy/RESTORE.md`, and `deploy/local/restore-drill.sh`
+exercises both end to end locally; the staging drill has not run yet.
 
 G2 exercised once: [ ]
 
@@ -15,6 +16,8 @@ topup restore-check
 restore-check is not implemented
 exit=1
 ```
+
+That output was recorded before D3; the command now runs the full restore check.
 
 The migration-state query ran as the application role against a database freshly migrated from
 this branch (15 `*.up.sql` files):
@@ -78,4 +81,5 @@ Adoption of an available product answer is covered by
 `post_restore_completes_when_product_truth_is_adopted` in the
 [reconciliation exercise](reconciliation-mismatch.md). The runbook's read-only restore queries ran
 as `wp_d5_app` against the migrated schema (see [local setup](local-setup.md#runbook-sql)). Backup
-listing, encrypted restore, and RPO/RTO evidence remain blocked on #58.
+listing, encrypted restore, and RPO/RTO evidence come from `deploy/local/restore-drill.sh` (see
+`deploy/RESTORE.md`); staging evidence is pending the first staging drill.
