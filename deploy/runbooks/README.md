@@ -104,8 +104,8 @@ for any runbook until #56 merges.
 | Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
 | Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
 | Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
-| Lock expiry worker failure | Partial: running service, injected ledger drift, owner repair while running; the in-service `topup reconcile --once` repair that replaced it is covered by the PostgreSQL integration tests only | [ ] |
-| Reconciliation mismatch | Complete: `topup reconcile --once` findings, blocks, owner-only lift | [x] |
+| Lock expiry worker failure | Partial: running service, injected ledger drift, owner repair while running; the in-service `topup reconcile` repair that replaced it is covered by the PostgreSQL integration tests only | [ ] |
+| Reconciliation mismatch | Complete: `topup reconcile` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
 | Backup age | Partial: D3 archiving and local restore drills available; alert pending #56 | [ ] |
 | Incident communication | Partial; publication and role actions are human-only | [ ] |

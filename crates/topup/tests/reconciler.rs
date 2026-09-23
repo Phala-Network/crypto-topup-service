@@ -1094,7 +1094,7 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
 async fn loop_respects_cancellation() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
-        seed_product(&pool).await?;
+        seed_product(&pool, &route.destination.product).await?;
         let chain = Arc::new(MockChain {
             finalized_delay: StdDuration::from_secs(10),
             ..MockChain::default()
@@ -1220,17 +1220,23 @@ fn transfer(
     }
 }
 
-async fn seed_product(pool: &PgPool) -> Result<Uuid> {
+/// Returns the route's product, creating it once: settlement calls resolve its attested destination.
+async fn seed_product(pool: &PgPool, slug: &str) -> Result<Uuid> {
+    let existing = sqlx::query_scalar::<_, Uuid>("SELECT id FROM products WHERE slug = $1")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
     let id = Uuid::new_v4();
     db::create_product(
         pool,
         &NewProduct {
             id,
-            slug: format!("product-{id}"),
-            settlement_url: "http://product.test/settlements".to_owned(),
+            slug: slug.to_owned(),
             webhook_url: "http://product.test/webhooks".to_owned(),
             pubkey: "test".to_owned(),
-            kid: "product/v1".to_owned(),
             paused_scopes: Vec::new(),
         },
     )
@@ -1239,7 +1245,7 @@ async fn seed_product(pool: &PgPool) -> Result<Uuid> {
 }
 
 async fn seed_identity(pool: &PgPool, route: &RouteFile, number: u8) -> Result<Seed> {
-    let product_id = seed_product(pool).await?;
+    let product_id = seed_product(pool, &route.destination.product).await?;
     let account_id = Uuid::new_v4();
     db::create_account(
         pool,

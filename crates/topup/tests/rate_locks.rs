@@ -64,9 +64,8 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         let product_key = SigningKey::from_bytes(&[41; 32]);
         let other_key = SigningKey::from_bytes(&[42; 32]);
         let admin_key = SigningKey::from_bytes(&[43; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", PRODUCT_KID, &product_key).await?;
-        let other = seed_product(&database.app_pool, "builder", "builder/v1", &other_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let other = seed_product(&database.app_pool, "builder", &other_key).await?;
         let account = seed_account(&database.app_pool, product.id, "account-rl").await?;
         let other_account = seed_account(&database.app_pool, other.id, "account-rl").await?;
         let mut route = test_route();
@@ -74,6 +73,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         let mut other_route = route.clone();
         other_route.destination.product = other.slug.clone();
         other_route.route = "builder-ethereum-pha-usd".to_owned();
+        other_route.destination.product_kid = "builder/v1".to_owned();
         let app = topup::api::router(AppState {
             pool: database.app_pool.clone(),
             routes: Arc::new(vec![route.clone(), other_route]),
@@ -1514,7 +1514,6 @@ fn test_route() -> RouteFile {
 async fn seed_product(
     pool: &sqlx::PgPool,
     slug: &str,
-    kid: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
     Ok(topup::db::create_product(
@@ -1522,10 +1521,8 @@ async fn seed_product(
         &NewProduct {
             id: Uuid::new_v4(),
             slug: slug.to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: public_key_base64(key),
-            kid: kid.to_owned(),
             paused_scopes: Vec::new(),
         },
     )
@@ -1534,7 +1531,7 @@ async fn seed_product(
 
 async fn seed_product_without_key(pool: &sqlx::PgPool, slug: &str) -> Result<topup::db::Product> {
     let key = SigningKey::from_bytes(&[51; 32]);
-    seed_product(pool, slug, &format!("{slug}/v1"), &key).await
+    seed_product(pool, slug, &key).await
 }
 
 async fn seed_account(

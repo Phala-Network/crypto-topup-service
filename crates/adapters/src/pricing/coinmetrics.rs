@@ -14,14 +14,16 @@ use super::decimal::parse_scaled;
 use super::{PriceError, PriceSource, http_client};
 
 const ENDPOINT: &str = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics";
+/// Reference-rate metric required by the valuation policy (docs/architecture.md §8).
+const METRIC: &str = "ReferenceRateUSD";
+/// Sampling frequency of [`METRIC`].
+const FREQUENCY: &str = "1m";
 
-/// Coin Metrics asset-metric observation source.
+/// Coin Metrics `ReferenceRateUSD` one-minute observation source.
 pub struct CoinMetrics {
     client: reqwest::Client,
     endpoint: Redacted,
     asset: String,
-    metric: String,
-    frequency: String,
     api_key: Option<String>,
 }
 
@@ -31,8 +33,6 @@ impl Debug for CoinMetrics {
             .debug_struct("CoinMetrics")
             .field("endpoint", &self.endpoint)
             .field("asset", &self.asset)
-            .field("metric", &self.metric)
-            .field("frequency", &self.frequency)
             .field("api_key_configured", &self.api_key.is_some())
             .finish_non_exhaustive()
     }
@@ -40,16 +40,11 @@ impl Debug for CoinMetrics {
 
 impl CoinMetrics {
     /// Creates a source using the public endpoint and optional `COINMETRICS_API_KEY`.
-    pub fn new(asset: String, metric: String, frequency: String) -> Result<Self, PriceError> {
-        Self::with_endpoint(asset, metric, frequency, ENDPOINT)
+    pub fn new(asset: String) -> Result<Self, PriceError> {
+        Self::with_endpoint(asset, ENDPOINT)
     }
 
-    fn with_endpoint(
-        asset: String,
-        metric: String,
-        frequency: String,
-        endpoint: &str,
-    ) -> Result<Self, PriceError> {
+    fn with_endpoint(asset: String, endpoint: &str) -> Result<Self, PriceError> {
         let endpoint = Redacted::parse(endpoint).map_err(|_| PriceError::InvalidUrl)?;
         let api_key = std::env::var("COINMETRICS_API_KEY")
             .ok()
@@ -58,8 +53,6 @@ impl CoinMetrics {
             client: http_client()?,
             endpoint,
             asset,
-            metric,
-            frequency,
             api_key,
         })
     }
@@ -77,7 +70,7 @@ impl CoinMetrics {
         }
         let raw_price = row
             .metrics
-            .get(&self.metric)
+            .get(METRIC)
             .and_then(Value::as_str)
             .ok_or(PriceError::MalformedResponse("data.metric"))?;
         let observed_at = DateTime::parse_from_rfc3339(&row.time)
@@ -99,8 +92,8 @@ impl PriceSource for CoinMetrics {
     async fn observe(&self) -> Result<Observation, PriceError> {
         let mut request = self.client.get(self.endpoint.expose().clone()).query(&[
             ("assets", self.asset.as_str()),
-            ("metrics", self.metric.as_str()),
-            ("frequency", self.frequency.as_str()),
+            ("metrics", METRIC),
+            ("frequency", FREQUENCY),
             ("limit_per_asset", "1"),
             ("paging_from", "end"),
         ]);
@@ -139,12 +132,7 @@ mod tests {
 
     #[test]
     fn parses_recorded_response() {
-        let source = CoinMetrics::new(
-            "pha".to_owned(),
-            "ReferenceRateUSD".to_owned(),
-            "1m".to_owned(),
-        )
-        .expect("source");
+        let source = CoinMetrics::new("pha".to_owned()).expect("source");
         let observation = source
             .parse_response(include_bytes!(
                 "../../tests/fixtures/pricing/coinmetrics.json"
@@ -156,12 +144,7 @@ mod tests {
 
     #[test]
     fn rejects_recorded_malformed_response() {
-        let source = CoinMetrics::new(
-            "pha".to_owned(),
-            "ReferenceRateUSD".to_owned(),
-            "1m".to_owned(),
-        )
-        .expect("source");
+        let source = CoinMetrics::new("pha".to_owned()).expect("source");
         assert!(
             source
                 .parse_response(include_bytes!(
@@ -178,8 +161,6 @@ mod tests {
             client: http_client().expect("HTTP client"),
             endpoint: Redacted::parse(ENDPOINT).expect("endpoint URL"),
             asset: "pha".to_owned(),
-            metric: "ReferenceRateUSD".to_owned(),
-            frequency: "1m".to_owned(),
             api_key: Some(secret.to_owned()),
         };
 

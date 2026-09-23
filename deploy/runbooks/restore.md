@@ -52,20 +52,20 @@ check. It verifies migrations, WAL position, externally anchored RPO, and table 
 the architecture section 13 restore gate from C8: it `GET`s the product for every deposit at or
 beyond `cleared`, adopts the product's answer, and exits non-zero while any settlement is
 incomplete. The gate refuses to start with `lease_owner_lock_held` while `topup run` or
-`topup reconcile --once` is connected to this database; stop that process, then retry. The lock
+`topup reconcile` is connected to this database; stop that process, then retry. The lock
 only sees processes connected to this PostgreSQL, so stopping the old instance remains the
 control. A `topup run` started while the gate runs waits for it, retrying with backoff and
 logging `waiting for the lease-owner lock`, instead of exiting:
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml run --rm --no-deps restore-check topup restore-check --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" --expected-lsn "$EXPECTED_LSN" --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+docker compose -f deploy/docker-compose.staging.yml run --rm --no-deps restore-check --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" --expected-lsn "$EXPECTED_LSN"
 ```
 
 To repeat only the gate after an incident repair, still with the service stopped, run it until it
 exits `0`; never resume traffic on a failing gate:
 
 ```sh
-docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconcile --once --post-restore --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconcile --post-restore --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
 ```
 
 Then review the restored state read-only:
@@ -77,7 +77,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT
 ## Verification
 
 Require `topup restore-check` to report `"status":"ok"` (or a repeated
-`topup reconcile --once --post-restore` to exit `0`), no open `post_restore_settlement` finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
+`topup reconcile --post-restore` to exit `0`), no open `post_restore_settlement` finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
 evidence, attestation verification, and a human review before traffic resumes.
 
 ## Rollback

@@ -8,7 +8,7 @@ topup bogus
 topup route bogus deploy/config/routes/phala-cloud-sepolia-pha.yaml
 topup outbox
 topup attest --bogus
-topup reconcile --once \
+topup reconcile \
   --no-such-flag --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check --once
 cargo run --locked -q -p topup -- restore

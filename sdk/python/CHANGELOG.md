@@ -12,6 +12,9 @@ follow [Semantic Versioning](https://semver.org/).
   (`TOPUP_PUBLIC_ORIGIN`) instead of the `Host` and `X-Forwarded-Proto` headers, so requests
   signed for the public URL verify behind the dstack gateway (#77). The `http_message_signature`
   security scheme in `openapi.json` documents this. No SDK code changed.
+- `DailyReportResponse` gains `exposure_minor`, the global open rate-lock credit in destination
+  minor units. `RouteDailyReport` drops `exposure_minor`, `exposure_minor_reason`, `pnl_minor`,
+  and `pnl_minor_reason`, which were always null placeholders. Regenerated models only.
 
 ## 0.1.0 - 2026-09-22
 

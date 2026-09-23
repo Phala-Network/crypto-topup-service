@@ -41,7 +41,7 @@ The post-restore gate ran with the application role against the reconciliation e
 from [local setup](local-setup.md), where no deposit was at or beyond `cleared`:
 
 ```sh
-topup reconcile --once --post-restore --route /tmp/wp-d5-ex/route.yaml
+topup reconcile --post-restore --route /tmp/wp-d5-ex/route.yaml
 ```
 
 ```text

@@ -993,10 +993,8 @@ async fn seed_account(pool: &PgPool) -> Result<Uuid> {
         &NewProduct {
             id: product_id,
             slug: "scanner-test".to_owned(),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: "https://product.test/webhooks".to_owned(),
             pubkey: "test-key".to_owned(),
-            kid: "test/v1".to_owned(),
             paused_scopes: Vec::new(),
         },
     )

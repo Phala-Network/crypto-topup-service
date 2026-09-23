@@ -2,9 +2,8 @@
 # measurement (docs/architecture.md §14). Changing a value is a new version and a new approved
 # compose hash. Numbers are illustrative; finance and risk set the real ones.
 
-chain:                             # one chain file per chain; shown inline here
+chain:                             # chain settings live inline in every route file
   chain_id: 1
-  name: ethereum-mainnet
   finality: finalized              # reviewed rule; two RPC providers must agree
   rpc_providers: [alchemy, quicknode]
   operator_key_version: 1          # derives operator/v1; bump only after granting the new operator OPERATOR_ROLE
@@ -18,19 +17,11 @@ chain:                             # one chain file per chain; shown inline here
     native_price_asset: eth        # Coin Metrics asset used to value gas in USD
     max_fee_per_gas_wei: 500000000000
     replacement_bps: 12500         # both EIP-1559 fee fields must increase by 25%
-    replacement_after_blocks: 3
-    gas_limit_bps: 12000
-    rpc_timeout_ms: 10000
-    balance_batch_size: 500
-    recovery_scan_blocks: 128
-    estimation_retry_after_s: 3600
-    maintenance_interval_s: 5
 
 route: phala-cloud-ethereum-pha-usd
 version: 1
 
 asset:
-  symbol: PHA
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
   min_flush_atomic: "20000000000000000000000"        # 20,000 PHA on-chain balance
@@ -38,16 +29,14 @@ asset:
 
 destination:
   product: phala-cloud
-  unit: USD
   unit_decimals: 2
   settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
   product_kid: phala-cloud/v1
 
 pricing:
   mode: spot
-  primary: { source: coinmetrics, asset: pha, metric: ReferenceRateUSD, frequency: 1m }
+  primary: { source: coinmetrics, asset: pha }
   check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-  price_scale: 8
   max_age_s: 120
   max_deviation_bps: 100
   max_fx_deviation_bps: 50

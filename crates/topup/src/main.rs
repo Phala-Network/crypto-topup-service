@@ -31,7 +31,7 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::route::RouteFile;
+use topup_core::route::{RouteFile, product_destination};
 use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
@@ -55,7 +55,7 @@ enum TopupCommand {
         #[command(subcommand)]
         command: OutboxCommand,
     },
-    /// Run one reconciliation pass; with --post-restore, only while the service is stopped.
+    /// Run one reconciliation pass and exit; with --post-restore, only while the service is stopped.
     Reconcile(ReconcileArgs),
     Attest(AttestArgs),
     BackupKey(BackupKeyArgs),
@@ -78,35 +78,31 @@ struct RunArgs {
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
-    /// Number of concurrent deposit pumps in this process.
-    #[arg(long, default_value_t = NonZeroUsize::MIN)]
-    pumps: NonZeroUsize,
-    /// Maximum duration of one step; must be shorter than five minutes.
-    #[arg(long, default_value_t = 240)]
-    step_timeout_s: u64,
     /// Delay before retrying an expected wait outcome.
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     wait_interval_s: u64,
-    /// Interval between deposit state-age scans.
-    #[arg(long, default_value_t = 60)]
-    age_alert_interval_s: u64,
-    /// Minimum interval between repeated alerts for the same deposit state.
-    #[arg(long, default_value_t = 60 * 60)]
-    age_alert_reminder_s: u64,
-    /// Interval between full reconciliation passes.
-    #[arg(long, default_value_t = 10 * 60)]
-    reconciliation_interval_s: u64,
+    /// Delay between scanner polls of each chain.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
+    scanner_poll_interval_s: u64,
 }
+
+/// Concurrent deposit pumps in one service process.
+const PUMPS: usize = 1;
+/// Maximum duration of one step; shorter than the five-minute lease.
+const STEP_TIMEOUT: Duration = Duration::from_secs(240);
+/// Interval between deposit state-age scans.
+const AGE_ALERT_INTERVAL: Duration = Duration::from_secs(60);
+/// Minimum interval between repeated alerts for the same deposit state.
+const AGE_ALERT_REMINDER: Duration = Duration::from_secs(60 * 60);
+/// Interval between full reconciliation passes.
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Args)]
 struct ReconcileArgs {
-    /// Run one pass and exit.
-    #[arg(long, required = true)]
-    once: bool,
     /// Run the restore gate and fail while any deposit is incomplete. Run it only while the
     /// service, heartbeat, and backup processes are stopped; it refuses to start while a service
     /// or reconcile process holds deposit leases.
-    #[arg(long, requires = "once")]
+    #[arg(long)]
     post_restore: bool,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
@@ -354,17 +350,12 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let database_url = [
-        "RESTORE_DATABASE_URL",
-        "MIGRATE_DATABASE_URL",
-        "DATABASE_URL",
-    ]
-    .into_iter()
-    .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
-    let Some(database_url) = database_url else {
-        tracing::error!(
-            "RESTORE_DATABASE_URL, MIGRATE_DATABASE_URL, or DATABASE_URL is required for restore-check"
-        );
+    // The post-restore gate reads and repairs with owner credentials, never the service login.
+    let Some(database_url) = std::env::var("MIGRATE_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::error!("MIGRATE_DATABASE_URL is required for restore-check");
         return ExitCode::FAILURE;
     };
     let pool = match PgPoolOptions::new()
@@ -506,18 +497,6 @@ fn print_attestation(
 }
 
 async fn run(args: &RunArgs) -> ExitCode {
-    if args.age_alert_interval_s == 0 {
-        tracing::error!("age alert interval must be positive");
-        return ExitCode::FAILURE;
-    }
-    if args.age_alert_reminder_s == 0 {
-        tracing::error!("age alert reminder interval must be positive");
-        return ExitCode::FAILURE;
-    }
-    if args.reconciliation_interval_s == 0 {
-        tracing::error!("reconciliation interval must be positive");
-        return ExitCode::FAILURE;
-    }
     let routes = match load_routes(&args.routes) {
         Ok(routes) => routes,
         Err(error) => {
@@ -547,7 +526,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         }
     };
     let pump_config = PumpConfig {
-        step_timeout: Duration::from_secs(args.step_timeout_s),
+        step_timeout: STEP_TIMEOUT,
         wait_interval: Duration::from_secs(args.wait_interval_s),
         ..PumpConfig::default()
     };
@@ -588,9 +567,15 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Architecture §4: before the database is touched, every provider must show the route's
+    // factory, implementation, and treasury, so nothing issues addresses or moves funds otherwise.
+    if let Err(error) = topup::contracts::verify_routes(&routes).await {
+        tracing::error!(%error, "on-chain contract check failed");
+        return ExitCode::FAILURE;
+    }
     let scanner_count = scanner_routes.len();
     let route_count = routes.len();
-    let connection_count = match u32::try_from(args.pumps.get())
+    let connection_count = match u32::try_from(PUMPS)
         .ok()
         .zip(u32::try_from(scanner_count).ok())
         .zip(u32::try_from(route_count).ok())
@@ -599,7 +584,7 @@ async fn run(args: &RunArgs) -> ExitCode {
     {
         Some(count) => count,
         None => {
-            tracing::error!("pump count is too large");
+            tracing::error!("route count is too large");
             return ExitCode::FAILURE;
         }
     };
@@ -696,8 +681,12 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let product_lookup =
-        SettlementProductLookup::new(pool.clone(), signer.clone(), Duration::from_secs(30));
+    let product_lookup = SettlementProductLookup::new(
+        pool.clone(),
+        &routes,
+        signer.clone(),
+        Duration::from_secs(30),
+    );
     let confirm_step =
         match ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(product_lookup)) {
             Ok(step) => step,
@@ -720,6 +709,7 @@ async fn run(args: &RunArgs) -> ExitCode {
             .with_confirmed(Box::new(screen_step))
             .with_cleared(Box::new(SettleStep::new(
                 pool.clone(),
+                &routes,
                 signer,
                 Duration::from_secs(30),
             )))
@@ -782,16 +772,23 @@ async fn run(args: &RunArgs) -> ExitCode {
     tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
+    let scanner_poll_interval = Duration::from_secs(args.scanner_poll_interval_s);
     let scanner_cancellation = cancellation.child_token();
     let mut scanner_task = tokio::spawn(async move {
-        topup::scanner::run(scanner_pool, scanner_routes, scanner_cancellation).await
+        topup::scanner::run(
+            scanner_pool,
+            scanner_routes,
+            scanner_poll_interval,
+            scanner_cancellation,
+        )
+        .await
     });
     let refund_cancellation = cancellation.child_token();
     let mut refund_task = tokio::spawn(async move {
         refund_worker.run(refund_cancellation).await;
     });
-    let mut pump_tasks = Vec::with_capacity(args.pumps.get());
-    for worker in 0..args.pumps.get() {
+    let mut pump_tasks = Vec::with_capacity(PUMPS);
+    for worker in 0..PUMPS {
         let worker_pump = pump.clone();
         let worker_cancellation = cancellation.child_token();
         pump_tasks.push(tokio::spawn(async move {
@@ -806,8 +803,8 @@ async fn run(args: &RunArgs) -> ExitCode {
         pool.clone(),
         age_config,
         Arc::clone(&metrics),
-        Duration::from_secs(args.age_alert_interval_s),
-        Duration::from_secs(args.age_alert_reminder_s),
+        AGE_ALERT_INTERVAL,
+        AGE_ALERT_REMINDER,
     );
     let age_cancellation = cancellation.child_token();
     let age_task = tokio::spawn(async move {
@@ -850,15 +847,14 @@ async fn run(args: &RunArgs) -> ExitCode {
         }));
     }
     let reconciliation_cancellation = cancellation.child_token();
-    let reconciliation_interval = Duration::from_secs(args.reconciliation_interval_s);
     let mut reconciliation_task = tokio::spawn(async move {
         reconciler
-            .run_loop(reconciliation_interval, reconciliation_cancellation)
+            .run_loop(RECONCILIATION_INTERVAL, reconciliation_cancellation)
             .await;
     });
 
     tracing::info!(
-        pumps = args.pumps.get(),
+        pumps = PUMPS,
         scanners = scanner_count,
         "topup service started"
     );
@@ -1051,10 +1047,6 @@ async fn run(args: &RunArgs) -> ExitCode {
 }
 
 async fn reconcile(args: &ReconcileArgs) -> ExitCode {
-    if !args.once {
-        tracing::error!("--once is required");
-        return ExitCode::FAILURE;
-    }
     let routes = match load_routes(&args.routes) {
         Ok(routes) => routes,
         Err(error) => {
@@ -1228,6 +1220,15 @@ fn validate_route_set(routes: &[RouteFile]) -> Result<(), String> {
             ));
         }
     }
+    // Settlement calls and product authentication read the destination from the routes, so every
+    // route of one product must name the same settlement URL and product key id.
+    let products = routes
+        .iter()
+        .map(|route| route.destination.product.as_str())
+        .collect::<BTreeSet<_>>();
+    for product in products {
+        product_destination(routes, product).map_err(|error| error.to_string())?;
+    }
     // Rate-lock exposure counters sum credit across routes, so every quote-first route must
     // count credit in the same destination minor unit.
     let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
@@ -1390,6 +1391,34 @@ mod tests {
             validate_route_set(&[route.clone(), route]),
             Err("duplicate route `phala-cloud-ethereum-pha-usd` version 1".to_owned())
         );
+    }
+
+    #[test]
+    fn route_loading_requires_one_settlement_destination_per_product() {
+        let route: RouteFile =
+            serde_saphyr::from_str(include_str!("../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture parses");
+        let mut newer = route.clone();
+        newer.version = route.version + 1;
+        newer.destination.settlement_url = "https://other.example/settlements".to_owned();
+        assert!(
+            validate_route_set(&[route.clone(), newer.clone()])
+                .expect_err("one product must not have two settlement URLs")
+                .contains("destination.settlement_url")
+        );
+
+        newer.destination.settlement_url = route.destination.settlement_url.clone();
+        newer.destination.product_kid = "phala-cloud/v2".to_owned();
+        assert!(
+            validate_route_set(&[route.clone(), newer.clone()])
+                .expect_err("one product must not have two key ids")
+                .contains("destination.product_kid")
+        );
+
+        newer.route = "builder-route".to_owned();
+        newer.destination.product = "builder".to_owned();
+        newer.destination.settlement_url = "https://builder.example/settlements".to_owned();
+        assert_eq!(validate_route_set(&[route, newer]), Ok(()));
     }
 
     #[test]

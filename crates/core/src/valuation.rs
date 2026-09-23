@@ -475,7 +475,6 @@ mod tests {
         fn new(asset: Address, min_credit_minor: u64, tolerance_bps: u16) -> Self {
             Self {
                 asset: AssetConfig {
-                    symbol: "PHA".to_owned(),
                     contract: asset,
                     decimals: 18,
                     min_flush_atomic: AtomicAmount::new(U256::ZERO),
@@ -483,7 +482,6 @@ mod tests {
                 },
                 destination: DestinationConfig {
                     product: "phala-cloud".to_owned(),
-                    unit: "USD".to_owned(),
                     unit_decimals: 2,
                     settlement_url: "https://example.invalid".to_owned(),
                     product_kid: "test".to_owned(),
@@ -966,8 +964,6 @@ mod tests {
             primary: PrimaryPriceConfig {
                 source: "coinmetrics".to_owned(),
                 asset: "pha".to_owned(),
-                metric: "ReferenceRateUSD".to_owned(),
-                frequency: "1m".to_owned(),
             },
             check: Some(CheckPriceConfig {
                 source: "binance".to_owned(),
@@ -977,7 +973,6 @@ mod tests {
                     pair: "USDT/USD".to_owned(),
                 },
             }),
-            price_scale: PRICE_SCALE,
             max_age_s: 120,
             max_deviation_bps: bps(100),
             max_fx_deviation_bps: Some(bps(50)),

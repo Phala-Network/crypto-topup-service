@@ -23,16 +23,21 @@ class DailyReportResponse:
     """Daily finance report produced by C12.
 
     Attributes:
+        exposure_minor (str): Open rate-lock credit across all products in destination minor units, from the global
+            exposure counter the global cap is enforced against.
         generated_at (datetime.datetime): Report snapshot time.
         routes (list[RouteDailyReport]): SQL-computed metrics for each configured route.
     """
 
+    exposure_minor: str
     generated_at: datetime.datetime
     routes: list[RouteDailyReport]
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
+
+        exposure_minor = self.exposure_minor
 
         generated_at = self.generated_at.isoformat()
 
@@ -45,6 +50,7 @@ class DailyReportResponse:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
+                "exposure_minor": exposure_minor,
                 "generated_at": generated_at,
                 "routes": routes,
             }
@@ -57,6 +63,8 @@ class DailyReportResponse:
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
         d = dict(src_dict)
+        exposure_minor = d.pop("exposure_minor")
+
         generated_at = datetime.datetime.fromisoformat(d.pop("generated_at"))
 
         routes = []
@@ -67,6 +75,7 @@ class DailyReportResponse:
             routes.append(routes_item)
 
         daily_report_response = cls(
+            exposure_minor=exposure_minor,
             generated_at=generated_at,
             routes=routes,
         )

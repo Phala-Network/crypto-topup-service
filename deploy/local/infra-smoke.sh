@@ -78,7 +78,9 @@ printf '%s\n' "$settings" | grep -Fx 'archive_mode=on' >/dev/null
 printf '%s\n' "$settings" | grep -Fx 'archive_timeout=60' >/dev/null
 echo "postgres archive settings passed"
 
-# No manual WAL switch: the backup keepalive must refresh the marker on an idle database.
+# No manual WAL switch: the heartbeat's one row per minute must refresh the marker on an otherwise
+# idle database.
+docker compose -p "$project" -f "$compose" up -d heartbeat
 wait_for backup-marker docker compose -p "$project" -f "$compose" \
     exec -T postgres test -s /run/topup-observability/last-backup-unix-seconds
 marker_age() {

@@ -54,8 +54,7 @@ permission to create roles and schema objects; the command never falls back to t
 `--route FILE` option. Provider ids in each route file resolve to `TOPUP_RPC_<ID>_URL` after
 uppercasing and replacing non-alphanumeric characters with underscores; the first provider is
 provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
-route version. The scanner poll interval is `TOPUP_SCANNER_POLL_INTERVAL_SECONDS`, defaulting to
-15 seconds.
+route version. The scanner poll interval is `--scanner-poll-interval-s`, defaulting to 15 seconds.
 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
 address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as
@@ -65,7 +64,7 @@ address; `Host` and `X-Forwarded-*` headers are never trusted.
 
 ## Restore
 
-`topup restore-check` and `topup reconcile --once --post-restore` run the architecture §13
+`topup restore-check` and `topup reconcile --post-restore` run the architecture §13
 post-restore reconciliation, which GETs and adopts the product's answer for every deposit at or
 beyond `cleared`. Run them only while `topup`, `heartbeat`, and `backup` are stopped; the
 [restore runbook](deploy/RESTORE.md) keeps the service stopped until the check reports `ok`.

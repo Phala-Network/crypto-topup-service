@@ -467,10 +467,8 @@ async fn seed_product(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
         &NewProduct {
             id: product_id,
             slug: format!("product-{product_id}"),
-            settlement_url: "https://product.test/settlements".to_owned(),
             webhook_url: webhook_url.to_owned(),
             pubkey: "product-public-key".to_owned(),
-            kid: "product/v1".to_owned(),
             paused_scopes: Vec::new(),
         },
     )

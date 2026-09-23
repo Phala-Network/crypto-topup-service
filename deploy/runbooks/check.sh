@@ -157,6 +157,12 @@ topup_arguments() {
                 *) index=$((index + 1)) ;;
             esac
         done
+        # The restore-check service's entrypoint is `topup restore-check --route FILE`, so its
+        # run arguments are restore-check flags.
+        if [[ "${words[index]:-}" == restore-check && "${words[index + 1]:-}" != topup ]]; then
+            printf 'topup restore-check %s\n' "${words[*]:index+1}"
+            return 0
+        fi
         index=$((index + 1))
     elif [[ "${words[index]}" == cargo && "${words[index + 1]:-}" == run ]]; then
         [[ " ${words[*]} " == *" -p topup "* ]] || return 0

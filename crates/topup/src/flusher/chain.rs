@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::time::timeout;
 use topup_adapters::chain::flush::{
-    decode_address_of, decode_balance_of, decode_has_role, encode_address_of, encode_balance_of,
+    ContractAddressGetter, decode_address_of, decode_balance_of, decode_contract_address_getter,
+    decode_has_role, encode_address_of, encode_balance_of, encode_contract_address_getter,
     encode_flush, encode_has_role, operator_role,
 };
 use topup_adapters::redaction::Redacted;
@@ -223,6 +224,33 @@ impl AlloyChainClient {
             result.extend(decoded);
         }
         Ok(result)
+    }
+
+    /// Reads the runtime code deployed at `address`.
+    pub async fn code_at(&self, address: Address) -> Result<Bytes, ChainError> {
+        timeout(self.request_timeout, self.provider.get_code_at(address))
+            .await
+            .map_err(|_| self.timeout_error("eth_getCode"))?
+            .map_err(|error| self.rpc_error("eth_getCode", &error))
+    }
+
+    /// Calls one immutable address getter of a forwarder contract.
+    pub async fn contract_address(
+        &self,
+        contract: Address,
+        getter: ContractAddressGetter,
+    ) -> Result<Address, ChainError> {
+        let tx = TransactionRequest::default()
+            .to(contract)
+            .input(TransactionInput::new(encode_contract_address_getter(
+                getter,
+            )));
+        let output = timeout(self.request_timeout, self.provider.call(tx))
+            .await
+            .map_err(|_| self.timeout_error("address getter call"))?
+            .map_err(|error| self.rpc_error("address getter call", &error))?;
+        decode_contract_address_getter(getter, &output)
+            .map_err(|error| ChainError::rpc(format!("decode {getter:?} result: {error}")))
     }
 }
 

@@ -18,9 +18,9 @@ docker exec -i wp-d5-exercise-pg psql -U postgres -d wp_d5_locks -v ON_ERROR_STO
 ```
 
 ```sql
-INSERT INTO products (id,slug,settlement_url,webhook_url,pubkey,kid) VALUES
- ('10000000-0000-0000-0000-000000000001','mock-a','http://127.0.0.1:9/settle','http://127.0.0.1:9/hook','mock','mock/v1'),
- ('10000000-0000-0000-0000-000000000002','mock-b','http://127.0.0.1:9/settle','http://127.0.0.1:9/hook','mock','mock/v1');
+INSERT INTO products (id,slug,webhook_url,pubkey) VALUES
+ ('10000000-0000-0000-0000-000000000001','mock-a','http://127.0.0.1:9/hook','mock'),
+ ('10000000-0000-0000-0000-000000000002','mock-b','http://127.0.0.1:9/hook','mock');
 INSERT INTO accounts (id,product_id,external_id) VALUES
  ('20000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','acct-a'),
  ('20000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000001','acct-b'),

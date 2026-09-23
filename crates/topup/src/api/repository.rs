@@ -62,7 +62,7 @@ pub async fn record_signature(
 pub async fn find_product_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Product>, ApiError> {
     let row = sqlx::query_as::<_, ProductRow>(
         r#"
-        SELECT id, slug, settlement_url, webhook_url, pubkey, kid, paused_scopes
+        SELECT id, slug, webhook_url, pubkey, paused_scopes
         FROM products
         WHERE slug = $1
         "#,
@@ -671,10 +671,8 @@ pub async fn route_paused_scopes(pool: &PgPool, route: &str) -> Result<Vec<Strin
 struct ProductRow {
     id: Uuid,
     slug: String,
-    settlement_url: String,
     webhook_url: String,
     pubkey: String,
-    kid: String,
     paused_scopes: Vec<String>,
 }
 
@@ -683,10 +681,8 @@ impl From<ProductRow> for Product {
         Self {
             id: row.id,
             slug: row.slug,
-            settlement_url: row.settlement_url,
             webhook_url: row.webhook_url,
             pubkey: row.pubkey,
-            kid: row.kid,
             paused_scopes: row.paused_scopes,
         }
     }
@@ -1157,8 +1153,16 @@ pub async fn daily_report(
         }
     }
 
+    let exposure_minor = sqlx::query_scalar::<_, String>(
+        "SELECT open_minor::text FROM lock_exposure WHERE scope_key = 'global'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| "0".to_owned());
+
     Ok(DailyReportResponse {
         generated_at,
+        exposure_minor,
         routes: reports.into_values().collect(),
     })
 }
@@ -1172,11 +1176,6 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         treasury_balance_note: "treasury balance has not been observed".to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
-        exposure_minor: None,
-        exposure_minor_reason: "TODO(C10): rate locks do not yet persist destination exposure"
-            .to_owned(),
-        pnl_minor: None,
-        pnl_minor_reason: "route PnL requires treasury valuation inputs".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
         deposits_by_state: zero_counts(&[
             "detected",
@@ -1208,11 +1207,6 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
         treasury_balance_note: "unrouted assets do not have an RPC route configuration".to_owned(),
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
-        exposure_minor: None,
-        exposure_minor_reason: "unrouted assets do not have destination rate-lock exposure"
-            .to_owned(),
-        pnl_minor: None,
-        pnl_minor_reason: "unrouted assets do not have route valuation inputs".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
         deposits_by_state: zero_counts(&[
             "detected",

@@ -365,6 +365,8 @@ impl ReconciliationChain for UnavailableChain {
 fn restore_reconciler(pool: &PgPool, lookup: &Arc<RestoreLookup>) -> Result<Reconciler> {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
+    // Settlement lookups resolve the product's attested destination: name the seeded product.
+    route.destination.product = "product-3".to_owned();
     route.chain.rpc_providers = vec![
         "http://127.0.0.1:8546".to_owned(),
         "http://localhost:8546".to_owned(),
@@ -1186,10 +1188,8 @@ fn new_product(number: u8, slug: &str) -> NewProduct {
     NewProduct {
         id: Uuid::new_v4(),
         slug: slug.to_owned(),
-        settlement_url: format!("https://product-{number}.test/settlements"),
         webhook_url: format!("https://product-{number}.test/webhooks"),
         pubkey: format!("public-key-{number}"),
-        kid: format!("product/{number}"),
         paused_scopes: Vec::new(),
     }
 }

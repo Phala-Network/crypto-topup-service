@@ -15,7 +15,7 @@ Every step that deploys contracts, changes a CVM, or writes to the sandbox datab
 | `routes/sandbox-sepolia.template.yaml` | Capped route for one integrator product (chain id 11155111). |
 | `render-route.sh` | Renders the template from environment variables; refuses leftover placeholders. |
 | `deploy-test-contracts.sh` | Deploys the test token (A1 `MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
-| `issue-product.sh` | Registers a product's slug, public key, key id, settlement URL, and webhook URL, with an audit row. |
+| `issue-product.sh` | Registers a product's slug, public key, and webhook URL, with an audit row. The key id and settlement URL come only from the attested route. |
 | `docker-compose.sepolia.yml`, `render-sepolia-compose.sh` | Overlay for `deploy/docker-compose.yml` and the renderer that inlines the sandbox route into the attested compose. |
 | `docker-compose.local.yml`, `run-local.sh` | Local stack (`deploy/local` plus Anvil) and the end-to-end driver. |
 | `scenarios/docker_restart.py` | The local `restart_command`: restarts the service container through the Docker API. |
@@ -98,8 +98,8 @@ gas from a public faucet.
      --rpc-url "$SEPOLIA_RPC_URL" --account sandbox-deployer
    ```
 
-2. Render and validate the integrator's route (one route per product; the product slug and key
-   id must match the issued credentials):
+2. Render and validate the integrator's route (one route per product). The route is the only
+   source of the product's key id and settlement URL; its slug must match the issued product:
 
    ```sh
    FORWARDER_FACTORY=0x... IMPLEMENTATION=0x... TREASURY=0x... TEST_TOKEN=0x... \
@@ -133,13 +133,12 @@ gas from a public faucet.
 
    ```sh
    PSQL="psql service=topup-sandbox-admin" deploy/sandbox/issue-product.sh \
-     --slug acme --keyid acme/v1 --public-key '<base64>' \
-     --settlement-url https://acme.example/topup/settlements \
+     --slug acme --public-key '<base64>' \
      --webhook-url https://acme.example/topup/webhooks --operator "$USER"
    ```
 
-   Changing a product's key or URLs is a separate, audited change; the script refuses to
-   overwrite an existing slug.
+   Changing a product's public key or webhook URL is a separate, audited change; the script refuses
+   to overwrite an existing slug. Changing its key id or settlement URL is a new route version.
 
 ## Running the scenarios against Sepolia (integrators)
 
