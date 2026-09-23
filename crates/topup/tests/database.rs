@@ -20,8 +20,7 @@ use topup::db::{
     NewFlush, NewProduct, OutboxEvent, SettlementIntent, TransitionUpdate,
 };
 use topup::reconciler::{
-    CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationMetrics,
-    SettlementLookup,
+    CheckName, Reconciler, ReconciliationChain, ReconciliationError, SettlementLookup,
 };
 use topup::{heartbeat, restore};
 use topup_adapters::chain::evm::TransferLog;
@@ -243,7 +242,6 @@ fn restore_reconciler(pool: &PgPool, lookup: &Arc<RestoreLookup>) -> Result<Reco
             Arc::new(UnavailableChain) as Arc<dyn ReconciliationChain>,
         )]),
         Arc::clone(lookup) as Arc<dyn SettlementLookup>,
-        Arc::new(ReconciliationMetrics::default()),
     )?)
 }
 

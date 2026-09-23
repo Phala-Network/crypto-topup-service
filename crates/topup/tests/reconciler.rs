@@ -21,8 +21,8 @@ use topup::db::{
 };
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
-    CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationMetrics,
-    ReconciliationReport, SettlementLookup, frozen_chains, hold_lease_owner_lock,
+    CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
+    SettlementLookup, frozen_chains, hold_lease_owner_lock,
 };
 use topup_adapters::chain::evm::{ChainError, ChainReader, TransferLog};
 use topup_adapters::settlement::http::SettlementAnswer;
@@ -353,6 +353,10 @@ async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
 
 #[tokio::test]
 async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The current-thread test runtime polls every reconciler future on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         let accepted = seed_sent(&pool, &route, 31).await?;
@@ -387,7 +391,6 @@ async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Res
         .bind(pump_lease)
         .execute(&pool)
         .await?;
-        let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
             vec![route],
@@ -396,7 +399,6 @@ async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Res
                 Arc::new(MockChain::at(0)) as Arc<dyn ReconciliationChain>,
             )]),
             settlement,
-            Arc::clone(&metrics),
         )?;
 
         let findings = reconciler.check(CheckName::SentSettlement).await?;
@@ -451,7 +453,9 @@ async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Res
                         .iter()
                         .any(|id| finding.subjects["deposit_id"] == id.to_string()))
         );
-        ensure!(metrics.mismatch_count(CheckName::SentSettlement) == 1);
+        ensure!(handle.render().contains(
+            "topup_reconciliation_mismatches_total{check=\"sent_settlement\",producer_enabled=\"true\"} 1"
+        ));
         Ok(())
     })
     .await
@@ -688,6 +692,10 @@ async fn post_restore_stays_incomplete_without_verified_product_truth() -> Resul
 
 #[tokio::test]
 async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The current-thread test runtime polls every reconciler future on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 61).await?;
@@ -712,13 +720,11 @@ async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> R
         let chain = Arc::new(MockChain::at(150));
         chain.derive(&[&seed]);
         chain.fail_derivation.store(true, Ordering::SeqCst);
-        let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
             vec![route],
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-            Arc::clone(&metrics),
         )?;
 
         let failed = reconciler.run_once().await?;
@@ -732,12 +738,12 @@ async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> R
                 && finding.observed["error"] == json!("route_version_unavailable")
         }));
         ensure!(has_check(&failed, CheckName::CustodyBalance));
-        ensure!(metrics.last_heartbeat_unix() == 0);
+        ensure!(!handle.render().contains(RECONCILER_PROGRESS));
 
         chain.fail_derivation.store(false, Ordering::SeqCst);
         let recovered = reconciler.run_once().await?;
         ensure!(recovered.succeeded());
-        ensure!(metrics.last_heartbeat_unix() > 0);
+        ensure!(handle.render().contains(RECONCILER_PROGRESS));
         Ok(())
     })
     .await
@@ -868,6 +874,10 @@ async fn custody_balances_use_the_finalized_block_and_incremental_totals() -> Re
 
 #[tokio::test]
 async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The current-thread test runtime polls every reconciler future on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 91).await?;
@@ -889,13 +899,11 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             .lock()
             .unwrap()
             .push((0, U256::from(7_u8)));
-        let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
             vec![route],
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-            Arc::clone(&metrics),
         )?;
         let first = reconciler.run_once().await?;
         ensure!(has_check(&first, CheckName::CreditRecomputation));
@@ -931,7 +939,9 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
                 .fetch_all(&pool)
                 .await?;
         ensure!(scopes == ["address", "chain"]);
-        ensure!(metrics.mismatch_count(CheckName::CreditRecomputation) == 1);
+        ensure!(handle.render().contains(
+            "topup_reconciliation_mismatches_total{check=\"credit_recomputation\",producer_enabled=\"true\"} 1"
+        ));
         Ok(())
     })
     .await
@@ -1092,6 +1102,10 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
 
 #[tokio::test]
 async fn loop_respects_cancellation() -> Result<()> {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The current-thread test runtime polls every reconciler future on this thread.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         seed_product(&pool).await?;
@@ -1099,13 +1113,11 @@ async fn loop_respects_cancellation() -> Result<()> {
             finalized_delay: StdDuration::from_secs(10),
             ..MockChain::default()
         });
-        let metrics = Arc::new(ReconciliationMetrics::default());
         let reconciler = Arc::new(Reconciler::with_dependencies(
             pool.clone(),
             vec![route],
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
             Arc::new(MockSettlement::default()),
-            Arc::clone(&metrics),
         )?);
         let cancellation = CancellationToken::new();
         let task = tokio::spawn({
@@ -1124,11 +1136,21 @@ async fn loop_respects_cancellation() -> Result<()> {
         .await?;
         cancellation.cancel();
         tokio::time::timeout(StdDuration::from_secs(1), task).await??;
-        ensure!(metrics.last_heartbeat_unix() == 0);
+        let rendered = handle.render();
+        // Positive control: the recorder captured this loop's metrics, so the absent progress
+        // gauge means the cancelled round never completed rather than that nothing was recorded.
+        ensure!(
+            rendered.contains("topup_loop_heartbeat_unixtime_seconds{loop=\"reconciler\""),
+            "{rendered}"
+        );
+        ensure!(!rendered.contains(RECONCILER_PROGRESS), "{rendered}");
         Ok(())
     })
     .await
 }
+
+/// Progress gauge the reconciler sets only after a round in which every check completed.
+const RECONCILER_PROGRESS: &str = "topup_loop_progress_unixtime_seconds{loop=\"reconciler\"";
 
 async fn with_database<F, Fut>(test: F) -> Result<()>
 where
@@ -1166,7 +1188,6 @@ fn reconciler(
         vec![route],
         BTreeMap::from([(CHAIN_ID, chain as Arc<dyn ReconciliationChain>)]),
         settlement,
-        Arc::new(ReconciliationMetrics::default()),
     )?)
 }
 

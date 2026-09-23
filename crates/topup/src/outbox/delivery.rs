@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rand::{TryRngCore, rngs::OsRng};
 use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
@@ -16,6 +15,7 @@ use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{EventEnvelope, SignedWebhook};
+use crate::jitter::{JitterSource, OsJitter};
 
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
 
@@ -58,8 +58,6 @@ pub enum DeliveryError {
     Client(reqwest::Error),
     /// PostgreSQL could not claim or persist an event.
     Database(sqlx::Error),
-    /// The operating system did not provide retry entropy.
-    Entropy,
 }
 
 impl Display for DeliveryError {
@@ -68,7 +66,6 @@ impl Display for DeliveryError {
             Self::InvalidConfig(message) => write!(formatter, "invalid delivery config: {message}"),
             Self::Client(error) => write!(formatter, "failed to build webhook client: {error}"),
             Self::Database(error) => write!(formatter, "outbox database operation failed: {error}"),
-            Self::Entropy => formatter.write_str("failed to obtain retry entropy"),
         }
     }
 }
@@ -78,7 +75,7 @@ impl Error for DeliveryError {
         match self {
             Self::Client(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::InvalidConfig(_) | Self::Entropy => None,
+            Self::InvalidConfig(_) => None,
         }
     }
 }
@@ -111,25 +108,13 @@ enum ClaimResult {
     Ready(ClaimedDelivery),
 }
 
-trait RetryEntropy: Send + Sync {
-    fn next_u64(&self) -> Result<u64, DeliveryError>;
-}
-
-struct OsRetryEntropy;
-
-impl RetryEntropy for OsRetryEntropy {
-    fn next_u64(&self) -> Result<u64, DeliveryError> {
-        OsRng.try_next_u64().map_err(|_| DeliveryError::Entropy)
-    }
-}
-
 /// PostgreSQL-backed Standard Webhooks sender.
 pub struct DeliveryWorker<S> {
     pool: PgPool,
     client: Client,
     signer: Arc<S>,
     config: DeliveryConfig,
-    entropy: Arc<dyn RetryEntropy>,
+    entropy: Arc<dyn JitterSource>,
 }
 
 impl<S> DeliveryWorker<S>
@@ -153,7 +138,7 @@ where
             client,
             signer,
             config,
-            entropy: Arc::new(OsRetryEntropy),
+            entropy: Arc::new(OsJitter),
         })
     }
 
@@ -359,7 +344,7 @@ where
         body: Option<String>,
         error: &'static str,
     ) -> Result<(), DeliveryError> {
-        let delay = retry_delay(event.attempts, self.entropy.as_ref())?;
+        let delay = retry_delay(event.attempts, self.entropy.as_ref());
         record_failure_on(connection, event, status, body, error, delay).await?;
         Ok(())
     }
@@ -573,9 +558,9 @@ fn request_error_code(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn retry_delay(attempts: i32, entropy: &dyn RetryEntropy) -> Result<Duration, DeliveryError> {
+fn retry_delay(attempts: i32, entropy: &dyn JitterSource) -> Duration {
     let attempt = u32::try_from(attempts).unwrap_or(u32::MAX);
-    Ok(backoff(attempt, entropy.next_u64()?))
+    backoff(attempt, entropy.next_u64())
 }
 
 #[cfg(test)]
@@ -597,27 +582,25 @@ mod tests {
         }
     }
 
-    impl RetryEntropy for SequenceEntropy {
-        fn next_u64(&self) -> Result<u64, DeliveryError> {
+    impl JitterSource for SequenceEntropy {
+        fn next_u64(&self) -> u64 {
             self.values
                 .lock()
-                .map_err(|_| DeliveryError::Entropy)?
+                .expect("entropy lock is not poisoned")
                 .pop_front()
-                .ok_or(DeliveryError::Entropy)
+                .expect("test supplied enough entropy")
         }
     }
 
     #[test]
-    fn retry_delay_uses_fresh_entropy_and_caps_the_exponential_ceiling() -> Result<(), DeliveryError>
-    {
+    fn retry_delay_uses_fresh_entropy_and_caps_the_exponential_ceiling() {
         let entropy = SequenceEntropy::new([0, u64::MAX, 0]);
 
-        assert_eq!(retry_delay(0, &entropy)?, Duration::from_secs(30));
-        assert_eq!(retry_delay(0, &entropy)?, Duration::ZERO);
+        assert_eq!(retry_delay(0, &entropy), Duration::from_secs(30));
+        assert_eq!(retry_delay(0, &entropy), Duration::ZERO);
         assert_eq!(
-            retry_delay(i32::MAX, &entropy)?,
+            retry_delay(i32::MAX, &entropy),
             Duration::from_secs(60 * 60)
         );
-        Ok(())
     }
 }

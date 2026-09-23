@@ -173,47 +173,6 @@ pub async fn get_address(pool: &PgPool, id: Uuid) -> Result<Option<Address>, sql
     record.map(TryInto::try_into).transpose()
 }
 
-/// Finds an address by its chain and physical address.
-pub async fn find_address_by_chain(
-    pool: &PgPool,
-    chain_id: u64,
-    address: EvmAddress,
-) -> Result<Option<Address>, sqlx::Error> {
-    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let address = address_hex(address);
-    let record = sqlx::query_as!(
-        AddressRecord,
-        "SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at FROM addresses WHERE chain_id = $1 AND address = $2",
-        chain_id,
-        address
-    )
-    .fetch_optional(pool)
-    .await?;
-    record.map(TryInto::try_into).transpose()
-}
-
-/// Finds the active persistent address for an account and chain.
-pub async fn find_active_persistent(
-    pool: &PgPool,
-    account_id: Uuid,
-    chain_id: u64,
-) -> Result<Option<Address>, sqlx::Error> {
-    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let record = sqlx::query_as!(
-        AddressRecord,
-        r#"
-        SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
-        FROM addresses
-        WHERE account_id = $1 AND chain_id = $2 AND kind = 'persistent' AND retired_at IS NULL
-        "#,
-        account_id,
-        chain_id
-    )
-    .fetch_optional(pool)
-    .await?;
-    record.map(TryInto::try_into).transpose()
-}
-
 /// Lists every active or retired forwarder address stored for a chain.
 pub async fn list_chain_addresses(
     pool: &PgPool,
