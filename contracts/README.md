@@ -21,7 +21,7 @@ This Foundry project implements the deterministic EIP-1167 deposit forwarders de
    `treasury()` and `factory()`, and `addressOf()` against the route configuration.
 
 Deployment determinism depends on the compiler settings as well as constructor inputs. This
-project pins Solidity `0.8.24`, EVM target `cancun`, optimizer settings, and metadata settings in
+project pins Solidity `0.8.37`, EVM target `cancun`, optimizer settings, and metadata settings in
 `foundry.toml`; deployments must use those checked-in settings so factory init code is identical.
 `deploy/contracts/check-build.sh --check` enforces those settings and the committed artifact
 fingerprints. `make deploy-check` also proves the proxy, factory, implementation, and a forwarder

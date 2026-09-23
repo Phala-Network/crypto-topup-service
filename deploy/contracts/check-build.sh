@@ -15,7 +15,7 @@ require_command jq
 
 config="$(cd "$CONTRACTS_DIR" && forge config --json)"
 jq -e '
-    .solc == "0.8.24" and
+    .solc == "0.8.37" and
     .evm_version == "cancun" and
     .optimizer == true and
     .optimizer_runs == 200 and

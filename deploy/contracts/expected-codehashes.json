@@ -1,6 +1,6 @@
 {
   "compiler": {
-    "solc": "0.8.24+commit.e11b9ed9",
+    "solc": "0.8.37+commit.f401782d",
     "evm_version": "cancun",
     "optimizer": true,
     "optimizer_runs": 200,
@@ -14,8 +14,8 @@
   "factory_salt": "0x33f357abc669d0dae6ca878fa2e4435dd82ff4a983efd8a8dd4f2efa9437a426",
   "artifacts": {
     "ForwarderFactory": {
-      "creation_code_hash": "0xc621f56b1431d44207d2ecf31bd78437f7425ebe4ed1769533aaaa6f77f28853",
-      "runtime_template_code_hash": "0x3bcaca09de50292271a29ea682474bfef177d16fea1a20ab25092ac34dc8ff1a",
+      "creation_code_hash": "0x54db433717372550a65e25c5cf27b0f420985df80a5d128c719f3a02e9f9908c",
+      "runtime_template_code_hash": "0x7abfec3082d6440476f52c9cc04b271dfe4b802e47feeb39f69670253523f0ee",
       "immutable_offsets": {
         "implementation": [
           303,
@@ -25,8 +25,8 @@
       }
     },
     "Forwarder": {
-      "creation_code_hash": "0xe18aa6643569296d4ae9efcca733d1e4b5bf9c3f536b9f879b5739ea0aeb7672",
-      "runtime_template_code_hash": "0x0d75243426ce4c396cb01f2586db90ca041e6708235c1a902679efa4f7fbed28",
+      "creation_code_hash": "0xe03a154f456dea8313c0eaab15f33a9ccba62d73e3e8f322425dc8bce6185db6",
+      "runtime_template_code_hash": "0x1fa01f51e22b763abd13dfc194dd43ee02355f68b534985877bf6b08de7e2029",
       "immutable_offsets": {
         "treasury": [
           82,

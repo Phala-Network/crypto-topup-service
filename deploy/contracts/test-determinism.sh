@@ -3,6 +3,12 @@
 set -euo pipefail
 source "$(dirname -- "$0")/common.sh"
 
+mode="${1:---check}"
+case "$mode" in
+    --check | --write) ;;
+    *) die "usage: $0 [--check|--write]" ;;
+esac
+
 require_command anvil
 require_command cast
 require_command forge
@@ -15,7 +21,7 @@ admin="$treasury"
 operator_role="$(cast keccak 'OPERATOR_ROLE')"
 sample_salt="$(jq -er '.salts[0]' "$CONTRACTS_DIR/test-vectors/create2.json")"
 expected="$DEPLOY_CONTRACTS_DIR/local-test-vectors.json"
-[[ -f "$expected" ]] || die "missing local deterministic vectors: $expected"
+[[ "$mode" == --write || -f "$expected" ]] || die "missing local deterministic vectors: $expected"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-two-anvil.XXXXXX")"
 pids=()
@@ -129,6 +135,9 @@ done
     "$(jq -c '.[1] | del(.chain_id)' <<<"$reports")" ]] || die "deployments differ across chain IDs"
 
 actual="$(jq -c '.[0] | del(.chain_id)' <<<"$reports")"
+if [[ "$mode" == --write ]]; then
+    jq . <<<"$actual" >"$expected"
+fi
 committed="$(jq -c '{factory, implementation, forwarder, factory_code_hash, implementation_code_hash}' "$expected")"
 [[ "$actual" == "$committed" ]] || die "local deterministic vectors drifted; inspect compiler or constructor input changes"
 

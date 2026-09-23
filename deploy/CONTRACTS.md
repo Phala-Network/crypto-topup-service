@@ -91,8 +91,9 @@ make deploy-check
 ```
 
 If an intentional contract or compiler-profile change is approved, regenerate and review the
-fingerprints with `deploy/contracts/check-build.sh --write`. Never regenerate them merely to make a
-failed deployment check pass. A contract change reopens the no-external-audit decision in
+fingerprints with `deploy/contracts/check-build.sh --write` and the local deployment vectors with
+`deploy/contracts/test-determinism.sh --write`. Never regenerate them merely to make a failed
+deployment check pass. A contract change reopens the no-external-audit decision in
 [architecture §4](../docs/architecture.md#4-contracts).
 
 ## Canonical proxy
