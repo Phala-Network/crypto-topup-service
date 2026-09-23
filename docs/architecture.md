@@ -617,7 +617,7 @@ response when available.
 
 ## 17. Delivery
 
-**Phase 0 (two weeks)**: deterministic deployment on Sepolia and mainnet;
+**Phase 0**: deterministic deployment on Sepolia and mainnet;
 finance Safe verified on each chain; two RPC providers; object storage; treasury; policy
 numbers; compliance determination of region, Travel Rule, and KYT timing; refund policy
 signed off by finance.

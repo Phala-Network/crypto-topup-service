@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Read-only preflight for a staging deploy (deploy/README.md, "First staging deploy"). It never
-# pushes, deploys, updates, or sends a transaction; it reads the env file, the rendered compose,
-# the images in their registry, the asset chain through the env file's two RPC providers, and the
-# Phala Cloud account the CLI is logged in to.
+# Preflight for a staging deploy (deploy/README.md, "First staging deploy checklist"). It is
+# read-only against remote systems: it never pushes, deploys, updates, or sends a transaction. It
+# reads the env file, the rendered compose, the images in their registry, the asset chain through
+# the env file's two RPC providers, and the Phala Cloud account the CLI is logged in to. Locally
+# it renders the compose, builds the contracts (verify-deployment.sh), and pulls the topup image.
 #
 # Usage: deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
-#          --workspace NAME --os-image NAME [--kms-contract ADDRESS] [--offline]
+#          --workspace NAME --os-image NAME [--kms-contract ADDRESS] [--source COMPOSE] [--offline]
 #
-# --offline runs only the local checks (env file, compose, route). PHALA selects the CLI command
-# (default `npx --yes phala@1.1.22`). Every failure is reported; the exit status is 1 if any.
+# --source is the unrendered compose the rendered file must come from (default
+# deploy/docker-compose.yml of this checkout). --offline runs only the local checks (env file,
+# compose, route). PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure
+# is reported; the exit status is 1 if any.
+#
+# RPC URLs may carry provider API keys. Cast reads them from ETH_RPC_URL here, but
+# verify-deployment.sh takes them as arguments, so they are visible in the process list while it
+# runs; run preflight on a single-user machine. Output never prints them: tool errors are
+# redacted to "provider a" and "provider b".
 set -euo pipefail
 source "$(dirname -- "$0")/contracts/common.sh"
 
@@ -22,10 +30,11 @@ optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
-        "[--kms-contract ADDRESS] [--offline]" >&2
+        "[--kms-contract ADDRESS] [--source COMPOSE] [--offline]" >&2
     exit 64
 }
 env_file="" compose="" workspace="" os_image="" offline=0
+source_compose="$REPO_ROOT/deploy/docker-compose.yml"
 kms_contract=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 while (($#)); do
     case "$1" in
@@ -34,6 +43,7 @@ while (($#)); do
         --workspace) workspace="${2:-}"; shift 2 ;;
         --os-image) os_image="${2:-}"; shift 2 ;;
         --kms-contract) kms_contract="${2:-}"; shift 2 ;;
+        --source) source_compose="${2:-}"; shift 2 ;;
         --offline) offline=1; shift ;;
         *) usage ;;
     esac
@@ -135,6 +145,17 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
             "$(diff "$tmp/expected" "$tmp/compose-variables" | grep '^[<>]' | tr '\n' ' ')"
     jq -j --arg name "$route_config" '.configs[$name].content // empty' "$tmp/compose.json" \
         >"$tmp/route.yaml"
+    # A stale render (older checkout, hand edits) must not reach the CLI: re-render the source
+    # with the same image references and compare byte for byte.
+    if TOPUP_IMAGE=$(jq -r '.services.topup.image' "$tmp/compose.json") \
+        POSTGRES_WALG_IMAGE=$(jq -r '.services.postgres.image' "$tmp/compose.json") \
+        "$root/deploy/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>/dev/null &&
+        cmp -s "$tmp/fresh.yml" "$compose"; then
+        :
+    else
+        fail "$compose differs from a fresh render of $source_compose with the same images;" \
+            "re-run render-compose.sh from the commit being deployed"
+    fi
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
     : >"$tmp/route.yaml"
@@ -195,10 +216,15 @@ echo "== asset chain (RPC URLs are not printed)"
 for command in cast forge; do
     require_command "$command"
 done
+redact() {
+    local text=$1
+    text=${text//"$rpc_a"/provider a}
+    printf '%s' "${text//"$rpc_b"/provider b}"
+}
 chain_ok=1
 for label in a b; do
     [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
-    id=$(rpc_chain_id "$url")
+    id=$(ETH_RPC_URL=$url cast chain-id 2>/dev/null) || id=error
     if [[ "$id" == "${route[chain_id]}" ]]; then
         ok "provider $label reports chain id $id"
     else
@@ -214,7 +240,7 @@ if ((chain_ok)) && [[ -n "$network" ]]; then
         --rpc "$network/b=$rpc_b" >"$tmp/verification.json" 2>"$tmp/verification.err"; then
         ok "verify-deployment.sh passed on both providers"
     else
-        fail "verify-deployment.sh failed: $(tail -n 3 "$tmp/verification.err")"
+        fail "verify-deployment.sh failed: $(redact "$(tail -n 3 "$tmp/verification.err")")"
     fi
     if jq -e --arg factory "${route[forwarder_factory]}" \
         --arg implementation "${route[implementation]}" --arg treasury "${route[treasury]}" \
@@ -230,12 +256,12 @@ if ((chain_ok)) && [[ -n "$network" ]]; then
     for label in a b; do
         [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
         for key in contract sanctions_oracle; do
-            hash=$(code_hash "$url" "${route[$key]}" 2>/dev/null) || hash=error
-            [[ "$hash" =~ ^0x[0-9a-f]{64}$ && "$hash" != "$ZERO_HASH" ]] ||
+            code=$(ETH_RPC_URL=$url cast code "${route[$key]}" 2>/dev/null) || code=error
+            [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
                 fail "route $key ${route[$key]} has no code on provider $label"
         done
     done
-    decimals=$(cast call "${route[contract]}" 'decimals()(uint8)' --rpc-url "$rpc_a" 2>/dev/null) ||
+    decimals=$(ETH_RPC_URL=$rpc_a cast call "${route[contract]}" 'decimals()(uint8)' 2>/dev/null) ||
         decimals=error
     [[ "$decimals" == "${route[decimals]}" ]] ||
         fail "asset decimals() is $decimals, the route says ${route[decimals]}"
@@ -248,12 +274,14 @@ read -r -a phala <<<"${PHALA:-npx --yes phala@1.1.22}"
 version=$("${phala[@]}" --version 2>/dev/null) || version=error
 [[ "$version" == v1.1.22* || "$version" == 1.1.22* ]] ||
     fail "the Phala CLI is $version; these steps are verified against 1.1.22"
+# Best effort: `status --json` in CLI 1.1.22 reports only the workspace display name (team_name),
+# no workspace id, so two workspaces with the same name cannot be told apart here.
 if "${phala[@]}" status --json >"$tmp/status.json" 2>/dev/null &&
     jq -e --arg workspace "$workspace" '.team_name == $workspace' "$tmp/status.json" >/dev/null; then
-    ok "logged in to workspace $workspace"
+    ok "logged in to a workspace named $workspace (display name; best effort)"
 else
-    fail "the CLI is not logged in to workspace '$workspace' ($(jq -r '.team_name // "not logged in"' \
-        "$tmp/status.json" 2>/dev/null || echo 'not logged in'))"
+    current=$(jq -r '.team_name // empty' "$tmp/status.json" 2>/dev/null) || current=""
+    fail "the CLI is not logged in to workspace '$workspace' (current: ${current:-not logged in})"
 fi
 if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
     contract=$(jq -c --arg address "$(lower "$kms_contract")" \
@@ -268,6 +296,11 @@ if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
             'any(.os_images[]; .name == $image and .on_chain_allowed == true)' <<<"$contract" \
             >/dev/null; then
             ok "OS image $os_image is allowed by KMS contract $kms_contract"
+            # The pinned dstack SDK needs the /v1 guest API of dstack 0.6 (deploy/README.md).
+            jq -e --arg image "$os_image" \
+                'any(.os_images[]; .name == $image and (.version | test("^v?0[.]6[.]")))' \
+                <<<"$contract" >/dev/null ||
+                fail "OS image $os_image is not a dstack 0.6 image"
         else
             fail "OS image $os_image is not allowed by KMS contract $kms_contract; allowed:" \
                 "$(jq -r '[.os_images[] | select(.on_chain_allowed == true) | .name] | join(", ")' \
@@ -276,6 +309,13 @@ if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
     fi
 else
     fail "'kms base --json' failed"
+fi
+if "${phala[@]}" os-images --prod --all --json >"$tmp/os-images.json" 2>/dev/null &&
+    jq -e --arg image "$os_image" 'any(.items[]; .name == $image and .is_dev == false)' \
+        "$tmp/os-images.json" >/dev/null; then
+    ok "OS image $os_image is a production (non-dev) image"
+else
+    fail "OS image $os_image is not listed as a production image by 'os-images --prod'"
 fi
 
 if ((failures)); then

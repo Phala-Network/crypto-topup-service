@@ -40,8 +40,10 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
 
    ```sh
    cast wallet import staging-deployer --interactive
-   ETH_PASSWORD=... deploy/sandbox/deploy-test-contracts.sh \
+   read -rsp "Keystore password: " ETH_PASSWORD && printf '\n' && export ETH_PASSWORD
+   deploy/sandbox/deploy-test-contracts.sh \
      --rpc-url "$SEPOLIA_RPC_A" --account staging-deployer > sepolia-test-contracts.json
+   unset ETH_PASSWORD
    ```
 
 2. Route PR: copy `factory` and `implementation` from `sepolia-contract-verification.json`, the
@@ -87,12 +89,15 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
    export OS_IMAGE=<allowed dstack 0.6.0 name>
    ```
 
-7. Run the read-only preflight; it must pass before `phala deploy`. It checks the env file (all
-   names, no `replace-me`, consistent database URLs), the compose (digest images, variables equal
-   to the env names, a route without placeholder addresses), both images in the registry,
+7. Run the preflight, which is read-only against remote systems (it builds the contracts and
+   pulls the images locally); it must pass before `phala deploy`. It checks the env file (all
+   names, no `replace-me`, consistent database URLs), the compose (identical to a fresh render of
+   the checkout with the same images, digest images, variables equal to the env names, a route
+   without placeholder addresses), both images in the registry,
    `topup route validate`, both RPC providers' chain id, `verify-deployment.sh` against those
    providers with the route's factory/implementation/treasury, token and oracle code, the
-   logged-in workspace, and that the KMS contract allows a device and `$OS_IMAGE`:
+   logged-in workspace (by display name, best effort), and that the KMS contract allows a device
+   and `$OS_IMAGE`, a non-dev dstack 0.6 image:
 
    ```sh
    deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
@@ -279,8 +284,9 @@ npx --yes phala@1.1.22 deploy --json \
   --wait > provision.raw
 sed -n '/^{/,$p' provision.raw > provision.json
 jq -e . provision.json >/dev/null
-export CVM_ID="$(jq -er '.vm_uuid' provision.json)"
-export APP_ID="$(jq -er '.app_id' provision.json)"
+CVM_ID=$(jq -er '.vm_uuid' provision.json) || exit 1
+APP_ID=$(jq -er '.app_id' provision.json) || exit 1
+export CVM_ID APP_ID
 case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
 ```
 
@@ -316,14 +322,19 @@ route or represent the locally previewed manifest as the deployed artifact.
 ### Public origin follow-up
 
 The workload booted with the provisional `TOPUP_PUBLIC_ORIGIN=https://pending.invalid`, which
-passes startup validation but matches no signed request. Derive the gateway URL of port 8080 from
-the provisioned app, confirm it serves the service, and write it into `.env.staging`:
+passes startup validation, but every request signed for the real URL is rejected until the
+origin is updated; during this window only the admin key exists, and no product credentials may
+be issued. Derive the gateway URL of port 8080 from the provisioned app, confirm it serves the
+service, and only then write it into `.env.staging`. CLI 1.1.22 `cvms get --json` (API
+2026-06-23) reports the gateway domain as `gateway.base_domain`; every extraction below stops on
+a missing field instead of writing a URL containing `null`:
 
 ```sh
-export GATEWAY_DOMAIN="$(jq -er '.gateway_domain' cvm.json)"
-export TOPUP_PUBLIC_ORIGIN="https://${APP_ID#0x}-8080.$GATEWAY_DOMAIN"
-curl -fsS "$TOPUP_PUBLIC_ORIGIN/healthz"
+GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
+TOPUP_PUBLIC_ORIGIN="https://${APP_ID#0x}-8080.$GATEWAY_DOMAIN"
+curl -fsS "$TOPUP_PUBLIC_ORIGIN/healthz" || exit 1
 sed -i "s|^TOPUP_PUBLIC_ORIGIN=.*|TOPUP_PUBLIC_ORIGIN=$TOPUP_PUBLIC_ORIGIN|" .env.staging
+export TOPUP_PUBLIC_ORIGIN
 deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml --offline
 ```
 
@@ -369,9 +380,10 @@ npx --yes phala@1.1.22 deploy --json \
   --compose deploy/docker-compose.staging.yml \
   -e .env.staging \
   --prepare-only > prepare.json
-export COMPOSE_HASH="$(jq -er '.compose_hash' prepare.json)"
-export COMMIT_TOKEN="$(jq -er '.commit_token' prepare.json)"
-export APP_ID="$(jq -er '.app_id' prepare.json)"
+COMPOSE_HASH=$(jq -er '.compose_hash' prepare.json) || exit 1
+COMMIT_TOKEN=$(jq -er '.commit_token' prepare.json) || exit 1
+APP_ID=$(jq -er '.app_id' prepare.json) || exit 1
+export COMPOSE_HASH COMMIT_TOKEN APP_ID
 case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
 ```
 
@@ -522,7 +534,7 @@ starts it with a `.env` holding exactly the `staging.env.example` names.
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 through the simulator, the backup marker is fresh, and one quote-first deposit is credited end to
 end against the reference product, then prints the workload's memory and checks that no
-container, volume, or network of the run is left. It needs Foundry with `contracts/lib`, the
+container, volume, network, or image of the run is left. It needs Foundry with `contracts/lib`, the
 Docker host's loopback (for the registry and Anvil), and internet access for the live price
 sources; it bind-mounts nothing.
 

@@ -15,7 +15,7 @@
 #    attestation endpoint answers through the simulator, the backup marker is fresh, and one
 #    quote-first deposit is credited end to end against the reference product
 #    (sdk/examples/phala_cloud_integration.py). Then it removes everything and asserts that no
-#    container, volume, or network of the run is left.
+#    container, volume, network, or image of the run is left.
 #
 # Nothing is bind-mounted and the workload publishes no host port (see cvm-rehearsal.compose.yml).
 # Requires docker (Compose 2.24.4+), Foundry v1.8.3 with contracts/lib checked out, jq, python3,
@@ -67,6 +67,10 @@ leftovers() {
         docker ps -aq --filter "name=^$registry\$" --filter "name=^$client\$"
         docker volume ls -q --filter "label=com.docker.compose.project=$project"
         docker network ls -q --filter "label=com.docker.compose.project=$project"
+        local image
+        for image in "${local_images[@]}" "$TOPUP_LOCAL_DSTACK_IMAGE"; do
+            docker image inspect --format "image $image" "$image"
+        done
     } 2>/dev/null
 }
 
@@ -80,14 +84,15 @@ cleanup() {
     docker rm -f "$client" >/dev/null 2>&1
     dc down --volumes --remove-orphans --timeout 10 >/dev/null 2>&1
     docker rm -f -v "$registry" >/dev/null 2>&1
+    # Failures show up in leftovers() below.
     docker image rm "${local_images[@]}" "$TOPUP_LOCAL_DSTACK_IMAGE" >/dev/null 2>&1
     rm -rf "$tmp"
     if [[ -n "$(leftovers)" ]]; then
-        echo "FAIL: containers, volumes, or networks of $project were left behind:" >&2
+        echo "FAIL: containers, volumes, networks, or images of $project were left behind:" >&2
         leftovers >&2
         status=1
     else
-        echo "== shutdown left no container, volume, or network of $project"
+        echo "== shutdown left no container, volume, network, or image of $project"
     fi
     exit "$status"
 }
