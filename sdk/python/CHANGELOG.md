@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Removed
+
+- **Breaking:** the generated `ErrorDetail.work_package` field and the `501` response of
+  `/v1/attestation` (`get_attestation`) (#90). Both belonged only to the pre-C11 placeholder
+  attestor; the production service never returned them. There was no deprecation window because
+  neither was ever reachable in production.
+
 ### Changed
 
 - The service now rebuilds `@target-uri` from its configured public origin

@@ -1136,7 +1136,14 @@ async fn loop_respects_cancellation() -> Result<()> {
         .await?;
         cancellation.cancel();
         tokio::time::timeout(StdDuration::from_secs(1), task).await??;
-        ensure!(!handle.render().contains(RECONCILER_PROGRESS));
+        let rendered = handle.render();
+        // Positive control: the recorder captured this loop's metrics, so the absent progress
+        // gauge means the cancelled round never completed rather than that nothing was recorded.
+        ensure!(
+            rendered.contains("topup_loop_heartbeat_unixtime_seconds{loop=\"reconciler\""),
+            "{rendered}"
+        );
+        ensure!(!rendered.contains(RECONCILER_PROGRESS), "{rendered}");
         Ok(())
     })
     .await

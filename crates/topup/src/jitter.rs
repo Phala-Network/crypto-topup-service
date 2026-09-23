@@ -15,6 +15,9 @@ pub struct OsJitter;
 impl JitterSource for OsJitter {
     /// Falls back to zero, the unjittered and therefore longest delay, if the OS RNG fails.
     fn next_u64(&self) -> u64 {
-        OsRng.try_next_u64().unwrap_or(0)
+        OsRng.try_next_u64().unwrap_or_else(|error| {
+            tracing::warn!(%error, "OS RNG failed; using unjittered retry delay");
+            0
+        })
     }
 }
