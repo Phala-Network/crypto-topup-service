@@ -11,7 +11,6 @@ one branch, one PR. Humans make the decisions listed in §1, review PRs, and pre
 | Treasury Safe: owners, threshold, deployed at the same address on Sepolia and mainnet | A2 | Finance |
 | Two RPC providers and API keys | C3 | Ops |
 | Object storage bucket and credentials for backups | D3 | Ops |
-| Contract audit vendor | A3 | Security |
 | Policy numbers: min/max deposit, min credit, spread, lock window, exposure caps, flush thresholds | G2 | Finance, Risk |
 | Compliance determinations: region, Travel Rule applicability, KYT timing | G2 | Compliance |
 | Refund policy sign-off | G2 | Finance |
@@ -43,7 +42,6 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 |---|---|---|---|
 | A1 Forwarder + Factory | `Forwarder.sol` (immutable treasury and factory, `flush(token)`, ETH via `call`, SafeERC20), `ForwarderFactory.sol` (AccessControl, implementation created in constructor, `addressOf`, batch `flush`, `Flushed` event) | Foundry unit, fuzz, and invariant tests: flush can only pay the treasury; predicted address equals deployed; ETH path; reentrancy with a hook token; batch is atomic; a failing salt reverts the whole flush, documented | §4 |
 | A2 Deterministic deployment | Scripts for the Arachnid proxy with plain salts; identical init code on every chain; verification script comparing factory/implementation/treasury across chains; Sepolia deployment `after: A1` and treasury Safe | Same addresses on two testnets; verification script green | §4, §14 |
-| A3 Audit package | Threat model, invariants, test report, deployment procedure `after: A1, A2` | Package accepted by the audit vendor; findings tracked as WPs | §4 |
 
 ### Lane B — Core domain (`crates/core`, no I/O)
 
@@ -99,13 +97,13 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 |---|---|
 | G0 Foundations | A1, B1, B2, B3, C1 merged; CI green |
 | G1 Sepolia end to end | A2, C2–C7, C9–C11, D2 merged; a quote-first and a persistent-address deposit credited on Sepolia through the mock product; flush confirmed; restore drill passed (D3) |
-| G2 Mainnet pilot go/no-go | A3 audit closed; E2, E3, E5 merged; conformance green against Phala Cloud; all §1 decisions recorded; every runbook exercised once; §17 Phase 1 acceptance list checked by a human |
+| G2 Mainnet pilot go/no-go | Contracts reviewed internally (no external audit, architecture §4); E2, E3, E5 merged; conformance green against Phala Cloud; all §1 decisions recorded; every runbook exercised once; §17 Phase 1 acceptance list checked by a human |
 | G3 GA | Phase 2 items of §17 and the GA column of §18 delivered; caps raised by finance |
 
 ## 5. Ordering summary
 
 ```text
-A1 ─┬─ A2 ─ A3
+A1 ─┬─ A2
     └─ C7
 B1 ─┬─ B2 ─┬─ B4 ─ C4 ─ C10
     │      └─ B5 ─ C5

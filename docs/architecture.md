@@ -116,6 +116,10 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
   tokens are out of scope; hook-bearing tokens require reentrancy tests before enabling.
 - Startup verifies on chain: factory code hash, `implementation()`, `treasury()`, and
   `addressOf(sample salt)` against the route file.
+- No external audit; internal review + tests. The contracts are two files (~109 lines) built
+  from audited OpenZeppelin components (Clones, SafeERC20, AccessControl); funds can only move
+  to the immutable treasury; unit, fuzz, and invariant tests cover them; the pilot keeps
+  per-deposit and exposure caps. Revisit if caps are raised materially or the contracts change.
 
 ## 5. Stack
 
@@ -127,7 +131,7 @@ release is published, use the official repository with both `version = "=0.6.0"`
 `rev = "721df1b93fd93884224f2261c37dd86ca250432f"`; changing that revision requires a spec
 change. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
 `unwrap_used`. `cargo-deny`, committed lockfile, reproducible distroless image by digest.
-Contracts: Solidity with OpenZeppelin, Foundry, one external audit.
+Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
 ```text
 crates/core       pure, no I/O: money, route schema, CREATE2 math, state machine, valuation, screening
@@ -613,7 +617,7 @@ response when available.
 
 ## 17. Delivery
 
-**Phase 0 (two weeks)**: contract audit and deterministic deployment on Sepolia and mainnet;
+**Phase 0 (two weeks)**: deterministic deployment on Sepolia and mainnet;
 finance Safe verified on each chain; two RPC providers; object storage; treasury; policy
 numbers; compliance determination of region, Travel Rule, and KYT timing; refund policy
 signed off by finance.
