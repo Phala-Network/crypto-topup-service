@@ -22,6 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run the controlled and crash restore drills
+        env:
+          # The runner empties runner.temp after every job, including cancelled ones. The runner
+          # context is only available at step level.
+          TMPDIR: ${{ runner.temp }}
         run: make restore-drill
       # A cancelled or timed-out job skips the drill's own trap; remove only this run's projects.
       - name: Remove this run's drill projects, volumes, and image tags

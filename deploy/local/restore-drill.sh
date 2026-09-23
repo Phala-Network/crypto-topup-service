@@ -1,7 +1,9 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+# bash for pipefail and inherit_errexit: several checks pipe docker or psql output into a filter.
+set -euo pipefail
+shopt -s inherit_errexit
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 compose="$root/deploy/local/docker-compose.yml"
 mode=${1:-all}
 
@@ -47,7 +49,9 @@ cleanup() {
         rm -rf "$routes_dir"
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 wait_for() {
     description=$1
@@ -83,10 +87,18 @@ psql_value() {
     dc exec -T postgres psql -U postgres -d topup -Atq -v ON_ERROR_STOP=1 -c "$1"
 }
 
-# PostgreSQL creates archive_status/<segment>.ready exactly when the segment closes.
+# PostgreSQL creates archive_status/<segment>.ready when the segment closes, and the archiver's
+# rename to .done keeps that mtime. pg_ls_archive_statusdir() truncates mtime to whole seconds, so
+# stat the file itself, and record the time as soon as the file appears: a later checkpoint may
+# recycle the segment and remove its .done file.
+segment_closed_at=
 wal_closed() {
-    test "$(psql_value "SELECT count(*) FROM pg_ls_archive_statusdir() \
-        WHERE name IN ('$1.ready', '$1.done')")" -gt 0
+    local closed
+    closed=$(dc exec -T postgres sh -c '
+        cd "$PGDATA/pg_wal/archive_status"
+        stat -c %y "$1.ready" 2>/dev/null || stat -c %y "$1.done"
+    ' sh "$1") || return 1
+    segment_closed_at=$(date -u -d "$closed" +%s.%3N)
 }
 
 wal_manifest_visible() {
@@ -106,20 +118,6 @@ wal_object_uploaded_epoch() {
         return 1
     }
     date -u -d "$3 $4" +%s.%3N
-}
-
-# PostgreSQL creates <segment>.ready when the segment closes; the rename to .done keeps its mtime.
-# pg_ls_archive_statusdir() truncates mtime to whole seconds, so stat the file itself; try .ready
-# first, then .done in case the archiver renamed it in between.
-wal_closed_epoch() {
-    closed=$(dc exec -T postgres sh -c '
-        cd "$PGDATA/pg_wal/archive_status"
-        stat -c %y "$1.ready" 2>/dev/null || stat -c %y "$1.done"
-    ' sh "$1") || {
-        echo "archive status for $1 is gone; a checkpoint removed it before timing" >&2
-        return 1
-    }
-    date -u -d "$closed" +%s.%3N
 }
 
 pending_wals() {
@@ -450,9 +448,9 @@ else
 fi
 
 # Time the segment that holds the first write, not whichever segment is current beforehand.
-set -- $(first_sample)
-first_marker=$1
-timed_wal=$2
+first=$(first_sample)
+read -r first_marker timed_wal <<<"$first"
+test -n "$first_marker" && test -n "$timed_wal"
 if [ "$mode" = controlled ]; then
     last_marker=$(record_sample)
     psql_value 'SELECT pg_switch_wal()' >/dev/null
@@ -480,7 +478,7 @@ if [ "$mode" = crash ]; then
 fi
 # Server-side timestamps: first write into the segment, segment close, and object upload.
 first_write_at=$(marker_epoch "$first_marker")
-segment_closed_at=$(wal_closed_epoch "$timed_wal")
+test -n "$segment_closed_at"
 object_uploaded_at=$(wal_object_uploaded_epoch "$timed_wal")
 archive_wait_seconds=$(seconds_between "$first_write_at" "$segment_closed_at")
 upload_latency_seconds=$(seconds_between "$segment_closed_at" "$object_uploaded_at")

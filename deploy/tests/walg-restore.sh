@@ -1,12 +1,14 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 cleanup() {
     find "$tmp" -depth -delete
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$tmp/bin" "$tmp/store/key-versions/base" "$tmp/store/key-versions/wal" "$tmp/keys"
 cat >"$tmp/bin/wal-g" <<'EOF'

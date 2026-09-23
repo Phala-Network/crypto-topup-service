@@ -3,7 +3,7 @@
 # user-supplied flags, so a restore drill cannot write into the production WAL prefix.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 prefix="topup-archive-switch-$$"
 containers=
 built_image=
@@ -16,7 +16,9 @@ cleanup() {
         docker image rm "$built_image" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Test the given image (CI passes the one it just built); otherwise build a per-run tag from this
 # checkout, because a shared tag such as crypto-topup-postgres-walg:local may be stale.
