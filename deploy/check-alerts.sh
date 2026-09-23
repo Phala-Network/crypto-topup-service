@@ -13,7 +13,8 @@ cleanup() {
         docker rm -f "$container" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 promtool() {
     container=$(docker create --entrypoint promtool --workdir /rules "$image" "$@")

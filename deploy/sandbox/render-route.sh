@@ -27,7 +27,8 @@ done
 [[ ${#PRODUCT_KID} -le 128 ]] || { echo "render-route.sh: PRODUCT_KID is too long" >&2; exit 1; }
 
 # Single pass over the template: only allow-listed `${NAME}` placeholders are replaced, and
-# substituted values are never rescanned. Anything else is left for the check below.
+# substituted values are never rescanned. Unlike envsubst, bare `$NAME` is not supported; any
+# `$NAME` or `${...}` left in the output (from the template or a value) is rejected below.
 allowed=" FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG \
 PRODUCT_KID SETTLEMENT_URL RATE_LOCK_WINDOW_S "
 rest="$(<"$template")"
@@ -44,7 +45,7 @@ while [[ "$rest" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
     rest=${rest#*"$placeholder"}
 done
 rendered+=$rest
-if grep -q '\${' <<<"$rendered"; then
+if grep -q '\$[A-Za-z_{]' <<<"$rendered"; then
     echo "render-route.sh: unsubstituted placeholder in output" >&2
     exit 1
 fi
