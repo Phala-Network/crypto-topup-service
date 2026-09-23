@@ -17,7 +17,7 @@ Human inputs, all required before step 1 below:
 | Input | Used for |
 |---|---|
 | Phala Cloud workspace to deploy into, with the CLI 1.1.22 logged in to it | `phala deploy`, `preflight.sh --workspace` |
-| Registry push credentials for `ghcr.io/phala-network` | publishing `crypto-topup` and `postgres-walg` |
+| Permission to run the Release images workflow (or push a `staging-*` tag), and admin on the `crypto-topup` and `postgres-walg` packages in `ghcr.io/phala-network` | publishing both images and making the packages public |
 | Sepolia deployer key with test ETH, imported as a Foundry keystore account | canonical proxy (if absent), forwarder factory, test PHA token, sanctions oracle |
 | Finance/test Safe on Sepolia (admin and treasury), with its owners, threshold, and Safe version for `deploy/contracts/safe-expectations.json` | factory constructor, `verify-safe.sh`, `verify-deployment.sh` |
 | Base provisioner key with ETH, a Base RPC URL, and the Finance/test Safe on Base | the `DstackApp` contract `phala deploy` creates, then its ownership |
@@ -67,9 +67,10 @@ steps 2-5 and the post-boot checks locally against Anvil, MinIO, and the dstack 
      < deploy/config/routes/phala-cloud-sepolia-pha.yaml
    ```
 
-3. **HUMAN-ONLY, registry credentials:** from the merged commit, build, push, and read back both
-   images as in [Build and publish images](#build-and-publish-images), and export `TOPUP_IMAGE`
-   and `POSTGRES_WALG_IMAGE` as `repository@sha256:<platform manifest digest>`.
+3. **HUMAN-ONLY, publishes to the registry:** run the Release images workflow on the merged commit
+   (or push a `staging-*` tag), then copy `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE` from its job
+   summary or `images.json` artifact, as in [Build and publish images](#build-and-publish-images).
+   On the first publish, make both packages public and confirm the summary has no warning.
 4. Fill `.env.staging` (ignored by Git) from the example. Every name stays; only
    `AWS_SESSION_TOKEN`, `AWS_ENDPOINT` (AWS S3), and `COINMETRICS_API_KEY` may be empty. The
    gateway URL is not known before provisioning, so start with the provisional origin (step 9):
@@ -171,43 +172,56 @@ the observability volume.
 
 ## Build and publish images
 
-The service image must be published by the same reproducible build path that is verified locally:
+Images are built and published only by CI, by the
+[Release images](../.github/workflows/release-images.yml) workflow; never push them from a
+workstation. It runs on `workflow_dispatch` (tag `sha-<12-hex commit>`, plus an optional suffix)
+and on pushed `v*` and `staging-*` Git tags (the tag itself), with `SOURCE_DATE_EPOCH` set to the
+commit time:
+
+- `ghcr.io/phala-network/crypto-topup:<tag>`: [verify-image.sh](verify-image.sh) with
+  `PUBLISH_IMAGE` set performs two clean BuildKit OCI exports for `linux/amd64`, with provenance
+  and SBOM attachments disabled and `rewrite-timestamp=true`, and fails unless their OCI manifest
+  and config digests match. It then builds and pushes a third time and fails unless the registry's
+  platform manifest and config digests equal the verified local ones. This proves repeatability on
+  the CI builder and platform, not cross-builder or cross-architecture identity.
+- `ghcr.io/phala-network/postgres-walg:<postgres>-<wal-g>-<tag>` from
+  [Dockerfile.postgres-walg](Dockerfile.postgres-walg): apt and dpkg record wall-clock times, so
+  it is not bit-for-bit reproducible. It is built and pushed once; the registry tag must resolve
+  to the digest BuildKit pushed, and the pulled digest must run `wal-g --version`.
+
+**HUMAN-ONLY, publishes to the registry:** run the workflow from the Actions tab, or
+`gh workflow run release-images.yml --ref main`, or push a `staging-*` tag. The job summary and the
+`images.json` artifact hold the two platform manifest references, the exact inputs of
+`render-compose.sh`:
 
 ```sh
-export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-deploy/verify-image.sh
+images=$(mktemp -d)
+gh run download <run-id> --repo Phala-Network/crypto-topup-service --name images-<tag> --dir "$images"
+eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | @sh)"' "$images/images.json")"
 ```
 
-The script performs two clean BuildKit OCI exports for `linux/amd64`, with provenance and SBOM
-attachments disabled and `rewrite-timestamp=true`, then compares their OCI manifest and config
-digests. This proves repeatability on the current builder and platform, not cross-builder or
-cross-architecture identity.
+Deploy those `repository@sha256:<platform manifest digest>` references, never a tag, and do not
+assume a registry index digest equals its platform manifest digest: registry-added indexes or
+attestations can change the outer digest while the child manifest and config stay identical. No
+build provenance attestation is published: GitHub artifact attestations need GitHub Enterprise
+Cloud for private repositories.
 
-**HUMAN-ONLY, registry credentials required:** set a candidate tag and let the same script build,
-push, read back, and compare the registry child manifest and config with both verified local builds:
+**HUMAN-ONLY, one-time, package admin:** CVMs pull without registry credentials, so both packages
+must be public; never add registry credentials to a CVM. GitHub's REST API cannot change a
+container package's visibility, and making a package public cannot be undone. After the first
+publish, for `crypto-topup` and for `postgres-walg`: open the package under the organization's
+Packages tab, then Package settings, Danger Zone, Change visibility, Public, and confirm with the
+package name. The workflow checks an anonymous pull of each pushed digest and adds a warning to the
+summary while a package is still private.
+
+Developer check, no push and no credentials: the same two-build comparison runs locally with
 
 ```sh
-export PUBLISH_IMAGE=ghcr.io/phala-network/crypto-topup:staging-candidate
-deploy/verify-image.sh
-docker buildx imagetools inspect "$PUBLISH_IMAGE"
+deploy/verify-image.sh   # or make verify-image
 ```
 
-Use the reported platform manifest digest as `TOPUP_IMAGE`; do not deploy the tag or assume a
-registry index digest equals its platform manifest digest. Registry-added indexes or attestations
-can legitimately change the outer index digest while the child manifest and config stay identical.
-
-Build and publish PostgreSQL/WAL-G separately:
-
-```sh
-docker build -f deploy/Dockerfile.postgres-walg \
-  -t ghcr.io/phala-network/postgres-walg:16-3.0.9 .
-docker run --rm ghcr.io/phala-network/postgres-walg:16-3.0.9 wal-g --version
-```
-
-**HUMAN-ONLY, registry credentials required:** push that image, inspect its digest, and set
-`POSTGRES_WALG_IMAGE` to `repository@sha256:...`.
-
-Render literal, nonzero image digests into the compose. Secret values remain `${NAME:-}` references:
+With the two published references exported, render their literal, nonzero digests into the
+compose. Secret values remain `${NAME:-}` references:
 
 ```sh
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:<64-hex-digest>
@@ -259,7 +273,7 @@ jq '{chain_id, contracts: [.contracts[] | {contract_address, devices, os_images}
 export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 ```
 
-**HUMAN-ONLY, Phala Cloud, Base RPC, registry, and provisioner-key credentials required:** authenticate
+**HUMAN-ONLY, Phala Cloud, Base RPC, and provisioner-key credentials required:** authenticate
 and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager; the CLI reads both
 from the environment, so neither appears on a command line. Do not add `--prepare-only`; it does
 not halt the create path in this CLI version. Run [preflight.sh](preflight.sh) first (checklist
