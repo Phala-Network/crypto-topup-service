@@ -10,7 +10,7 @@ use std::time::Duration as StdDuration;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Row};
@@ -34,6 +34,10 @@ use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
 use url::Url;
 use uuid::Uuid;
+
+/// Waits out transient `max_connections` exhaustion when many test databases share one
+/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
+const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
@@ -59,6 +63,7 @@ impl TestContext {
         admin_url.set_path("/postgres");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await
             .context("connect to the PostgreSQL maintenance database")?;
@@ -79,6 +84,7 @@ impl TestContext {
         owner_url.set_path(&format!("/{database_name}"));
         let owner_pool = PgPoolOptions::new()
             .max_connections(4)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(owner_url.as_str())
             .await
             .context("connect to isolated test database as owner")?;
@@ -102,6 +108,7 @@ impl TestContext {
         app_url.set_path(&format!("/{database_name}"));
         let app_pool = PgPoolOptions::new()
             .max_connections(8)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(app_url.as_str())
             .await
             .context("connect to isolated test database as application role")?;
@@ -553,7 +560,16 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                     .bind(amount.to_string())
                     .execute(&context.app_pool)
                     .await?;
-                let expires_at = Utc::now() + Duration::seconds(expiry_seconds);
+                // Chain block times are whole seconds; pin one and derive the expiry from
+                // it so the window check does not depend on when the second ticks over.
+                let block_time = DateTime::from_timestamp(Utc::now().timestamp(), 0)
+                    .context("whole-second block time")?;
+                sqlx::query("UPDATE deposits SET block_time = $2 WHERE id = $1")
+                    .bind(deposit_id)
+                    .bind(block_time)
+                    .execute(&context.app_pool)
+                    .await?;
+                let expires_at = block_time + Duration::seconds(expiry_seconds);
                 sqlx::query(
                     r#"
                     INSERT INTO rate_locks (

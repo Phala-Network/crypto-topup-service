@@ -41,6 +41,10 @@ use topup_core::{
 use url::Url;
 use uuid::Uuid;
 
+/// Waits out transient `max_connections` exhaustion when many test databases share one
+/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
+const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
 #[derive(Clone)]
@@ -182,6 +186,7 @@ impl TestContext {
         admin_url.set_path("/postgres");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
         sqlx::query("SELECT pg_advisory_lock(704_206_001)")
@@ -198,6 +203,7 @@ impl TestContext {
         owner_url.set_path(&format!("/{database_name}"));
         let owner_pool = PgPoolOptions::new()
             .max_connections(4)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(owner_url.as_str())
             .await?;
         db::migrate(&owner_pool).await?;
@@ -217,6 +223,7 @@ impl TestContext {
         app_url.set_path(&format!("/{database_name}"));
         let app_pool = PgPoolOptions::new()
             .max_connections(8)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(app_url.as_str())
             .await?;
         sqlx::query("SELECT pg_advisory_unlock(704_206_001)")
@@ -374,7 +381,7 @@ async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> 
                     destination_tx_id: "credit-1".to_owned(),
                     payload: settlement_payload(&context.app_pool, accepted_id).await?,
                 }));
-            let accepted = pump(&context.app_pool, accepted_api, StdDuration::from_secs(1))?;
+            let accepted = pump(&context.app_pool, accepted_api)?;
             ensure!(
                 accepted.run_once().await?
                     == RunOnceResult::Applied {
@@ -398,7 +405,7 @@ async fn accepted_and_rejected_answers_persist_rows_transitions_and_events() -> 
                     reason: "cap".to_owned(),
                     payload: settlement_payload(&context.app_pool, rejected_id).await?,
                 }));
-            let rejected = pump(&context.app_pool, rejected_api, StdDuration::from_secs(1))?;
+            let rejected = pump(&context.app_pool, rejected_api)?;
             rejected.run_once().await?;
             assert_state_and_event(
                 &context.app_pool,
@@ -431,9 +438,7 @@ async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<
                     destination_tx_id: "credit-delivery".to_owned(),
                     payload: settlement_payload(&context.app_pool, accepted_id).await?,
                 }));
-            pump(&context.app_pool, accepted_api, StdDuration::from_secs(1))?
-                .run_once()
-                .await?;
+            pump(&context.app_pool, accepted_api)?.run_once().await?;
             sqlx::query(
                 "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
             )
@@ -448,9 +453,7 @@ async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<
                     reason: "cap".to_owned(),
                     payload: settlement_payload(&context.app_pool, rejected_id).await?,
                 }));
-            pump(&context.app_pool, rejected_api, StdDuration::from_secs(1))?
-                .run_once()
-                .await?;
+            pump(&context.app_pool, rejected_api)?.run_once().await?;
             ensure!(
                 db::get_deposit(&context.app_pool, accepted_id)
                     .await?
@@ -471,8 +474,8 @@ async fn credited_and_rejected_events_deliver_to_reference_receiver() -> Result<
                 webhook_signer,
                 DeliveryConfig {
                     batch_size: 2,
-                    request_timeout: StdDuration::from_secs(2),
-                    claim_lease: StdDuration::from_secs(10),
+                    request_timeout: TEST_TIMEOUT,
+                    claim_lease: StdDuration::from_secs(60),
                     poll_interval: StdDuration::from_millis(10),
                     response_body_limit: 1024,
                     age_alert_threshold: StdDuration::from_secs(60),
@@ -519,7 +522,7 @@ async fn sent_row_gets_authoritative_answer_and_adopts_product_pricing() -> Resu
                     payload,
                 })],
             );
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            let worker = pump(&context.app_pool, api.clone())?;
             worker.run_once().await?;
 
             ensure!(api.gets.load(Ordering::SeqCst) == 1);
@@ -582,7 +585,7 @@ async fn terminal_row_restores_transition_without_get_or_post() -> Result<()> {
             )
             .await?;
             let api = MockSettlementApi::default();
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            let worker = pump(&context.app_pool, api.clone())?;
             worker.run_once().await?;
 
             ensure!(api.gets.load(Ordering::SeqCst) == 0);
@@ -602,7 +605,7 @@ async fn pauses_block_new_posts_but_not_get_adoption() -> Result<()> {
             for (number, scope) in [(8, "account"), (9, "product"), (10, "route")] {
                 let id = seed_cleared(&context.app_pool, number).await?;
                 pause_settlement(&context.app_pool, id, scope).await?;
-                let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+                let worker = pump(&context.app_pool, api.clone())?;
                 worker.run_once().await?;
                 let stored = db::get_deposit(&context.app_pool, id)
                     .await?
@@ -630,11 +633,7 @@ async fn pauses_block_new_posts_but_not_get_adoption() -> Result<()> {
                     payload,
                 })],
             );
-            let worker = pump(
-                &context.app_pool,
-                adopting_api.clone(),
-                StdDuration::from_secs(1),
-            )?;
+            let worker = pump(&context.app_pool, adopting_api.clone())?;
             worker.run_once().await?;
             ensure!(adopting_api.gets.load(Ordering::SeqCst) == 1);
             ensure!(adopting_api.posts.lock().await.is_empty());
@@ -666,7 +665,7 @@ async fn unknown_result_gets_before_resend_and_keeps_payload_identical() -> Resu
                 ],
                 vec![MockOutcome::Failure],
             );
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            let worker = pump(&context.app_pool, api.clone())?;
             worker.run_once().await?;
             sqlx::query(
                 "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
@@ -695,7 +694,7 @@ async fn payload_mismatch_is_alert_retry_and_is_never_resent() -> Result<()> {
                 Vec::new(),
             );
             let id = seed_cleared(&context.app_pool, 4).await?;
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            let worker = pump(&context.app_pool, api.clone())?;
             worker.run_once().await?;
             let evidence: Value =
                 sqlx::query("SELECT evidence FROM transitions WHERE deposit_id = $1")
@@ -743,7 +742,7 @@ async fn payload_mismatch_guard_survives_unknown_and_missing_gets() -> Result<()
                 ],
             );
             let id = seed_cleared(&context.app_pool, 14).await?;
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(1))?;
+            let worker = pump(&context.app_pool, api.clone())?;
 
             worker.run_once().await?;
             ensure!(api.posts.lock().await.len() == 1);
@@ -790,7 +789,7 @@ async fn two_pumps_cannot_both_post_one_cleared_deposit() -> Result<()> {
         Box::pin(async move {
             let api = MockSettlementApi::blocking();
             let id = seed_cleared(&context.app_pool, 5).await?;
-            let worker = pump(&context.app_pool, api.clone(), StdDuration::from_secs(5))?;
+            let worker = pump(&context.app_pool, api.clone())?;
             let first_worker = worker.clone();
             let first = tokio::spawn(async move { first_worker.run_once().await });
             api.entered.acquire().await?.forget();
@@ -819,6 +818,10 @@ impl Step for StaticStep {
     }
 }
 
+// No test here exercises a timeout firing; keep them generous so a loaded host does not
+// turn a slow step or signer into a spurious failure.
+const TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+
 struct FixedJitter;
 
 impl JitterSource for FixedJitter {
@@ -827,11 +830,11 @@ impl JitterSource for FixedJitter {
     }
 }
 
-fn pump(pool: &PgPool, api: MockSettlementApi, timeout: StdDuration) -> Result<Pump> {
+fn pump(pool: &PgPool, api: MockSettlementApi) -> Result<Pump> {
     let signer = SignerHandle::spawn(
         TestSigner(ed25519_dalek::SigningKey::from_bytes(&[2; 32])),
         std::num::NonZeroUsize::new(4).unwrap_or(std::num::NonZeroUsize::MIN),
-        StdDuration::from_secs(1),
+        TEST_TIMEOUT,
     )?;
     let steps = StepSet::new(
         Box::new(StaticStep),
@@ -843,7 +846,7 @@ fn pump(pool: &PgPool, api: MockSettlementApi, timeout: StdDuration) -> Result<P
         pool.clone(),
         Arc::new(steps),
         PumpConfig {
-            step_timeout: timeout,
+            step_timeout: TEST_TIMEOUT,
             ..PumpConfig::default()
         },
         Arc::new(FixedJitter),

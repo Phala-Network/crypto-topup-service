@@ -5,7 +5,8 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::net::{SocketAddr, TcpListener};
+use std::io::{BufRead as _, BufReader};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
@@ -29,7 +30,7 @@ use topup_adapters::settlement::http::{
     SettlementAnswer, SettlementApi as _, SettlementClient, SettlementRequest,
 };
 use topup_conformance::DEV_SETTLEMENT_SEED;
-use topup_conformance::chain::{ChainFixture, Manifest, PrepareOptions};
+use topup_conformance::chain::{ChainFixture, Manifest, PrepareOptions, Rpc};
 use topup_conformance::reference::{BrokenVariant, ReferenceConfig, ReferenceState, router};
 use topup_conformance::report::{Report, TestStatus};
 use topup_conformance::signer_handle;
@@ -41,6 +42,9 @@ const CAPS: Caps = Caps {
     period: Duration::from_secs(3_600),
 };
 
+/// Generous bound on anvil start-up under CPU contention; a healthy start takes well under 1 s.
+const ANVIL_START: Duration = Duration::from_secs(60);
+
 /// Serializes `forge create` so parallel tests do not race on the Foundry build cache.
 static FORGE: Mutex<()> = Mutex::const_new(());
 
@@ -50,35 +54,49 @@ struct Anvil {
 }
 
 impl Anvil {
-    fn start() -> Result<Option<Self>> {
+    /// Starts anvil on a port it picks itself (no free-port race with parallel tests) and
+    /// waits until it answers JSON-RPC, so a loaded host only slows the start down.
+    async fn start() -> Result<Option<Self>> {
         if !command_available("anvil") || !command_available("forge") {
             skip("anvil or forge is not on PATH")?;
             return Ok(None);
         }
-        let port = free_port()?;
-        let child = Command::new("anvil")
-            .args([
-                "--silent",
-                "--port",
-                &port.to_string(),
-                "--chain-id",
-                "31337",
-            ])
-            .stdout(Stdio::null())
+        let mut child = Command::new("anvil")
+            .args(["--port", "0", "--chain-id", "31337"])
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .context("start anvil")?;
-        let anvil = Self {
+        let stdout = child.stdout.take().context("anvil stdout")?;
+        let mut anvil = Self {
             child,
-            rpc_url: format!("http://127.0.0.1:{port}"),
+            rpc_url: String::new(),
         };
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Ok(Some(anvil));
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        // Keeps draining stdout after the address line so anvil never blocks on a full pipe.
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(address) = line.strip_prefix("Listening on ") {
+                    let _ = address_tx.send(address.trim().to_owned());
+                }
             }
-            std::thread::sleep(Duration::from_millis(50));
+        });
+        let address = tokio::task::spawn_blocking(move || address_rx.recv_timeout(ANVIL_START))
+            .await?
+            .context("anvil did not report its listening address")?;
+        anvil.rpc_url = format!("http://{address}");
+
+        let rpc = Rpc::new(&anvil.rpc_url)?;
+        let deadline = tokio::time::Instant::now() + ANVIL_START;
+        loop {
+            match rpc.chain_id().await {
+                Ok(_) => return Ok(Some(anvil)),
+                Err(error) if tokio::time::Instant::now() >= deadline => {
+                    return Err(error.context("anvil did not answer eth_chainId"));
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
         }
-        bail!("anvil did not start")
     }
 
     async fn prepare(&self) -> Result<Manifest> {
@@ -116,10 +134,6 @@ fn command_available(command: &str) -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
-}
-
-fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 fn config(manifest: Manifest, broken: BrokenVariant) -> ReferenceConfig {
@@ -264,7 +278,7 @@ fn ids_with(report: &Report, status: TestStatus) -> BTreeSet<&str> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn conforming_reference_passes_every_case() -> Result<()> {
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start().await? else {
         return Ok(());
     };
     let manifest = anvil.prepare().await?;
@@ -302,7 +316,7 @@ async fn conforming_reference_passes_every_case() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn each_broken_variant_fails_exactly_its_obligation() -> Result<()> {
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start().await? else {
         return Ok(());
     };
     let manifest = anvil.prepare().await?;
@@ -364,7 +378,7 @@ fn router_rejecting_transient_reads(state: ReferenceState) -> Router {
 /// The suite does not enforce the transient-read rule, but must surface a violation.
 #[tokio::test(flavor = "multi_thread")]
 async fn stored_rejection_for_an_unfinalized_log_is_reported_as_a_warning() -> Result<()> {
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start().await? else {
         return Ok(());
     };
     let manifest = anvil.prepare().await?;
@@ -390,7 +404,7 @@ async fn stored_rejection_for_an_unfinalized_log_is_reported_as_a_warning() -> R
 
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_ledger_hook_and_restart_are_incomplete_never_pass() -> Result<()> {
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start().await? else {
         return Ok(());
     };
     let manifest = anvil.prepare().await?;
@@ -431,7 +445,7 @@ async fn postgres_reference_passes_across_a_real_reconnect() -> Result<()> {
     let Ok(admin_url) = std::env::var("MIGRATE_DATABASE_URL") else {
         return skip("MIGRATE_DATABASE_URL is not set");
     };
-    let Some(anvil) = Anvil::start()? else {
+    let Some(anvil) = Anvil::start().await? else {
         return Ok(());
     };
     let manifest = anvil.prepare().await?;

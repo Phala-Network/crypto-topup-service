@@ -32,6 +32,10 @@ use topup_core::{
 use url::Url;
 use uuid::Uuid;
 
+/// Waits out transient `max_connections` exhaustion when many test databases share one
+/// server under load; sqlx's 30 s default turns that into spurious `PoolTimedOut` failures.
+const DB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
 #[derive(Clone)]
@@ -347,6 +351,7 @@ impl TestContext {
         admin_url.set_path("/postgres");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(admin_url.as_str())
             .await?;
         sqlx::query("SELECT pg_advisory_lock(704_201_013)")
@@ -365,6 +370,7 @@ impl TestContext {
         owner_url.set_path(&format!("/{database_name}"));
         let owner_pool = PgPoolOptions::new()
             .max_connections(4)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(owner_url.as_str())
             .await?;
         db::migrate(&owner_pool).await?;
@@ -386,6 +392,7 @@ impl TestContext {
         let app_url = app_url.to_string();
         let app_pool = PgPoolOptions::new()
             .max_connections(8)
+            .acquire_timeout(DB_ACQUIRE_TIMEOUT)
             .connect(&app_url)
             .await?;
         sqlx::query("SELECT pg_advisory_unlock(704_201_013)")
