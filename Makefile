@@ -11,8 +11,10 @@ build-topup:
 test:
 	cargo test --workspace --locked
 
+# CI's lint job runs exactly this.
 lint:
 	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo deny --locked check
 
@@ -20,11 +22,14 @@ image:
 	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t crypto-topup-service:dev .
 	docker run --rm crypto-topup-service:dev topup --help
 
+# The attested compose with the local overlay (MinIO, dstack simulator, images built here).
+LOCAL_COMPOSE = docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml
+
 up:
-	docker compose -f deploy/local/docker-compose.yml up --build -d postgres dstack-simulator backup
+	$(LOCAL_COMPOSE) up --build -d postgres dstack-simulator backup
 
 down:
-	docker compose -f deploy/local/docker-compose.yml down --remove-orphans
+	$(LOCAL_COMPOSE) down --remove-orphans
 
 infra-smoke:
 	deploy/local/infra-smoke.sh

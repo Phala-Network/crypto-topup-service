@@ -1,0 +1,17 @@
+name: Rust toolchain
+description: >-
+  Installs rustup when the runner lacks it (self-hosted runners may) and the toolchain and
+  components pinned in rust-toolchain.toml.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+        fi
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # Without arguments, rustup 1.28+ installs the toolchain named by rust-toolchain.toml.
+        "$HOME/.cargo/bin/rustup" toolchain install
+        "$HOME/.cargo/bin/rustup" show active-toolchain

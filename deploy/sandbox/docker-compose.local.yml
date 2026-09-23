@@ -1,6 +1,7 @@
-# Local sandbox overlay: `docker compose -f deploy/local/docker-compose.yml
-# -f deploy/sandbox/docker-compose.local.yml ...`. Adds a disposable Anvil chain with Sepolia's
-# chain id and points the service at it; run-local.sh drives the whole flow.
+# Local sandbox overlay: `docker compose -f deploy/docker-compose.yml
+# -f deploy/local/docker-compose.yml -f deploy/sandbox/docker-compose.local.yml ...`. Adds a
+# disposable Anvil chain with Sepolia's chain id and points the service at it; run-local.sh
+# drives the whole flow.
 services:
   anvil:
     image: ghcr.io/foundry-rs/foundry:v1.8.3@sha256:2e4287278639262de76db72477301d5d3212fa1b1cce710d7d148750a46ce9e7

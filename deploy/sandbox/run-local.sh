@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the Python integration example and the sandbox scenarios against a disposable local
-# stack: deploy/local plus an Anvil chain (docker-compose.local.yml). Everything it starts is
-# removed on exit. Usage: deploy/sandbox/run-local.sh [SCENARIO ...]
+# stack: the attested compose with the deploy/local overlay plus an Anvil chain
+# (docker-compose.local.yml). Everything it starts is removed on exit.
+# Usage: deploy/sandbox/run-local.sh [SCENARIO ...]
 #
 # Requires docker compose, Foundry (forge, cast), jq, and uv. Prices come from the
 # live Coin Metrics, Binance, and Kraken endpoints, exactly as on Sepolia.
@@ -15,8 +16,8 @@ done
 
 project="topup-sandbox-$$"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-sandbox.XXXXXX")
-compose=(docker compose -p "$project" -f "$root/deploy/local/docker-compose.yml"
-    -f "$root/deploy/sandbox/docker-compose.local.yml")
+compose=(docker compose -p "$project" -f "$root/deploy/docker-compose.yml"
+    -f "$root/deploy/local/docker-compose.yml" -f "$root/deploy/sandbox/docker-compose.local.yml")
 # The product side (example and scenarios) runs in this image on the compose network, so the
 # service reaches its endpoints as http://product:8089 even where a host firewall drops traffic
 # from containers to the host.
