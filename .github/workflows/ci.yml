@@ -62,6 +62,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+      - name: Clippy with default features
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Runtime binary builds without conformance-only features
         run: |
           cargo check -p topup --locked
