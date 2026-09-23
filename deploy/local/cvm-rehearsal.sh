@@ -33,9 +33,9 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-cvm-rehearsal.XXXXXX")
 cvm="$tmp/cvm"
 mkdir -p "$cvm"
 : >"$cvm/.env"
-registry_image="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+registry_image="registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0"
 # The pinned uv/Python image of deploy/sandbox/run-local.sh; it plays the reference product.
-client_image="ghcr.io/astral-sh/uv:0.11.14-python3.12-trixie-slim@sha256:13b5883729ec534af5863facf5c40ac0869f2c124ad5620c9ed36fe7c03fa87d"
+client_image="ghcr.io/astral-sh/uv:0.12.18-python3.14-trixie-slim@sha256:00facf17b58b02b725155862c5cd637f688f906bf7eb5b5194647886d8805cf3"
 registry="$project-registry"
 client="$project-product"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"

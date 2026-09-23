@@ -33,7 +33,7 @@ jobs:
       # Lowercase alphanumeric; unique per run attempt so a re-run never shares projects.
       TOPUP_RESTORE_DRILL_ID: gh${{ github.run_id }}a${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the controlled and crash restore drills
         env:
           # The runner empties runner.temp after every job, including cancelled ones. The runner

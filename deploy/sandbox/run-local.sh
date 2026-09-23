@@ -21,7 +21,7 @@ compose=(docker compose -p "$project" -f "$root/deploy/docker-compose.yml"
 # The product side (example and scenarios) runs in this image on the compose network, so the
 # service reaches its endpoints as http://product:8089 even where a host firewall drops traffic
 # from containers to the host.
-client_image="ghcr.io/astral-sh/uv:0.11.14-python3.12-trixie-slim@sha256:13b5883729ec534af5863facf5c40ac0869f2c124ad5620c9ed36fe7c03fa87d"
+client_image="ghcr.io/astral-sh/uv:0.12.18-python3.14-trixie-slim@sha256:00facf17b58b02b725155862c5cd637f688f906bf7eb5b5194647886d8805cf3"
 client="$project-product"
 
 cleanup() {
