@@ -10,7 +10,7 @@ set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
-for command in docker forge cast jq uv; do
+for command in docker forge cast jq uv python3; do
     require_command "$command"
 done
 
@@ -36,10 +36,6 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT INT TERM
-
-free_port() {
-    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
-}
 
 wait_for() {
     local description=$1 attempts=90

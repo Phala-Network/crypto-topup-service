@@ -8,12 +8,16 @@
 # newer) replaces each service's whole volume list, because the local overlay mounts host paths
 # that a named volume cannot shadow. PostgreSQL's init script is an inline config, which Compose
 # copies into the container, so it needs no volume here.
+#
+# The drill talks to the stack only through `docker compose exec` and the compose network, so it
+# publishes no host ports; concurrent drills and sandbox runs on one host cannot collide.
 services:
   topup:
     volumes: !override
       - dstack_socket:/var/run
       - observability:/run/topup-observability:ro
       - drill_routes:/etc/topup/routes:ro
+    ports: !reset []
 
   mock-product:
     volumes: !override

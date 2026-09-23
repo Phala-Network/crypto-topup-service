@@ -8,7 +8,7 @@ fi
 
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
-for command in docker forge cast jq; do
+for command in docker forge cast jq python3; do
     require_command "$command"
 done
 # `topup run` refuses to start until the route's contracts are verified on chain, so the smoke
@@ -18,8 +18,10 @@ local_compose="$root/deploy/local/docker-compose.yml"
 sandbox_compose="$root/deploy/sandbox/docker-compose.local.yml"
 project="topup-service-smoke-$$"
 tmp=$(mktemp -d)
-port=${TOPUP_LOCAL_PORT:-18080}
-export SANDBOX_ANVIL_PORT=${SANDBOX_ANVIL_PORT:-18545}
+# Free host ports by default, so the smoke can run beside a drill or a sandbox run.
+export TOPUP_LOCAL_PORT=${TOPUP_LOCAL_PORT:-$(free_port)}
+export SANDBOX_ANVIL_PORT=${SANDBOX_ANVIL_PORT:-$(free_port)}
+port=$TOPUP_LOCAL_PORT
 rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
 export TOPUP_LOCAL_DSTACK_IMAGE="$project-dstack"
 export TOPUP_LOCAL_POSTGRES_IMAGE="$project-postgres"
