@@ -11,7 +11,8 @@ follow [Semantic Versioning](https://semver.org/).
 - `TopupClient.list_pending_deposits` and the generated `list_pending_deposits` operation with
   `PendingDepositResponse` and `PendingDepositsResponse`: transfers to persistent addresses seen
   before finality. Display only; they are not credited.
-- `RateLockResponse.payment` (`RateLockPayment`): the lock's first payment, `seen` before finality
+- `RateLockResponse.payment` (`RateLockPayment`): the payment the checkout page should show (the
+  consuming deposit, else the first qualifying payment, else the first), `seen` before finality
   or `finalized` once it is a deposit.
 
 ### Changed

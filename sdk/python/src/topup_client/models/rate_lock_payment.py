@@ -19,15 +19,17 @@ T = TypeVar("T", bound="RateLockPayment")
 
 @_attrs_define
 class RateLockPayment:
-    """The first payment observed at a rate-lock address.
+    """A payment observed at a rate-lock address.
 
     Attributes:
         amount_atomic (str): Atomic token amount encoded as a decimal string.
-        amount_within_tolerance (bool): Whether the amount is the lock's asset within the lock tolerance.
+        amount_within_tolerance (bool): Whether the amount is the lock's asset within the lock tolerance; always false
+            on a
+            cancelled lock.
         asset_contract (str): Canonical token contract address.
         block_number (int): Block that contains the transfer.
         deposit_id (UUID): Identifier the deposit has, or will have once final.
-        in_time (bool): Whether the block time is at or before `expires_at`.
+        in_time (bool): Whether the block time is at or before `expires_at`; always false on a cancelled lock.
         log_index (int): Transfer log index.
         status (str): `seen`: in a block above `finalized`, provisional and may still disappear in a reorg.
             `finalized`: recorded as a deposit; follow it by `deposit_id`. New values may be added.

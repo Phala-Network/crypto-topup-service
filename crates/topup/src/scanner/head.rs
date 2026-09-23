@@ -8,7 +8,9 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{ChainReader, EvmChain};
+use topup_adapters::chain::evm::{ChainReader as _, EvmChain};
+
+use super::ChainRoutes;
 
 use super::{MAX_SCAN_WINDOW, ScannerError};
 use crate::db::{self, HeadCommit, NewPendingTransfer};
@@ -28,14 +30,17 @@ pub struct HeadScan {
     pub commit: HeadCommit,
 }
 
-/// Scans `[finalized + 1, latest]` (at most one scan window below `latest`) for transfers to
-/// watched addresses and replaces the stored pending view of that range. Returns `None` while
+/// Scans `[finalized + 1, latest]` (at most one scan window below `latest`) for non-zero transfers
+/// of the chain's routed tokens to watched addresses and replaces the stored pending view of that
+/// range. Other tokens are not requested, so they cannot create pending rows or notifications;
+/// they become visible after finality as `rejected(unsupported_asset)`. Returns `None` while
 /// reconciliation has frozen the chain.
 pub async fn head_scan_once(
     pool: &PgPool,
     reader: &EvmChain,
-    chain_id: u64,
+    routes: &ChainRoutes,
 ) -> Result<Option<HeadScan>, ScannerError> {
+    let chain_id = routes.chain.chain_id;
     if crate::reconciler::chain_is_blocked(pool, chain_id).await? {
         return Ok(None);
     }
@@ -52,10 +57,14 @@ pub async fn head_scan_once(
             .map(|address| (address.address, address.id))
             .collect::<BTreeMap<_, _>>();
         let addresses = index.keys().copied().collect::<Vec<_>>();
+        let tokens = routes.routes.keys().copied().collect::<Vec<_>>();
         for log in reader
-            .transfer_logs_to(&addresses, from_block, latest)
+            .token_transfer_logs_to(&tokens, &addresses, from_block, latest)
             .await?
         {
+            if log.amount.value().is_zero() {
+                continue;
+            }
             let address_id = *index
                 .get(&log.to)
                 .ok_or(ScannerError::UnknownRecipient(log.to))?;
@@ -87,16 +96,17 @@ pub async fn head_scan_once(
 pub(super) async fn run_head_loop(
     pool: &PgPool,
     reader: &EvmChain,
-    chain_id: u64,
+    routes: &ChainRoutes,
     interval: Duration,
     finalized_advanced: &Notify,
     cancellation: CancellationToken,
 ) {
+    let chain_id = routes.chain.chain_id;
     let mut last_finalized = None;
     loop {
         let result = tokio::select! {
             () = cancellation.cancelled() => return,
-            result = head_scan_once(pool, reader, chain_id) => result,
+            result = head_scan_once(pool, reader, routes) => result,
         };
         match result {
             Ok(Some(scan)) => {

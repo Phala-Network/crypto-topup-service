@@ -2124,7 +2124,7 @@
           },
           "supported": {
             "type": "boolean",
-            "description": "Whether a configured route accepts this token on this chain. Unsupported tokens are\nrecorded but not credited once final."
+            "description": "Whether a route of this product accepts this token on this chain. Only routed tokens are\nscanned before finality, so this is false only for a token routed for another product."
           },
           "tx_hash": {
             "type": "string",
@@ -2175,7 +2175,7 @@
       },
       "RateLockPayment": {
         "type": "object",
-        "description": "The first payment observed at a rate-lock address.",
+        "description": "A payment observed at a rate-lock address.",
         "required": [
           "status",
           "deposit_id",
@@ -2195,7 +2195,7 @@
           },
           "amount_within_tolerance": {
             "type": "boolean",
-            "description": "Whether the amount is the lock's asset within the lock tolerance."
+            "description": "Whether the amount is the lock's asset within the lock tolerance; always false on a\ncancelled lock."
           },
           "asset_contract": {
             "type": "string",
@@ -2231,7 +2231,7 @@
           },
           "in_time": {
             "type": "boolean",
-            "description": "Whether the block time is at or before `expires_at`."
+            "description": "Whether the block time is at or before `expires_at`; always false on a cancelled lock."
           },
           "log_index": {
             "type": "integer",
@@ -2296,7 +2296,7 @@
               },
               {
                 "$ref": "#/components/schemas/RateLockPayment",
-                "description": "The first payment to the lock address, once one is seen on chain. Display only: while\n`status` is `seen` the payment is not final and nothing has been credited."
+                "description": "The payment to the lock address that the checkout page should show, once one is seen on\nchain: the deposit that consumed the lock; otherwise the first payment that would consume\nit; otherwise the first payment. Display only: while `status` is `seen` the payment is not\nfinal and nothing has been credited."
               }
             ]
           },

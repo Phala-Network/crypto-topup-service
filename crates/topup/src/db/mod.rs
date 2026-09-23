@@ -41,8 +41,8 @@ pub use flushes::{
 };
 pub use outbox::{ClaimedOutboxEvent, NewOutboxEvent, claim_outbox, enqueue, mark_delivered};
 pub use pending::{
-    HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, first_address_pending,
-    list_account_pending, list_watched_addresses, touch_persistent_requested,
+    HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_account_pending,
+    list_address_pending, list_watched_addresses, touch_persistent_requested,
 };
 pub use products::{
     NewProduct, Product, create_product, delete_product, get_product, set_product_paused_scopes,

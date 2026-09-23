@@ -563,7 +563,7 @@ async fn deposit_address(
         )
         .await?
     };
-    crate::db::touch_persistent_requested(&state.pool, account.id).await?;
+    super::pending::touch_requested(state, account.id).await;
     Ok(Json(address_response(route, product, &account, address)))
 }
 

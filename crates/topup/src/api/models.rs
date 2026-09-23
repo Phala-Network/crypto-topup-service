@@ -243,13 +243,15 @@ pub struct RateLockResponse {
     pub eip681_uri: String,
     /// Inputs encoded into the rate-lock salt.
     pub salt_inputs: RateLockSaltInputs,
-    /// The first payment to the lock address, once one is seen on chain. Display only: while
-    /// `status` is `seen` the payment is not final and nothing has been credited.
+    /// The payment to the lock address that the checkout page should show, once one is seen on
+    /// chain: the deposit that consumed the lock; otherwise the first payment that would consume
+    /// it; otherwise the first payment. Display only: while `status` is `seen` the payment is not
+    /// final and nothing has been credited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment: Option<RateLockPayment>,
 }
 
-/// The first payment observed at a rate-lock address.
+/// A payment observed at a rate-lock address.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct RateLockPayment {
     /// `seen`: in a block above `finalized`, provisional and may still disappear in a reorg.
@@ -271,9 +273,10 @@ pub struct RateLockPayment {
     pub asset_contract: String,
     /// Whether the token is the lock's route asset.
     pub supported: bool,
-    /// Whether the amount is the lock's asset within the lock tolerance.
+    /// Whether the amount is the lock's asset within the lock tolerance; always false on a
+    /// cancelled lock.
     pub amount_within_tolerance: bool,
-    /// Whether the block time is at or before `expires_at`.
+    /// Whether the block time is at or before `expires_at`; always false on a cancelled lock.
     pub in_time: bool,
     /// Estimated finality time: block time plus 15 minutes; `seen` only.
     pub estimated_final_at: Option<DateTime<Utc>>,
@@ -305,8 +308,8 @@ pub struct PendingDepositResponse {
     pub from_address: String,
     /// Atomic token amount encoded as a decimal string.
     pub amount_atomic: String,
-    /// Whether a configured route accepts this token on this chain. Unsupported tokens are
-    /// recorded but not credited once final.
+    /// Whether a route of this product accepts this token on this chain. Only routed tokens are
+    /// scanned before finality, so this is false only for a token routed for another product.
     pub supported: bool,
     /// First time the service saw the transfer.
     pub first_seen_at: DateTime<Utc>,

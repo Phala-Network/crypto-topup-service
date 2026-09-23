@@ -145,9 +145,10 @@ pub async fn list_watched_addresses(
         .collect()
 }
 
-/// Replaces the pending view of blocks `from_block` and above with `transfers`, in one
+/// Replaces the pending view of blocks `from_block..=head_block` with `transfers`, in one
 /// transaction: rows in that range not seen this time (reorged or no longer watched) and rows at
-/// or below the finalized cursor are deleted; seen rows are upserted. The first sighting of a
+/// or below the finalized cursor are deleted; seen rows are upserted. Rows above `head_block`
+/// (a provider briefly behind) are left for the next scan that covers them. The first sighting of a
 /// transfer writes one `deposit.pending` event, at most once per chain event ever.
 pub async fn commit_head_scan(
     pool: &PgPool,
@@ -160,12 +161,16 @@ pub async fn commit_head_scan(
     let from_block = to_i64(from_block, "pending_transfers.block_number")?;
     let head = to_i64(head_block, "pending_transfers.head_block")?;
     let mut transaction = pool.begin().await?;
-    let cursor =
-        sqlx::query_scalar::<_, i64>("SELECT scanned_block FROM cursors WHERE chain_id = $1")
-            .bind(chain)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .unwrap_or(-1);
+    // `FOR SHARE` makes a concurrent cursor advance wait for this transaction (or this read wait
+    // for it), so a row at or below the committed cursor is never inserted after the finalized
+    // scanner deleted that range.
+    let cursor = sqlx::query_scalar::<_, i64>(
+        "SELECT scanned_block FROM cursors WHERE chain_id = $1 FOR SHARE",
+    )
+    .bind(chain)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .unwrap_or(-1);
     let tx_hashes = transfers
         .iter()
         .map(|transfer| b256_hex(transfer.tx_hash))
@@ -181,7 +186,7 @@ pub async fn commit_head_scan(
           AND (
               block_number <= $2
               OR (
-                  block_number >= $3
+                  block_number BETWEEN $3 AND $6
                   AND (tx_hash, log_index) NOT IN (
                       SELECT seen.tx_hash, seen.log_index
                       FROM unnest($4::text[], $5::bigint[]) AS seen (tx_hash, log_index)
@@ -195,6 +200,7 @@ pub async fn commit_head_scan(
     .bind(from_block)
     .bind(&tx_hashes)
     .bind(&log_indexes)
+    .bind(head)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
@@ -396,20 +402,20 @@ pub async fn list_account_pending(
     records.into_iter().map(TryInto::try_into).collect()
 }
 
-/// The earliest pending transfer to one address.
-pub async fn first_address_pending(
+/// Pending transfers to one address, oldest first.
+pub async fn list_address_pending(
     pool: &PgPool,
     address_id: Uuid,
-) -> Result<Option<PendingTransfer>, sqlx::Error> {
+) -> Result<Vec<PendingTransfer>, sqlx::Error> {
     let query = format!(
         "{PENDING_SELECT} AND pending.address_id = $1 \
-         ORDER BY pending.block_number, pending.log_index LIMIT 1"
+         ORDER BY pending.block_number, pending.log_index"
     );
-    let record = sqlx::query_as::<_, PendingRecord>(&query)
+    let records = sqlx::query_as::<_, PendingRecord>(&query)
         .bind(address_id)
-        .fetch_optional(pool)
+        .fetch_all(pool)
         .await?;
-    record.map(TryInto::try_into).transpose()
+    records.into_iter().map(TryInto::try_into).collect()
 }
 
 /// Records that the product issued or fetched an account's persistent addresses, so the head scan

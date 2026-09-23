@@ -130,12 +130,14 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     transfer(&anvil.rpc_url, token, lock_address, 100)?;
     transfer(&anvil.rpc_url, other_token, persistent_address, 5)?;
     transfer(&anvil.rpc_url, token, persistent_address, 7)?;
+    transfer(&anvil.rpc_url, token, persistent_address, 0)?;
 
-    let scan = head_scan_once(pool, &reader, CHAIN_ID)
+    let scan = head_scan_once(pool, &reader, &chain_routes)
         .await?
         .context("chain is not frozen")?;
-    ensure!(scan.commit.seen == 3, "unexpected head scan {scan:?}");
-    ensure!(scan.commit.announced == 3, "unexpected head scan {scan:?}");
+    // Only non-zero transfers of the routed token are requested and stored.
+    ensure!(scan.commit.seen == 2, "unexpected head scan {scan:?}");
+    ensure!(scan.commit.announced == 2, "unexpected head scan {scan:?}");
     ensure!(
         Ledger::read(pool).await? == before,
         "a pending transfer changed deposits, locks, exposure, or transitions"
@@ -183,25 +185,17 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let items = pending["pending_deposits"]
         .as_array()
         .context("pending list")?;
-    ensure!(items.len() == 2, "unexpected pending deposits {pending}");
-    let unsupported = items
-        .iter()
-        .find(|item| item["amount_atomic"] == "5")
-        .context("unsupported transfer")?;
-    ensure!(unsupported["supported"] == false);
-    ensure!(unsupported["asset_contract"] == format!("{other_token:#x}"));
-    let supported = items
-        .iter()
-        .find(|item| item["amount_atomic"] == "7")
-        .context("supported transfer")?;
+    ensure!(items.len() == 1, "unexpected pending deposits {pending}");
+    let supported = &items[0];
+    ensure!(supported["amount_atomic"] == "7");
     ensure!(supported["supported"] == true);
     ensure!(supported["address"] == format!("{persistent_address:#x}"));
 
-    let again = head_scan_once(pool, &reader, CHAIN_ID)
+    let again = head_scan_once(pool, &reader, &chain_routes)
         .await?
         .context("chain is not frozen")?;
-    ensure!(again.commit.seen == 3 && again.commit.announced == 0);
-    ensure!(pending_events(pool).await? == 3);
+    ensure!(again.commit.seen == 2 && again.commit.announced == 0);
+    ensure!(pending_events(pool).await? == 2);
     let unannounced: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE event_type = 'deposit.pending' \
          AND (payload->>'provisional')::boolean IS NOT TRUE",
@@ -216,11 +210,11 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     // A reorg that drops the transfers removes them from the pending view.
     anvil.revert(&snapshot)?;
     anvil.mine(8)?;
-    let reorged = head_scan_once(pool, &reader, CHAIN_ID)
+    let reorged = head_scan_once(pool, &reader, &chain_routes)
         .await?
         .context("chain is not frozen")?;
     ensure!(
-        reorged.commit.removed == 3,
+        reorged.commit.removed == 2,
         "unexpected reorg scan {reorged:?}"
     );
     ensure!(pending_rows(pool).await? == 0);
@@ -232,14 +226,14 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         )
         .await?;
     ensure!(lock.get("payment").is_none(), "reorged payment still shown");
-    ensure!(pending_events(pool).await? == 3);
+    ensure!(pending_events(pool).await? == 2);
 
     // Once final, the finalized scanner records the deposit and clears its pending row in the same
     // transaction, and the lock shows the finalized payment.
     transfer(&anvil.rpc_url, token, lock_address, 100)?;
-    head_scan_once(pool, &reader, CHAIN_ID).await?;
+    head_scan_once(pool, &reader, &chain_routes).await?;
     ensure!(pending_rows(pool).await? == 1);
-    ensure!(pending_events(pool).await? == 4);
+    ensure!(pending_events(pool).await? == 3);
     anvil.mine(FINALITY_LAG)?;
     let finalized = scan_once(pool, &reader, &chain_routes).await?;
     ensure!(
@@ -259,6 +253,82 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "unexpected {lock}"
     );
     ensure!(lock["payment"]["confirmations"].is_null());
+
+    // Underpay, then pay in full: the finalized underpayment does not consume the lock, so the
+    // later exact payment is the one shown while it is still pending.
+    let underpaid = api.lock("checkout-2").await?;
+    transfer(&anvil.rpc_url, token, underpaid, 50)?;
+    anvil.mine(FINALITY_LAG)?;
+    scan_once(pool, &reader, &chain_routes).await?;
+    transfer(&anvil.rpc_url, token, underpaid, 100)?;
+    // Dust first, then the exact amount, both still pending.
+    let dusted = api.lock("checkout-3").await?;
+    transfer(&anvil.rpc_url, token, dusted, 1)?;
+    transfer(&anvil.rpc_url, token, dusted, 100)?;
+    head_scan_once(pool, &reader, &chain_routes).await?;
+    for lock_ref in ["checkout-2", "checkout-3"] {
+        let payment = api.payment(lock_ref).await?;
+        ensure!(
+            payment["status"] == "seen"
+                && payment["amount_atomic"] == "100"
+                && payment["amount_within_tolerance"] == true
+                && payment["in_time"] == true,
+            "{lock_ref} does not show the payment that consumes it: {payment}"
+        );
+    }
+
+    // Once a deposit consumed the lock, that deposit is shown, whatever else arrived.
+    anvil.mine(FINALITY_LAG)?;
+    scan_once(pool, &reader, &chain_routes).await?;
+    let underpayment: Uuid = sqlx::query_scalar(
+        "SELECT deposit.id FROM deposits AS deposit JOIN addresses AS address \
+         ON address.id = deposit.address_id WHERE address.lock_ref = 'checkout-2' \
+         AND deposit.amount_atomic = 50",
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE rate_locks SET status = 'consumed', consumed_by = $1, exposure_reserved = false, \
+         closed_at = now() WHERE address_id = (SELECT address_id FROM deposits WHERE id = $1)",
+    )
+    .bind(underpayment)
+    .execute(pool)
+    .await?;
+    let payment = api.payment("checkout-2").await?;
+    ensure!(
+        payment["status"] == "finalized" && payment["deposit_id"] == underpayment.to_string(),
+        "consumed lock does not show its consuming deposit: {payment}"
+    );
+
+    // A cancelled lock credits every payment at spot, so none is in time or within tolerance.
+    let cancelled = api.lock("checkout-4").await?;
+    api.call(
+        Method::DELETE,
+        "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-4",
+        Value::Null,
+    )
+    .await?;
+    transfer(&anvil.rpc_url, token, cancelled, 100)?;
+    anvil.mine(FINALITY_LAG)?;
+    scan_once(pool, &reader, &chain_routes).await?;
+    let lock = api
+        .call(
+            Method::GET,
+            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-4",
+            Value::Null,
+        )
+        .await?;
+    ensure!(lock["status"] == "cancelled", "unexpected {lock}");
+    ensure!(
+        lock["payment"]["amount_atomic"] == "100"
+            && lock["payment"]["in_time"] == false
+            && lock["payment"]["amount_within_tolerance"] == false,
+        "cancelled lock shows its payment as applying: {lock}"
+    );
+    ensure!(
+        pending_events(pool).await? == 6,
+        "unsupported or zero transfers were announced"
+    );
     Ok(())
 }
 
@@ -411,6 +481,30 @@ struct Api {
 }
 
 impl Api {
+    async fn lock(&self, lock_ref: &str) -> Result<Address> {
+        let lock = self
+            .call(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts/ws-pending/rate-locks",
+                json!({"amount_atomic": "100", "product_lock_ref": lock_ref}),
+            )
+            .await?;
+        Ok(Address::from_str(
+            lock["address"].as_str().context("lock address")?,
+        )?)
+    }
+
+    async fn payment(&self, lock_ref: &str) -> Result<Value> {
+        let lock = self
+            .call(
+                Method::GET,
+                &format!("/v1/products/phala-cloud/accounts/ws-pending/rate-locks/{lock_ref}"),
+                Value::Null,
+            )
+            .await?;
+        Ok(lock["payment"].clone())
+    }
+
     async fn call(&self, method: Method, path: &str, body: Value) -> Result<Value> {
         let body = if body.is_null() {
             Vec::new()

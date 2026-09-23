@@ -486,7 +486,7 @@ async fn run_chain(
     let head_scan = head::run_head_loop(
         &pool,
         &reader,
-        chain_id,
+        &routes,
         poll_interval.min(HEAD_SCAN_INTERVAL),
         &finalized_advanced,
         cancellation,

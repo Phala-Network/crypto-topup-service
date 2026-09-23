@@ -34,8 +34,8 @@ class PendingDepositResponse:
             first_seen_at (datetime.datetime): First time the service saw the transfer.
             from_address (str): Canonical transfer sender address.
             log_index (int): Transfer log index.
-            supported (bool): Whether a configured route accepts this token on this chain. Unsupported tokens are
-                recorded but not credited once final.
+            supported (bool): Whether a route of this product accepts this token on this chain. Only routed tokens are
+                scanned before finality, so this is false only for a token routed for another product.
             tx_hash (str): Canonical transaction hash.
     """
 
