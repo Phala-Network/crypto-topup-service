@@ -275,7 +275,7 @@ jobs:
           )
           cat "$ENV_FILE.new" >"$ENV_FILE"
           rm -f "$ENV_FILE.new"
-          deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" --offline
+          deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" --offline --unsealed
           before=$(jq -c '.progress' "$WORK/cvm.json")
           # CLI 1.1.22 returns as soon as the API answers `in_progress`; the restart follows.
           npx --yes phala@1.1.22 envs update "$CVM_ID" -e "$ENV_FILE"

@@ -176,6 +176,8 @@ jobs:
         run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
       - name: Check WAL-G runtime
         run: docker run --rm postgres-walg:ci wal-g --version
+      - name: postgres-walg carries TLS roots for the object store
+        run: docker run --rm --entrypoint sh postgres-walg:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
       - name: Check the WAL archive switch
         run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 
