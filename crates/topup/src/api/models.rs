@@ -459,15 +459,46 @@ pub struct AttestationQuery {
     pub nonce: String,
 }
 
-/// TDX evidence binding a nonce to the settlement public key.
+/// TDX evidence binding a nonce to the settlement public key and the flusher operators.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AttestationResponse {
     /// Settlement key identifier.
     pub keyid: String,
     /// Raw ed25519 settlement public key as lowercase hexadecimal.
     pub settlement_pubkey: String,
-    /// SHA-256 report data as lowercase hexadecimal.
+    /// Flusher operator of each configured chain, in ascending `chain_id` order. This service
+    /// always sends it; it is optional in the schema so clients also parse responses from servers
+    /// that predate it, whose report data binds no operators (an absent list reads as empty).
+    #[schema(required = false)]
+    pub operators: Vec<OperatorIdentity>,
+    /// `sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)` as lowercase hexadecimal,
+    /// with one 32-byte record per operator in list order: `chain_id` (u64 big-endian),
+    /// `operator_key_version` (u32 big-endian), and the 20 address bytes.
     pub report_data: String,
     /// Versioned dstack attestation bytes as lowercase hexadecimal.
     pub quote: String,
+}
+
+/// The key a chain's flusher signs `flush` transactions with; it needs `OPERATOR_ROLE` and gas.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct OperatorIdentity {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The chain's configured operator key derivation version.
+    pub operator_key_version: u32,
+    /// Operator key identifier, `operator/v{operator_key_version}`.
+    pub keyid: String,
+    /// Operator address as lowercase `0x`-prefixed hexadecimal.
+    pub address: String,
+}
+
+impl From<&topup_adapters::attestation::AttestedOperator> for OperatorIdentity {
+    fn from(operator: &topup_adapters::attestation::AttestedOperator) -> Self {
+        Self {
+            chain_id: operator.chain_id,
+            operator_key_version: operator.key_version.get(),
+            keyid: topup_core::operator_key_domain(operator.key_version),
+            address: format!("{:#x}", operator.address),
+        }
+    }
 }

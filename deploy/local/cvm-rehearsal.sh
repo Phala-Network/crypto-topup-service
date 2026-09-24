@@ -13,7 +13,9 @@
 #    `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator, MinIO,
 #    Anvil), as dstack's app-compose runner does.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
-#    attestation endpoint answers through the simulator, and no backup marker exists yet; then it
+#    attestation endpoint answers through the simulator and binds the flusher operator (matching
+#    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
+#    the mock Safe grants it and it is funded, and no backup marker exists yet; then it
 #    seals the complete `.env` (the owner's `envs update`) and requires a fresh backup marker, and one
 #    quote-first deposit is credited end to end against the reference product
 #    (sdk/examples/phala_cloud_integration.py). Then it removes everything and asserts that no
@@ -288,16 +290,47 @@ if dc logs topup 2>&1 | grep -q 'on-chain contract check failed'; then
 fi
 echo "ok: topup passed its startup contract check; GET /healthz is 200"
 
-product_python - <<'PY'
-import hashlib, secrets, httpx
-nonce = secrets.token_bytes(32)
+# The owner learns the flusher operator only from /v1/attestation: production has no logs or SSH.
+nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+attestation=$(product_python - "$nonce" <<'PY'
+import json, sys, httpx
+from topup_client.models import AttestationResponse
+from topup_sdk import verify_attestation_binding
+nonce = bytes.fromhex(sys.argv[1])
 body = httpx.get("http://topup:8080/v1/attestation", params={"nonce": nonce.hex()}, timeout=30).raise_for_status().json()
-key = bytes.fromhex(body["settlement_pubkey"])
+verify_attestation_binding(AttestationResponse.from_dict(body), nonce)
 assert body["keyid"] == "settlement/v1", body["keyid"]
-assert bytes.fromhex(body["report_data"]) == hashlib.sha256(nonce + key).digest(), "report_data"
 assert len(body["quote"]) > 0, "empty quote"
-print(f"ok: GET /v1/attestation answered through the simulator ({len(body['quote']) // 2} quote bytes)")
+operators = body["operators"]
+assert [(o["chain_id"], o["operator_key_version"], o["keyid"]) for o in operators] == [(11155111, 1, "operator/v1")], operators
+print(json.dumps({key: body[key] for key in ("settlement_pubkey", "operators", "report_data")}))
 PY
+)
+echo "ok: GET /v1/attestation binds the nonce, settlement key, and flusher operator (simulator quote)"
+cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" \
+    --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml |
+    jq -c '{settlement_pubkey, operators, report_data}')
+[[ "$(jq -S . <<<"$cli_attestation")" == "$(jq -S . <<<"$attestation")" ]] ||
+    die "topup attest --route and GET /v1/attestation disagree"
+echo "ok: topup attest --route reports the same operators and report_data"
+
+operator=$(jq -er '.operators[0].address' <<<"$attestation")
+operator_role=$(cast keccak 'OPERATOR_ROLE')
+flusher_logged() {
+    dc logs --no-color topup 2>&1 | grep -F "$1" | grep -qiF "\"operator\":\"$operator\""
+}
+wait_for "the flusher to report its missing role" 30 flusher_logged 'does not hold OPERATOR_ROLE'
+[[ "$(cast call "$factory" 'hasRole(bytes32,address)(bool)' "$operator_role" "$operator" \
+    --rpc-url "$rpc_url")" == false ]] || die "the operator already holds OPERATOR_ROLE"
+echo "ok: the flusher waits for OPERATOR_ROLE on the attested operator $operator"
+# deploy/README.md: the admin Safe grants the attested address the role, then it is funded.
+cast send "$treasury" 'exec(address,bytes)' "$factory" \
+    "$(cast calldata 'grantRole(bytes32,address)' "$operator_role" "$operator")" \
+    --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
+cast send "$operator" --value 1ether --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" \
+    >/dev/null
+wait_for "the flusher to hold OPERATOR_ROLE" 30 flusher_logged 'flusher operator holds OPERATOR_ROLE'
+echo "ok: after the grant and gas funding the flusher holds OPERATOR_ROLE"
 
 # Unsealed: WAL archiving cannot reach object storage, so no backup marker has been written.
 if dc exec -T backup test -e /run/topup-observability/last-backup-unix-seconds; then

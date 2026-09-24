@@ -23,9 +23,9 @@ use topup::routes::RouteSet;
 use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
 use topup::steps::screen::ScreenStep;
 use topup::steps::settle::SettleStep;
-use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
+use topup_adapters::attestation::{AttestedOperator, DstackAttestor};
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -119,6 +119,10 @@ struct AttestArgs {
     /// Operator key derivation version to report, as set by the chain's `operator_key_version`.
     #[arg(long, value_name = "N", default_value_t = NonZeroU32::MIN)]
     operator_key_version: NonZeroU32,
+    /// Route file whose chain operator is listed in `operators` and bound into the report data,
+    /// as `GET /v1/attestation` does; repeat for every enabled route version.
+    #[arg(long = "route", value_name = "FILE")]
+    routes: Vec<PathBuf>,
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
@@ -397,10 +401,21 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
 async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
     let nonce = parse_nonce(&args.nonce)?;
     let version = args.operator_key_version;
+    let operator_keys = if args.routes.is_empty() {
+        Vec::new()
+    } else {
+        load_routes(&args.routes)
+            .and_then(|routes| routes.operator_keys())
+            .map_err(|error| {
+                tracing::error!(%error, "invalid route configuration");
+                "failed to load the route configuration"
+            })?
+    };
 
     #[cfg(feature = "dev-signer")]
     if args.dev {
-        let signer = DevSigner::derive(&SecretKey32::new([1; 32]), version);
+        let seed = SecretKey32::new([1; 32]);
+        let signer = DevSigner::derive(&seed, version);
         let public_key = signer
             .settlement_public_key()
             .await
@@ -409,9 +424,21 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
             .operator_address()
             .await
             .map_err(|_| "development operator key is invalid")?;
+        let mut operators = Vec::with_capacity(operator_keys.len());
+        for key in &operator_keys {
+            operators.push(AttestedOperator {
+                chain_id: key.chain_id,
+                key_version: key.key_version,
+                address: DevSigner::derive(&seed, key.key_version)
+                    .operator_address()
+                    .await
+                    .map_err(|_| "development operator key is invalid")?,
+            });
+        }
         return print_attestation(
             &public_key.0,
-            &report_data(&nonce, &public_key),
+            &operators,
+            &report_data(&nonce, &public_key, &operators),
             &[],
             &[],
             &[],
@@ -421,7 +448,7 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
     }
 
     let evidence = DstackAttestor::new()
-        .attest(&nonce)
+        .attest(&nonce, &operator_keys)
         .await
         .map_err(|_| "failed to collect dstack attestation")?;
     let operator = DstackSigner::new()
@@ -431,6 +458,7 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
         .map_err(|_| "failed to derive the dstack operator key")?;
     print_attestation(
         &evidence.settlement_public_key.0,
+        &evidence.operators,
         &evidence.report_data,
         &evidence.quote,
         &evidence.info.app_id,
@@ -450,8 +478,10 @@ fn parse_nonce(value: &str) -> Result<Vec<u8>, &'static str> {
     hex::decode(value).map_err(|_| "nonce must be valid hexadecimal")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_attestation(
     settlement_public_key: &[u8; 32],
+    operators: &[AttestedOperator],
     report_data: &[u8; 32],
     quote: &[u8],
     app_id: &[u8],
@@ -459,9 +489,14 @@ fn print_attestation(
     operator_key_version: NonZeroU32,
     operator: alloy_primitives::Address,
 ) -> Result<(), &'static str> {
+    let operators = operators
+        .iter()
+        .map(topup::api::models::OperatorIdentity::from)
+        .collect::<Vec<_>>();
     let output = json!({
         "keyid": SETTLEMENT_KEY_DOMAIN,
         "settlement_pubkey": hex::encode(settlement_public_key),
+        "operators": operators,
         "report_data": hex::encode(report_data),
         "quote": hex::encode(quote),
         "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },

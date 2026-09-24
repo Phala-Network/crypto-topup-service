@@ -28,7 +28,6 @@ Run it with `deploy/sandbox/run-local.sh`, or directly:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -757,7 +756,7 @@ class ProductServer:
 
 
 def pin_settlement_key(config: SandboxConfig, client: TopupClient) -> Ed25519PublicKey:
-    """Returns the settlement key, checking the attestation binds it to a fresh nonce.
+    """Returns the settlement key; the client checks the attestation binds it to a fresh nonce.
 
     Production integrators must also verify the TDX quote with the dstack verification flow
     (deploy/README.md) and then pin `(keyid, public key)` in configuration; a configured
@@ -767,11 +766,8 @@ def pin_settlement_key(config: SandboxConfig, client: TopupClient) -> Ed25519Pub
         return load_public_key(config.settlement_public_key)
     nonce = secrets.token_bytes(32)
     evidence = client.attestation(nonce)
-    public_key = bytes.fromhex(evidence.settlement_pubkey)
     if evidence.keyid != SETTLEMENT_KEYID:
         raise RuntimeError("attestation names an unexpected settlement key id")
-    if bytes.fromhex(evidence.report_data) != hashlib.sha256(nonce + public_key).digest():
-        raise RuntimeError("attestation report data does not bind the settlement key")
     LOG.warning("pinned settlement key from attestation; verify the quote before production")
     return load_public_key(evidence.settlement_pubkey)
 

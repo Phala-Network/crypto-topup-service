@@ -493,8 +493,10 @@ jq -e --arg nonce "$NONCE" '.keyid == "settlement/v1" and (.quote | length > 0)'
   public-attestation.json
 ```
 
-Bind `report_data` to `sha256(nonce ‖ settlement_pubkey)` and verify the quote as described below
-before any product pins the settlement key.
+Check the `report_data` binding and verify the quote as described in
+[Attestation, ingress, and egress](#attestation-ingress-and-egress) before any product pins the
+settlement key, then grant and fund the flusher operator it reports
+([Flusher operator](#flusher-operator)).
 
 ## B. Upgrade an existing CVM
 
@@ -560,34 +562,35 @@ Request an application-bound quote with a fresh nonce:
 
 ```sh
 export NONCE="$(openssl rand -hex 32)"
-npx --yes phala@1.1.22 ssh "$CVM_ID" -- \
-  sh -lc "docker exec \"\$(docker ps -q --filter label=com.docker.compose.service=topup)\" \
-  topup attest --nonce '$NONCE'"
+curl -fsS "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
 ```
 
-The output also reports `operator_keyid` and `operator_address` for `--operator-key-version`
-(default 1). dstack derives keys from the application identity rather than the compose hash, so
-the current deployment can report the next operator address before it is used. To rotate the
-operator key:
-
-1. Run the command above with `--operator-key-version <next>` to read the new operator address.
-2. **HUMAN-ONLY, admin Safe required:** `grantRole(OPERATOR_ROLE, <new operator>)` on each
-   chain's factory.
-3. Fund the new operator address with native gas on each chain.
-4. Bump `operator_key_version` in the attested chain and route files, then upgrade as above (new
-   compose hash, allow-list, deploy). Every current route on one chain must share the version.
-5. Confirm the `flusher operator holds OPERATOR_ROLE` log line with the new version; unsigned
-   plans are re-bound to the new operator and in-flight flushes of the old one keep confirming.
-6. **HUMAN-ONLY, admin Safe required:** once no flush of the old operator is in flight, revoke
-   its `OPERATOR_ROLE`.
-
-A flusher whose operator lacks the role plans and sends nothing, logs an error and raises an
-`OperatorRoleMissing` alert at every maintenance interval, and resumes by itself once the role
-is granted.
+Production images have no logs or SSH, so this public endpoint is the only source of the
+settlement key and the flusher operator addresses.
 
 **HUMAN-ONLY, verifier approval required:** verify the platform certificate/quote and TCB in the
 Phala Trust Center or official dstack verification flow, replay the RTMR event log, confirm the
-attested compose hash, and bind the fresh nonce to the returned `settlement/v1` public key.
+attested compose hash, and confirm that the quote's 64-byte report data field starts with the
+32-byte `report_data`. Then check that `report_data` binds the fresh
+nonce, the returned `settlement/v1` public key, and every returned operator:
+
+```sh
+python3 - "$NONCE" public-attestation.json <<'PY'
+import hashlib, json, sys
+nonce, body = bytes.fromhex(sys.argv[1]), json.load(open(sys.argv[2]))
+data = nonce + bytes.fromhex(body["settlement_pubkey"])
+for op in body["operators"]:
+    assert op["keyid"] == f"operator/v{op['operator_key_version']}", op
+    data += op["chain_id"].to_bytes(8, "big") + op["operator_key_version"].to_bytes(4, "big")
+    data += bytes.fromhex(op["address"].removeprefix("0x"))
+assert hashlib.sha256(data).hexdigest() == body["report_data"], "report_data does not bind the keys"
+print("ok: report_data binds the nonce, settlement key, and operators")
+PY
+```
+
+The Python SDK's `TopupClient.attestation` performs the same check
+(`topup_sdk.verify_attestation_binding`). Architecture §14 defines the construction; with no
+operators it is `sha256(nonce ‖ settlement_pubkey)`.
 
 CLI 1.1.22 does not submit `port_policy`. Ingress is therefore verified after deployment from the
 attested compose and the live gateway:
@@ -617,8 +620,58 @@ firewall boundary because it runs after Docker startup.
 
 Before enabling a route, also confirm real route addresses validate without template mode, both RPC
 providers agree at `finalized`, Safe/factory/implementation/CREATE2 checks pass, migrations completed,
-WAL archiving is current, the product pins the attested settlement key, pilot limits are approved,
-and a restore drill per [RESTORE.md](RESTORE.md) has passed.
+WAL archiving is current, the product pins the attested settlement key, the attested flusher
+operator of each chain holds `OPERATOR_ROLE` and has gas ([Flusher operator](#flusher-operator)),
+pilot limits are approved, and a restore drill per [RESTORE.md](RESTORE.md) has passed.
+
+### Flusher operator
+
+`operators` lists, per configured chain, the key the flusher signs `flush` with: `chain_id`,
+the current routes' `operator_key_version`, `keyid` (`operator/v{n}`), and `address`. The address
+is public and can only flush forwarders to the immutable treasury, but it needs `OPERATOR_ROLE` on
+the chain's factory and native gas before any flush is sent. Use only an address from a response
+whose quote and binding were verified in
+[Attestation, ingress, and egress](#attestation-ingress-and-egress):
+
+```sh
+export CHAIN_ID=11155111 FACTORY=<chain factory> ETH_RPC_URL=<chain RPC>
+export OPERATOR_ADDRESS="$(jq -er --argjson chain "$CHAIN_ID" \
+  '.operators[] | select(.chain_id == $chain) | .address' public-attestation.json)"
+export OPERATOR_ROLE="$(cast keccak OPERATOR_ROLE)"
+cast calldata 'grantRole(bytes32,address)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"
+```
+
+1. **HUMAN-ONLY, admin Safe required:** execute the printed `grantRole` calldata on `$FACTORY`,
+   wait for finality, and confirm
+   `cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"`
+   returns `true`.
+2. **HUMAN-ONLY, gas funds required:** fund `$OPERATOR_ADDRESS` with native gas on the chain
+   ([runbooks/gas-refill.md](runbooks/gas-refill.md)) and check `cast balance "$OPERATOR_ADDRESS"`.
+
+A flusher whose operator lacks the role plans and sends nothing, raises an `OperatorRoleMissing`
+alert at every maintenance interval, and resumes by itself once the role is granted.
+`make cvm-rehearsal` exercises this path: it reads the address from `/v1/attestation`, checks it
+against `topup attest --route`, grants it through the mock Safe, funds it, and waits for the
+flusher to report the role.
+
+To rotate the operator key:
+
+1. Bump `operator_key_version` in the attested chain and route files, then upgrade as in
+   [B. Upgrade an existing CVM](#b-upgrade-an-existing-cvm) (new compose hash, allow-list, deploy). Every current route on one
+   chain must share the version. Unsigned plans are re-bound to the new operator and in-flight
+   flushes of the old one keep confirming; new flushes wait for the grant.
+2. Request a fresh attestation, verify it, and read the new `operators` entry.
+3. Grant `OPERATOR_ROLE` to the new address and fund it, as in steps 1 and 2 above; the flusher
+   resumes by itself.
+4. **HUMAN-ONLY, admin Safe required:** once no flush of the old operator is in flight, revoke
+   its `OPERATOR_ROLE`.
+
+Where a shell is available (staging with SSH, local stacks), `topup attest --nonce <hex> --route
+<file>` prints the same `settlement_pubkey`, `operators`, and `report_data` as the endpoint for
+those route files, plus `operator_keyid` and `operator_address` for `--operator-key-version`
+(default 1), which is not bound into the report data. dstack derives keys from the application
+identity rather than the compose hash, so this previews the next operator address and lets the
+Safe grant it before the bump, without a pause in flushing.
 
 ## Local verification
 
@@ -671,7 +724,9 @@ starts it with a `.env` holding exactly the `staging.env.example` names.
 [local/cvm-rehearsal.compose.yml](local/cvm-rehearsal.compose.yml) adds only the dstack simulator
 (in place of the host socket), MinIO, and Anvil. The run asserts that `migrate` exits 0, `topup`
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
-through the simulator, the backup marker is fresh, and one quote-first deposit is credited end to
+and the flusher operator through the simulator (the same values as `topup attest --route`), the
+flusher waits for that attested address's `OPERATOR_ROLE` and resumes once the mock Safe grants it
+and it is funded, the backup marker is fresh, and one quote-first deposit is credited end to
 end against the reference product with a lock priced from the live HTTPS sources (so the image's
 TLS verification with system roots works), then prints the workload's memory and checks that no
 container, volume, network, or image of the run is left. It needs Foundry with `contracts/lib`, the

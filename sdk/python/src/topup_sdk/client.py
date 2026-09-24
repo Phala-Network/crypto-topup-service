@@ -65,6 +65,7 @@ from topup_client.models import (
 )
 from topup_client.types import UNSET, Response
 
+from .attestation import verify_attestation_binding
 from .errors import ApiError
 from .signing import RequestSigner, SigningAuth
 
@@ -297,14 +298,18 @@ class TopupClient:
         )
 
     def attestation(self, nonce: bytes) -> AttestationResponse:
-        """Fetches attestation evidence binding `nonce` to the settlement public key.
+        """Fetches attestation evidence binding `nonce` to the settlement key and operators.
 
-        Verify the quote with the dstack verification flow before pinning the key.
+        Raises `AttestationError` unless `report_data` binds `nonce`, `settlement_pubkey`, and
+        every entry of `operators`. Verify the quote with the dstack verification flow, including
+        that its report data equals `report_data`, before pinning the key or trusting an operator.
         """
-        return self._call(
+        response = self._call(
             lambda: get_attestation.sync_detailed(client=self._client, nonce=nonce.hex()),
             AttestationResponse,
         )
+        verify_attestation_binding(response, nonce)
+        return response
 
     def _call(self, operation: Callable[[], Response[Any]], expected: type[T]) -> T:
         attempt = 1

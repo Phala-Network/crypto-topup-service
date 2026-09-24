@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `AttestationResponse.operators` (`OperatorIdentity`): the flusher operator of each configured
+  chain, bound into `report_data`. Optional, so the model also parses responses from servers
+  that predate it.
+- `topup_sdk.verify_attestation_binding` and `attestation_report_data`, which check that
+  `report_data` binds the nonce, the settlement key, and every listed operator, and
+  `AttestationError`.
+
+### Changed
+
+- `TopupClient.attestation` raises `AttestationError` unless `report_data` binds the returned
+  keys. It does not verify the quote itself.
+
 ### Removed
 
 - **Breaking:** the generated `ErrorDetail.work_package` field and the `501` response of

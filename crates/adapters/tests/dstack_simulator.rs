@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 
 use dstack_sdk::dstack_client::DstackClient;
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-use topup_adapters::attestation::DstackAttestor;
+use topup_adapters::attestation::{AttestedOperator, DstackAttestor, OperatorKey, report_data};
 use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, Signer as _};
 
@@ -48,8 +48,19 @@ async fn dstack_signing_and_attestation() -> Result<(), Box<dyn std::error::Erro
     assert_ne!(owner.expose_secret(), app.expose_secret());
     assert_ne!(app.expose_secret(), backup.expose_secret());
 
+    let two = NonZeroU32::new(2).ok_or("two is non-zero")?;
+    let operator_keys = [
+        OperatorKey {
+            chain_id: 11_155_111,
+            key_version: NonZeroU32::MIN,
+        },
+        OperatorKey {
+            chain_id: 1,
+            key_version: two,
+        },
+    ];
     let evidence = DstackAttestor::with_endpoint(endpoint)
-        .attest(b"integration-test")
+        .attest(b"integration-test", &operator_keys)
         .await?;
     assert_eq!(evidence.settlement_public_key, public_key);
     // The attestation is msgpack whose byte fields are integer arrays; the TDX quote in it carries
@@ -62,6 +73,25 @@ async fn dstack_signing_and_attestation() -> Result<(), Box<dyn std::error::Erro
             .quote
             .windows(encoded.len())
             .any(|window| window == encoded)
+    );
+    assert_eq!(
+        evidence.operators,
+        [
+            AttestedOperator {
+                chain_id: 1,
+                key_version: two,
+                address: v2,
+            },
+            AttestedOperator {
+                chain_id: 11_155_111,
+                key_version: NonZeroU32::MIN,
+                address: v1,
+            },
+        ]
+    );
+    assert_eq!(
+        evidence.report_data,
+        report_data(b"integration-test", &public_key, &evidence.operators)
     );
     assert!(!evidence.info.app_id.is_empty());
     assert_eq!(evidence.info.compose_hash.len(), 32);

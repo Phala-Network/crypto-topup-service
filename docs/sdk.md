@@ -48,7 +48,10 @@ current and the Python tests verify it.
 
 Webhooks use the Standard Webhooks asymmetric `v1a` scheme with the same settlement key;
 `topup_sdk.verify_webhook` verifies them. Pin the settlement key only after verifying the
-attestation (`GET /v1/attestation`, section 14 of the architecture).
+attestation (`GET /v1/attestation`, section 14 of the architecture). `TopupClient.attestation`
+checks that `report_data` binds the nonce, the settlement key, and the listed flusher operators
+(`topup_sdk.verify_attestation_binding`); the quote itself still needs the dstack verification
+flow.
 
 ## Versioning
 

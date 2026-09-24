@@ -338,7 +338,12 @@ pub(crate) async fn get_attestation(
     Query(query): Query<AttestationQuery>,
 ) -> ApiResult<Json<AttestationResponse>> {
     let nonce = decode_nonce(&query.nonce)?;
-    match state.attestor.attest(&nonce).await {
+    // The flusher signs with these keys; startup refuses routes that disagree on one.
+    let operator_keys = state.routes.operator_keys().map_err(|error| {
+        tracing::error!(%error, "invalid operator key configuration");
+        ApiError::service_unavailable("attestation is unavailable")
+    })?;
+    match state.attestor.attest(&nonce, &operator_keys).await {
         Ok(response) => Ok(Json(response)),
         Err(AttestationError::Unavailable) => {
             Err(ApiError::service_unavailable("attestation is unavailable"))
