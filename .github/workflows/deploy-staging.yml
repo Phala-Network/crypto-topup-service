@@ -170,6 +170,8 @@ jobs:
           deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" \
             --workspace "$PHALA_WORKSPACE" --os-image "$DSTACK_OS_IMAGE" --kms phala --unsealed
 
+      # The CLI output (JSON, no secrets: the key is only in the environment and env values are
+      # encrypted client-side) goes to the log as well, so a failure shows its reason.
       - name: Deploy (${{ inputs.mode }})
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -187,7 +189,7 @@ jobs:
               --no-public-logs \
               --no-public-sysinfo \
               --public-tcbinfo \
-              --secure-time >"$WORK/deploy.raw"
+              --secure-time 2>&1 | tee "$WORK/deploy.raw"
           else
             # No -e: CLI 1.1.22 then sends neither allowed_envs nor encrypted_env in the PATCH
             # (cli/src/commands/deploy/handler.ts: resolveEnvVars returns undefined, and updateCvm
@@ -197,7 +199,7 @@ jobs:
               --compose "$WORK/docker-compose.staging.yml" \
               --no-public-logs \
               --no-public-sysinfo \
-              --wait >"$WORK/deploy.raw"
+              --wait 2>&1 | tee "$WORK/deploy.raw"
           fi
           sed -n '/^{/,$p' "$WORK/deploy.raw" >"$WORK/deploy.json"
           jq -e '.success == true' "$WORK/deploy.json" >/dev/null
