@@ -193,7 +193,7 @@ Deploy staging, in order; any failure stops the run:
     rendered compose, `deploy.json`, `cvm.json`, `attestation.json`, and the verification output
     (no secrets); deletes the env file even when a step failed.
 
-`make cvm-rehearsal` runs the same artifact locally against Anvil, MinIO, and the dstack simulator
+`make cvm-rehearsal` runs the same artifact locally against Anvil, Garage (S3), and the dstack simulator
 (see [Local verification](#local-verification)).
 
 ## Deployment artifacts
@@ -676,7 +676,7 @@ Safe grant it before the bump, without a pause in flushing.
 ## Local verification
 
 The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`
-overlay, which adds MinIO, the dstack simulator, and a mock product, builds the images from the
+overlay, which adds Garage (S3), the dstack simulator, and a mock product, builds the images from the
 checkout, and replaces secrets, ports, and host paths with local values. It builds dstack's
 simulator from the pinned source revision and shares its `/var/run/dstack.sock` with `topup` and
 `keys`, so local stacks derive their database credentials exactly as a CVM does. Pass both files to
@@ -709,7 +709,7 @@ listener, `GET /healthz` for HTTP 200, `GET /openapi.json`, and the running back
 provider URL is deliberately unreachable, exercising scanner retry behavior without contacting a
 real chain. A skipped service smoke is not a successful service check.
 
-Backup encryption, MinIO object storage, point-in-time recovery, and the weekly destructive drill
+Backup encryption, Garage object storage, point-in-time recovery, and the weekly destructive drill
 are documented in [RESTORE.md](RESTORE.md). Run `make restore-drill`; it uses an isolated Compose
 project and removes all drill containers and volumes on exit.
 
@@ -722,7 +722,7 @@ to an Anvil chain with Sepolia's chain id using the A2 and sandbox scripts, writ
 route with those addresses into a copy of the compose, renders it with `render-compose.sh`, and
 starts it with a `.env` holding exactly the `staging.env.example` names.
 [local/cvm-rehearsal.compose.yml](local/cvm-rehearsal.compose.yml) adds only the dstack simulator
-(in place of the host socket), MinIO, and Anvil. The run asserts that `migrate` exits 0, `topup`
+(in place of the host socket), Garage (S3), and Anvil. The run asserts that `migrate` exits 0, `topup`
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 and the flusher operator through the simulator (the same values as `topup attest --route`), the
 flusher waits for that attested address's `OPERATOR_ROLE` and resumes once the mock Safe grants it

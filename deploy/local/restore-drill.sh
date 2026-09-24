@@ -114,7 +114,7 @@ wal_object_visible() {
     dc exec -T backup wal-g st ls wal_005/ | grep -F " $1."
 }
 
-# Upload time of a WAL object as recorded by MinIO, in epoch seconds with milliseconds.
+# Upload time of a WAL object as recorded by object storage, in epoch seconds with milliseconds.
 wal_object_uploaded_epoch() {
     line=$(dc exec -T backup wal-g st ls wal_005/ | grep -F " $1.")
     set -- $line
@@ -400,7 +400,7 @@ verify_rotation_keys() {
 # Builds a WAL backlog under key v1 with object storage down, archives exactly one segment with
 # one v1 wrapper call, rotates PostgreSQL to v2, and lets its archiver finish the backlog.
 exercise_key_rotation() {
-    dc stop minio >/dev/null
+    dc stop s3 >/dev/null
     for _ in 1 2 3 4; do
         record_sample >/dev/null
         psql_value 'SELECT pg_switch_wal()' >/dev/null
@@ -408,8 +408,8 @@ exercise_key_rotation() {
     wait_for "WAL backlog" pending_wal_count_at_least 3
     rotation_wals=$(pending_wals)
     dc stop postgres >/dev/null
-    dc start minio >/dev/null
-    wait_for minio dc exec -T minio curl -fsS http://localhost:9000/minio/health/live
+    dc start s3 >/dev/null
+    wait_for s3 dc exec -T s3 /garage bucket info topup-backups
 
     set -- $rotation_wals
     test "$#" -ge 3 || {
@@ -473,7 +473,7 @@ dc --profile tools config --format json |
 
 dc build postgres dstack-simulator topup
 seed_drill_volumes
-dc up -d keys minio-init mock-product
+dc up -d keys s3-init mock-product
 wait_for keys dc exec -T keys topup keys --check \
     --backup-dir /run/wal-g --owner-dir /run/db-owner --app-dir /run/db-app
 export TOPUP_BACKUP_KEY_VERSION=1

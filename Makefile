@@ -23,7 +23,7 @@ image:
 	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t crypto-topup-service:dev .
 	docker run --rm crypto-topup-service:dev topup --help
 
-# The attested compose with the local overlay (MinIO, dstack simulator, images built here).
+# The attested compose with the local overlay (Garage S3, dstack simulator, images built here).
 LOCAL_COMPOSE = docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml
 
 up:

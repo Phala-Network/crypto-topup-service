@@ -150,7 +150,7 @@ jq -e '[.services[].ports[]?] | length == 0' "$rendered" >/dev/null || {
     exit 1
 }
 
-# The CVM rehearsal runs the rendered staging compose with only the simulator, MinIO, and Anvil
+# The CVM rehearsal runs the rendered staging compose with only the simulator, S3, and Anvil
 # added; like the drill it must not bind-mount, and only Anvil may publish a (chosen) port.
 TOPUP_LOCAL_DSTACK_IMAGE=validate docker compose --project-directory "$root/deploy/local" \
     -f "$compose" -f "$root/deploy/local/cvm-rehearsal.compose.yml" config --format json \

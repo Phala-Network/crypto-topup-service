@@ -10,7 +10,7 @@
 #    committed route lives, and renders the compose.
 # 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy staging does (exactly
 #    the names of deploy/staging.env.example, owner-sealed S3 keys empty), and runs
-#    `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator, MinIO,
+#    `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator, S3,
 #    Anvil), as dstack's app-compose runner does.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
@@ -233,11 +233,11 @@ admin_key=$(product_python -m topup_sdk keygen --keyid rehearsal-admin/v1 \
 product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
     --seed-out /opt/product.seed)
 declare -A values=(
-    [AWS_ACCESS_KEY_ID]=topup-minio
-    [AWS_ENDPOINT]=http://minio:9000
+    [AWS_ACCESS_KEY_ID]=topup-s3
+    [AWS_ENDPOINT]=http://s3:3900
     [AWS_REGION]=us-east-1
     [AWS_S3_FORCE_PATH_STYLE]=true
-    [AWS_SECRET_ACCESS_KEY]=topup-minio-secret
+    [AWS_SECRET_ACCESS_KEY]=topup-s3-secret-key
     [AWS_SESSION_TOKEN]=
     [COINMETRICS_API_KEY]=
     [TOPUP_ADMIN_KID]=rehearsal-admin/v1
