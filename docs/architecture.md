@@ -124,12 +124,13 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
 ## 5. Stack
 
 Rust stable, `#![forbid(unsafe_code)]`, release `overflow-checks = true`. `tokio`, `axum` +
-`utoipa`, `sqlx`, `alloy`, `dstack-sdk` pinned to the `dstack.guest.v1` guest API,
-`secrecy` + `zeroize`. The v1 Rust SDK is not yet published on crates.io: the published
-`dstack-sdk = 0.1.3` exposes the legacy API and cannot derive an ed25519 key. Until a v1
-release is published, use the official repository with both `version = "=0.6.0"` and
-`rev = "ad92cfeb4ab6960275498c31b66004b9bb1df068"` (the dstack `v0.6.0-rc5` release); changing
-that revision requires a spec change. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
+`utoipa`, `sqlx`, `alloy`, `dstack-sdk = "=0.1.3"` for the guest API of dstack 0.5.9, whose
+guest agent the deployed OS image `dstack-0.5.9` runs (§14), `secrecy` + `zeroize`. That
+crates.io release is the `rust-sdk-v0.5.9` source (commit
+`282eeb27d22d8f091ad0fa5a90e638f85cf68751`) with only `hickory-dns` dropped from its `reqwest`
+features (commit `f67b4f67ebabef0a27795705121698280a1038dc`); changing the SDK or the OS image
+requires a spec change. The dstack 0.6 `/v1` guest API derives different keys for the same domain and no Phala
+Cloud node offers a 0.6 image, so it is out of scope until a key migration is specified. `core` denies `arithmetic_side_effects`, `float_arithmetic`, `as_conversions`,
 `unwrap_used`. `cargo-deny`, committed lockfile, reproducible distroless image by digest.
 Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
@@ -304,7 +305,7 @@ pub trait Signer {
 ```
 
 `signer::dstack` derives `operator/v{n}` (secp256k1) and `settlement/v1` (ed25519) on demand
-and zeroizes them; `n` is the route's attested `chain.operator_key_version` (≥ 1, initially 1),
+and zeroizes them (dstack 0.5 derives a key from its domain alone; each domain has one algorithm); `n` is the route's attested `chain.operator_key_version` (≥ 1, initially 1),
 and a chain's flusher plans and sends only while that operator holds `OPERATOR_ROLE` on the
 factory.
 
@@ -576,9 +577,11 @@ Postgres on the CVM's encrypted disk; WAL-G daily base backups and continuous WA
 min, RTO ≤ 1 h, weekly restore drill in staging). Restore = restore → post-restore check
 (§13) → resume; addresses need no restore because salts derive from product data. Ingress
 via the dstack gateway; egress limited to providers, price sources, object storage, product
-URLs. Upgrade = reproducible build → digest → compose hash → on-chain allow-list → redeploy.
-`GET /v1/attestation?nonce=` returns a TDX quote with `report_data = sha256(nonce ‖
-settlement_pubkey)`; verifiers run the dstack verification flow (TCB, measurements, allowed
+URLs. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
+Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
+it. Upgrade = reproducible build → digest → compose hash → on-chain allow-list → redeploy.
+`GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
+`/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey)`; verifiers run the dstack verification flow (TCB, measurements, allowed
 compose) and pin `(keyid, public key)`.
 
 ## 15. Operating policies

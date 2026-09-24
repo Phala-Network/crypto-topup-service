@@ -1,20 +1,26 @@
 //! dstack-backed signing adapter.
 //!
+//! Keys come from the `GetKey` method of the dstack 0.5 guest API on `/var/run/dstack.sock`. That
+//! agent derives the key from the domain (its `path`) and the app key alone: the algorithm only
+//! selects the public key it signs, so one domain has one secret. The pinned SDK always requests
+//! `secp256k1`; the `settlement/v1` secret is used as an ed25519 seed. Every domain here has one
+//! fixed algorithm, which [`DerivedKey`] checks locally because the response carries no public key.
+//!
 //! The pinned SDK deserializes RPC JSON into ordinary response buffers before returning them. Those
-//! internal JSON and response allocations are outside this adapter's zeroization control. Once the
-//! private-key `Vec` reaches this module, it is immediately moved into [`Zeroizing`] and copied
-//! directly into [`SecretKey32`]; both owned buffers are zeroized on drop.
+//! internal JSON and response allocations are outside this adapter's zeroization control. The hex
+//! key string this module receives is zeroized after decoding, and the decoded `Vec` is moved into
+//! [`Zeroizing`] and copied directly into [`SecretKey32`]; all owned buffers are zeroized on drop.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use dstack_sdk::DstackClient;
+use dstack_sdk::dstack_client::DstackClient;
 use tokio::time::timeout;
 use topup_core::{
     Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32, SignedTx, Signer,
     SignerError, TxRequest, operator_key_domain,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{
     operator_address, operator_signer, settlement_public_key, sign_operator_tx, sign_settlement,
@@ -22,7 +28,7 @@ use super::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A signer which derives a fresh key for every operation through dstack v1.
+/// A signer which derives a fresh key for every operation through the dstack guest agent.
 ///
 /// Operator keys derive from `operator/v{n}`, where `n` defaults to one and is set from the
 /// attested chain configuration with [`DstackSigner::with_operator_key_version`].
@@ -88,9 +94,6 @@ impl DstackSigner {
     }
 
     /// Derives the `backup/v1` secp256k1 key for backup encryption.
-    ///
-    /// The algorithm string is part of dstack's derivation input and is intentionally fixed here
-    /// rather than exposed to callers.
     pub async fn derive_backup_key(&self) -> Result<SecretKey32, SignerError> {
         self.derive_backup_key_version(1).await
     }
@@ -105,7 +108,7 @@ impl DstackSigner {
 
     /// Derives the secp256k1 key for a secret domain such as `backup/vN` or `db/owner/v1`.
     ///
-    /// The algorithm is part of dstack's derivation input, so it is fixed for every secret.
+    /// Every secret is a secp256k1 key, so a secret domain never needs a second algorithm.
     pub async fn derive_secret(&self, domain: &str) -> Result<SecretKey32, SignerError> {
         Ok(self
             .derive_key(domain, KeyAlgorithm::Secp256k1)
@@ -119,11 +122,13 @@ impl DstackSigner {
         algorithm: KeyAlgorithm,
     ) -> Result<DerivedKey, SignerError> {
         let client = DstackClient::new(self.endpoint.as_deref());
-        let response = timeout(self.timeout, client.get_key(domain, algorithm.as_str()))
+        let mut response = timeout(self.timeout, client.get_key(Some(domain.to_owned()), None))
             .await
             .map_err(|_| SignerError::KeyUnavailable)?
             .map_err(|_| SignerError::KeyUnavailable)?;
-        DerivedKey::from_response(response.key, response.public_key, algorithm)
+        let key = response.decode_key().map_err(|_| SignerError::InvalidKey);
+        response.key.zeroize();
+        DerivedKey::from_bytes(key?, algorithm)
     }
 
     async fn derive_operator_key(&self) -> Result<DerivedKey, SignerError> {
@@ -167,53 +172,20 @@ pub(crate) enum KeyAlgorithm {
     Ed25519,
 }
 
-impl KeyAlgorithm {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Secp256k1 => "secp256k1",
-            Self::Ed25519 => "ed25519",
-        }
-    }
-}
-
 pub(crate) struct DerivedKey {
     pub(crate) secret: SecretKey32,
 }
 
 impl DerivedKey {
-    pub(crate) fn from_response(
-        key: Vec<u8>,
-        public_key: Vec<u8>,
-        algorithm: KeyAlgorithm,
-    ) -> Result<Self, SignerError> {
+    /// Accepts 32 key bytes that are valid for `algorithm`: any 32 bytes for ed25519, a non-zero
+    /// scalar below the curve order for secp256k1.
+    pub(crate) fn from_bytes(key: Vec<u8>, algorithm: KeyAlgorithm) -> Result<Self, SignerError> {
         let key = Zeroizing::new(key);
         let secret = SecretKey32::from_slice(key.as_slice()).ok_or(SignerError::InvalidKey)?;
-        validate_public_key(&secret, &public_key, algorithm)?;
-        Ok(Self { secret })
-    }
-}
-
-fn validate_public_key(
-    secret: &SecretKey32,
-    reported: &[u8],
-    algorithm: KeyAlgorithm,
-) -> Result<(), SignerError> {
-    let matches = match algorithm {
-        KeyAlgorithm::Secp256k1 => {
-            let signer = operator_signer(secret)?;
-            signer
-                .credential()
-                .verifying_key()
-                .to_encoded_point(true)
-                .as_bytes()
-                == reported
+        if let KeyAlgorithm::Secp256k1 = algorithm {
+            operator_signer(&secret)?;
         }
-        KeyAlgorithm::Ed25519 => settlement_public_key(secret).0.as_slice() == reported,
-    };
-    if matches {
-        Ok(())
-    } else {
-        Err(SignerError::InvalidKey)
+        Ok(Self { secret })
     }
 }
 
@@ -224,10 +196,12 @@ mod tests {
 
     #[test]
     fn rejects_wrong_private_key_length() {
-        assert_eq!(
-            DerivedKey::from_response(vec![1; 31], vec![0; 33], KeyAlgorithm::Secp256k1).err(),
-            Some(SignerError::InvalidKey)
-        );
+        for algorithm in [KeyAlgorithm::Secp256k1, KeyAlgorithm::Ed25519] {
+            assert_eq!(
+                DerivedKey::from_bytes(vec![1; 31], algorithm).err(),
+                Some(SignerError::InvalidKey)
+            );
+        }
     }
 
     #[test]
@@ -237,21 +211,9 @@ mod tests {
                 .expect("curve order vector is valid hex");
         for key in [vec![0; 32], curve_order] {
             assert_eq!(
-                DerivedKey::from_response(key, vec![0; 33], KeyAlgorithm::Secp256k1).err(),
+                DerivedKey::from_bytes(key, KeyAlgorithm::Secp256k1).err(),
                 Some(SignerError::InvalidKey)
             );
         }
-    }
-
-    #[test]
-    fn rejects_public_key_mismatch() {
-        assert_eq!(
-            DerivedKey::from_response(vec![1; 32], vec![0; 33], KeyAlgorithm::Secp256k1).err(),
-            Some(SignerError::InvalidKey)
-        );
-        assert_eq!(
-            DerivedKey::from_response(vec![1; 32], vec![0; 32], KeyAlgorithm::Ed25519).err(),
-            Some(SignerError::InvalidKey)
-        );
     }
 }

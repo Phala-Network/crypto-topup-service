@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Local (offline) preflight checks: the example env file, a zero-address route, and
-# a stale render must be refused, and a complete env file with a filled route must pass.
+# Local (offline) preflight checks: the example env file, a zero-address route, a stale render,
+# and an OS image other than the approved one must be refused, and a complete env file with a
+# filled route must pass.
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -66,6 +67,15 @@ expect_failure stale-render "differs from a fresh render" \
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
+
+# Only the approved production image passes; no Phala Cloud node offers dstack 0.6.0.
+for image in dstack-0.6.0-rc5 dstack-dev-0.5.9 dstack-nvidia-0.5.9 dstack-0.5.8; do
+    expect_failure "image-$image" "OS image $image is not the approved dstack-0.5.9" \
+        --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
+        --source "$tmp/filled-source.yml" --os-image "$image"
+done
+"$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
+    --source "$tmp/filled-source.yml" --os-image dstack-0.5.9 --offline >/dev/null
 
 # The CI-written env file has the owner-sealed S3 keys empty: accepted only with --unsealed.
 sed -E 's/^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.*/\1=/' "$tmp/complete.env" >"$tmp/unsealed.env"

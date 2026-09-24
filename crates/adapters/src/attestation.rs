@@ -4,10 +4,11 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
-use dstack_sdk::DstackClient;
+use dstack_sdk::dstack_client::DstackClient;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 use topup_core::{Ed25519PublicKey, SETTLEMENT_KEY_DOMAIN};
+use zeroize::Zeroize as _;
 
 use crate::signer::dstack::{DerivedKey, KeyAlgorithm};
 use crate::signer::settlement_public_key;
@@ -68,7 +69,7 @@ pub fn report_data(nonce: &[u8], settlement_public_key: &Ed25519PublicKey) -> [u
     hasher.finalize().into()
 }
 
-/// Collects a settlement-key attestation from dstack v1.
+/// Collects a settlement-key attestation from the dstack guest agent.
 #[derive(Clone, Debug)]
 pub struct DstackAttestor {
     endpoint: Option<String>,
@@ -121,24 +122,26 @@ impl DstackAttestor {
     /// Derives the settlement key, binds it to `nonce`, and returns dstack evidence.
     pub async fn attest(&self, nonce: &[u8]) -> Result<AttestationBundle, AttestationError> {
         let client = DstackClient::new(self.endpoint.as_deref());
-        let key_response = timeout(
+        let mut key_response = timeout(
             self.timeout,
-            client.get_key(SETTLEMENT_KEY_DOMAIN, KeyAlgorithm::Ed25519.as_str()),
+            client.get_key(Some(SETTLEMENT_KEY_DOMAIN.to_owned()), None),
         )
         .await
         .map_err(|_| AttestationError::DstackUnavailable)?
         .map_err(|_| AttestationError::DstackUnavailable)?;
-        let key = DerivedKey::from_response(
-            key_response.key,
-            key_response.public_key,
-            KeyAlgorithm::Ed25519,
-        )
-        .map_err(|_| AttestationError::InvalidSettlementKey)?;
+        let key = key_response.decode_key();
+        key_response.key.zeroize();
+        let key = key
+            .map_err(|_| AttestationError::InvalidSettlementKey)
+            .and_then(|key| {
+                DerivedKey::from_bytes(key, KeyAlgorithm::Ed25519)
+                    .map_err(|_| AttestationError::InvalidSettlementKey)
+            })?;
         let settlement_public_key = settlement_public_key(&key.secret);
         drop(key);
 
         let report_data = report_data(nonce, &settlement_public_key);
-        let response = timeout(self.timeout, client.attest(report_data.to_vec(), false))
+        let response = timeout(self.timeout, client.attest(report_data.to_vec()))
             .await
             .map_err(|_| AttestationError::DstackUnavailable)?
             .map_err(|_| AttestationError::DstackUnavailable)?;
@@ -146,15 +149,22 @@ impl DstackAttestor {
             .await
             .map_err(|_| AttestationError::DstackUnavailable)?
             .map_err(|_| AttestationError::DstackUnavailable)?;
+        let quote = response
+            .decode_attestation()
+            .map_err(|_| AttestationError::DstackUnavailable)?;
+        let app_id = hex::decode(&info.app_id).map_err(|_| AttestationError::DstackUnavailable)?;
+        let compose_hash =
+            hex::decode(&info.compose_hash).map_err(|_| AttestationError::DstackUnavailable)?;
+        let app_compose = info.tcb_info.app_compose;
 
         Ok(AttestationBundle {
             settlement_public_key,
             report_data,
-            quote: response.attestation,
+            quote,
             info: AttestationInfo {
-                app_id: info.app_id,
-                compose_hash: info.compose_hash,
-                app_compose: (!info.app_compose.is_empty()).then_some(info.app_compose),
+                app_id,
+                compose_hash,
+                app_compose: (!app_compose.is_empty()).then_some(app_compose),
             },
         })
     }
