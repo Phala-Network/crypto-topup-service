@@ -307,7 +307,7 @@ pub trait Signer {
 `signer::dstack` derives `operator/v{n}` (secp256k1) and `settlement/v1` (ed25519) on demand
 and zeroizes them (dstack 0.5 derives a key from its domain alone; each domain has one algorithm); `n` is the route's attested `chain.operator_key_version` (≥ 1, initially 1),
 and a chain's flusher plans and sends only while that operator holds `OPERATOR_ROLE` on the
-factory.
+factory. `GET /v1/attestation` reports and attests each chain's operator address (§14).
 
 **Flusher** on a schedule *(policy)*, per (chain, token): select addresses whose on-chain
 balance ≥ `min_flush_atomic` and whose share of batch gas ≤ `max_gas_ratio` of value
@@ -406,7 +406,7 @@ GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
 GET    /v1/products/{p}/accounts/{ext}/limits                     caps, remaining, reset time
 POST   /v1/products/{p}/accounts/{ext}/pause | resume {scopes}
 POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   finance approves and executes (§15)
-GET    /v1/attestation?nonce=…
+GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
 
@@ -581,8 +581,15 @@ URLs. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack releas
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
 it. Upgrade = reproducible build → digest → compose hash → on-chain allow-list → redeploy.
 `GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
-`/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey)`; verifiers run the dstack verification flow (TCB, measurements, allowed
-compose) and pin `(keyid, public key)`.
+`/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, where `operators` lists each configured chain's
+flusher operator in ascending `chain_id` order (`chain_id`, `operator_key_version` from the
+chain's current routes, `keyid = operator/v{n}`, and the address the flusher signs with) and
+record `i` is the 32 bytes `chain_id` (u64 big-endian) ‖ `operator_key_version` (u32 big-endian) ‖
+address. With no operators this is the original `sha256(nonce ‖ settlement_pubkey)`. Verifiers
+run the dstack verification flow (TCB, measurements, allowed compose), check that the quote's
+report data is this hash zero-padded to 64 bytes, and then pin `(keyid, public key)`; the owner grants
+`OPERATOR_ROLE` to, and funds, only an operator address verified this way, since a production
+CVM exposes no logs or shell.
 
 ## 15. Operating policies
 

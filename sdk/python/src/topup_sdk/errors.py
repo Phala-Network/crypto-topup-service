@@ -11,6 +11,10 @@ class SignatureError(TopupError):
     """An inbound request or webhook failed signature verification."""
 
 
+class AttestationError(TopupError):
+    """An attestation response does not bind the keys it reports."""
+
+
 class ApiError(TopupError):
     """The service answered with a documented error envelope or an unexpected status."""
 

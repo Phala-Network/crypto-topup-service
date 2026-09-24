@@ -304,22 +304,8 @@ pub fn configure_tasks(
 
 /// Selects the newest route version per chain/token and requires one operator key per chain.
 fn latest_routes(routes: &RouteSet) -> Result<Vec<RouteFile>, String> {
-    let latest = routes.current().cloned().collect::<Vec<_>>();
-    let mut versions = BTreeMap::new();
-    for route in &latest {
-        let chain_id = route.chain.chain_id;
-        let version = route.chain.operator_key_version;
-        if let Some((other, other_version)) = versions.insert(chain_id, (&route.route, version))
-            && other_version != version
-        {
-            return Err(format!(
-                "current routes `{other}` and `{}` on chain {chain_id} use operator key versions \
-                 {other_version} and {version}; they must share one operator_key_version",
-                route.route
-            ));
-        }
-    }
-    Ok(latest)
+    routes.operator_keys()?;
+    Ok(routes.current().cloned().collect())
 }
 
 /// Coin Metrics `ReferenceRateUSD` sources for the route token and the chain's native gas asset.

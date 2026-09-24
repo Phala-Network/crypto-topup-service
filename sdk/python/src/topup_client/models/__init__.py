@@ -14,6 +14,7 @@ from .error_detail import ErrorDetail
 from .error_response import ErrorResponse
 from .limits_response import LimitsResponse
 from .nudge_response import NudgeResponse
+from .operator_identity import OperatorIdentity
 from .pause_request import PauseRequest
 from .pause_response import PauseResponse
 from .pending_deposit_response import PendingDepositResponse
@@ -51,6 +52,7 @@ __all__ = (
     "ErrorResponse",
     "LimitsResponse",
     "NudgeResponse",
+    "OperatorIdentity",
     "PauseRequest",
     "PauseResponse",
     "PendingDepositResponse",

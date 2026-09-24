@@ -202,8 +202,9 @@ fn dev_attestation_prints_the_required_json_shape() {
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
     let object = value.as_object().expect("attestation should be an object");
 
-    assert_eq!(object.len(), 8);
+    assert_eq!(object.len(), 9);
     assert_eq!(value["keyid"], "settlement/v1");
+    assert_eq!(value["operators"], serde_json::json!([]));
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
@@ -245,6 +246,60 @@ fn dev_attestation_reports_the_requested_operator_key_version() {
         "0",
     ]);
     assert!(!zero.status.success());
+}
+
+#[cfg(feature = "dev-signer")]
+#[test]
+fn dev_attestation_binds_the_route_operators_like_the_api() {
+    use topup_adapters::attestation::{AttestedOperator, report_data};
+
+    let route = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/phala-cloud-pha.yaml"
+    );
+    let output = topup(&["attest", "--nonce", "00010203", "--dev", "--route", route]);
+    assert!(output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
+
+    // The fixture route runs on chain 1 with operator key version 1, the default preview.
+    let address = value["operator_address"]
+        .as_str()
+        .expect("operator address");
+    assert_eq!(
+        value["operators"],
+        serde_json::json!([{
+            "chain_id": 1,
+            "operator_key_version": 1,
+            "keyid": "operator/v1",
+            "address": address,
+        }])
+    );
+    let settlement = topup_core::Ed25519PublicKey(
+        hex::decode(value["settlement_pubkey"].as_str().expect("settlement key"))
+            .expect("hex settlement key")
+            .try_into()
+            .expect("32-byte settlement key"),
+    );
+    let operator = AttestedOperator {
+        chain_id: 1,
+        key_version: std::num::NonZeroU32::MIN,
+        address: address.parse().expect("operator address parses"),
+    };
+    assert_eq!(
+        value["report_data"],
+        hex::encode(report_data(&[0, 1, 2, 3], &settlement, &[operator]))
+    );
+
+    let invalid = topup(&[
+        "attest",
+        "--nonce",
+        "00",
+        "--dev",
+        "--route",
+        "/nonexistent",
+    ]);
+    assert!(!invalid.status.success());
 }
 
 #[test]

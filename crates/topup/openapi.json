@@ -1554,7 +1554,7 @@
       },
       "AttestationResponse": {
         "type": "object",
-        "description": "TDX evidence binding a nonce to the settlement public key.",
+        "description": "TDX evidence binding a nonce to the settlement public key and the flusher operators.",
         "required": [
           "keyid",
           "settlement_pubkey",
@@ -1566,13 +1566,20 @@
             "type": "string",
             "description": "Settlement key identifier."
           },
+          "operators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorIdentity"
+            },
+            "description": "Flusher operator of each configured chain, in ascending `chain_id` order. This service\nalways sends it; it is optional in the schema so clients also parse responses from servers\nthat predate it, whose report data binds no operators (an absent list reads as empty)."
+          },
           "quote": {
             "type": "string",
             "description": "Versioned dstack attestation bytes as lowercase hexadecimal."
           },
           "report_data": {
             "type": "string",
-            "description": "SHA-256 report data as lowercase hexadecimal."
+            "description": "`sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)` as lowercase hexadecimal,\nwith one 32-byte record per operator in list order: `chain_id` (u64 big-endian),\n`operator_key_version` (u32 big-endian), and the 20 address bytes."
           },
           "settlement_pubkey": {
             "type": "string",
@@ -1997,6 +2004,38 @@
             "type": "string",
             "format": "date-time",
             "description": "Newly due processing time."
+          }
+        }
+      },
+      "OperatorIdentity": {
+        "type": "object",
+        "description": "The key a chain's flusher signs `flush` transactions with; it needs `OPERATOR_ROLE` and gas.",
+        "required": [
+          "chain_id",
+          "operator_key_version",
+          "keyid",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Operator address as lowercase `0x`-prefixed hexadecimal."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "keyid": {
+            "type": "string",
+            "description": "Operator key identifier, `operator/v{operator_key_version}`."
+          },
+          "operator_key_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The chain's configured operator key derivation version.",
+            "minimum": 0
           }
         }
       },

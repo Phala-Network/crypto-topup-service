@@ -14,14 +14,14 @@ use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row;
 #[cfg(feature = "dev-signer")]
-use topup::api::models::AttestationResponse;
+use topup::api::models::{AttestationResponse, OperatorIdentity};
 use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
-use topup_adapters::attestation::report_data;
+use topup_adapters::attestation::{AttestedOperator, OperatorKey, report_data};
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::deposit::DepositState;
@@ -822,10 +822,8 @@ async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {
     let admin_key = SigningKey::from_bytes(&[30; 32]);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
-    let attestor = Arc::new(DevHttpAttestor(DevSigner::new(
-        SecretKey32::new([1; 32]),
-        SecretKey32::new([2; 32]),
-    )));
+    let seed = [1; 32];
+    let attestor = Arc::new(DevHttpAttestor(seed));
     let state = app_state_with_attestor(pool, &admin_key, attestor);
     let app = topup::api::router(state).0;
     let response = app
@@ -838,9 +836,30 @@ async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {
     ensure!(response.status() == StatusCode::OK);
     let response = response_json(response).await?;
     ensure!(response["keyid"] == SETTLEMENT_KEY_DOMAIN);
-    ensure!(response["settlement_pubkey"].as_str().map(str::len) == Some(64));
-    ensure!(response["report_data"].as_str().map(str::len) == Some(64));
     ensure!(response["quote"] == "");
+
+    // The fixture route runs on chain 1 with operator key version 1.
+    let dev = DevSigner::derive(&SecretKey32::new(seed), std::num::NonZeroU32::MIN);
+    let settlement = dev.settlement_public_key().await?;
+    let operator = AttestedOperator {
+        chain_id: 1,
+        key_version: std::num::NonZeroU32::MIN,
+        address: dev.operator_address().await?,
+    };
+    ensure!(response["settlement_pubkey"] == hex::encode(settlement.0));
+    ensure!(
+        response["operators"]
+            == json!([{
+                "chain_id": 1,
+                "operator_key_version": 1,
+                "keyid": "operator/v1",
+                "address": format!("{:#x}", operator.address),
+            }])
+    );
+    ensure!(
+        response["report_data"]
+            == hex::encode(report_data(&[0, 1, 2, 3], &settlement, &[operator]))
+    );
     Ok(())
 }
 
@@ -898,22 +917,39 @@ fn app_state_with_attestor(
     }
 }
 
+/// Development attestor deriving every key from one seed, as `topup attest --dev` does.
 #[cfg(feature = "dev-signer")]
-struct DevHttpAttestor(DevSigner);
+struct DevHttpAttestor([u8; 32]);
 
 #[cfg(feature = "dev-signer")]
 impl Attestor for DevHttpAttestor {
-    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a> {
+    fn attest<'a>(
+        &'a self,
+        nonce: &'a [u8],
+        operator_keys: &'a [OperatorKey],
+    ) -> AttestationFuture<'a> {
         Box::pin(async move {
-            let public_key = self
-                .0
+            let seed = SecretKey32::new(self.0);
+            let public_key = DevSigner::derive(&seed, std::num::NonZeroU32::MIN)
                 .settlement_public_key()
                 .await
                 .map_err(|_| AttestationError::Unavailable)?;
+            let mut operators = Vec::with_capacity(operator_keys.len());
+            for key in operator_keys {
+                operators.push(AttestedOperator {
+                    chain_id: key.chain_id,
+                    key_version: key.key_version,
+                    address: DevSigner::derive(&seed, key.key_version)
+                        .operator_address()
+                        .await
+                        .map_err(|_| AttestationError::Unavailable)?,
+                });
+            }
             Ok(AttestationResponse {
                 keyid: SETTLEMENT_KEY_DOMAIN.to_owned(),
                 settlement_pubkey: hex::encode(public_key.0),
-                report_data: hex::encode(report_data(nonce, &public_key)),
+                operators: operators.iter().map(OperatorIdentity::from).collect(),
+                report_data: hex::encode(report_data(nonce, &public_key, &operators)),
                 quote: String::new(),
             })
         })

@@ -7,6 +7,17 @@ webhook receivers must ignore unknown fields.
 
 ### Added
 
+- `GET /v1/attestation` returns `operators`: for each configured chain, the flusher operator
+  (`chain_id`, `operator_key_version` from the chain's current routes, `keyid` `operator/v{n}`,
+  `address`) that needs `OPERATOR_ROLE` on the factory and native gas. `report_data` now binds
+  them: `sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, one 32-byte record per
+  operator in list (ascending `chain_id`) order: `chain_id` (u64 big-endian),
+  `operator_key_version` (u32 big-endian), and the 20 address bytes (architecture §14). With no
+  operators the value is unchanged; a verifier that hashes only `nonce ‖ settlement_pubkey` must
+  append the records. `operators` is optional in the schema so clients also parse responses from
+  servers that predate it. `topup attest --route FILE` prints the same `operators` and
+  `report_data` for those routes.
+
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
   destination minor units (#94). The field is optional in the schema so clients also parse reports
   from servers that predate it.
