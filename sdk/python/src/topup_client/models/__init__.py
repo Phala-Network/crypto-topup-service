@@ -20,6 +20,7 @@ from .pause_response import PauseResponse
 from .pending_deposit_response import PendingDepositResponse
 from .pending_deposits_response import PendingDepositsResponse
 from .persistent_salt_inputs import PersistentSaltInputs
+from .product_response import ProductResponse
 from .rate_lock_payment import RateLockPayment
 from .rate_lock_response import RateLockResponse
 from .rate_lock_salt_inputs import RateLockSaltInputs
@@ -27,6 +28,7 @@ from .record_refund_request import RecordRefundRequest
 from .refund_request import RefundRequest
 from .refund_response import RefundResponse
 from .register_account_request import RegisterAccountRequest
+from .register_product_request import RegisterProductRequest
 from .rotate_deposit_address_request import RotateDepositAddressRequest
 from .route_daily_report import RouteDailyReport
 from .route_daily_report_age_in_state_max_seconds import RouteDailyReportAgeInStateMaxSeconds
@@ -58,6 +60,7 @@ __all__ = (
     "PendingDepositResponse",
     "PendingDepositsResponse",
     "PersistentSaltInputs",
+    "ProductResponse",
     "RateLockPayment",
     "RateLockResponse",
     "RateLockSaltInputs",
@@ -65,6 +68,7 @@ __all__ = (
     "RefundRequest",
     "RefundResponse",
     "RegisterAccountRequest",
+    "RegisterProductRequest",
     "RotateDepositAddressRequest",
     "RouteDailyReport",
     "RouteDailyReportAgeInStateMaxSeconds",

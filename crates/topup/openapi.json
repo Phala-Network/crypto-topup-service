@@ -52,6 +52,71 @@
         ]
       }
     },
+    "/v1/admin/products": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "register_product",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterProductRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: registered, or already registered with the same values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict: the slug is registered with different values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/refunds/{id}/approve": {
       "post": {
         "tags": [
@@ -2202,6 +2267,43 @@
           }
         }
       },
+      "ProductResponse": {
+        "type": "object",
+        "description": "Registered product.",
+        "required": [
+          "id",
+          "slug",
+          "public_key",
+          "webhook_url",
+          "paused_scopes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Service product identifier."
+          },
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Active product-level pause scopes."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Standard base64 of the product's ed25519 public key."
+          },
+          "slug": {
+            "type": "string",
+            "description": "Product slug."
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Webhook receiver URL."
+          }
+        }
+      },
       "RateLockPayment": {
         "type": "object",
         "description": "A payment observed at a rate-lock address.",
@@ -2448,6 +2550,29 @@
           "external_id": {
             "type": "string",
             "description": "Product-owned account identifier."
+          }
+        }
+      },
+      "RegisterProductRequest": {
+        "type": "object",
+        "description": "Administrative product registration body. The product's key id and settlement URL are not\npart of it: the attested route is their only source.",
+        "required": [
+          "slug",
+          "public_key",
+          "webhook_url"
+        ],
+        "properties": {
+          "public_key": {
+            "type": "string",
+            "description": "Standard base64 of the product's 32-byte ed25519 request-verification public key."
+          },
+          "slug": {
+            "type": "string",
+            "description": "Product slug named by a loaded route's `destination.product`; matches\n`^[a-z0-9][a-z0-9-]{0,62}$`."
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the product's\nattested settlement URL also uses `http` (local stacks)."
           }
         }
       },

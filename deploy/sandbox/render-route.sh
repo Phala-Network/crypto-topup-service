@@ -22,7 +22,7 @@ done
     exit 1
 }
 # Values land inside double-quoted YAML scalars: allow printable ASCII without quotes,
-# backslashes, or `$`, matching issue-product.sh.
+# backslashes, or `$`.
 for name in PRODUCT_KID SETTLEMENT_URL; do
     value=${!name}
     if ! [[ "$value" =~ ^[[:print:]]{1,512}$ ]] || [[ "$value" == *[\"\\\$]* ]]; then

@@ -18,6 +18,12 @@ webhook receivers must ignore unknown fields.
   servers that predate it. `topup attest --route FILE` prints the same `operators` and
   `report_data` for those routes.
 
+- `POST /v1/admin/products {slug, public_key, webhook_url}` (administrative API) issues a
+  product with an `audit` row (`product.issue`); it replaces direct database registration. The
+  key id and settlement URL still come only from the attested route, whose slug must be loaded.
+  The same values return the same product with `200`; different values for an issued slug are
+  `409 conflict`.
+
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
   destination minor units (#94). The field is optional in the schema so clients also parse reports
   from servers that predate it.

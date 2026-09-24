@@ -384,8 +384,8 @@ as a monorepo issue.
 Product requests use the same signature scheme with the product's key; paths use the product's
 `external_id`; every request is checked for tenant ownership. Address responses include the
 salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the product can
-recompute any address without the service. The admin key can only pause and resume; each
-call writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
+recompute any address without the service. The admin key can only issue products, pause and
+resume, nudge, and drive the refund workflow; each change writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
 (`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
 `X-Forwarded-*`, so signers sign the public URL they call. Each deployment (sandbox, staging,
 production) must pin a distinct product key: signature single-use is recorded per database, so a
@@ -410,6 +410,7 @@ GET    /v1/attestation?nonce=…                                    settlement k
 
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
 
+POST   /v1/admin/products {slug, public_key, webhook_url}   key id, settlement URL: route (§14); same values → same product, different → 409
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}

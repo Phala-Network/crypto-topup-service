@@ -156,7 +156,7 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
    created (no CVM id in the summary), fix the cause and re-run `provision`.
 6. **HUMAN-ONLY, verifier:** complete [Attestation, ingress, and egress](#attestation-ingress-and-egress)
    (Trust Center quote verification, the nonce-bound settlement key, the egress restriction) before
-   issuing product credentials.
+   issuing product credentials ([Product credentials](#product-credentials)).
 
 Deploy staging, in order; any failure stops the run:
 
@@ -673,6 +673,46 @@ those route files, plus `operator_keyid` and `operator_address` for `--operator-
 identity rather than the compose hash, so this previews the next operator address and lets the
 Safe grant it before the bump, without a pause in flushing.
 
+## Product credentials
+
+`POST /v1/admin/products` is the only way to issue a product: CVMs have no SSH, logs, or database
+access. It stores the product's slug, ed25519 request-verification public key, and webhook URL,
+and writes an `audit` row (`actor = admin:<TOPUP_ADMIN_KID>`, `action = product.issue`). The key
+id and settlement URL are not part of it: the attested route's `destination.product_kid` and
+`destination.settlement_url` are their only source, so the slug must be named by a route the
+service loaded, and the route change comes first.
+
+The body is `{"slug", "public_key", "webhook_url"}`: `slug` matches
+`^[a-z0-9][a-z0-9-]{0,62}$`, `public_key` is the standard base64 of the 32-byte key the integrator
+printed with `topup-sdk keygen` (never the seed), and `webhook_url` is an absolute `https` URL
+without credentials (`http` is accepted only when the route's settlement URL is itself `http`,
+which only local stacks use). Responses: `200` with the product, also when the slug is already
+registered with the same values; `409 conflict` when it is registered with a different key or
+webhook URL; `400` for an invalid field or a slug no loaded route names.
+
+**HUMAN-ONLY, admin key holder:** complete
+[Attestation, ingress, and egress](#attestation-ingress-and-egress) first. The signing helper takes
+a PEM key; convert the `topup-sdk keygen` seed file once, then sign the exact body and send it:
+
+```sh
+(umask 077 && { printf '302e020100300506032b657004220420'; tr -d '\n' < admin.seed; } |
+  xxd -r -p | openssl pkey -inform DER -out admin.pem)
+export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/v1   # the CVM's TOPUP_ADMIN_KID
+jq -cjn --arg public_key '<base64 from the integrator>' \
+  '{slug: "phala-cloud", public_key: $public_key,
+    webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-product.json
+mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST \
+  "$TOPUP_PUBLIC_ORIGIN/v1/admin/products" /tmp/topup-product.json \
+  "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
+  -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
+  --data-binary @/tmp/topup-product.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/products"
+```
+
+Changing a registered product's public key or webhook URL is not supported yet (the endpoint
+answers `409`); a new key also needs a new key id, which is a new route version. Changing its
+settlement URL is a new route version.
+
 ## Local verification
 
 The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`
@@ -726,8 +766,9 @@ starts it with a `.env` holding exactly the `staging.env.example` names.
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 and the flusher operator through the simulator (the same values as `topup attest --route`), the
 flusher waits for that attested address's `OPERATOR_ROLE` and resumes once the mock Safe grants it
-and it is funded, the backup marker is fresh, and one quote-first deposit is credited end to
-end against the reference product with a lock priced from the live HTTPS sources (so the image's
+and it is funded, the backup marker is fresh, the product is issued through the signed
+`POST /v1/admin/products`, and one quote-first deposit is credited end to end against the
+reference product with a lock priced from the live HTTPS sources (so the image's
 TLS verification with system roots works), then prints the workload's memory and checks that no
 container, volume, network, or image of the run is left. It needs Foundry with `contracts/lib`, the
 Docker host's loopback (for the registry and Anvil), and internet access for the live price

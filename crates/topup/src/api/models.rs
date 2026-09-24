@@ -378,6 +378,35 @@ pub struct RefundResponse {
     pub status: String,
 }
 
+/// Administrative product registration body. The product's key id and settlement URL are not
+/// part of it: the attested route is their only source.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct RegisterProductRequest {
+    /// Product slug named by a loaded route's `destination.product`; matches
+    /// `^[a-z0-9][a-z0-9-]{0,62}$`.
+    pub slug: String,
+    /// Standard base64 of the product's 32-byte ed25519 request-verification public key.
+    pub public_key: String,
+    /// Absolute `https` URL of the product's webhook receiver; `http` only when the product's
+    /// attested settlement URL also uses `http` (local stacks).
+    pub webhook_url: String,
+}
+
+/// Registered product.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ProductResponse {
+    /// Service product identifier.
+    pub id: Uuid,
+    /// Product slug.
+    pub slug: String,
+    /// Standard base64 of the product's ed25519 public key.
+    pub public_key: String,
+    /// Webhook receiver URL.
+    pub webhook_url: String,
+    /// Active product-level pause scopes.
+    pub paused_scopes: Vec<String>,
+}
+
 /// Administrative deposit nudge result.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct NudgeResponse {
