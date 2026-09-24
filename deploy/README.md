@@ -23,19 +23,18 @@ Release images publishes the images; the other workflows run against the GitHub 
 | Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup` and `postgres-walg` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
 | Deploy staging ([deploy-staging.yml](../.github/workflows/deploy-staging.yml)) | manual, `main` only | provisions or upgrades the staging CVM (below) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
-| Deploy contracts ([deploy-contracts.yml](../.github/workflows/deploy-contracts.yml)) | manual, `main` only | Sepolia `ForwarderFactory`: dry run, then broadcast only with `broadcast: true`, then verification; forge run records and the report as artifacts |
 
 ### Controls
 
 The `staging` Environment admits only the `main` branch, and the deploy jobs also check
 `github.ref`. Starting a workflow needs write access to the repository. Required reviewers are not
 available for a private repository on the current GitHub plan, so there is **no approval gate**:
-dispatching Deploy staging or Deploy contracts is the decision, and the run's actor is the record.
+dispatching Deploy staging is the decision, and the run's actor is the record.
 The credentials exist only as `staging` Environment secrets and reach the tools through
-environment variables, never command-line arguments (the Sepolia deployer key is read inside the
-forge script). The workflows have
+environment variables, never command-line arguments. No signing key is stored in GitHub:
+contract deployments and Safe transactions are signed by the Safe owner outside CI. The workflows have
 `permissions: contents: read`, pin every action by commit SHA, and serialize runs
-(`deploy-staging`, `deploy-contracts`) without cancelling one in progress.
+(`deploy-staging`) without cancelling one in progress.
 
 Mainnet is never deployed from CI. Mainnet contracts and any production CVM stay HUMAN-ONLY
 through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B below).
@@ -57,7 +56,6 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | secret | S3/R2 key for the WAL-G bucket |
    | `AWS_SESSION_TOKEN` | secret, optional | only for temporary credentials |
    | `COINMETRICS_API_KEY` | secret, optional | empty selects the community endpoint |
-   | `SEPOLIA_DEPLOYER_PRIVATE_KEY` | secret | only for Deploy contracts: a funded Sepolia deployer key |
    | `AWS_ENDPOINT` | variable, optional | S3-compatible endpoint (R2); empty for AWS S3 |
    | `AWS_REGION` | variable | bucket region (`auto` for R2) |
    | `AWS_S3_FORCE_PATH_STYLE` | variable | `false` (or `true` for a path-style endpoint) |
@@ -65,7 +63,7 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable | from `topup-sdk keygen`; the private key stays with the admin |
    | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable | `1` and `0` |
    | `TOPUP_WAL_ARCHIVE` | variable | `on` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy contracts); a URL that embeds a provider API key goes into a secret of the same name, which takes precedence |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts); a URL that embeds a provider API key goes into a secret of the same name, which takes precedence |
    | `DSTACK_OS_IMAGE` | variable | the owner-approved dstack 0.6.0 image name (`0.6.0-rc5`), from `os-images --prod` |
    | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
 
@@ -86,8 +84,9 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    end-to-end settlement test.
 
 The Sepolia contracts (factory, test PHA token, sanctions oracle) are deployed and committed in the
-route. A future factory deployment runs Deploy contracts; its constructor inputs come from the
-committed `deploy/contracts/safe-expectations.json`, and its addresses reach the route through a
+route. A future factory deployment is run by the Safe owner with their own key, as
+[CONTRACTS.md](CONTRACTS.md#sepolia) describes; its constructor inputs come from the committed
+`deploy/contracts/safe-expectations.json`, and its addresses reach the route through a
 reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the inline copy in
 `deploy/docker-compose.yml`, checked by `deploy/validate-compose.sh`).
 
