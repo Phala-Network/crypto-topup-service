@@ -13,16 +13,15 @@ use anyhow::{Context as _, Result};
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::{Signer as _, TxRequest};
 
-type Requests = Arc<Mutex<Vec<(String, String)>>>;
+type Requests = Arc<Mutex<Vec<String>>>;
 
-/// Serves `/v1/GetKey` with a key derived from the requested domain and records each request.
+/// Serves the dstack 0.5 `/GetKey` with a key derived from the requested path and records each path.
 struct GuestAgent {
     endpoint: String,
     requests: Requests,
@@ -33,7 +32,7 @@ impl GuestAgent {
     async fn start() -> Result<Self> {
         let requests = Requests::default();
         let app = Router::new()
-            .route("/v1/GetKey", post(get_key))
+            .route("/GetKey", post(get_key))
             .with_state(Arc::clone(&requests));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("http://{}", listener.local_addr()?);
@@ -47,7 +46,7 @@ impl GuestAgent {
         })
     }
 
-    fn take_requests(&self) -> Vec<(String, String)> {
+    fn take_requests(&self) -> Vec<String> {
         self.requests
             .lock()
             .map(|mut requests| std::mem::take(&mut *requests))
@@ -70,37 +69,17 @@ fn stub_operator(domain: &str) -> Result<Address> {
 }
 
 async fn get_key(State(requests): State<Requests>, Json(body): Json<Value>) -> Json<Value> {
-    let field = |name: &str| {
-        body.get(name)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let (domain, algorithm) = (field("domain"), field("algorithm"));
-    let key = stub_key(&domain);
-    let public_key = if algorithm == "ed25519" {
-        SigningKey::from_bytes(&key)
-            .verifying_key()
-            .to_bytes()
-            .to_vec()
-    } else {
-        PrivateKeySigner::from_slice(&key)
-            .map(|signer| {
-                signer
-                    .credential()
-                    .verifying_key()
-                    .to_encoded_point(true)
-                    .as_bytes()
-                    .to_vec()
-            })
-            .unwrap_or_default()
-    };
+    let path = body
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = stub_key(&path);
     if let Ok(mut requests) = requests.lock() {
-        requests.push((domain, algorithm));
+        requests.push(path);
     }
     Json(json!({
         "key": hex::encode(key),
-        "public_key": hex::encode(public_key),
         "signature_chain": [],
     }))
 }
@@ -116,10 +95,6 @@ fn request(chain_id: u64) -> TxRequest {
         max_fee_per_gas: 2,
         max_priority_fee_per_gas: 1,
     }
-}
-
-fn pair(domain: &str, algorithm: &str) -> (String, String) {
-    (domain.to_owned(), algorithm.to_owned())
 }
 
 #[tokio::test]
@@ -146,11 +121,11 @@ async fn operator_domain_follows_the_configured_version_only() -> Result<()> {
     assert_eq!(
         agent.take_requests(),
         vec![
-            pair("operator/v2", "secp256k1"),
-            pair("operator/v2", "secp256k1"),
-            pair("settlement/v1", "ed25519"),
-            pair("settlement/v1", "ed25519"),
-            pair("backup/v1", "secp256k1"),
+            "operator/v2",
+            "operator/v2",
+            "settlement/v1",
+            "settlement/v1",
+            "backup/v1",
         ]
     );
 
@@ -159,9 +134,6 @@ async fn operator_domain_follows_the_configured_version_only() -> Result<()> {
         default.operator_address().await?,
         stub_operator("operator/v1")?
     );
-    assert_eq!(
-        agent.take_requests(),
-        vec![pair("operator/v1", "secp256k1")]
-    );
+    assert_eq!(agent.take_requests(), vec!["operator/v1"]);
     Ok(())
 }

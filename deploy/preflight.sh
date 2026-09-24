@@ -9,8 +9,13 @@
 #          --workspace NAME --os-image NAME [--kms base|phala] [--kms-contract ADDRESS] \
 #          [--source COMPOSE] [--offline] [--unsealed]
 #
-# --kms base (default) also checks that the on-chain KMS contract allows a device and the OS image;
-# --kms phala (Phala Cloud's KMS, used for staging) has no contract to check. Images are pulled
+# --os-image must be the owner-approved OS image, dstack-0.5.9 (deploy/README.md): the pinned dstack
+# SDK speaks the dstack 0.5 guest API. Online, the image must be a listed production image and a
+# node of the workspace must offer it (`api /teepods/available`), or provisioning fails with
+# "OS image ... is not available on the selected node".
+# --kms base (default) also checks that the on-chain KMS contract allows a device and the OS image,
+# and that a node offering the image supports on-chain KMS; --kms phala (Phala Cloud's KMS, used for
+# staging) has no contract to check. Images are pulled
 # anonymously (an empty Docker client config), because the CVM pulls them without credentials: a
 # private image fails here.
 #
@@ -35,6 +40,8 @@ route_config=topup_route_phala_cloud_sepolia_pha
 # May stay empty: a static S3 key has no session token, AWS S3 needs no endpoint, and an empty
 # Coin Metrics key selects the community endpoint.
 optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
+# The owner-approved OS image (deploy/README.md, "OS image"): production, dstack 0.5.9.
+approved_os_image=dstack-0.5.9
 # The only secrets of the env file. GitHub never holds them; the owner seals them (README).
 owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY "
 
@@ -132,6 +139,10 @@ admin_key_bytes=$(base64 -d 2>/dev/null <<<"${env[TOPUP_ADMIN_PUBLIC_KEY]-}" | w
 [[ "${env[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
 [[ "${env[TOPUP_WAL_ARCHIVE]-}" == on ]] || fail "TOPUP_WAL_ARCHIVE must be on for staging"
 [[ "${env[TOPUP_SERVICE_ENABLED]-}" == on ]] || fail "TOPUP_SERVICE_ENABLED must be on for staging"
+
+if [[ -n "$os_image" && "$os_image" != "$approved_os_image" ]]; then
+    fail "OS image $os_image is not the approved $approved_os_image (deploy/README.md)"
+fi
 
 echo "== compose"
 if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \
@@ -321,15 +332,23 @@ if [[ "$kms" == base ]]; then
     fi
 fi
 if "${phala[@]}" os-images --prod --all --json >"$tmp/os-images.json" 2>/dev/null &&
-    jq -e --arg image "$os_image" 'any(.items[]; .name == $image and .is_dev == false)' \
-        "$tmp/os-images.json" >/dev/null; then
-    ok "OS image $os_image is a production (non-dev) image"
-    # The pinned dstack SDK needs the /v1 guest API of dstack 0.6 (deploy/README.md).
     jq -e --arg image "$os_image" \
-        'any(.items[]; .name == $image and (.version | test("^v?0[.]6[.]")))' \
-        "$tmp/os-images.json" >/dev/null || fail "OS image $os_image is not a dstack 0.6 image"
+        'any(.items[]; .name == $image and .is_dev == false and (.version | test("^v?0[.]5[.]9$")))' \
+        "$tmp/os-images.json" >/dev/null; then
+    ok "OS image $os_image is a production (non-dev) dstack 0.5.9 image"
 else
-    fail "OS image $os_image is not listed as a production image by 'os-images --prod'"
+    fail "OS image $os_image is not listed as a production dstack 0.5.9 image by 'os-images --prod'"
+fi
+# The platform picks the node; it must be one whose images include this one.
+offering='[.nodes[] | select(any(.images[]; .name == $image and .is_dev == false and .version[0:3] == [0, 5, 9]))]'
+[[ "$kms" == base ]] && offering+=' | map(select(.support_onchain_kms == true))'
+if "${phala[@]}" api /teepods/available >"$tmp/nodes.json" 2>/dev/null &&
+    count=$(jq -er --arg image "$os_image" "$offering | length" "$tmp/nodes.json") && ((count > 0)); then
+    ok "$count node(s) of the workspace offer OS image $os_image"
+else
+    fail "no node of the workspace offers OS image $os_image$([[ "$kms" == base ]] && echo " with on-chain KMS"); offered:" \
+        "$(jq -r '[.nodes[].images[] | select(.is_dev == false) | .name] | unique | join(", ")' \
+            "$tmp/nodes.json" 2>/dev/null)"
 fi
 
 if ((failures)); then

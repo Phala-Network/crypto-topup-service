@@ -1,15 +1,15 @@
-//! Opt-in dstack v1 simulator coverage.
+//! Opt-in dstack 0.5.9 simulator coverage.
 
 use std::num::NonZeroU32;
 
-use dstack_sdk::DstackClient;
+use dstack_sdk::dstack_client::DstackClient;
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::signer::dstack::DstackSigner;
 use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, Signer as _};
 
 #[tokio::test]
-async fn dstack_v1_signing_and_attestation() -> Result<(), Box<dyn std::error::Error>> {
+async fn dstack_signing_and_attestation() -> Result<(), Box<dyn std::error::Error>> {
     let Ok(endpoint) = std::env::var("DSTACK_SIMULATOR_ENDPOINT") else {
         eprintln!("skipped: set DSTACK_SIMULATOR_ENDPOINT to run the dstack simulator test");
         return Ok(());
@@ -28,10 +28,11 @@ async fn dstack_v1_signing_and_attestation() -> Result<(), Box<dyn std::error::E
     let v2 = rotated.operator_address().await?;
     assert_ne!(v1, v2);
     let raw = DstackClient::new(Some(&endpoint))
-        .get_key("operator/v2", "secp256k1")
-        .await?;
+        .get_key(Some("operator/v2".to_owned()), None)
+        .await?
+        .decode_key()?;
     assert_eq!(
-        alloy_signer_local::PrivateKeySigner::from_slice(&raw.key)?.address(),
+        alloy_signer_local::PrivateKeySigner::from_slice(&raw)?.address(),
         v2
     );
     assert_eq!(rotated.settlement_public_key().await?, public_key);
@@ -51,8 +52,32 @@ async fn dstack_v1_signing_and_attestation() -> Result<(), Box<dyn std::error::E
         .attest(b"integration-test")
         .await?;
     assert_eq!(evidence.settlement_public_key, public_key);
-    assert!(!evidence.quote.is_empty());
+    // The attestation is msgpack whose byte fields are integer arrays; the TDX quote in it carries
+    // report_data zero-padded to 64 bytes.
+    let mut padded = evidence.report_data.to_vec();
+    padded.resize(64, 0);
+    let encoded = msgpack_uints(&padded);
+    assert!(
+        evidence
+            .quote
+            .windows(encoded.len())
+            .any(|window| window == encoded)
+    );
     assert!(!evidence.info.app_id.is_empty());
     assert_eq!(evidence.info.compose_hash.len(), 32);
     Ok(())
+}
+
+/// Encodes each byte as a msgpack unsigned integer: a positive fixint below 0x80, else `0xcc b`.
+fn msgpack_uints(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|&byte| {
+            if byte < 0x80 {
+                vec![byte]
+            } else {
+                vec![0xcc, byte]
+            }
+        })
+        .collect()
 }

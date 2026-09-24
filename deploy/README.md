@@ -9,9 +9,9 @@ those workflows that change a registry, Phala Cloud, a CVM, a Safe, an on-chain 
 state are marked **HUMAN-ONLY** and describe the production path (on-chain Base KMS, Finance Safe).
 The commands were checked on 2026-09-22 against dstack commit
 `721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22 (tag `cli-v1.1.22`
-of `Phala-Network/phala-cloud`); the SDK and the simulator now pin the `v0.6.0-rc5` release commit
-`ad92cfeb4ab6960275498c31b66004b9bb1df068`, whose SDK and linked documents are identical to that
-commit.
+of `Phala-Network/phala-cloud`); the SDK and the simulator now target the dstack `v0.5.9` release,
+commit `282eeb27d22d8f091ad0fa5a90e638f85cf68751` ([OS image](#os-image)), and the linked dstack
+documents are those of that commit.
 
 ## First staging deploy checklist
 
@@ -41,6 +41,27 @@ contract deployments and Safe transactions are signed by the Safe owner outside 
 Mainnet is never deployed from CI. Mainnet contracts and any production CVM stay HUMAN-ONLY
 through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B below).
 
+### OS image
+
+The owner-approved OS image is `dstack-0.5.9`: dstack 0.5.9, the latest general-availability
+release, non-dev. It replaces `dstack-0.6.0-rc5`, which `os-images --prod` lists but no Phala
+Cloud node offers (checked on 2026-09-24 in both workspaces: every node offers only `dstack-0.5.8`,
+`dstack-0.5.9`, and their dev and nvidia variants), so provisioning with it failed with "OS image …
+is not available on the selected node" (ERR-02-013). The local simulator is built from the same
+release (commit `282eeb27d22d8f091ad0fa5a90e638f85cf68751`, tag `v0.5.9`), and the service uses
+`dstack-sdk = "=0.1.3"` from crates.io, the `rust-sdk-v0.5.9` source with only `hickory-dns`
+dropped from its `reqwest` features. Both speak the dstack 0.5 guest API on
+`/var/run/dstack.sock` (`/GetKey`, `/Attest`, `/Info`). [preflight.sh](preflight.sh) accepts only this image name and,
+online, requires `os-images --prod` to list it as a non-dev 0.5.9 image and at least one node of
+the workspace (`api /teepods/available`) to offer it, with on-chain KMS support for `--kms base`.
+
+The dstack 0.5 key derivation differs from 0.6's `/v1` API: a key depends on the app identity and
+the domain only, not on the algorithm, and 0.6 derives different keys for the same domain. Keys
+derived on 0.5.9 (operator address, settlement key, backup and database keys) therefore change if
+the app moves to a dstack 0.6 image. Such a move is a key migration with its own runbook
+(operator role grant, settlement-key re-pinning, backup re-encryption, database password change),
+not an OS image bump.
+
 ### One-time setup (HUMAN-ONLY, repository owner)
 
 1. **Phala Cloud API key.** Create an API key in the Phala Cloud dashboard for the workspace
@@ -66,7 +87,7 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable | `1` and `0` |
    | `TOPUP_WAL_ARCHIVE` | variable | `on` |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable | public Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts); a URL with an embedded provider key is never stored in GitHub, only in the owner's sealed env file |
-   | `DSTACK_OS_IMAGE` | variable | the owner-approved dstack 0.6.0 image name (`0.6.0-rc5`), from `os-images --prod` |
+   | `DSTACK_OS_IMAGE` | variable | the owner-approved OS image, `dstack-0.5.9` ([OS image](#os-image)) |
    | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
 
    `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below) and writes
@@ -151,7 +172,7 @@ Deploy staging, in order; any failure stops the run:
    variables equal to the env names, route without placeholder addresses), anonymous pulls of both
    images, `topup route validate`, both RPC providers' chain id, `verify-deployment.sh` against
    both providers, the route's token and oracle code, the Phala workspace, and that
-   `DSTACK_OS_IMAGE` is a production dstack 0.6 image;
+   `DSTACK_OS_IMAGE` is the approved `dstack-0.5.9`, a listed production image offered by a node;
 6. `phala deploy` (CLI 1.1.22 via `npx`): a new CVM with `--kms phala --instance-type tdx.medium
    --fs ext4 --image "$DSTACK_OS_IMAGE" --no-dev-os --no-public-logs --no-public-sysinfo
    --public-tcbinfo --secure-time` and the unsealed env file, or an update with
@@ -359,8 +380,8 @@ and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager; the
 from the environment, so neither appears on a command line. Do not add `--prepare-only`; it does
 not halt the create path in this CLI version. Run [preflight.sh](preflight.sh) first with the
 default `--kms base`, which also checks the KMS contract's devices and OS images, and pass the
-same `$OS_IMAGE`: without `--image` the platform picks the OS image, and a pre-0.6 image cannot
-serve the service's dstack SDK:
+same `$OS_IMAGE` (`dstack-0.5.9`, [OS image](#os-image)): without `--image` the platform picks
+the OS image, and a different dstack release derives different keys:
 
 ```sh
 deploy/preflight.sh --env .env.production --compose deploy/docker-compose.production.yml \
@@ -660,14 +681,14 @@ sources; it bind-mounts nothing.
 ## Pinned upstream references
 
 - dstack boundaries and encrypted env:
-  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/security/cvm-boundaries.md>
+  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/docs/security/cvm-boundaries.md>
 - dstack socket, gateway, and simulator usage:
-  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/usage.md>
+  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/docs/usage.md>
 - dstack verification:
-  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/docs/verification.md>
+  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/docs/verification.md>
 - Phala CLI 1.1.22 deploy implementation:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts>
 - Phala CLI 1.1.22 flags:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts>
 - dstack `DstackApp` authorization contract:
-  <https://github.com/Dstack-TEE/dstack/blob/ad92cfeb4ab6960275498c31b66004b9bb1df068/dstack/kms/auth-eth/contracts/DstackApp.sol>
+  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/kms/auth-eth/contracts/DstackApp.sol>
