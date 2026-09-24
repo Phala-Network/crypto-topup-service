@@ -77,8 +77,7 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public, as in
    [Build and publish images](#build-and-publish-images). The organization must first allow public
    container packages, and making a package public is irreversible. The CVM pulls them without
-   credentials, the preflight fails on an image it cannot pull anonymously, and the Release images
-   summary warns while a package is still private.
+   credentials, and the preflight fails on an image it cannot pull anonymously.
 4. **Owner decisions.** Staging uses Phala Cloud's KMS (`--kms phala`): no `DstackApp` contract, no
    provisioner key, and upgrades apply without an on-chain compose-hash approval. The on-chain
    Base KMS stays the production path (sections A and B). The staging `settlement_url` in
@@ -205,8 +204,8 @@ the observability volume.
 Images are built and published only by CI, by the
 [Release images](../.github/workflows/release-images.yml) workflow; never push them from a
 workstation. It runs only on `workflow_dispatch` and publishes only from `main`; a dispatch on
-any other ref fails. The tag is `sha-<12-hex commit>`, plus an optional suffix, and
-`SOURCE_DATE_EPOCH` is the commit time:
+any other ref fails. Both images get the same tag, `sha-<12-hex commit>` plus an optional
+suffix, and `SOURCE_DATE_EPOCH` is the commit time:
 
 - `ghcr.io/phala-network/crypto-topup:<tag>`: [verify-image.sh](verify-image.sh) with
   `PUBLISH_IMAGE` set performs two clean BuildKit OCI exports for `linux/amd64`, with provenance
@@ -214,7 +213,7 @@ any other ref fails. The tag is `sha-<12-hex commit>`, plus an optional suffix, 
   and config digests match. It then builds and pushes a third time and fails unless the registry's
   platform manifest and config digests equal the verified local ones. This proves repeatability on
   the CI builder and platform, not cross-builder or cross-architecture identity.
-- `ghcr.io/phala-network/postgres-walg:<postgres>-<wal-g>-<tag>` from
+- `ghcr.io/phala-network/postgres-walg:<tag>` from
   [Dockerfile.postgres-walg](Dockerfile.postgres-walg): apt and dpkg record wall-clock times, so
   it is not bit-for-bit reproducible. It is built and pushed once; the registry tag must resolve
   to the digest BuildKit pushed, and that digest, pulled from the registry, must run
@@ -223,7 +222,7 @@ any other ref fails. The tag is `sha-<12-hex commit>`, plus an optional suffix, 
 
 Run the workflow on `main` from the Actions tab, or with
 `gh workflow run release-images.yml --ref main`. The job summary and the `images.json` artifact
-hold the two platform manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`): pass them to
+hold the two manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`): pass them to
 Deploy staging as `topup_image` and `postgres_walg_image`. For a local render or preflight:
 
 ```sh
@@ -245,8 +244,8 @@ again. Prerequisite: the organization must allow public container packages (orga
 Settings, Packages, Package creation, with Public enabled for containers); otherwise the Public
 option is unavailable. After the first publish, for `crypto-topup` and for `postgres-walg`: open
 the package under the organization's Packages tab, then Package settings, Danger Zone, Change
-visibility, Public, and confirm with the package name. The workflow checks an anonymous pull of
-each pushed digest and adds a warning to the summary while a package is still private.
+visibility, Public, and confirm with the package name. Deploy staging's preflight pulls both
+digests anonymously and fails while a package is still private.
 
 Developer check, no push and no credentials: the same two-build comparison runs locally with
 
