@@ -78,4 +78,21 @@ for bad in 'a#b' 'a"b' "a'b" 'a`b' $'a\nb'; do
     fi
 done
 
+# --product: the product's names, its signing seed always empty.
+names_of "$root/deploy/product/staging.env.example" >"$tmp/product-expected"
+product=()
+while IFS= read -r name; do
+    product+=("$name=secret-value-of-$name")
+done <"$tmp/product-expected"
+: >"$tmp/product.env"
+env -i PATH="$PATH" "${product[@]}" "$writer" --product "$tmp/product.env" >/dev/null
+names_of "$tmp/product.env" | diff -u "$tmp/product-expected" - || {
+    echo "--product wrote other names than deploy/product/staging.env.example" >&2
+    exit 1
+}
+grep -qx 'PRODUCT_SEED=' "$tmp/product.env" && ! grep -q 'secret-value-of-PRODUCT_SEED' "$tmp/product.env" || {
+    echo "--product wrote the product seed" >&2
+    exit 1
+}
+
 echo "write-staging-env.sh test passed"

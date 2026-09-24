@@ -57,7 +57,7 @@ def main() -> int:
     ledger = reference.ProductLedger()
     results: list[tuple[str, str, float, str]] = []
     with config.client() as client:
-        key = reference.pin_settlement_key(config, client)
+        key = reference.pin_settlement_key(config)
         settlement = harness.ScenarioSettlement(config, ledger, key, rpc)
         with reference.ProductServer(settlement, reference.WebhookReceiver(ledger, key)):
             context = harness.Context(

@@ -1,0 +1,338 @@
+name: Deploy staging product
+
+# Provisions or upgrades the staging reference-product CVM on Phala Cloud (deploy/README.md,
+# "Staging reference product"): sdk/examples/phala_cloud_integration.py in `serve` mode, the
+# settlement endpoint and webhook receiver of the phala-cloud product on the Sepolia staging route.
+# It follows Deploy staging (same controls, Phala CLI 1.1.22 behavior, and runner constraints; see
+# that workflow's header) with a smaller CVM:
+#
+# - The GitHub Environment `staging` holds the only secret, PHALA_CLOUD_API_KEY. The product's
+#   signing seed never enters GitHub: `provision` sends the env file with PRODUCT_SEED empty (the
+#   product serves settlements and webhooks but its account API answers 503) and the owner seals
+#   the complete env file from their own machine; `upgrade` sends no env, so the sealed env stays.
+# - Public configuration: TOPUP_ORIGIN is the gateway URL of the topup CVM in vars.STAGING_CVM_ID,
+#   read from Phala Cloud; PRODUCT_RPC_URL (the product's own Sepolia RPC, not topup's providers)
+#   and PRODUCT_DRIVER_PUBLIC_KEY (the deposit driver's key) are Environment variables; the
+#   route's addresses are in deploy/product/docker-compose.yml. The product pins topup's
+#   settlement key from TOPUP_ORIGIN's /v1/attestation at startup.
+# - The CVM id is the Environment variable STAGING_PRODUCT_CVM_ID.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "provision: create the product CVM; upgrade: update the CVM in vars.STAGING_PRODUCT_CVM_ID"
+        type: choice
+        options: [provision, upgrade]
+        required: true
+      product_image:
+        description: "crypto-topup-reference-product image, repository@sha256:<64 hex> (Release images summary)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging-product
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    environment: staging
+    timeout-minutes: 60
+    env:
+      MODE: ${{ inputs.mode }}
+      PRODUCT_IMAGE: ${{ inputs.product_image }}
+      DSTACK_OS_IMAGE: ${{ vars.DSTACK_OS_IMAGE }}
+      STAGING_CVM_ID: ${{ vars.STAGING_CVM_ID }}
+      STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
+      PHALA_WORKSPACE: "kingsley's projects"
+      CVM_NAME: crypto-topup-staging-product
+      PORT: "8089"
+    steps:
+      - name: Check inputs and Environment settings
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          status=0
+          digest='^[a-z0-9]+([._/-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$'
+          [[ "$PRODUCT_IMAGE" =~ $digest ]] ||
+            { echo "::error::PRODUCT_IMAGE must be repository@sha256:<64 lowercase hex>"; status=1; }
+          [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
+            { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
+          for name in DSTACK_OS_IMAGE STAGING_CVM_ID; do
+            [[ -n "${!name}" ]] || { echo "::error::Environment variable $name is not set"; status=1; }
+          done
+          case "$MODE" in
+            provision)
+              [[ -z "$STAGING_PRODUCT_CVM_ID" ]] || {
+                echo "::error::STAGING_PRODUCT_CVM_ID is set ($STAGING_PRODUCT_CVM_ID); use mode upgrade, or clear it to provision a new CVM"
+                status=1
+              } ;;
+            upgrade)
+              [[ -n "$STAGING_PRODUCT_CVM_ID" ]] ||
+                { echo "::error::mode upgrade needs the Environment variable STAGING_PRODUCT_CVM_ID"; status=1; } ;;
+            *) echo "::error::unknown mode $MODE"; status=1 ;;
+          esac
+          exit "$status"
+
+      - name: Prepare private working files
+        run: |
+          work="$RUNNER_TEMP/deploy-staging-product"
+          mkdir -p "$work" "$RUNNER_TEMP/phala-cloud"
+          env_file=$(umask 077 && mktemp "$RUNNER_TEMP/product-env.XXXXXX")
+          {
+            echo "WORK=$work"
+            echo "ENV_FILE=$env_file"
+            echo "PHALA_CLOUD_DIR=$RUNNER_TEMP/phala-cloud"
+          } >>"$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.3
+
+      # topup's gateway URL, and for a new product CVM a provisional public URL until its own
+      # gateway URL is known (step "Set the public URL").
+      - name: Resolve the topup origin and the public URL
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          # gateway_url CVM_ID PORT VARIABLE
+          gateway_url() {
+            local app_id domain
+            npx --yes phala@1.1.22 cvms get "$1" --json >"$WORK/cvm-$1.json"
+            app_id=$(jq -er '.app_id' "$WORK/cvm-$1.json")
+            domain=$(jq -er '.gateway.base_domain' "$WORK/cvm-$1.json")
+            printf -v "$3" 'https://%s-%s.%s' "${app_id#0x}" "$2" "$domain"
+          }
+          gateway_url "$STAGING_CVM_ID" 8080 topup_origin
+          if [[ "$MODE" == provision ]]; then
+            public_url=https://pending.invalid
+          else
+            gateway_url "$STAGING_PRODUCT_CVM_ID" "$PORT" public_url
+          fi
+          {
+            echo "TOPUP_ORIGIN=$topup_origin"
+            echo "PRODUCT_PUBLIC_URL=$public_url"
+          } >>"$GITHUB_ENV"
+          echo "topup origin: $topup_origin"
+          echo "product public URL: $public_url"
+
+      # `upgrade` writes the file for preflight only and never sends it.
+      - name: Write the unsealed env file
+        env:
+          PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
+          PRODUCT_RPC_URL: ${{ vars.PRODUCT_RPC_URL }}
+        run: deploy/write-staging-env.sh --product "$ENV_FILE"
+
+      - name: Render the compose from this commit with the input digest
+        run: deploy/render-compose.sh deploy/product/docker-compose.yml >"$WORK/docker-compose.product.yml"
+
+      - name: Preflight (read-only; product RPC, topup attestation, anonymous pull, Phala Cloud)
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          deploy/product/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.product.yml" \
+            --workspace "$PHALA_WORKSPACE" --os-image "$DSTACK_OS_IMAGE" --unsealed
+
+      - name: Deploy (${{ inputs.mode }})
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          if [[ "$MODE" == provision ]]; then
+            npx --yes phala@1.1.22 deploy --json \
+              --name "$CVM_NAME" \
+              --compose "$WORK/docker-compose.product.yml" \
+              -e "$ENV_FILE" \
+              --instance-type tdx.small \
+              --fs ext4 \
+              --kms phala \
+              --image "$DSTACK_OS_IMAGE" \
+              --no-dev-os \
+              --no-public-logs \
+              --no-public-sysinfo \
+              --public-tcbinfo \
+              --secure-time 2>&1 | tee "$WORK/deploy.raw"
+          else
+            # No -e: the owner-sealed env stays (see Deploy staging).
+            npx --yes phala@1.1.22 deploy --json \
+              --cvm-id "$STAGING_PRODUCT_CVM_ID" \
+              --compose "$WORK/docker-compose.product.yml" \
+              --no-public-logs \
+              --no-public-sysinfo \
+              --wait 2>&1 | tee "$WORK/deploy.raw"
+          fi
+          sed -n '/^{/,$p' "$WORK/deploy.raw" >"$WORK/deploy.json"
+          jq -e '.success == true' "$WORK/deploy.json" >/dev/null
+          cvm_id=$(jq -er '.vm_uuid' "$WORK/deploy.json")
+          app_id=$(jq -er '.app_id' "$WORK/deploy.json")
+          {
+            echo "CVM_ID=$cvm_id"
+            echo "APP_ID=$app_id"
+          } >>"$GITHUB_ENV"
+          {
+            echo "## Staging product $MODE"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| CVM id | \`$cvm_id\` |"
+            echo "| App id | \`$app_id\` |"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| reference product | \`$PRODUCT_IMAGE\` |"
+            echo "| OS image | \`$DSTACK_OS_IMAGE\` |"
+            echo "| topup origin | $TOPUP_ORIGIN |"
+            echo
+            if [[ "$MODE" == provision ]]; then
+              echo "Set the \`staging\` Environment variable \`STAGING_PRODUCT_CVM_ID\` to \`$cvm_id\`;"
+              echo "later runs, including a retry after a failure below, use mode \`upgrade\`."
+              echo
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the CVM and the product
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          settled='.status == "running" and (.in_progress | not)'
+          for _ in $(seq 60); do
+            npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
+              jq -e "$settled" "$WORK/cvm.json" >/dev/null && break
+            sleep 15
+          done
+          jq -e "$settled" "$WORK/cvm.json" >/dev/null ||
+            { echo "::error::CVM $CVM_ID is not running"; exit 1; }
+          deployed_hash=$(jq -er '.compose_hash' "$WORK/cvm.json")
+          deployed_hash=${deployed_hash#0x}
+          echo "DEPLOYED_COMPOSE_HASH=${deployed_hash,,}" >>"$GITHUB_ENV"
+          domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
+          gateway_url="https://${APP_ID#0x}-$PORT.$domain"
+          echo "GATEWAY_URL=$gateway_url" >>"$GITHUB_ENV"
+          for _ in $(seq 60); do
+            curl -fsS --max-time 10 "$gateway_url/healthz" >/dev/null && exit 0
+            sleep 10
+          done
+          echo "::error::$gateway_url/healthz did not answer"
+          exit 1
+
+      # Env values are not part of the app-compose, so the same name set keeps the compose hash.
+      - name: Set the public URL
+        if: inputs.mode == 'provision'
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          (
+            umask 077
+            awk -v url="$GATEWAY_URL" \
+              '/^PRODUCT_PUBLIC_URL=/ { print "PRODUCT_PUBLIC_URL=" url; next } { print }' \
+              "$ENV_FILE" >"$ENV_FILE.new"
+          )
+          cat "$ENV_FILE.new" >"$ENV_FILE"
+          rm -f "$ENV_FILE.new"
+          deploy/product/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.product.yml" \
+            --offline --unsealed
+          before=$(jq -c '.progress' "$WORK/cvm.json")
+          npx --yes phala@1.1.22 envs update "$CVM_ID" -e "$ENV_FILE"
+          restarted=0
+          for _ in $(seq 60); do
+            if npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
+              jq -e --argjson before "$before" \
+                '.status != "running" or .in_progress or .progress != $before' \
+                "$WORK/cvm.json" >/dev/null; then
+              restarted=1
+              break
+            fi
+            sleep 5
+          done
+          ((restarted)) || { echo "::error::the CVM did not start the env update within 5 minutes"; exit 1; }
+          for _ in $(seq 60); do
+            npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
+              jq -e '.status == "running" and (.in_progress | not)' "$WORK/cvm.json" >/dev/null &&
+              curl -fsS --max-time 10 "$GATEWAY_URL/healthz" >/dev/null && exit 0
+            sleep 15
+          done
+          echo "::error::the product did not come back within 15 minutes after the URL update"
+          exit 1
+
+      - name: Read back and verify the attested compose
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          attested=""
+          for _ in $(seq 40); do
+            if npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json >"$WORK/attestation.json" 2>/dev/null &&
+              jq -jer '.compose_file | select(type == "string" and length > 0)' \
+                "$WORK/attestation.json" >"$WORK/app-compose.json" 2>/dev/null; then
+              attested=$(deploy/compose-hash.sh "$WORK/app-compose.json" 2>/dev/null) || attested=""
+              [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] && break
+            fi
+            sleep 15
+          done
+          [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] || {
+            echo "::error::the attestation reports compose hash '${attested:-none}', not the deployed $DEPLOYED_COMPOSE_HASH"
+            exit 1
+          }
+          npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json"
+          deploy/verify-attested-compose.sh "$WORK/attestation.json" "$WORK/cvm.json" \
+            "$WORK/docker-compose.product.yml" deploy/product/staging.env.example "product:$PORT" 2>&1 |
+            tee "$WORK/verification.txt"
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Compose hash | \`0x$DEPLOYED_COMPOSE_HASH\` |"
+            echo "| Public URL | $GATEWAY_URL |"
+            echo "| Settlement URL | $GATEWAY_URL/settlements |"
+            echo "| Webhook URL | $GATEWAY_URL/webhooks |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Print the owner's sealing step
+        if: inputs.mode == 'provision'
+        run: |
+          {
+            echo "### Owner: seal the product seed"
+            echo
+            echo "The product runs without its signing seed: settlements and webhooks are served,"
+            echo "the account API answers 503. Seal the complete env file from your own machine:"
+            echo "exactly the deploy/product/staging.env.example names, this run's values"
+            echo "(PRODUCT_PUBLIC_URL=$GATEWAY_URL, TOPUP_ORIGIN=$TOPUP_ORIGIN, and the"
+            echo "Environment variables), and PRODUCT_SEED from your seed file. From a checkout of"
+            echo "\`$GITHUB_SHA\`, with \`docker-compose.product.yml\` from this run's artifact:"
+            echo
+            echo '```sh'
+            echo "deploy/product/preflight.sh --env .env.product --compose docker-compose.product.yml --offline"
+            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e .env.product"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the deployment record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-product-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/deploy-staging-product/docker-compose.product.yml
+            ${{ runner.temp }}/deploy-staging-product/deploy.json
+            ${{ runner.temp }}/deploy-staging-product/cvm.json
+            ${{ runner.temp }}/deploy-staging-product/attestation.json
+            ${{ runner.temp }}/deploy-staging-product/verification.txt
+
+      - name: Delete the env file and CLI state
+        if: always()
+        run: |
+          [[ -z "${ENV_FILE:-}" ]] || rm -f "$ENV_FILE" "$ENV_FILE.new"
+          [[ -z "${PHALA_CLOUD_DIR:-}" ]] || rm -rf "$PHALA_CLOUD_DIR"
+          [[ -z "${WORK:-}" ]] || rm -rf "$WORK"

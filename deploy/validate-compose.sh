@@ -165,4 +165,25 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
     exit 1
 }
 
+# The reference-product CVM (deploy/product): it reads exactly the names of its env example, which
+# become its allowed_envs, mounts no host path, and publishes only 8089.
+product_compose="$root/deploy/product/docker-compose.yml"
+docker compose -f "$product_compose" config --variables |
+    awk 'NR > 1 && NF > 0 && $1 != "PRODUCT_IMAGE" { print $1 }' | sort >"$compose_envs"
+awk '/^[[:space:]]*($|#)/ { next } { sub(/=.*/, ""); print }' \
+    "$root/deploy/product/staging.env.example" | sort -u >"$staging_envs"
+cmp -s "$compose_envs" "$staging_envs" || {
+    echo "the product compose reads other variables than deploy/product/staging.env.example" >&2
+    diff -u "$staging_envs" "$compose_envs" >&2 || true
+    exit 1
+}
+docker compose -f "$product_compose" config --format json >"$rendered"
+jq -e '([.services[].volumes[]? | select(.type == "bind")] | length == 0)
+    and ([.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["product"])
+    and ([.services.product.ports[].target] == [8089])
+    and (.configs.product_config.content | test("[$]") | not)' "$rendered" >/dev/null || {
+    echo "the product compose must mount no host path and publish only product:8089" >&2
+    exit 1
+}
+
 echo "attested compose config, allowed_envs, and local overlay validation passed"

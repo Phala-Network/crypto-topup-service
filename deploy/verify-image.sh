@@ -4,6 +4,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 platform=${PLATFORM:-linux/amd64}
+# DOCKERFILE (relative to the repository root) selects another image; default the crypto-topup one.
+dockerfile="$root/${DOCKERFILE:-Dockerfile}"
 tmp=$(mktemp -d)
 
 cleanup() {
@@ -23,6 +25,7 @@ build() {
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
         --provenance=false \
         --sbom=false \
+        --file "$dockerfile" \
         --output "type=oci,dest=$archive,name=crypto-topup-service:repro,rewrite-timestamp=true,oci-mediatypes=true" \
         "$root"
     tar -xf "$archive" -C "$output"
@@ -65,6 +68,7 @@ if [ -n "${PUBLISH_IMAGE:-}" ]; then
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
         --provenance=false \
         --sbom=false \
+        --file "$dockerfile" \
         --output "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
         "$root"
 

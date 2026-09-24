@@ -119,6 +119,11 @@ jobs:
           --tag crypto-topup-service:ci .
       - name: Smoke test runtime image
         run: docker run --rm crypto-topup-service:ci topup --help
+      - name: Build and smoke test the reference-product image
+        run: |
+          docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            -f deploy/Dockerfile.reference-product -t crypto-topup-reference-product:ci .
+          docker run --rm crypto-topup-reference-product:ci --help
       - name: Validate the sandbox route template
         run: |
           route="$RUNNER_TEMP/sandbox-route.yaml"
@@ -143,7 +148,7 @@ jobs:
         run: deploy/check-alerts.sh
       - name: Validate deployment scripts and app compose
         run: |
-          for file in deploy/*.sh deploy/contracts/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
+          for file in deploy/*.sh deploy/contracts/*.sh deploy/product/*.sh deploy/local/*.sh deploy/scripts/* deploy/postgres-init/* deploy/tests/*.sh; do
             case "$(head -n 1 "$file")" in
               *bash) bash -n "$file" ;;
               *) sh -n "$file" ;;
@@ -155,6 +160,7 @@ jobs:
           deploy/tests/render-compose.sh
           deploy/tests/render-route.sh
           deploy/tests/preflight.sh
+          deploy/tests/product-preflight.sh
           deploy/tests/write-staging-env.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
           TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
