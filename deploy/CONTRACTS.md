@@ -1,10 +1,9 @@
 # Deterministic contract deployment
 
-This runbook implements work package A2. Sepolia factory deployments run in CI: the Deploy
-contracts workflow ([deploy-contracts.yml](../.github/workflows/deploy-contracts.yml), `main` only,
-key from the `staging` Environment secret `SEPOLIA_DEPLOYER_PRIVATE_KEY`) runs the
-[Sepolia](#sepolia) commands below, and Verify contracts re-checks the deployment daily. Mainnet is
-never deployed from automation. Every other funding or broadcast command below is **HUMAN-ONLY**.
+This runbook implements work package A2. No signing key is stored in CI: every funding or
+broadcast command below is **HUMAN-ONLY**, run by the Safe owner with their own key, and the
+Verify contracts workflow re-checks the deployment daily. Mainnet is never deployed from
+automation.
 
 The Arachnid deterministic deployment proxy is fixed at
 `0x4e59b44847b379578588920cA78FbF26c0B4956C`. Its calldata is the plain 32-byte salt followed by
@@ -125,12 +124,12 @@ architecture explicitly selects another deterministic deployer.
 ## Sepolia
 
 Use the Finance Safe as both factory admin and treasury unless the committed expectations name
-different approved Safes. `ADMIN` and `TREASURY` must match those entries. Run the Deploy contracts
-workflow (first without, then with `broadcast: true`); it performs these commands with the key in
-the environment:
+different approved Safes. `ADMIN` and `TREASURY` must match those entries. **HUMAN-ONLY**, with
+the deployer key in the environment only (the forge script reads `PRIVATE_KEY`; it never appears
+in argv):
 
 ```sh
-# PRIVATE_KEY is the Environment secret SEPOLIA_DEPLOYER_PRIVATE_KEY.
+read -rsp "Deployer private key: " PRIVATE_KEY && printf '\n' && export PRIVATE_KEY
 export ADMIN="$(jq -er .admin deploy/contracts/safe-expectations.json)"
 export TREASURY="$(jq -er .treasury deploy/contracts/safe-expectations.json)"
 
