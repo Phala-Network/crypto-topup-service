@@ -5,6 +5,7 @@ ARG WAL_G_VERSION=3.0.9
 ARG WAL_G_AMD64_SHA256=8015836f246a978f27b31a2462eac7765312558ae5b11ac033322b555abf9e22
 ARG WAL_G_ARM64_SHA256=1edd72c3387bfc3a1c19acad9daa36709dbb7cff0642f7044e175d5f8b555d64
 
+# ca-certificates: WAL-G verifies the object store's TLS certificate (R2/S3 over HTTPS).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     set -eu; \
@@ -20,8 +21,9 @@ RUN apt-get update && \
 
 FROM postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
 
+# ca-certificates: WAL-G verifies the object store's TLS certificate (R2/S3 over HTTPS).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends jq && \
+    apt-get install -y --no-install-recommends ca-certificates jq && \
     rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL 18 images declare VOLUME /var/lib/postgresql and default PGDATA to a major-version
