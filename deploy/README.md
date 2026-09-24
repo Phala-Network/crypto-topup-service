@@ -102,11 +102,8 @@ not an OS image bump.
 4. **Owner decisions.** Staging uses Phala Cloud's KMS (`--kms phala`): no `DstackApp` contract, no
    provisioner key, and upgrades apply without an on-chain compose-hash approval. The on-chain
    Base KMS stays the production path (sections A and B). The staging `settlement_url` in
-   `deploy/config/routes/phala-cloud-sepolia-pha.yaml` is a non-routable `.invalid` placeholder,
-   so settlements fail on DNS and deposits stay unsettled (expect the stuck-deposit alerts); the
-   staging product endpoint is the reference-product CVM
-   ([Staging reference product](#staging-reference-product)), set in the route by a reviewed
-   route change before any end-to-end settlement test.
+   `deploy/config/routes/phala-cloud-sepolia-pha.yaml` is the reference-product CVM's
+   `/settlements` endpoint ([Staging reference product](#staging-reference-product)).
 
 The Sepolia contracts (factory, test PHA token, sanctions oracle) are deployed and committed in the
 route. A future factory deployment is run by the Safe owner with their own key, as

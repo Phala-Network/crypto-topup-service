@@ -1,4 +1,4 @@
-# Staging route on Sepolia (test contracts). The settlement URL is a non-routable placeholder until a staging product exists.
+# Staging route on Sepolia (test contracts). Settlements go to the staging reference-product CVM (deploy/README.md, "Staging reference product").
 chain:
   chain_id: 11155111
   finality: finalized
@@ -27,7 +27,7 @@ asset:
 destination:
   product: phala-cloud
   unit_decimals: 2
-  settlement_url: "https://settlement.staging.invalid/internal/crypto-topup/settlements"
+  settlement_url: "https://fcb1ace9ae19492773a9384924d50cad9b532859-8089.dstack-pha-prod5.phala.network/settlements"
   product_kid: phala-cloud/v1
 
 pricing:
