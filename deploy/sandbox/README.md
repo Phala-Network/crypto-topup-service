@@ -5,8 +5,8 @@ package E4): Sepolia, a test token, product credentials, and scripted late, unde
 rejected payment scenarios. The same scenarios run now against a disposable local stack and
 later, unchanged, against the Sepolia sandbox.
 
-Every step that deploys contracts, changes a CVM, or writes to the sandbox database is marked
-**HUMAN-ONLY**; agents and CI never run them.
+Every step that deploys contracts, changes a CVM, or issues a product with the sandbox's admin key
+is marked **HUMAN-ONLY**; agents and CI never run them.
 
 ## Contents
 
@@ -15,7 +15,6 @@ Every step that deploys contracts, changes a CVM, or writes to the sandbox datab
 | `routes/sandbox-sepolia.template.yaml` | Capped route for one integrator product (chain id 11155111). |
 | `render-route.sh` | Renders the template from environment variables; refuses leftover placeholders. |
 | `deploy-test-contracts.sh` | Deploys the test token (A1 `MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
-| `issue-product.sh` | Registers a product's slug, public key, and webhook URL, with an audit row. The key id and settlement URL come only from the attested route. |
 | `docker-compose.sepolia.yml`, `render-sepolia-compose.sh` | Overlay for `deploy/docker-compose.yml` and the renderer that inlines the sandbox route into the attested compose. |
 | `docker-compose.local.yml`, `run-local.sh` | Local stack (the attested compose with the `deploy/local` overlay, plus Anvil) and the end-to-end driver. |
 | `scenarios/docker_restart.py` | The local `restart_command`: restarts the service container through the Docker API. |
@@ -23,7 +22,7 @@ Every step that deploys contracts, changes a CVM, or writes to the sandbox datab
 
 ## Run everything locally
 
-Requirements: Docker Compose, Foundry v1.8.3 (`forge`, `cast`), `jq`, and `uv`.
+Requirements: Docker Compose, Foundry v1.8.3 (`forge`, `cast`), `jq`, `uv`, `curl`, and OpenSSL 3.
 
 ```sh
 deploy/sandbox/run-local.sh                 # example, then every scenario
@@ -125,20 +124,12 @@ gas from a public faucet.
    call and the service verifies `@target-uri` against this origin, so a wrong value makes every
    signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
    deployed sandbox URL before opening it to integrators.
-5. **HUMAN-ONLY:** issue the product through the sandbox's administrative database access
-   (there is deliberately no product-creation API):
-
-   Keep the connection details and password out of the command line: define a
-   `topup-sandbox-admin` entry in `~/.pg_service.conf` and the password in `~/.pgpass` (mode 0600).
-
-   ```sh
-   PSQL="psql service=topup-sandbox-admin" deploy/sandbox/issue-product.sh \
-     --slug acme --public-key '<base64>' \
-     --webhook-url https://acme.example/topup/webhooks --operator "$USER"
-   ```
-
-   Changing a product's public key or webhook URL is a separate, audited change; the script refuses
-   to overwrite an existing slug. Changing its key id or settlement URL is a new route version.
+5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
+   against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
+   [Product credentials](../README.md#product-credentials) describes: the integrator's slug (the
+   route's `destination.product`), public key, and HTTPS webhook URL. The request is audited; a
+   repeat with the same values returns the same product, and different values for an issued slug
+   are refused with `409`. The key id and settlement URL come only from the route.
 
 ## Running the scenarios against Sepolia (integrators)
 

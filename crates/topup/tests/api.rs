@@ -524,6 +524,118 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
     result.and(cleanup)
 }
 
+/// `POST /v1/admin/products` is the only way to issue product credentials: admin-signed,
+/// validated at the boundary, idempotent for identical values, and audited once.
+#[tokio::test]
+async fn admin_product_registration() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[41; 32]);
+        let admin_key = SigningKey::from_bytes(&[42; 32]);
+        let app = test_router(&database.app_pool, &admin_key);
+        let path = "/v1/admin/products";
+        let now = Utc::now().timestamp();
+        let register = |body: Value, created: i64, kid: &str, key: &SigningKey| -> Result<_> {
+            Ok(signed_request(
+                Method::POST,
+                path,
+                serde_json::to_vec(&body)?,
+                kid,
+                key,
+                created,
+            ))
+        };
+        let valid = json!({
+            "slug": "phala-cloud",
+            "public_key": public_key_base64(&product_key),
+            "webhook_url": "https://product.test/webhooks",
+        });
+
+        let response = app
+            .clone()
+            .oneshot(register(valid.clone(), now, PRODUCT_KID, &product_key)?)
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+
+        let invalid = [
+            json!({"slug": "Phala", "public_key": public_key_base64(&product_key),
+                   "webhook_url": "https://product.test/webhooks"}),
+            json!({"slug": "phala-cloud", "public_key": "AAAA",
+                   "webhook_url": "https://product.test/webhooks"}),
+            json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
+                   "webhook_url": "http://product.test/webhooks"}),
+            json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
+                   "webhook_url": "https://user:secret@product.test/webhooks"}),
+            json!({"slug": "unrouted", "public_key": public_key_base64(&product_key),
+                   "webhook_url": "https://product.test/webhooks"}),
+        ];
+        for (offset, body) in (1_i64..).zip(invalid) {
+            let response = app
+                .clone()
+                .oneshot(register(body.clone(), now + offset, ADMIN_KID, &admin_key)?)
+                .await?;
+            ensure!(
+                response.status() == StatusCode::BAD_REQUEST,
+                "{body} must be rejected"
+            );
+            ensure!(response_json(response).await?["error"]["code"] == "invalid_request");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(register(valid.clone(), now + 10, ADMIN_KID, &admin_key)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let created = response_json(response).await?;
+        ensure!(created["slug"] == "phala-cloud");
+        ensure!(created["public_key"] == valid["public_key"]);
+        ensure!(created["webhook_url"] == "https://product.test/webhooks");
+
+        let response = app
+            .clone()
+            .oneshot(register(valid.clone(), now + 11, ADMIN_KID, &admin_key)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response_json(response).await?["id"] == created["id"]);
+
+        let mut changed = valid.clone();
+        changed["webhook_url"] = json!("https://product.test/other");
+        let response = app
+            .clone()
+            .oneshot(register(changed, now + 12, ADMIN_KID, &admin_key)?)
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response_json(response).await?["error"]["code"] == "conflict");
+
+        let audit =
+            sqlx::query("SELECT actor, action FROM audit WHERE subject = 'product:phala-cloud'")
+                .fetch_all(&database.app_pool)
+                .await?;
+        ensure!(audit.len() == 1, "only the first registration is audited");
+        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        ensure!(audit[0].try_get::<String, _>("action")? == "product.issue");
+
+        // The registered key authenticates product requests under the route's key id.
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts",
+                serde_json::to_vec(&json!({"external_id": "registered"}))?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[tokio::test]
 async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {

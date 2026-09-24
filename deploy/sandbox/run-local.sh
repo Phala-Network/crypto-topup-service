@@ -4,13 +4,13 @@
 # (docker-compose.local.yml). Everything it starts is removed on exit.
 # Usage: deploy/sandbox/run-local.sh [SCENARIO ...]
 #
-# Requires docker compose, Foundry (forge, cast), jq, and uv. Prices come from the
+# Requires docker compose, Foundry (forge, cast), jq, uv, curl, and OpenSSL 3. Prices come from the
 # live Coin Metrics, Binance, and Kraken endpoints, exactly as on Sepolia.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
-for command in docker forge cast jq uv python3; do
+for command in docker forge cast jq uv python3 curl openssl; do
     require_command "$command"
 done
 
@@ -57,6 +57,12 @@ public_url="http://product:8089"
 slug="sandbox-local"
 keyid="$slug/v1"
 mkdir -p "$TOPUP_LOCAL_ROUTES_DIR"
+# A throwaway admin key for this run; the service issues the product through the admin API.
+export TOPUP_LOCAL_ADMIN_KID="sandbox-admin/v1"
+openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
+TOPUP_LOCAL_ADMIN_PUBLIC_KEY=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER |
+    tail -c 32 | base64)
+export TOPUP_LOCAL_ADMIN_PUBLIC_KEY
 
 echo "== building and starting postgres, dstack simulator, and anvil"
 "${compose[@]}" build postgres dstack-simulator topup
@@ -75,7 +81,7 @@ implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rp
     --rpc-url "$rpc_url" >"$tmp/contracts.json"
 jq . "$tmp/contracts.json"
 
-echo "== issuing product credentials and rendering the sandbox route"
+echo "== creating the product key and rendering the sandbox route"
 uv run --locked --project "$root/sdk/python" topup-sdk keygen --keyid "$keyid" \
     --seed-out "$tmp/product.seed" >"$tmp/product-key.json"
 FORWARDER_FACTORY="$factory" IMPLEMENTATION="$implementation" TREASURY="$owner" \
@@ -85,15 +91,23 @@ FORWARDER_FACTORY="$factory" IMPLEMENTATION="$implementation" TREASURY="$owner" 
     RATE_LOCK_WINDOW_S=45 \
     "$root/deploy/sandbox/render-route.sh" >"$TOPUP_LOCAL_ROUTES_DIR/sandbox.yaml"
 "${compose[@]}" run --rm --no-deps topup topup route validate /etc/topup/routes/sandbox.yaml
-PSQL="${compose[*]} exec -T postgres psql -U postgres -d topup" \
-    "$root/deploy/sandbox/issue-product.sh" --slug "$slug" \
-    --public-key "$(jq -er .public_key "$tmp/product-key.json")" \
-    --webhook-url "$public_url/webhooks" \
-    --operator run-local --allow-http
 
 echo "== starting the service"
 "${compose[@]}" up -d topup
 wait_for "GET /healthz" curl -fsS "$service_url/healthz"
+
+echo "== issuing product credentials through POST /v1/admin/products"
+# Signed for the service's public origin (http://topup:8080), sent to its published port.
+jq -n --arg slug "$slug" --arg public_key "$(jq -er .public_key "$tmp/product-key.json")" \
+    --arg webhook_url "$public_url/webhooks" \
+    '{slug: $slug, public_key: $public_key, webhook_url: $webhook_url}' >"$tmp/product.json"
+mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
+    http://topup:8080/v1/admin/products "$tmp/product.json" "$tmp/admin.pem" \
+    "$TOPUP_LOCAL_ADMIN_KID")
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
+    -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
+    --data-binary @"$tmp/product.json" "$service_url/v1/admin/products"
+echo
 
 # Addresses as seen from the product container on the compose network.
 jq -n \

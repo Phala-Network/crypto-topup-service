@@ -23,12 +23,12 @@
 #
 # Nothing is bind-mounted and the workload publishes no host port (see cvm-rehearsal.compose.yml).
 # Requires docker (Compose 2.24.4+), Foundry v1.8.3 with contracts/lib checked out, jq, python3,
-# and internet access for the live price sources, as in production.
+# OpenSSL 3, and internet access for the live price sources, as in production.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
-for command in docker forge cast jq python3; do
+for command in docker forge cast jq python3 openssl; do
     require_command "$command"
 done
 
@@ -228,8 +228,9 @@ jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$tmp/s
     >/dev/null || die "the rehearsal stack bind-mounts a host path"
 
 echo "== writing the unsealed .env with write-staging-env.sh"
-admin_key=$(product_python -m topup_sdk keygen --keyid rehearsal-admin/v1 \
-    --seed-out /tmp/admin.seed)
+# The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
+openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
+admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
 product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
     --seed-out /opt/product.seed)
 declare -A values=(
@@ -241,7 +242,7 @@ declare -A values=(
     [AWS_SESSION_TOKEN]=
     [COINMETRICS_API_KEY]=
     [TOPUP_ADMIN_KID]=rehearsal-admin/v1
-    [TOPUP_ADMIN_PUBLIC_KEY]=$(jq -er .public_key <<<"$admin_key")
+    [TOPUP_ADMIN_PUBLIC_KEY]=$admin_public_key
     [TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]=0
     [TOPUP_BACKUP_KEY_VERSION]=1
     [TOPUP_PUBLIC_ORIGIN]=http://topup:8080
@@ -364,10 +365,23 @@ wait_for "topup to export the backup marker" 60 marker_exported
 echo "ok: WAL archiving refreshed the backup marker and topup exports it"
 
 echo "== one quote-first deposit against the reference product"
-PSQL="docker compose -p $project --project-directory $root/deploy/local --env-file $cvm/.env -f $compose_file -f $root/deploy/local/cvm-rehearsal.compose.yml exec -T postgres psql -U postgres -d topup" \
-    "$root/deploy/sandbox/issue-product.sh" --slug phala-cloud \
-    --public-key "$(jq -er .public_key <<<"$product_key")" \
-    --webhook-url http://product:8089/webhooks --operator cvm-rehearsal --allow-http >/dev/null
+# A CVM has no database access, so the owner issues the product through the signed admin API.
+# `-j` omits the trailing newline, so the body passes through an argument byte for byte.
+jq -cjn --arg public_key "$(jq -er .public_key <<<"$product_key")" \
+    '{slug: "phala-cloud", public_key: $public_key, webhook_url: "http://product:8089/webhooks"}' \
+    >"$tmp/product.json"
+mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
+    http://topup:8080/v1/admin/products "$tmp/product.json" "$tmp/admin.pem" rehearsal-admin/v1)
+product_python - "$(<"$tmp/product.json")" "${headers[@]}" <<'PY' >/dev/null ||
+import sys, httpx
+headers = dict(header.split(": ", 1) for header in sys.argv[2:])
+headers["content-type"] = "application/json"
+response = httpx.post("http://topup:8080/v1/admin/products", content=sys.argv[1].encode(),
+                      headers=headers, timeout=30)
+assert response.status_code == 200, (response.status_code, response.text)
+PY
+    die "POST /v1/admin/products did not issue the product"
+echo "ok: POST /v1/admin/products issued the product"
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
     --arg payer "$owner" \
     '{service_url: "http://topup:8080", product_slug: "phala-cloud",

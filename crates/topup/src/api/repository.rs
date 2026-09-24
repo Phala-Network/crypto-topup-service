@@ -70,6 +70,61 @@ pub async fn find_product_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Pr
     Ok(row.map(Into::into))
 }
 
+/// Registers a product with an audit row, or returns the existing product when every value
+/// matches. A slug registered with a different key or webhook URL is a conflict.
+pub async fn register_product(
+    pool: &PgPool,
+    slug: &str,
+    pubkey: &str,
+    webhook_url: &str,
+    actor: &str,
+) -> Result<Product, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let inserted = sqlx::query_as::<_, ProductRow>(
+        r#"
+        INSERT INTO products (id, slug, webhook_url, pubkey)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (slug) DO NOTHING
+        RETURNING id, slug, webhook_url, pubkey, paused_scopes
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(slug)
+    .bind(webhook_url)
+    .bind(pubkey)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let product = match inserted {
+        Some(row) => {
+            insert_audit_tx(
+                &mut transaction,
+                actor,
+                "product.issue",
+                &format!("product:{slug}"),
+            )
+            .await?;
+            row
+        }
+        None => {
+            let existing = sqlx::query_as::<_, ProductRow>(
+                "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE slug = $1",
+            )
+            .bind(slug)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(ApiError::internal)?;
+            if existing.pubkey != pubkey || existing.webhook_url != webhook_url {
+                return Err(ApiError::conflict(
+                    "product slug is already registered with a different public key or webhook URL",
+                ));
+            }
+            existing
+        }
+    };
+    transaction.commit().await?;
+    Ok(product.into())
+}
+
 /// Registers an account or returns the existing account with the same product identifier.
 pub async fn register_account(
     pool: &PgPool,

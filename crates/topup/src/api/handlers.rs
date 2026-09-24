@@ -16,14 +16,15 @@ use crate::routes::{ProviderError, RouteSet};
 
 use super::AppState;
 use super::attestation::AttestationError;
+use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
     AccountResponse, AdminRefundResponse, AttestationQuery, AttestationResponse,
     DailyReportResponse, DepositAddressResponse, DepositListQuery, DepositLookupQuery,
     DepositResponse, DepositsResponse, LimitsResponse, NudgeResponse, PauseRequest, PauseResponse,
-    PersistentSaltInputs, RecordRefundRequest, RefundRequest, RefundResponse,
-    RegisterAccountRequest, RotateDepositAddressRequest, RoutePauseResponse,
-    SupportDepositsResponse,
+    PersistentSaltInputs, ProductResponse, RecordRefundRequest, RefundRequest, RefundResponse,
+    RegisterAccountRequest, RegisterProductRequest, RotateDepositAddressRequest,
+    RoutePauseResponse, SupportDepositsResponse,
 };
 use super::repository;
 
@@ -353,6 +354,51 @@ pub(crate) async fn get_attestation(
 
 #[utoipa::path(
     post,
+    path = "/v1/admin/products",
+    request_body = RegisterProductRequest,
+    responses(
+        (status = 200, description = "OK: registered, or already registered with the same values", body = ProductResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 409, description = "Conflict: the slug is registered with different values", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+pub(crate) async fn register_product(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterProductRequest>,
+) -> ApiResult<Json<ProductResponse>> {
+    validate_product_slug(&request.slug)?;
+    VerificationKey::from_base64(String::new(), &request.public_key).map_err(|_| {
+        ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
+    })?;
+    // The key id and settlement URL come only from the attested route, so a product no loaded
+    // route names could never authenticate.
+    let destination = state
+        .routes
+        .destination(&request.slug)
+        .ok_or_else(|| ApiError::bad_request("no loaded route names this product slug"))?;
+    validate_webhook_url(&request.webhook_url, &destination.settlement_url)?;
+    let product = repository::register_product(
+        &state.pool,
+        &request.slug,
+        &request.public_key,
+        &request.webhook_url,
+        &admin_actor(&state),
+    )
+    .await?;
+    Ok(Json(ProductResponse {
+        id: product.id,
+        slug: product.slug,
+        public_key: product.pubkey,
+        webhook_url: product.webhook_url,
+        paused_scopes: product.paused_scopes,
+    }))
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/admin/routes/{r}/pause",
     params(("r" = String, Path)),
     request_body = PauseRequest,
@@ -669,6 +715,42 @@ fn validate_external_id(external_id: &str) -> ApiResult<()> {
     Ok(())
 }
 
+fn validate_product_slug(slug: &str) -> ApiResult<()> {
+    let bytes = slug.as_bytes();
+    let valid = matches!(bytes.first(), Some(b'a'..=b'z' | b'0'..=b'9'))
+        && bytes.len() <= 63
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
+    if !valid {
+        return Err(ApiError::bad_request(
+            "slug must match ^[a-z0-9][a-z0-9-]{0,62}$",
+        ));
+    }
+    Ok(())
+}
+
+/// Requires an absolute `https` URL without credentials or fragment. `http` is accepted only
+/// when the product's attested settlement URL is itself `http`, which only local stacks use.
+fn validate_webhook_url(webhook_url: &str, settlement_url: &str) -> ApiResult<()> {
+    const MESSAGE: &str = "webhook_url must be an absolute https URL without credentials";
+    if webhook_url.len() > 2048 {
+        return Err(ApiError::bad_request(MESSAGE));
+    }
+    let url = url::Url::parse(webhook_url).map_err(|_| ApiError::bad_request(MESSAGE))?;
+    let allow_http = url::Url::parse(settlement_url).is_ok_and(|url| url.scheme() == "http");
+    let scheme_allowed = url.scheme() == "https" || (allow_http && url.scheme() == "http");
+    if !scheme_allowed
+        || url.host_str().is_none_or(str::is_empty)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ApiError::bad_request(MESSAGE));
+    }
+    Ok(())
+}
+
 fn validate_scopes(scopes: Vec<String>) -> ApiResult<Vec<String>> {
     if scopes.is_empty() {
         return Err(ApiError::bad_request("at least one scope is required"));
@@ -718,4 +800,36 @@ fn account_response(account: Account) -> AccountResponse {
 
 fn admin_actor(state: &AppState) -> String {
     format!("admin:{}", state.admin_key.kid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_product_slug, validate_webhook_url};
+
+    #[test]
+    fn product_slugs_match_the_documented_pattern() {
+        for slug in ["a", "0", "phala-cloud", "a-", &"a".repeat(63)] {
+            assert!(validate_product_slug(slug).is_ok(), "{slug}");
+        }
+        for slug in ["", "-a", "A", "a_b", "a.b", "a b", &"a".repeat(64)] {
+            assert!(validate_product_slug(slug).is_err(), "{slug}");
+        }
+    }
+
+    #[test]
+    fn webhook_urls_use_https_unless_the_attested_settlement_url_is_http() {
+        let https = "https://product.example/settlements";
+        let http = "http://product:8089/settlements";
+        assert!(validate_webhook_url("https://product.example/webhooks", https).is_ok());
+        assert!(validate_webhook_url("http://product.example/webhooks", https).is_err());
+        assert!(validate_webhook_url("http://product:8089/webhooks", http).is_ok());
+        for url in [
+            "product.example/webhooks",
+            "ftp://product.example/webhooks",
+            "https://user@product.example/webhooks",
+            "https://product.example/webhooks#fragment",
+        ] {
+            assert!(validate_webhook_url(url, http).is_err(), "{url}");
+        }
+    }
 }

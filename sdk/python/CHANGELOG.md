@@ -11,6 +11,8 @@ follow [Semantic Versioning](https://semver.org/).
 - `AttestationResponse.operators` (`OperatorIdentity`): the flusher operator of each configured
   chain, bound into `report_data`. Optional, so the model also parses responses from servers
   that predate it.
+- Generated `topup_client.api.admin.register_product` with `RegisterProductRequest` and
+  `ProductResponse` for `POST /v1/admin/products`.
 - `topup_sdk.verify_attestation_binding` and `attestation_report_data`, which check that
   `report_data` binds the nonce, the settlement key, and every listed operator, and
   `AttestationError`.
