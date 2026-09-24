@@ -8,11 +8,13 @@
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
 #    committed route lives, and renders the compose.
-# 4. Writes a `.env` with exactly the names of deploy/staging.env.example and runs
+# 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy staging does (exactly
+#    the names of deploy/staging.env.example, owner-sealed S3 keys empty), and runs
 #    `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator, MinIO,
 #    Anvil), as dstack's app-compose runner does.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
-#    attestation endpoint answers through the simulator, the backup marker is fresh, and one
+#    attestation endpoint answers through the simulator, and no backup marker exists yet; then it
+#    seals the complete `.env` (the owner's `envs update`) and requires a fresh backup marker, and one
 #    quote-first deposit is credited end to end against the reference product
 #    (sdk/examples/phala_cloud_integration.py). Then it removes everything and asserts that no
 #    container, volume, network, or image of the run is left.
@@ -223,7 +225,7 @@ jq -e --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" \
 jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$tmp/stack.json" \
     >/dev/null || die "the rehearsal stack bind-mounts a host path"
 
-echo "== writing .env with exactly the staging.env.example names"
+echo "== writing the unsealed .env with write-staging-env.sh"
 admin_key=$(product_python -m topup_sdk keygen --keyid rehearsal-admin/v1 \
     --seed-out /tmp/admin.seed)
 product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
@@ -250,8 +252,14 @@ declare -A values=(
 ((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and staging.env.example differ"
 for name in "${env_names[@]}"; do
     [[ -v "values[$name]" ]] || die "no rehearsal value for $name"
-    printf '%s=%s\n' "$name" "${values[$name]}"
-done >"$cvm/.env"
+done
+# Deploy staging's writer: every name from the environment, owner-sealed secrets always empty.
+unsealed=()
+for name in "${env_names[@]}"; do
+    unsealed+=("$name=${values[$name]}")
+done
+env -i PATH="$PATH" "${unsealed[@]}" "$root/deploy/write-staging-env.sh" "$cvm/.env" >/dev/null
+grep -qx 'AWS_SECRET_ACCESS_KEY=' "$cvm/.env" || die "the unsealed .env carries the S3 secret"
 docker compose -f "$compose_file" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$tmp/variables"
 printf '%s\n' "${env_names[@]}" | sort | cmp -s - "$tmp/variables" ||
     die "the rendered compose reads other variables than staging.env.example"
@@ -290,6 +298,19 @@ assert bytes.fromhex(body["report_data"]) == hashlib.sha256(nonce + key).digest(
 assert len(body["quote"]) > 0, "empty quote"
 print(f"ok: GET /v1/attestation answered through the simulator ({len(body['quote']) // 2} quote bytes)")
 PY
+
+# Unsealed: WAL archiving cannot reach object storage, so no backup marker has been written.
+if dc exec -T backup test -e /run/topup-observability/last-backup-unix-seconds; then
+    die "a backup marker exists before the S3 keys were sealed"
+fi
+echo "ok: the unsealed CVM serves the API; WAL archiving waits for the sealed S3 keys"
+
+echo "== sealing the complete .env (the owner's envs update: same names, restart)"
+for name in "${env_names[@]}"; do
+    printf '%s=%s\n' "$name" "${values[$name]}"
+done >"$cvm/.env"
+dc up -d --remove-orphans >/dev/null
+wait_for "GET /healthz after sealing" 90 healthy
 
 marker_fresh() {
     local marker

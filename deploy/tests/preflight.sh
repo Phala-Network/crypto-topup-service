@@ -67,4 +67,11 @@ expect_failure stale-render "differs from a fresh render" \
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
 
+# The CI-written env file has the owner-sealed S3 keys empty: accepted only with --unsealed.
+sed -E 's/^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.*/\1=/' "$tmp/complete.env" >"$tmp/unsealed.env"
+expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
+    --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+"$preflight" --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" \
+    --source "$tmp/filled-source.yml" --offline --unsealed >/dev/null
+
 echo "preflight local checks test passed"

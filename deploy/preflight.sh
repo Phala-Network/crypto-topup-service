@@ -7,7 +7,7 @@
 #
 # Usage: deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
 #          --workspace NAME --os-image NAME [--kms base|phala] [--kms-contract ADDRESS] \
-#          [--source COMPOSE] [--offline]
+#          [--source COMPOSE] [--offline] [--unsealed]
 #
 # --kms base (default) also checks that the on-chain KMS contract allows a device and the OS image;
 # --kms phala (Phala Cloud's KMS, used for staging) has no contract to check. Images are pulled
@@ -16,7 +16,9 @@
 #
 # --source is the unrendered compose the rendered file must come from (default
 # deploy/docker-compose.yml of this checkout). --offline runs only the local checks (env file,
-# compose, route). PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure
+# compose, route). --unsealed accepts empty owner-sealed secrets (the S3 keys and the Coin Metrics
+# key): Deploy staging provisions with them empty and the owner seals the complete env file from
+# their own machine; check that file without --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure
 # is reported; the exit status is 1 if any.
 #
 # RPC URLs may carry provider API keys. Cast reads them from ETH_RPC_URL here, but
@@ -33,13 +35,15 @@ route_config=topup_route_phala_cloud_sepolia_pha
 # May stay empty: a static S3 key has no session token, AWS S3 needs no endpoint, and an empty
 # Coin Metrics key selects the community endpoint.
 optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
+# The only secrets of the env file. GitHub never holds them; the owner seals them (README).
+owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY "
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
-        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--offline]" >&2
+        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--offline] [--unsealed]" >&2
     exit 64
 }
-env_file="" compose="" workspace="" os_image="" kms=base offline=0
+env_file="" compose="" workspace="" os_image="" kms=base offline=0 unsealed=0
 source_compose="$REPO_ROOT/deploy/docker-compose.yml"
 kms_contract=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 while (($#)); do
@@ -52,6 +56,7 @@ while (($#)); do
         --kms-contract) kms_contract="${2:-}"; shift 2 ;;
         --source) source_compose="${2:-}"; shift 2 ;;
         --offline) offline=1; shift ;;
+        --unsealed) unsealed=1; shift ;;
         *) usage ;;
     esac
 done
@@ -99,11 +104,13 @@ while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
     env[${line%%=*}]=${line#*=}
 done <"$env_file"
+allowed_empty=$optional_empty
+((unsealed)) && allowed_empty+=$owner_sealed
 for name in $(cat "$tmp/expected"); do
     value=${env[$name]-}
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
-    elif [[ -z "$value" && "$optional_empty" != *" $name "* ]]; then
+    elif [[ -z "$value" && "$allowed_empty" != *" $name "* ]]; then
         fail "$name is empty"
     fi
 done

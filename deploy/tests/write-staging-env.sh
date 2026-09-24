@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# write-staging-env.sh writes exactly the staging.env.example names, refuses a missing required
-# name or a value the CLI's dotenv parser would alter without printing any value, and accepts empty
-# optional names.
+# write-staging-env.sh writes exactly the staging.env.example names, writes the owner-sealed
+# secrets empty even when set, refuses a missing required name or a value the CLI's dotenv parser
+# would alter without printing any value, and accepts empty optional names.
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -14,11 +14,11 @@ names_of() {
 }
 names_of "$root/deploy/staging.env.example" >"$tmp/expected"
 
-# Every name set to a distinctive value; the optional ones empty.
+# Every name set to a distinctive value, including the owner-sealed secrets; AWS_ENDPOINT empty.
 declare -a assignments=()
 while IFS= read -r name; do
     case "$name" in
-        AWS_SESSION_TOKEN | AWS_ENDPOINT | COINMETRICS_API_KEY) assignments+=("$name=") ;;
+        AWS_ENDPOINT) assignments+=("$name=") ;;
         *) assignments+=("$name=secret-value-of-$name") ;;
     esac
 done <"$tmp/expected"
@@ -30,10 +30,16 @@ diff -u "$tmp/expected" "$tmp/actual" || {
     echo "the written names differ from staging.env.example" >&2
     exit 1
 }
-grep -qx 'AWS_SECRET_ACCESS_KEY=secret-value-of-AWS_SECRET_ACCESS_KEY' "$tmp/env" || {
+grep -qx 'WALG_S3_PREFIX=secret-value-of-WALG_S3_PREFIX' "$tmp/env" || {
     echo "a value was not written verbatim" >&2
     exit 1
 }
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY; do
+    grep -qx "$name=" "$tmp/env" || {
+        echo "the owner-sealed $name was not written empty" >&2
+        exit 1
+    }
+done
 [[ "$(stat -c %a "$tmp/env")" == 600 ]] || { echo "the env file is not mode 0600" >&2; exit 1; }
 
 # A missing required name fails, names it, and prints no value.
@@ -56,12 +62,12 @@ fi
 # Quotes, backticks, and # are refused, naming only the variable.
 for bad in 'a#b' 'a"b' "a'b" 'a`b' $'a\nb'; do
     : >"$tmp/bad"
-    if env -i PATH="$PATH" "${assignments[@]}" AWS_SECRET_ACCESS_KEY="secret-value-$bad" \
+    if env -i PATH="$PATH" "${assignments[@]}" TOPUP_ADMIN_KID="secret-value-$bad" \
         "$writer" "$tmp/bad" >"$tmp/out" 2>&1; then
         echo "write-staging-env.sh accepted a value containing ${bad:1:1}" >&2
         exit 1
     fi
-    grep -q 'without quotes, backticks, or #: AWS_SECRET_ACCESS_KEY$' "$tmp/out" || {
+    grep -q 'without quotes, backticks, or #: TOPUP_ADMIN_KID$' "$tmp/out" || {
         echo "unexpected failure output:" >&2
         cat "$tmp/out" >&2
         exit 1
