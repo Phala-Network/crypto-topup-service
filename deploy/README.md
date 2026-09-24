@@ -23,19 +23,18 @@ Release images publishes the images; the other workflows run against the GitHub 
 | Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup` and `postgres-walg` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
 | Deploy staging ([deploy-staging.yml](../.github/workflows/deploy-staging.yml)) | manual, `main` only | provisions or upgrades the staging CVM (below) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
-| Deploy contracts ([deploy-contracts.yml](../.github/workflows/deploy-contracts.yml)) | manual, `main` only | Sepolia `ForwarderFactory`: dry run, then broadcast only with `broadcast: true`, then verification; forge run records and the report as artifacts |
 
 ### Controls
 
 The `staging` Environment admits only the `main` branch, and the deploy jobs also check
 `github.ref`. Starting a workflow needs write access to the repository. Required reviewers are not
 available for a private repository on the current GitHub plan, so there is **no approval gate**:
-dispatching Deploy staging or Deploy contracts is the decision, and the run's actor is the record.
+dispatching Deploy staging is the decision, and the run's actor is the record.
 The credentials exist only as `staging` Environment secrets and reach the tools through
-environment variables, never command-line arguments (the Sepolia deployer key is read inside the
-forge script). The workflows have
+environment variables, never command-line arguments. No signing key is stored in GitHub:
+contract deployments and Safe transactions are signed by the Safe owner outside CI. The workflows have
 `permissions: contents: read`, pin every action by commit SHA, and serialize runs
-(`deploy-staging`, `deploy-contracts`) without cancelling one in progress.
+(`deploy-staging`) without cancelling one in progress.
 
 Mainnet is never deployed from CI. Mainnet contracts and any production CVM stay HUMAN-ONLY
 through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B below).
@@ -60,8 +59,7 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `POSTGRES_PASSWORD`, `TOPUP_APP_PASSWORD` | secret | two different `openssl rand -hex 32` values |
    | `MIGRATE_DATABASE_URL` | secret | `postgres://postgres:<POSTGRES_PASSWORD>@postgres:5432/topup` |
    | `DATABASE_URL` | secret | `postgres://topup_service:<TOPUP_APP_PASSWORD>@postgres:5432/topup` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | secret | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy contracts) |
-   | `SEPOLIA_DEPLOYER_PRIVATE_KEY` | secret | only for Deploy contracts: a funded Sepolia deployer key |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | secret | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts) |
    | `AWS_ENDPOINT` | variable, optional | S3-compatible endpoint (R2); empty for AWS S3 |
    | `AWS_REGION` | variable | bucket region (`auto` for R2) |
    | `AWS_S3_FORCE_PATH_STYLE` | variable | `false` (or `true` for a path-style endpoint) |
@@ -87,8 +85,9 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    end-to-end settlement test.
 
 The Sepolia contracts (factory, test PHA token, sanctions oracle) are deployed and committed in the
-route. A future factory deployment runs Deploy contracts; its constructor inputs come from the
-committed `deploy/contracts/safe-expectations.json`, and its addresses reach the route through a
+route. A future factory deployment is run by the Safe owner with their own key, as
+[CONTRACTS.md](CONTRACTS.md#sepolia) describes; its constructor inputs come from the committed
+`deploy/contracts/safe-expectations.json`, and its addresses reach the route through a
 reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the inline copy in
 `deploy/docker-compose.yml`, checked by `deploy/validate-compose.sh`).
 
