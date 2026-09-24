@@ -1,22 +1,23 @@
 # Local overlay for the attested stack:
 #   docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml ...
-# It adds MinIO, the dstack simulator, and a mock product, builds the images from this checkout,
-# and replaces secrets, ports, and host paths with local values. Everything else, including the
-# PostgreSQL init script (an inline config), comes from deploy/docker-compose.yml. Database
-# credentials need no local value: `keys` derives them from the simulator exactly as in a CVM.
+# It adds object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds
+# the images from this checkout, and replaces secrets, ports, and host paths with local values.
+# Everything else, including the PostgreSQL init script (an inline config), comes from
+# deploy/docker-compose.yml. Database credentials need no local value: `keys` derives them from
+# the simulator exactly as in a CVM.
 #
 # Compose resolves relative paths against the first file's directory, so paths here are relative
 # to deploy/. `!override` and `!reset` need Compose 2.24.4 or newer.
 x-walg-environment: &walg-environment
   WALG_S3_PREFIX: s3://topup-backups/postgres
-  AWS_ENDPOINT: http://minio:9000
+  AWS_ENDPOINT: http://s3:3900
   AWS_REGION: us-east-1
   AWS_S3_FORCE_PATH_STYLE: "true"
-  # A restore phase switches to the read-only topup-restore-read user created by minio-init.
-  AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-minio}
-  AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-minio-secret}
+  # A restore phase switches to the read-only topup-restore-read key created by s3-init.
+  AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-s3}
+  AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-s3-secret-key}
   # The attested file reads AWS_SESSION_TOKEN from the shell; a developer's SSO token must never
-  # reach MinIO.
+  # reach the local S3 server.
   AWS_SESSION_TOKEN: ""
 
 x-service-build: &service-build
@@ -25,40 +26,10 @@ x-service-build: &service-build
   args:
     SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
 
+include:
+  - local/s3.compose.yml
+
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: ["server", "/data"]
-    environment:
-      MINIO_ROOT_USER: topup-minio
-      MINIO_ROOT_PASSWORD: topup-minio-secret
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-    restart: unless-stopped
-
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    entrypoint: ["/bin/sh", "-eu", "-c"]
-    command:
-      - |
-        mc alias set local http://minio:9000 topup-minio topup-minio-secret >/dev/null
-        mc mb --ignore-existing local/topup-backups >/dev/null
-        printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::topup-backups"]},{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::topup-backups/*"]}]}' >/tmp/restore-read.json
-        mc admin policy create local topup-restore-read /tmp/restore-read.json >/dev/null
-        mc admin user add local topup-restore-read topup-restore-read-secret >/dev/null
-        # attach fails when the policy is already attached, e.g. when minio-init runs again.
-        mc admin policy attach local topup-restore-read --user topup-restore-read >/dev/null 2>&1 ||
-          mc admin user info local topup-restore-read | grep -q 'PolicyName: *topup-restore-read'
-    depends_on:
-      minio:
-        condition: service_healthy
-    restart: "no"
-
   dstack-simulator:
     build:
       context: ..
@@ -114,7 +85,7 @@ services:
       timeout: 3s
       retries: 30
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
 
   migrate:
@@ -157,7 +128,7 @@ services:
       <<: *walg-environment
       WALG_RETENTION_FULL: "2"
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
 
   restore:
@@ -184,4 +155,3 @@ services:
 
 volumes:
   dstack_socket:
-  minio_data:

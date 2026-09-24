@@ -1,0 +1,78 @@
+# Local stand-in for the R2 bucket, included by docker-compose.yml and cvm-rehearsal.compose.yml:
+# a single-node Garage server that creates the topup-backups bucket and its read-write key on
+# start. Garage reads its configuration only from a file, so that is an inline config here.
+services:
+  s3:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: topup-s3
+      GARAGE_DEFAULT_SECRET_KEY: topup-s3-secret-key
+      GARAGE_DEFAULT_BUCKET: topup-backups
+    configs:
+      - source: garage
+        target: /etc/garage.toml
+    volumes:
+      - s3_data:/var/lib/garage
+    healthcheck:
+      test: ["CMD", "/garage", "bucket", "info", "topup-backups"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  # Adds the read-only topup-restore-read key through Garage's admin API. The image has no shell,
+  # so the pinned mock-product Python image makes the calls.
+  s3-init:
+    image: python:3.14-slim-trixie@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2
+    command:
+      - python3
+      - -c
+      - |
+        import json, urllib.error, urllib.request
+
+        def admin(endpoint, body=None):
+            request = urllib.request.Request(
+                f"http://s3:3903/v2/{endpoint}",
+                data=None if body is None else json.dumps(body).encode(),
+                headers={"Authorization": "Bearer topup-s3-admin"},
+            )
+            with urllib.request.urlopen(request) as response:
+                return json.load(response)
+
+        try:
+            admin("ImportKey", {"name": "topup-restore-read", "accessKeyId": "topup-restore-read",
+                                "secretAccessKey": "topup-restore-read-secret"})
+        except urllib.error.HTTPError as error:
+            # Garage never reuses a key id, e.g. when s3-init runs again.
+            if error.code != 409:
+                raise
+        bucket = admin("GetBucketInfo?globalAlias=topup-backups")["id"]
+        admin("AllowBucketKey", {"bucketId": bucket, "accessKeyId": "topup-restore-read",
+                                 "permissions": {"read": True, "write": False, "owner": False}})
+    depends_on:
+      s3:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  s3_data:
+
+configs:
+  garage:
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "[::]:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+      [s3_api]
+      s3_region = "us-east-1"
+      api_bind_addr = "[::]:3900"
+
+      [admin]
+      api_bind_addr = "[::]:3903"
+      admin_token = "topup-s3-admin"

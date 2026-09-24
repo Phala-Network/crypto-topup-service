@@ -1,24 +1,18 @@
 # CVM rehearsal overlay, applied by deploy/local/cvm-rehearsal.sh after the rendered staging
 # compose (deploy/render-compose.sh output with a real route inlined). It replaces only what a
 # CVM provides and a workstation does not: the dstack socket (the simulator), object storage
-# (MinIO), and the asset chain (Anvil with Sepolia's chain id). Images, commands, environment
-# (from a `.env` shaped like staging.env.example), inline configs, and healthchecks all come from
-# the rendered file.
+# (s3.compose.yml), and the asset chain (Anvil with Sepolia's chain id). Images, commands,
+# environment (from a `.env` shaped like staging.env.example), inline configs, and healthchecks all
+# come from the rendered file.
 #
 # Like the restore drill, nothing here bind-mounts a host path (CI's Docker daemon cannot see
 # the checkout) and the workload publishes no host port; only Anvil is published, on a loopback
 # port the script picks, so the contract scripts can deploy to it. `!override` and `!reset` need
 # Compose 2.24.4 or newer.
+include:
+  - s3.compose.yml
+
 services:
-  minio:
-    extends: { file: docker-compose.yml, service: minio }
-
-  minio-init:
-    extends: { file: docker-compose.yml, service: minio-init }
-    depends_on:
-      minio:
-        condition: service_healthy
-
   dstack-simulator:
     image: ${TOPUP_LOCAL_DSTACK_IMAGE:?build the simulator image first}
     volumes:
@@ -45,12 +39,12 @@ services:
 
   postgres:
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
 
   backup:
     depends_on:
-      minio-init:
+      s3-init:
         condition: service_completed_successfully
 
   topup:
@@ -67,4 +61,3 @@ services:
 
 volumes:
   dstack_socket:
-  minio_data:

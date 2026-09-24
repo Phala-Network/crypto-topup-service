@@ -66,7 +66,7 @@ natural `archive_timeout=60` upload, continues writing, kills PostgreSQL without
 reports observed loss. The output separates two server-side measurements: `archive_wait_seconds`
 runs from the first drill write into the WAL segment until PostgreSQL closes it (its
 `archive_status/<segment>.ready` mtime), and `upload_latency_seconds` runs from that close until
-MinIO's `LastModified` for the uploaded WAL object. Controlled mode also builds a WAL backlog under
+the object store's `LastModified` for the uploaded WAL object. Controlled mode also builds a WAL backlog under
 key v1 while object storage is down, archives one segment with a single v1 wrapper call and proves
 no adjacent segment was uploaded, rotates PostgreSQL to v2 while the rest are pending, lets the
 archiver finish them under v2, decrypts every rotation segment with its recorded key version (and
