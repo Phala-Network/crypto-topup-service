@@ -58,7 +58,9 @@ contract DeployFactory is Script {
             return factory;
         }
 
-        vm.startBroadcast();
+        // The key comes from the environment, never from forge's command line, so it does not
+        // appear in the process list.
+        vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
         (bool success, bytes memory result) = DeploymentConstants.DETERMINISTIC_DEPLOYMENT_PROXY
             .call(abi.encodePacked(DeploymentConstants.FACTORY_SALT, initCode));
         vm.stopBroadcast();
