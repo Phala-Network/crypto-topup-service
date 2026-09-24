@@ -52,6 +52,9 @@ if [ -n "${PUBLISH_IMAGE:-}" ]; then
             echo "PUBLISH_IMAGE must be a writable repository tag, not a digest" >&2
             exit 64
             ;;
+    esac
+    # The tag follows the last path component, so a registry port is not mistaken for one.
+    case "${PUBLISH_IMAGE##*/}" in
         *:*) ;;
         *) echo "PUBLISH_IMAGE must include an explicit candidate tag" >&2; exit 64 ;;
     esac
@@ -62,7 +65,7 @@ if [ -n "${PUBLISH_IMAGE:-}" ]; then
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
         --provenance=false \
         --sbom=false \
-        --output "type=image,name=$PUBLISH_IMAGE,push=true,rewrite-timestamp=true,oci-mediatypes=true" \
+        --output "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
         "$root"
 
     registry_raw="$tmp/registry-raw.json"
@@ -92,4 +95,7 @@ if [ -n "${PUBLISH_IMAGE:-}" ]; then
         exit 1
     fi
     echo "published image matches verified local manifest and config"
+    if [ -n "${IMAGE_REF_FILE:-}" ]; then
+        printf '%s@%s\n' "${PUBLISH_IMAGE%:*}" "$registry_manifest_digest" >"$IMAGE_REF_FILE"
+    fi
 fi

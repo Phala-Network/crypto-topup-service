@@ -1,0 +1,143 @@
+name: Release images
+
+# Publishes the two images the attested compose pins, from CI only and only from main
+# (deploy/README.md, "Build and publish images"), both tagged sha-<12 hex commit>[-suffix]:
+# - crypto-topup: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
+#   config digests, builds and pushes a third time, and fails unless the registry's platform
+#   manifest and config equal the verified local ones.
+# - postgres-walg: apt and dpkg record wall-clock times, so two builds differ; it is built and
+#   pushed once, the registry tag must resolve to the digest BuildKit pushed, and that digest,
+#   pulled from the registry, must run `wal-g --version`.
+# The job summary and the `images.json` artifact carry both manifest references
+# (`repository@sha256:...`) for Deploy staging and deploy/render-compose.sh.
+#
+# No build provenance attestation: actions/attest-build-provenance supports private repositories
+# only on GitHub Enterprise Cloud, and this private repository's organization is on the Free plan.
+#
+# Runner constraints (org self-hosted runner): the runner is a container that drives the host Docker
+# daemon through its socket. Builds send their context over the socket and nothing bind-mounts a
+# workspace path; the OCI archives and read-backs stay in runner.temp. `ss` and `envsubst` are not
+# used.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: Optional suffix for the sha-<commit> tag (letters, digits, '.', '_', '-')
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TOPUP_REPOSITORY: ghcr.io/phala-network/crypto-topup
+  POSTGRES_WALG_REPOSITORY: ghcr.io/phala-network/postgres-walg
+
+jobs:
+  publish:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - name: Publish only from main
+        run: |
+          test "$GITHUB_REF" = refs/heads/main ||
+            { echo "::error::Release images publishes only from main, not $GITHUB_REF"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Choose the tag and the build timestamp
+        id: meta
+        env:
+          TAG_SUFFIX: ${{ inputs.tag_suffix }}
+        run: |
+          tag="sha-$(git rev-parse --short=12 HEAD)${TAG_SUFFIX:+-$TAG_SUFFIX}"
+          if [[ ! $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ ]]; then
+            echo "invalid image tag: $tag" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "source_date_epoch=$(git log -1 --pretty=%ct)"
+          } >>"$GITHUB_OUTPUT"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish crypto-topup after two matching reproducible builds
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+          PUBLISH_IMAGE: ${{ env.TOPUP_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          IMAGE_REF_FILE: ${{ runner.temp }}/topup.ref
+          # The runner context is only available at step level.
+          TMPDIR: ${{ runner.temp }}
+        run: deploy/verify-image.sh
+      - name: Publish postgres-walg and read it back
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+          IMAGE: ${{ env.POSTGRES_WALG_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          metadata="$RUNNER_TEMP/postgres-walg-metadata.json"
+          docker buildx build \
+            --no-cache \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+            --provenance=false \
+            --sbom=false \
+            --file deploy/Dockerfile.postgres-walg \
+            --metadata-file "$metadata" \
+            --output "type=image,name=$IMAGE,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
+            .
+          # Single platform without attestations: BuildKit pushes one image manifest, no index.
+          pushed_digest=$(jq -er '."containerimage.digest"' "$metadata")
+          registry_digest="sha256:$(docker buildx imagetools inspect "$IMAGE" --raw | sha256sum | awk '{print $1}')"
+          if [ "$registry_digest" != "$pushed_digest" ]; then
+            echo "registry tag $IMAGE is $registry_digest, BuildKit pushed $pushed_digest" >&2
+            exit 1
+          fi
+          ref="$POSTGRES_WALG_REPOSITORY@$pushed_digest"
+          # Drop the builder's local copy so the smoke run executes what the registry serves.
+          docker image rm "$IMAGE" >/dev/null 2>&1 || true
+          docker run --rm --pull=always "$ref" wal-g --version
+          docker image rm "$ref" >/dev/null || true
+          printf '%s\n' "$ref" >"$RUNNER_TEMP/postgres-walg.ref"
+      - name: Write images.json and the job summary
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          topup=$(cat "$RUNNER_TEMP/topup.ref")
+          postgres_walg=$(cat "$RUNNER_TEMP/postgres-walg.ref")
+          # render-compose.sh rejects anything but a nonzero repository@sha256 reference.
+          TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres_walg deploy/render-compose.sh >/dev/null
+          mkdir -p "$RUNNER_TEMP/images"
+          jq -n --arg topup "$topup" --arg postgres_walg "$postgres_walg" \
+            '{TOPUP_IMAGE: $topup, POSTGRES_WALG_IMAGE: $postgres_walg}' \
+            >"$RUNNER_TEMP/images/images.json"
+          {
+            echo "## Published images"
+            echo
+            echo "Commit \`$GITHUB_SHA\`, tag \`$TAG\`. Deploy the manifest digests, never the tag."
+            echo
+            echo '```sh'
+            echo "export TOPUP_IMAGE=$topup"
+            echo "export POSTGRES_WALG_IMAGE=$postgres_walg"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: images-${{ steps.meta.outputs.tag }}
+          path: ${{ runner.temp }}/images/images.json
+          if-no-files-found: error
+      # The host daemon keeps pushed tags in its image store; remove this run's tags, not their cache.
+      - name: Remove this run's image tags from the host
+        if: always() && steps.meta.outputs.tag != ''
+        env:
+          TOPUP: ${{ env.TOPUP_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          POSTGRES_WALG: ${{ env.POSTGRES_WALG_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: docker image rm "$TOPUP" "$POSTGRES_WALG" 2>/dev/null || true

@@ -20,7 +20,7 @@ Release images publishes the images; the other workflows run against the GitHub 
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| Release images (`release-images.yml`) | manual | builds and publishes `ghcr.io/phala-network/crypto-topup` and `postgres-walg`; digests in the job summary and the `images.json` artifact |
+| Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup` and `postgres-walg` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
 | Deploy staging ([deploy-staging.yml](../.github/workflows/deploy-staging.yml)) | manual, `main` only | provisions or upgrades the staging CVM (below) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
 | Deploy contracts ([deploy-contracts.yml](../.github/workflows/deploy-contracts.yml)) | manual, `main` only | Sepolia `ForwarderFactory`: dry run, then broadcast only with `broadcast: true`, then verification; forge run records and the report as artifacts |
@@ -74,9 +74,10 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
 
    `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below).
 3. **Package visibility.** After the first Release images run, make both packages
-   (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public in their
-   GitHub package settings. The CVM pulls them without credentials, and the preflight fails on
-   an image it cannot pull anonymously.
+   (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public, as in
+   [Build and publish images](#build-and-publish-images). The organization must first allow public
+   container packages, and making a package public is irreversible. The CVM pulls them without
+   credentials, and the preflight fails on an image it cannot pull anonymously.
 4. **Owner decisions.** Staging uses Phala Cloud's KMS (`--kms phala`): no `DstackApp` contract, no
    provisioner key, and upgrades apply without an on-chain compose-hash approval. The on-chain
    Base KMS stays the production path (sections A and B). The staging `settlement_url` in
@@ -94,8 +95,8 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
 ### Deploy
 
 1. Merge the change to `main`.
-2. Run **Release images** on `main`; copy both `repository@sha256:<digest>` references from its
-   summary.
+2. Run **Release images** on `main` (the only ref it publishes from); copy both
+   `repository@sha256:<digest>` references from its summary or its `images.json` artifact.
 3. Run **Deploy staging** on `main` with `mode: provision`, `topup_image`, and
    `postgres_walg_image`. The run refuses `provision` while `STAGING_CVM_ID` is set.
 4. Set the `staging` variable `STAGING_CVM_ID` to the CVM id in the run summary. From then on use
@@ -200,23 +201,57 @@ the observability volume.
 
 ## Build and publish images
 
-The service image must be published by the same reproducible build path that is verified locally:
+Images are built and published only by CI, by the
+[Release images](../.github/workflows/release-images.yml) workflow; never push them from a
+workstation. It runs only on `workflow_dispatch` and publishes only from `main`; a dispatch on
+any other ref fails. Both images get the same tag, `sha-<12-hex commit>` plus an optional
+suffix, and `SOURCE_DATE_EPOCH` is the commit time:
+
+- `ghcr.io/phala-network/crypto-topup:<tag>`: [verify-image.sh](verify-image.sh) with
+  `PUBLISH_IMAGE` set performs two clean BuildKit OCI exports for `linux/amd64`, with provenance
+  and SBOM attachments disabled and `rewrite-timestamp=true`, and fails unless their OCI manifest
+  and config digests match. It then builds and pushes a third time and fails unless the registry's
+  platform manifest and config digests equal the verified local ones. This proves repeatability on
+  the CI builder and platform, not cross-builder or cross-architecture identity.
+- `ghcr.io/phala-network/postgres-walg:<tag>` from
+  [Dockerfile.postgres-walg](Dockerfile.postgres-walg): apt and dpkg record wall-clock times, so
+  it is not bit-for-bit reproducible. It is built and pushed once; the registry tag must resolve
+  to the digest BuildKit pushed, and that digest, pulled from the registry, must run
+  `wal-g --version`. Making this image reproducible (removing the apt and dpkg logs and caches,
+  then the same two-build check) is a follow-up.
+
+Run the workflow on `main` from the Actions tab, or with
+`gh workflow run release-images.yml --ref main`. The job summary and the `images.json` artifact
+hold the two manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`): pass them to
+Deploy staging as `topup_image` and `postgres_walg_image`. For a local render or preflight:
 
 ```sh
-export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-deploy/verify-image.sh
+images=$(mktemp -d)
+gh run download <run-id> --repo Phala-Network/crypto-topup-service --name images-<tag> --dir "$images"
+eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | @sh)"' "$images/images.json")"
 ```
 
-The script performs two clean BuildKit OCI exports for `linux/amd64`, with provenance and SBOM
-attachments disabled and `rewrite-timestamp=true`, then compares their OCI manifest and config
-digests. This proves repeatability on the current builder and platform, not cross-builder or
-cross-architecture identity.
+Deploy those `repository@sha256:<platform manifest digest>` references, never a tag, and do not
+assume a registry index digest equals its platform manifest digest: registry-added indexes or
+attestations can change the outer digest while the child manifest and config stay identical. No
+build provenance attestation is published: GitHub artifact attestations need GitHub Enterprise
+Cloud for private repositories.
 
-The Release images workflow publishes both images from `main`; nothing is pushed from a laptop.
-Use the platform manifest digests it reports as `TOPUP_IMAGE` and `POSTGRES_WALG_IMAGE`; do not
-deploy a tag or assume a registry index digest equals its platform manifest digest.
-Registry-added indexes or attestations can legitimately change the outer index digest while the
-child manifest and config stay identical.
+**HUMAN-ONLY, one-time, package admin:** CVMs pull without registry credentials, so both packages
+must be public; never add registry credentials to a CVM. GitHub's REST API cannot change a
+container package's visibility. Making a package public is irreversible: it cannot be made private
+again. Prerequisite: the organization must allow public container packages (organization
+Settings, Packages, Package creation, with Public enabled for containers); otherwise the Public
+option is unavailable. After the first publish, for `crypto-topup` and for `postgres-walg`: open
+the package under the organization's Packages tab, then Package settings, Danger Zone, Change
+visibility, Public, and confirm with the package name. Deploy staging's preflight pulls both
+digests anonymously and fails while a package is still private.
+
+Developer check, no push and no credentials: the same two-build comparison runs locally with
+
+```sh
+deploy/verify-image.sh   # or make verify-image
+```
 
 Deploy staging renders literal, nonzero image digests into the compose; secret values remain
 `${NAME:-}` references. To review a render locally:
@@ -269,7 +304,7 @@ jq '{chain_id, contracts: [.contracts[] | {contract_address, devices, os_images}
 export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 ```
 
-**HUMAN-ONLY, Phala Cloud, Base RPC, registry, and provisioner-key credentials required:** authenticate
+**HUMAN-ONLY, Phala Cloud, Base RPC, and provisioner-key credentials required:** authenticate
 and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager; the CLI reads both
 from the environment, so neither appears on a command line. Do not add `--prepare-only`; it does
 not halt the create path in this CLI version. Run [preflight.sh](preflight.sh) first with the
