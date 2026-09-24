@@ -20,8 +20,9 @@ Release images publishes the images; the other workflows run against the GitHub 
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup` and `postgres-walg` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
+| Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup`, `postgres-walg`, and `crypto-topup-reference-product` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
 | Deploy staging ([deploy-staging.yml](../.github/workflows/deploy-staging.yml)) | manual, `main` only | provisions or upgrades the staging CVM (below) |
+| Deploy staging product ([deploy-staging-product.yml](../.github/workflows/deploy-staging-product.yml)) | manual, `main` only | provisions or upgrades the staging reference-product CVM ([Staging reference product](#staging-reference-product)) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
 
 ### Controls
@@ -102,9 +103,10 @@ not an OS image bump.
    provisioner key, and upgrades apply without an on-chain compose-hash approval. The on-chain
    Base KMS stays the production path (sections A and B). The staging `settlement_url` in
    `deploy/config/routes/phala-cloud-sepolia-pha.yaml` is a non-routable `.invalid` placeholder,
-   so settlements fail on DNS and deposits stay unsettled (expect the stuck-deposit alerts); supply
-   a staging product endpoint (new route content, reviewed like any attested change) before any
-   end-to-end settlement test.
+   so settlements fail on DNS and deposits stay unsettled (expect the stuck-deposit alerts); the
+   staging product endpoint is the reference-product CVM
+   ([Staging reference product](#staging-reference-product)), set in the route by a reviewed
+   route change before any end-to-end settlement test.
 
 The Sepolia contracts (factory, test PHA token, sanctions oracle) are deployed and committed in the
 route. A future factory deployment is run by the Safe owner with their own key, as
@@ -275,7 +277,7 @@ the observability volume.
 Images are built and published only by CI, by the
 [Release images](../.github/workflows/release-images.yml) workflow; never push them from a
 workstation. It runs only on `workflow_dispatch` and publishes only from `main`; a dispatch on
-any other ref fails. Both images get the same tag, `sha-<12-hex commit>` plus an optional
+any other ref fails. All images get the same tag, `sha-<12-hex commit>` plus an optional
 suffix, and `SOURCE_DATE_EPOCH` is the commit time:
 
 - `ghcr.io/phala-network/crypto-topup:<tag>`: [verify-image.sh](verify-image.sh) with
@@ -290,11 +292,16 @@ suffix, and `SOURCE_DATE_EPOCH` is the commit time:
   to the digest BuildKit pushed, and that digest, pulled from the registry, must run
   `wal-g --version`. Making this image reproducible (removing the apt and dpkg logs and caches,
   then the same two-build check) is a follow-up.
+- `ghcr.io/phala-network/crypto-topup-reference-product:<tag>` from
+  [Dockerfile.reference-product](Dockerfile.reference-product): the same `verify-image.sh`
+  two-build, push, and read-back check as `crypto-topup` (with `DOCKERFILE` set), then the
+  digest, pulled from the registry, must run `--help`.
 
 Run the workflow on `main` from the Actions tab, or with
 `gh workflow run release-images.yml --ref main`. The job summary and the `images.json` artifact
-hold the two manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`): pass them to
-Deploy staging as `topup_image` and `postgres_walg_image`. For a local render or preflight:
+hold the manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`, `PRODUCT_IMAGE`): pass the
+first two to Deploy staging as `topup_image` and `postgres_walg_image`, and `PRODUCT_IMAGE` to
+Deploy staging product as `product_image`. For a local render or preflight:
 
 ```sh
 images=$(mktemp -d)
@@ -313,10 +320,12 @@ must be public; never add registry credentials to a CVM. GitHub's REST API canno
 container package's visibility. Making a package public is irreversible: it cannot be made private
 again. Prerequisite: the organization must allow public container packages (organization
 Settings, Packages, Package creation, with Public enabled for containers); otherwise the Public
-option is unavailable. After the first publish, for `crypto-topup` and for `postgres-walg`: open
+option is unavailable. After the first publish, for `crypto-topup`, `postgres-walg`, and
+`crypto-topup-reference-product`: open
 the package under the organization's Packages tab, then Package settings, Danger Zone, Change
 visibility, Public, and confirm with the package name. Deploy staging's preflight pulls both
-digests anonymously and fails while a package is still private.
+digests anonymously (Deploy staging product's preflight its own) and fails while a package is
+still private.
 
 Developer check, no push and no credentials: the same two-build comparison runs locally with
 
@@ -712,6 +721,123 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 Changing a registered product's public key or webhook URL is not supported yet (the endpoint
 answers `409`); a new key also needs a new key id, which is a new route version. Changing its
 settlement URL is a new route version.
+
+## Staging reference product
+
+Staging settles deposits against a second, small CVM running the repository's reference
+product, [sdk/examples/phala_cloud_integration.py](../sdk/examples/phala_cloud_integration.py),
+as the `phala-cloud` product: `serve` mode is the settlement endpoint (all six product
+obligations), the webhook receiver, and the product's own account API, with its ledger in SQLite on
+the CVM's `ledger` volume; `deposit` mode, run from an operator's machine, plays a Phala Cloud user.
+The product holds the product signing key and calls topup on the user's behalf; the driver
+signs its account API requests with a separate driver key (`driver/v1`) that cannot sign topup
+requests.
+
+| Piece | Where |
+|---|---|
+| Image | `ghcr.io/phala-network/crypto-topup-reference-product` ([Dockerfile.reference-product](Dockerfile.reference-product)), published by Release images |
+| Compose | [product/docker-compose.yml](product/docker-compose.yml): one service, port 8089, the staging route's addresses inline, no capabilities |
+| Env names | [product/staging.env.example](product/staging.env.example); `PRODUCT_SEED` is the only secret |
+| Workflow | [Deploy staging product](../.github/workflows/deploy-staging-product.yml): same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attested-compose read-back |
+
+The product's configuration: `TOPUP_ORIGIN` is read by the workflow from the topup CVM
+(`vars.STAGING_CVM_ID`); `PRODUCT_RPC_URL` (the product's own Sepolia RPC, preferably a provider
+topup does not use) and `PRODUCT_DRIVER_PUBLIC_KEY` are `staging` Environment variables;
+`PRODUCT_PUBLIC_URL` is the CVM's gateway URL, set by the workflow after provisioning. At
+startup the product fetches `TOPUP_ORIGIN/v1/attestation` with a fresh nonce, checks it with
+`topup_sdk.verify_attestation_binding`, and pins the `settlement/v1` key. GitHub holds only
+`PHALA_CLOUD_API_KEY`.
+
+### End-to-end order
+
+Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed from a laptop.
+
+1. **Keys, on the owner's machine** (mode-0600 files, never committed or sent anywhere):
+
+   ```sh
+   cd sdk/python
+   uv run --locked topup-sdk keygen --keyid phala-cloud/v1 --seed-out ~/staging/product.seed
+   uv run --locked topup-sdk keygen --keyid driver/v1 --seed-out ~/staging/driver.seed
+   ```
+
+   Set the `staging` Environment variables `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed
+   `public_key`) and `PRODUCT_RPC_URL`.
+2. **Release** (workflow): run Release images on `main`; make the new
+   `crypto-topup-reference-product` package public once
+   ([Build and publish images](#build-and-publish-images)).
+3. **Provision the product CVM** (workflow): Deploy staging product, mode `provision`,
+   `product_image` = `PRODUCT_IMAGE` from the Release images summary. Then set the `staging`
+   Environment variable `STAGING_PRODUCT_CVM_ID` to the printed CVM id. The summary lists the
+   public, settlement, and webhook URLs (`https://<app-id>-8089.<gateway domain>`); later runs
+   use mode `upgrade`, which keeps the sealed env.
+4. **Seal the product seed:** write `.env.product` with exactly the
+   `product/staging.env.example` names, the values from the run summary, and `PRODUCT_SEED` from
+   `~/staging/product.seed`, then run the two commands the summary prints
+   (`deploy/product/preflight.sh ... --offline` and `phala envs update <cvm-id> -e .env.product`).
+   Until then the account API answers 503.
+5. **Register the product in topup** with the admin-signed `POST /v1/admin/products`, exactly as
+   [Product credentials](#product-credentials) shows: slug `phala-cloud`, `public_key` the
+   `phala-cloud/v1` keygen output, and `webhook_url` `<product URL>/webhooks`. The committed
+   staging route already names `phala-cloud` (with the placeholder settlement URL), so this can
+   precede step 6; a repeat with the same values answers `200`.
+6. **Point the route at the product:** a reviewed PR sets `settlement_url` to
+   `<product URL>/settlements` in `deploy/config/routes/phala-cloud-sepolia-pha.yaml` and in the
+   inline copy in `deploy/docker-compose.yml` (`deploy/validate-compose.sh` compares them). This
+   is attested route content, so it changes topup's compose hash: after merging, run Deploy
+   staging in mode `upgrade` ([B. Upgrade an existing CVM](#b-upgrade-an-existing-cvm)).
+7. **Run the deposit driver** from the operator's machine. The payer is a Foundry keystore
+   holding a throwaway test key with some Sepolia ETH for gas (public faucet); no key is ever in
+   the environment, on a command line, or in CI. The Sepolia test PHA token
+   (`0x8F40e7E99678F44c88158f049E62817580ab113B`) is the repository's `MockERC20`, whose
+   `mint(address,uint256)` is public (checked with an `eth_call` from an arbitrary address), so
+   the driver mints exactly the locked amount to the payer and then transfers it to the quote
+   address. Write `driver.json` with the `SandboxConfig` fields the driver reads:
+
+   ```json
+   {
+     "service_url": "<TOPUP_ORIGIN>",
+     "product_slug": "phala-cloud",
+     "product_keyid": "phala-cloud/v1",
+     "route": "phala-cloud-sepolia-pha-usd",
+     "chain_id": 11155111,
+     "rpc_url": "<a Sepolia RPC>",
+     "factory": "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",
+     "implementation": "0x70B714508BFa441449DC09f790Ca03Baa5170360",
+     "token": "0x8F40e7E99678F44c88158f049E62817580ab113B",
+     "token_symbol": "PHA",
+     "public_url": "<product URL>"
+   }
+   ```
+
+   The flusher sweeps only forwarders holding at least the route's `min_flush_atomic`, 20000
+   test PHA, so pay at least that in one deposit: `--min-atomic` refuses to pay a smaller quote
+   and prints the `--amount-minor` needed (the unpaid lock simply expires). `--amount-minor` is
+   cents; for 20000 PHA at a PHA price of `$p` it is about `2000000 * p` plus 1-2% margin. The
+   quote must also fit the product's per-deposit cap and the route's open-lock cap per account
+   (both 500000 cents), so this works while PHA is below about $0.24.
+
+   ```sh
+   export ETH_KEYSTORE=~/.foundry/keystores/staging-payer   # cast wallet import staging-payer --interactive
+   export ETH_PASSWORD=~/staging/payer.password             # file holding the keystore password
+   uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py deposit \
+     --config driver.json --driver-seed-file ~/staging/driver.seed \
+     --amount-minor <cents> --min-atomic 20000000000000000000000
+   ```
+
+   The driver registers a fresh workspace through the product, gets a quote-first lock and
+   recomputes its address from the product slug, workspace, and `lock_ref` before paying,
+   pays the exact `amount_atomic`, and polls the product until the deposit is `credited`, the
+   verified `deposit.credited` webhook is recorded, and the product ledger holds exactly one
+   credit of the locked amount. Sepolia finality takes about 15 minutes.
+8. **Observe the sweep:** the route's flush schedule is `0 */6 * * *` (UTC); a forwarder at or
+   above `min_flush_atomic` is swept into the treasury once the flusher's operator holds
+   `OPERATOR_ROLE` and gas ([Flusher operator](#flusher-operator)) and the gas ratio allows it.
+   To wait for it in the same run, give step 7 `--until swept --timeout 25200` (up to seven
+   hours); otherwise check the treasury's token balance with `cast call` after the next
+   scheduled run.
+
+`make cvm-rehearsal` runs this product CVM locally: the rendered product compose, the unsealed and
+then sealed env, and one deposit driven by `deposit` mode.
 
 ## Local verification
 

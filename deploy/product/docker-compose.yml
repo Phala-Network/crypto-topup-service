@@ -1,0 +1,56 @@
+# Staging reference product CVM (deploy/README.md, "Staging reference product"): the settlement
+# endpoint, webhook receiver, and account API of sdk/examples/phala_cloud_integration.py for the
+# phala-cloud product on the Sepolia staging route. Deploy staging product renders PRODUCT_IMAGE
+# to a digest with deploy/render-compose.sh; the other variables are exactly the names of
+# deploy/product/staging.env.example. PRODUCT_SEED is the product's signing seed (64 hex), sealed
+# by the owner; everything else is public configuration.
+services:
+  product:
+    image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/crypto-topup-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    environment:
+      PRODUCT_SEED: ${PRODUCT_SEED:-}
+    configs:
+      - source: product_config
+        target: /etc/product/config.json
+    volumes:
+      - ledger:/data
+    ports:
+      - "8089:8089"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  ledger:
+
+# Addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml). The
+# product's caps admit one deposit above the route's min_flush_atomic (20000 test PHA).
+configs:
+  product_config:
+    content: |
+      {
+        "service_url": "${TOPUP_ORIGIN:-}",
+        "product_slug": "phala-cloud",
+        "product_keyid": "phala-cloud/v1",
+        "product_seed_env": "PRODUCT_SEED",
+        "route": "phala-cloud-sepolia-pha-usd",
+        "chain_id": 11155111,
+        "rpc_url": "${PRODUCT_RPC_URL:-}",
+        "factory": "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",
+        "implementation": "0x70B714508BFa441449DC09f790Ca03Baa5170360",
+        "token": "0x8F40e7E99678F44c88158f049E62817580ab113B",
+        "token_symbol": "PHA",
+        "listen_host": "0.0.0.0",
+        "listen_port": 8089,
+        "public_url": "${PRODUCT_PUBLIC_URL:-}",
+        "driver_public_key": "${PRODUCT_DRIVER_PUBLIC_KEY:-}",
+        "ledger_path": "/data/ledger.sqlite3",
+        "per_deposit_cap_minor": 500000,
+        "per_period_cap_minor": 1000000
+      }

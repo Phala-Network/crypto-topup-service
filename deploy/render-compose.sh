@@ -33,14 +33,24 @@ validate_image() {
     fi
 }
 
-validate_image TOPUP_IMAGE "${TOPUP_IMAGE:-}"
-validate_image POSTGRES_WALG_IMAGE "${POSTGRES_WALG_IMAGE:-}"
+# Every image variable the compose references (TOPUP_IMAGE and POSTGRES_WALG_IMAGE for the
+# service, PRODUCT_IMAGE for deploy/product/docker-compose.yml) must be a valid digest.
+names=$(grep -o '[$][{][A-Z_]*_IMAGE:-' "$compose" | sed 's/^[$][{]//; s/:-$//' | sort -u)
+if [ -z "$names" ]; then
+    echo "$compose references no *_IMAGE variable" >&2
+    exit 64
+fi
+for name in $names; do
+    eval "value=\${$name:-}"
+    validate_image "$name" "$value"
+    export "$name=$value"
+done
 
-awk -v topup="$TOPUP_IMAGE" -v postgres="$POSTGRES_WALG_IMAGE" '
+awk -v names="$names" '
+BEGIN { count = split(names, name, /[[:space:]]+/) }
 {
     line = $0
-    gsub(/[$][{]TOPUP_IMAGE:-[^}]*[}]/, topup, line)
-    gsub(/[$][{]POSTGRES_WALG_IMAGE:-[^}]*[}]/, postgres, line)
+    for (i = 1; i <= count; i++) gsub("[$][{]" name[i] ":-[^}]*[}]", ENVIRON[name[i]], line)
     print line
 }
 ' "$compose"

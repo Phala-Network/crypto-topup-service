@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -188,3 +189,34 @@ def test_verified_deposit_is_credited_once() -> None:
     assert first.body["status"] == "accepted"
     assert _post(service).body == first.body
     assert service.ledger.credits_for(TEAM) == [(KEY, 115)]
+
+
+DRIVER = RequestSigner.from_seed(reference.DRIVER_KEYID, bytes([7] * 32))
+
+
+def _account_call(
+    api: reference.AccountApi, method: str, path: str, body: bytes, signer: RequestSigner = DRIVER
+) -> reference.Answer:
+    target = "/topup" + path
+    headers = signer.sign(method, "https://acme.example" + target, body)
+    return api.handle(method, target, headers, body)
+
+
+def test_account_api_requires_the_driver_key_and_valid_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACME_SEED", raising=False)
+    config = replace(CONFIG, product_seed_file=None, product_seed_env="ACME_SEED")
+    api = reference.AccountApi(
+        config, reference.ProductLedger(), load_public_key(DRIVER.public_key_base64())
+    )
+    register = json.dumps({"account_id": TEAM}).encode()
+    other = RequestSigner.from_seed(reference.DRIVER_KEYID, bytes([8] * 32))
+    assert _account_call(api, "POST", "/accounts", register, other).status == 401
+    unsigned = api.handle("POST", "/topup/accounts", {}, register)
+    assert unsigned.status == 401
+    bad_ref = json.dumps({"account_id": "a/b"}).encode()
+    assert _account_call(api, "POST", "/accounts", bad_ref).status == 400
+    assert _account_call(api, "GET", f"/accounts/{TEAM}", b"").status == 404
+    # Signed and valid, but the product key is not sealed yet: unavailable, nothing recorded.
+    assert _account_call(api, "POST", "/accounts", register).status == 503

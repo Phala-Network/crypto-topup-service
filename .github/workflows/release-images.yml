@@ -1,15 +1,19 @@
 name: Release images
 
-# Publishes the two images the attested compose pins, from CI only and only from main
-# (deploy/README.md, "Build and publish images"), both tagged sha-<12 hex commit>[-suffix]:
+# Publishes the images the attested composes pin, from CI only and only from main
+# (deploy/README.md, "Build and publish images"), all tagged sha-<12 hex commit>[-suffix]:
 # - crypto-topup: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
 #   config digests, builds and pushes a third time, and fails unless the registry's platform
 #   manifest and config equal the verified local ones.
 # - postgres-walg: apt and dpkg record wall-clock times, so two builds differ; it is built and
 #   pushed once, the registry tag must resolve to the digest BuildKit pushed, and that digest,
 #   pulled from the registry, must run `wal-g --version`.
-# The job summary and the `images.json` artifact carry both manifest references
-# (`repository@sha256:...`) for Deploy staging and deploy/render-compose.sh.
+# - crypto-topup-reference-product (deploy/Dockerfile.reference-product, the staging reference
+#   product): the same two-build, push, and read-back discipline as crypto-topup, and the digest,
+#   pulled from the registry, must run `--help`.
+# The job summary and the `images.json` artifact carry the manifest references
+# (`repository@sha256:...`) for Deploy staging, Deploy staging product, and
+# deploy/render-compose.sh.
 #
 # No build provenance attestation: actions/attest-build-provenance supports private repositories
 # only on GitHub Enterprise Cloud, and this private repository's organization is on the Free plan.
@@ -38,6 +42,7 @@ concurrency:
 env:
   TOPUP_REPOSITORY: ghcr.io/phala-network/crypto-topup
   POSTGRES_WALG_REPOSITORY: ghcr.io/phala-network/postgres-walg
+  REFERENCE_PRODUCT_REPOSITORY: ghcr.io/phala-network/crypto-topup-reference-product
 
 jobs:
   publish:
@@ -107,17 +112,33 @@ jobs:
           docker run --rm --pull=always "$ref" wal-g --version
           docker image rm "$ref" >/dev/null || true
           printf '%s\n' "$ref" >"$RUNNER_TEMP/postgres-walg.ref"
+      - name: Publish crypto-topup-reference-product after two matching reproducible builds
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+          DOCKERFILE: deploy/Dockerfile.reference-product
+          PUBLISH_IMAGE: ${{ env.REFERENCE_PRODUCT_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          IMAGE_REF_FILE: ${{ runner.temp }}/reference-product.ref
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          deploy/verify-image.sh
+          ref=$(cat "$IMAGE_REF_FILE")
+          # Drop the builder's local copy so the smoke run executes what the registry serves.
+          docker image rm "$PUBLISH_IMAGE" >/dev/null 2>&1 || true
+          docker run --rm --pull=always "$ref" --help >/dev/null
+          docker image rm "$ref" >/dev/null || true
       - name: Write images.json and the job summary
         env:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           topup=$(cat "$RUNNER_TEMP/topup.ref")
           postgres_walg=$(cat "$RUNNER_TEMP/postgres-walg.ref")
+          product=$(cat "$RUNNER_TEMP/reference-product.ref")
           # render-compose.sh rejects anything but a nonzero repository@sha256 reference.
           TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres_walg deploy/render-compose.sh >/dev/null
+          PRODUCT_IMAGE=$product deploy/render-compose.sh deploy/product/docker-compose.yml >/dev/null
           mkdir -p "$RUNNER_TEMP/images"
-          jq -n --arg topup "$topup" --arg postgres_walg "$postgres_walg" \
-            '{TOPUP_IMAGE: $topup, POSTGRES_WALG_IMAGE: $postgres_walg}' \
+          jq -n --arg topup "$topup" --arg postgres_walg "$postgres_walg" --arg product "$product" \
+            '{TOPUP_IMAGE: $topup, POSTGRES_WALG_IMAGE: $postgres_walg, PRODUCT_IMAGE: $product}' \
             >"$RUNNER_TEMP/images/images.json"
           {
             echo "## Published images"
@@ -127,6 +148,7 @@ jobs:
             echo '```sh'
             echo "export TOPUP_IMAGE=$topup"
             echo "export POSTGRES_WALG_IMAGE=$postgres_walg"
+            echo "export PRODUCT_IMAGE=$product"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -140,4 +162,5 @@ jobs:
         env:
           TOPUP: ${{ env.TOPUP_REPOSITORY }}:${{ steps.meta.outputs.tag }}
           POSTGRES_WALG: ${{ env.POSTGRES_WALG_REPOSITORY }}:${{ steps.meta.outputs.tag }}
-        run: docker image rm "$TOPUP" "$POSTGRES_WALG" 2>/dev/null || true
+          PRODUCT: ${{ env.REFERENCE_PRODUCT_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: docker image rm "$TOPUP" "$POSTGRES_WALG" "$PRODUCT" 2>/dev/null || true

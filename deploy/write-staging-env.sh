@@ -5,7 +5,10 @@
 # environment). The Deploy staging workflow maps its GitHub Environment variables to those names;
 # the owner later seals the complete file from their own machine (deploy/README.md).
 #
-# Usage: deploy/write-staging-env.sh OUTPUT
+# Usage: deploy/write-staging-env.sh [--product] OUTPUT
+#
+# --product writes the reference product's env file instead: the names of
+# deploy/product/staging.env.example, with its only secret, PRODUCT_SEED, empty.
 #
 # OUTPUT must already exist (create it with mktemp, mode 0600); it is overwritten. Every name must
 # be set and non-empty, except the ones preflight.sh --unsealed allows to be empty. A value must be one line
@@ -19,7 +22,13 @@ example="$root/deploy/staging.env.example"
 optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
 owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY "
 
-(($# == 1)) || { echo "usage: $0 OUTPUT" >&2; exit 64; }
+if [[ "${1:-}" == --product ]]; then
+    example="$root/deploy/product/staging.env.example"
+    optional_empty=" "
+    owner_sealed=" PRODUCT_SEED "
+    shift
+fi
+(($# == 1)) || { echo "usage: $0 [--product] OUTPUT" >&2; exit 64; }
 output=$1
 [[ -f "$output" ]] || { echo "$output must exist (create it with mktemp)" >&2; exit 64; }
 

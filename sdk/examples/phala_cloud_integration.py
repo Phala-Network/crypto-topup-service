@@ -1,13 +1,20 @@
 """End-to-end Phala Cloud integration example for the crypto top-up service.
 
-It plays the product side against a running service (the local sandbox or the Sepolia sandbox):
+It plays the product side against a running service (the local sandbox, the Sepolia sandbox, or
+staging). The product (`serve`) is a long-running service:
 
 1. pins the service's settlement key from attestation;
-2. starts the product's settlement endpoint and webhook receiver;
-3. registers a workspace, gets a quote-first single-use address, and recomputes it locally;
-4. pays the exact locked amount with the sandbox test token;
-5. polls the deposit until it is credited and waits for the verified `deposit.credited` webhook;
-6. checks that the product ledger credited the locked amount exactly once.
+2. serves the settlement endpoint and webhook receiver, with its ledger in SQLite;
+3. serves its own account API, through which a user registers a workspace, gets a quote-first
+   single-use address, and reads its deposits, credits, and webhook events. It holds the product
+   key and calls the service on the user's behalf, as Phala Cloud's backend does.
+
+The deposit driver (`deposit`) plays that user from an operator's machine: it registers a
+workspace, gets a quote and recomputes its address locally, pays the exact locked amount with the
+test token, polls until the deposit is credited, and checks that the product ledger credited the
+locked amount exactly once and received the verified `deposit.credited` webhook.
+
+With no mode, the example runs both in one process (`deploy/sandbox/run-local.sh`).
 
 The settlement endpoint is the reference for the Phala Cloud implementation (docs/architecture.md
 section 11 and the monorepo E2 issue). It enforces all six product obligations:
@@ -22,7 +29,8 @@ section 11 and the monorepo E2 issue). It enforces all six product obligations:
 6. recompute `deposit_id` from chain evidence and require `idempotency_key == "deposit:" + id`.
 
 Run it with `deploy/sandbox/run-local.sh`, or directly:
-`uv run --project sdk/python python sdk/examples/phala_cloud_integration.py --config FILE`.
+`uv run --project sdk/python python sdk/examples/phala_cloud_integration.py [MODE] --config FILE`
+where MODE is `serve` or `deposit` (deploy/README.md, "Staging reference product").
 """
 
 from __future__ import annotations
@@ -31,7 +39,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import secrets
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -39,22 +49,26 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import unquote, urlsplit
+from typing import Any, Protocol
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from topup_client.models import RateLockResponse
+from topup_client.models import AttestationResponse, DepositResponse, RateLockResponse
 from topup_sdk import (
+    ApiError,
+    AttestationError,
     RequestSigner,
     SignatureError,
+    SigningAuth,
     TopupClient,
     load_public_key,
+    verify_attestation_binding,
     verify_request,
     verify_webhook,
 )
@@ -74,16 +88,25 @@ TRANSFER_TOPIC = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
 MAX_BODY_BYTES = 1024 * 1024
 ORDER_FLOW_CODE = "crypto-top-up"
 ORDER_PROVIDER = "crypto_topup"
+# The deposit driver signs its account API requests with this key id (see `AccountApi`).
+DRIVER_KEYID = "driver/v1"
+# Workspace ids and lock references in the account API: URL path segments without escaping.
+ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Everything the product needs; see deploy/sandbox/README.md for each field."""
+    """Everything the product needs; see deploy/sandbox/README.md for each field.
+
+    The product key comes from `product_seed_file`, or, in a CVM, from the sealed environment
+    variable named by `product_seed_env` (64 hexadecimal characters, as `topup-sdk keygen`
+    writes them). The deposit driver needs neither: it calls the product's account API at
+    `public_url`, signed with the driver key whose public key is `driver_public_key`.
+    """
 
     service_url: str
     product_slug: str
     product_keyid: str
-    product_seed_file: str
     route: str
     chain_id: int
     rpc_url: str
@@ -91,10 +114,14 @@ class SandboxConfig:
     implementation: str
     token: str
     token_symbol: str
-    listen_host: str
-    listen_port: int
     public_url: str
-    payer: str
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8089
+    product_seed_file: str | None = None
+    product_seed_env: str | None = None
+    ledger_path: str = ":memory:"
+    driver_public_key: str | None = None
+    payer: str | None = None
     payer_account: str | None = None
     unsupported_token: str | None = None
     settlement_public_key: str | None = None
@@ -109,7 +136,12 @@ class SandboxConfig:
         return cls(**values)
 
     def signer(self) -> RequestSigner:
-        return RequestSigner.from_seed_file(self.product_keyid, self.product_seed_file)
+        if self.product_seed_file is not None:
+            return RequestSigner.from_seed_file(self.product_keyid, self.product_seed_file)
+        seed = os.environ.get(self.product_seed_env or "", "").strip()
+        if not seed:
+            raise MissingProductKeyError("no product_seed_file, and product_seed_env is unset")
+        return RequestSigner.from_seed(self.product_keyid, bytes.fromhex(seed))
 
     def client(self) -> TopupClient:
         return TopupClient(self.service_url, self.product_slug, self.signer())
@@ -117,6 +149,10 @@ class SandboxConfig:
 
 class TransientError(Exception):
     """A dependency is unavailable; answer 503 without recording a decision."""
+
+
+class MissingProductKeyError(Exception):
+    """The product key is not configured (in a CVM: not sealed yet)."""
 
 
 # --- Chain access (the product's own RPC) -------------------------------------------------------
@@ -160,51 +196,63 @@ class JsonRpc:
 class Payer:
     """Sends sandbox test-token transactions.
 
-    On Anvil the payer is an unlocked development account. On Sepolia set `payer_account` to a
-    Foundry keystore account holding a funded throwaway test key (`cast wallet import`); `cast`
-    signs with it and reads the keystore password from the mode-0600 file named by `ETH_PASSWORD`.
+    On Anvil the payer is `payer`, an unlocked development account. On Sepolia `cast` signs with
+    a Foundry keystore holding a funded throwaway test key: the account named by `payer_account`
+    (`cast wallet import`), or else the keystore file named by `ETH_KEYSTORE`. `cast` reads the
+    keystore password from the mode-0600 file named by `ETH_PASSWORD`; no key is ever passed in
+    the environment or on a command line. The test token's `mint` is public, so the payer mints
+    what it pays and needs only Sepolia ETH for gas.
     """
 
     def __init__(self, config: SandboxConfig, rpc: JsonRpc) -> None:
-        self._config = config
         self._rpc = rpc
+        self._rpc_url = config.rpc_url
+        self._wallet: list[str] | None = None
+        if config.payer_account is not None:
+            self._wallet = ["--account", config.payer_account]
+        elif os.environ.get("ETH_KEYSTORE"):
+            self._wallet = []  # cast reads ETH_KEYSTORE and ETH_PASSWORD itself
+        if self._wallet is None:
+            if config.payer is None:
+                raise ValueError("set payer (Anvil), payer_account, or ETH_KEYSTORE")
+            self.address = config.payer
+        else:
+            self.address = self._cast("wallet", "address", *self._wallet).strip()
 
     def mint_and_transfer(self, token: str, to: str, amount_atomic: int) -> str:
-        self.send(token, "mint(address,uint256)", self._config.payer, amount_atomic)
+        self.send(token, "mint(address,uint256)", self.address, amount_atomic)
         return self.send(token, "transfer(address,uint256)", to, amount_atomic)
 
     def send(self, contract: str, signature: str, address: str, amount: int) -> str:
-        account = self._config.payer_account
-        if account is None:
+        if self._wallet is None:
             data = _selector(signature) + _word(int(address, 16)) + _word(amount)
             tx_hash = str(
                 self._rpc.call(
                     "eth_sendTransaction",
-                    [{"from": self._config.payer, "to": contract, "data": "0x" + data.hex()}],
+                    [{"from": self.address, "to": contract, "data": "0x" + data.hex()}],
                 )
             )
         else:
-            output = subprocess.run(
-                [
-                    "cast",
-                    "send",
-                    "--json",
-                    "--account",
-                    account,
-                    "--rpc-url",
-                    self._config.rpc_url,
-                    contract,
-                    signature,
-                    address,
-                    str(amount),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
+            output = self._cast(
+                "send",
+                "--json",
+                *self._wallet,
+                "--rpc-url",
+                self._rpc_url,
+                contract,
+                signature,
+                address,
+                str(amount),
+            )
             tx_hash = str(json.loads(output)["transactionHash"])
         self._rpc.wait_for_receipt(tx_hash)
         return tx_hash
+
+    @staticmethod
+    def _cast(*arguments: str) -> str:
+        return subprocess.run(
+            ["cast", *arguments], check=True, capture_output=True, text=True
+        ).stdout
 
 
 def _selector(signature: str) -> bytes:
@@ -375,6 +423,14 @@ class ProductLedger:
                 "SELECT data FROM webhook_events WHERE type = ? ORDER BY received_at", (event_type,)
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def all_events(self) -> list[dict[str, Any]]:
+        """Every stored webhook event as `{"type", "data"}`, oldest first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT type, data FROM webhook_events ORDER BY received_at"
+            ).fetchall()
+        return [{"type": row[0], "data": json.loads(row[1])} for row in rows]
 
     def wait_for_event(
         self, event_type: str, matches: Callable[[dict[str, Any]], bool], timeout: float
@@ -692,11 +748,18 @@ class WebhookReceiver:
 
 
 class ProductServer:
-    """Serves `POST /settlements`, `GET /settlements/{key}`, and `POST /webhooks`."""
+    """Serves `POST /settlements`, `GET /settlements/{key}`, `POST /webhooks`, `GET /healthz`,
+    and, given an `AccountApi`, `/accounts`."""
 
-    def __init__(self, settlement: SettlementService, webhooks: WebhookReceiver) -> None:
+    def __init__(
+        self,
+        settlement: SettlementService,
+        webhooks: WebhookReceiver,
+        accounts: AccountApi | None = None,
+    ) -> None:
         self.settlement = settlement
         self.webhooks = webhooks
+        self.accounts = accounts
         config = settlement.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
         server = self
@@ -711,12 +774,19 @@ class ProductServer:
                     self._send(server.settlement.handle_post(self.path, headers, body))
                 elif self.path == base_path + "/webhooks":
                     self._send(server.webhooks.handle(headers, body))
+                elif server.accounts is not None and server.accounts.handles(self.path):
+                    self._send(server.accounts.handle("POST", self.path, headers, body))
                 else:
                     self._send(Answer(HTTPStatus.NOT_FOUND))
 
             def do_GET(self) -> None:
+                headers = dict(self.headers.items())
                 if self.path.startswith(base_path + "/settlements/"):
-                    self._send(server.settlement.handle_get(self.path, dict(self.headers.items())))
+                    self._send(server.settlement.handle_get(self.path, headers))
+                elif self.path == base_path + "/healthz":
+                    self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
+                elif server.accounts is not None and server.accounts.handles(self.path):
+                    self._send(server.accounts.handle("GET", self.path, headers, b""))
                 else:
                     self._send(Answer(HTTPStatus.NOT_FOUND))
 
@@ -752,30 +822,193 @@ class ProductServer:
         self._thread.join()
 
 
-# --- Integration flow -----------------------------------------------------------------------------
+# --- Account API (the product's own API for its users) --------------------------------------------
 
 
-def pin_settlement_key(config: SandboxConfig, client: TopupClient) -> Ed25519PublicKey:
-    """Returns the settlement key; the client checks the attestation binds it to a fresh nonce.
+class AccountApi:
+    """The product's account API; the deposit driver uses it as a signed-in user would.
 
-    Production integrators must also verify the TDX quote with the dstack verification flow
-    (deploy/README.md) and then pin `(keyid, public key)` in configuration; a configured
-    `settlement_public_key` skips the fetch.
+    - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
+    - `POST /accounts/{id}/quotes` `{"lock_ref", "amount_minor"}` creates a quote-first lock
+      (`create_quote`) and returns the service's lock;
+    - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
+      (from the ledger), and the verified webhook events for those deposits.
+
+    The product calls the service with its own key on the user's behalf, as Phala Cloud's
+    backend does. Requests must carry an RFC 9421 signature by the pinned driver key
+    (`driver_public_key`, key id `driver/v1`), which stands in for user sessions and cannot sign
+    service requests. Replays are bounded only by the five-minute freshness window; every
+    operation is idempotent.
+    """
+
+    def __init__(self, config: SandboxConfig, ledger: ProductLedger, driver_key: Ed25519PublicKey):
+        self.config = config
+        self.ledger = ledger
+        self.driver_key = driver_key
+        self.accounts_path = urlsplit(config.public_url).path.rstrip("/") + "/accounts"
+        self._client: TopupClient | None = None
+        self._client_lock = threading.Lock()
+
+    def handles(self, target: str) -> bool:
+        path = urlsplit(target).path
+        return path == self.accounts_path or path.startswith(self.accounts_path + "/")
+
+    def handle(self, method: str, target: str, headers: Mapping[str, str], body: bytes) -> Answer:
+        public = urlsplit(self.config.public_url)
+        try:
+            verify_request(
+                method=method,
+                target_uri=f"{public.scheme}://{public.netloc}{target}",
+                headers=headers,
+                body=body,
+                public_key=self.driver_key,
+                keyid=DRIVER_KEYID,
+                require_idempotency_key=False,
+            )
+        except SignatureError:
+            return Answer(HTTPStatus.UNAUTHORIZED)
+        parts = urlsplit(target).path.removeprefix(self.accounts_path).split("/")[1:]
+        try:
+            if method == "POST" and not parts:
+                team = _account_ref(_json_object(body).get("account_id"))
+                address = register_team(self.config, self._service(), self.ledger, team)
+                return Answer(HTTPStatus.OK, {"account_id": team, "address": address})
+            if len(parts) == 2 and parts[1] == "quotes" and method == "POST":
+                team = _account_ref(parts[0])
+                request = _json_object(body)
+                amount_minor = request.get("amount_minor")
+                if type(amount_minor) is not int or amount_minor <= 0:
+                    raise ValueError("amount_minor must be a positive integer")
+                if self.ledger.team_suspended(team) is None:
+                    return Answer(HTTPStatus.NOT_FOUND)
+                lock = create_quote(
+                    self.config,
+                    self._service(),
+                    self.ledger,
+                    team,
+                    lock_ref=_account_ref(request.get("lock_ref")),
+                    amount_minor=amount_minor,
+                )
+                return Answer(HTTPStatus.OK, lock.to_dict())
+            if len(parts) == 1 and method == "GET":
+                team = _account_ref(parts[0])
+                if self.ledger.team_suspended(team) is None:
+                    return Answer(HTTPStatus.NOT_FOUND)
+                return Answer(HTTPStatus.OK, self._account_view(team))
+        except ValueError:
+            return Answer(HTTPStatus.BAD_REQUEST)
+        except MissingProductKeyError:
+            LOG.warning("account API unavailable: the product key is not configured")
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        except ApiError as error:
+            # The service's documented error code is public; nothing else is passed on.
+            LOG.warning("service answered %s %s", error.status_code, error.code)
+            return Answer(
+                HTTPStatus.BAD_GATEWAY,
+                {"service_status": error.status_code, "service_code": error.code},
+            )
+        except httpx.HTTPError:
+            LOG.warning("service unavailable for the account API")
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        except RuntimeError:
+            LOG.exception("account API request failed")
+            return Answer(HTTPStatus.INTERNAL_SERVER_ERROR)
+        return Answer(HTTPStatus.NOT_FOUND)
+
+    def _account_view(self, team: str) -> dict[str, Any]:
+        deposits = list(self._service().list_deposits(team))
+        ids = {str(deposit.id) for deposit in deposits}
+        return {
+            "account_id": team,
+            "deposits": [deposit.to_dict() for deposit in deposits],
+            "credits": [
+                {"provider_order_id": key, "amount_minor": amount}
+                for key, amount in self.ledger.credits_for(team)
+            ],
+            "events": [
+                event
+                for event in self.ledger.all_events()
+                if event["data"].get("deposit_id") in ids
+            ],
+        }
+
+    def _service(self) -> TopupClient:
+        with self._client_lock:
+            if self._client is None:
+                self._client = self.config.client()
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            if self._client is not None:
+                self._client.close()
+
+
+def _account_ref(value: object) -> str:
+    if not isinstance(value, str) or not ACCOUNT_REF.fullmatch(value):
+        raise ValueError("expected 1-64 letters, digits, '.', '_', or '-'")
+    return value
+
+
+def _json_object(body: bytes) -> dict[str, Any]:
+    value = json.loads(body)
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
+# --- Product flows --------------------------------------------------------------------------------
+
+
+def pin_settlement_key(config: SandboxConfig, *, wait_s: float = 0) -> Ed25519PublicKey:
+    """Returns the settlement key from attestation evidence bound to a fresh nonce.
+
+    `verify_attestation_binding` checks that the report data binds the nonce, the key, and the
+    flusher operators. Production integrators must also verify the TDX quote with the dstack
+    verification flow (deploy/README.md) and then pin `(keyid, public key)` in configuration;
+    a configured `settlement_public_key` skips the fetch. While the service is unreachable this
+    retries for up to `wait_s` seconds.
     """
     if config.settlement_public_key is not None:
         return load_public_key(config.settlement_public_key)
-    nonce = secrets.token_bytes(32)
-    evidence = client.attestation(nonce)
+    deadline = time.monotonic() + wait_s
+    while True:
+        nonce = secrets.token_bytes(32)
+        try:
+            response = httpx.get(
+                config.service_url.rstrip("/") + "/v1/attestation",
+                params={"nonce": nonce.hex()},
+                timeout=30,
+            )
+            response.raise_for_status()
+            evidence = AttestationResponse.from_dict(response.json())
+            break
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            if time.monotonic() >= deadline:
+                raise TransientError("the service's attestation is unavailable") from error
+            LOG.warning(
+                "waiting for %s/v1/attestation: %s", config.service_url, type(error).__name__
+            )
+            time.sleep(5)
+    verify_attestation_binding(evidence, nonce)
     if evidence.keyid != SETTLEMENT_KEYID:
-        raise RuntimeError("attestation names an unexpected settlement key id")
+        raise AttestationError("attestation names an unexpected settlement key id")
     LOG.warning("pinned settlement key from attestation; verify the quote before production")
     return load_public_key(evidence.settlement_pubkey)
+
+
+class TeamLedger(Protocol):
+    def add_team(self, team_id: str, *, suspended: bool = False) -> None: ...
+
+    def record_address(
+        self, address: str, team_id: str, *, version: int | None = None, lock_ref: str | None = None
+    ) -> None: ...
 
 
 def register_team(
     config: SandboxConfig,
     client: TopupClient,
-    ledger: ProductLedger,
+    ledger: TeamLedger,
     team: str,
     *,
     suspended: bool = False,
@@ -798,7 +1031,7 @@ def register_team(
 def create_quote(
     config: SandboxConfig,
     client: TopupClient,
-    ledger: ProductLedger,
+    ledger: TeamLedger,
     team: str,
     *,
     lock_ref: str,
@@ -809,13 +1042,18 @@ def create_quote(
     Recording first means a crash between the two steps never leaves a paid quote address the
     product does not recognise; the service's answer must then match the recorded address.
     """
-    salt = lock_salt(config.product_slug, team, lock_ref)
-    expected = forwarder_address(config.factory, config.implementation, salt)
+    expected = quote_address(config, team, lock_ref)
     ledger.record_address(expected, team, lock_ref=lock_ref)
     lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
     if not same_address(expected, lock.address):
         raise RuntimeError("rate-lock address does not match the product's computation")
     return lock
+
+
+def quote_address(config: SandboxConfig, team: str, lock_ref: str) -> str:
+    return forwarder_address(
+        config.factory, config.implementation, lock_salt(config.product_slug, team, lock_ref)
+    )
 
 
 def wait_for_deposit(
@@ -836,59 +1074,224 @@ def wait_for_deposit(
     raise TimeoutError(f"no deposit to {address} reached {sorted(states)} in {timeout:.0f}s")
 
 
-def run_example(config: SandboxConfig) -> None:
+@contextmanager
+def product_service(config: SandboxConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+    """Runs the product: settlement endpoint, webhook receiver, and account API."""
+    if config.driver_public_key is None:
+        raise ValueError("driver_public_key is required to serve the account API")
+    settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
+    ledger = ProductLedger(config.ledger_path)
+    settlement = SettlementService(config, ledger, settlement_key, JsonRpc(config.rpc_url))
+    accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
+    try:
+        with ProductServer(settlement, WebhookReceiver(ledger, settlement_key), accounts) as server:
+            LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
+            yield server
+    finally:
+        accounts.close()
+
+
+def serve(config: SandboxConfig) -> None:
+    """Serves the product until SIGTERM or SIGINT."""
+    stop = threading.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: stop.set())
+    with product_service(config, pin_wait_s=600):
+        stop.wait()
+    LOG.info("product stopped")
+
+
+# --- Deposit driver -------------------------------------------------------------------------------
+
+
+class ProductApiError(Exception):
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"product answered {status}: {body[:200]}")
+        self.status = status
+
+
+class ProductApi:
+    """The deposit driver's client for the product's account API, signed with the driver key."""
+
+    def __init__(self, public_url: str, signer: RequestSigner) -> None:
+        self._base = public_url.rstrip("/")
+        self._http = httpx.Client(auth=SigningAuth(signer), timeout=60)
+
+    def __enter__(self) -> ProductApi:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._http.close()
+
+    def register(self, team: str) -> str:
+        return str(self._call("POST", "/accounts", {"account_id": team})["address"])
+
+    def quote(self, team: str, lock_ref: str, amount_minor: int) -> RateLockResponse:
+        body = {"lock_ref": lock_ref, "amount_minor": amount_minor}
+        return RateLockResponse.from_dict(
+            self._call("POST", f"/accounts/{quote(team)}/quotes", body)
+        )
+
+    def account(self, team: str) -> dict[str, Any]:
+        return self._call("GET", f"/accounts/{quote(team)}")
+
+    def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = self._http.request(method, self._base + path, json=body)
+        if response.status_code != HTTPStatus.OK:
+            raise ProductApiError(response.status_code, response.text)
+        value = response.json()
+        if not isinstance(value, dict):
+            raise ProductApiError(response.status_code, "not a JSON object")
+        return value
+
+
+def run_deposit(
+    config: SandboxConfig,
+    driver: RequestSigner,
+    *,
+    amount_minor: int,
+    min_atomic: int = 0,
+    until: str = "credited",
+    timeout: float = 1800,
+) -> None:
+    """Registers a workspace through the product, pays one quote, and checks the credit."""
     rpc = JsonRpc(config.rpc_url)
     payer = Payer(config, rpc)
-    ledger = ProductLedger()
-    with config.client() as client:
-        settlement_key = pin_settlement_key(config, client)
-        settlement = SettlementService(config, ledger, settlement_key, rpc)
-        with ProductServer(settlement, WebhookReceiver(ledger, settlement_key)):
-            team = f"team-{uuid.uuid4().hex[:12]}"
-            register_team(config, client, ledger, team)
-            LOG.info("registered workspace %s", team)
+    with ProductApi(config.public_url, driver) as api:
+        team = f"team-{uuid.uuid4().hex[:12]}"
+        persistent = api.register(team)
+        LOG.info("registered workspace %s (persistent address %s)", team, persistent)
 
-            lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
-            lock = create_quote(config, client, ledger, team, lock_ref=lock_ref, amount_minor=2500)
-            LOG.info(
-                "quote: pay %s atomic to %s before %s for %s minor (%s)",
-                lock.amount_atomic,
-                lock.address,
-                lock.expires_at.isoformat(),
-                lock.credit_minor,
-                lock.eip681_uri,
+        lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
+        lock = api.quote(team, lock_ref, amount_minor)
+        # Pay only an address recomputed here from the product slug, workspace, and lock_ref.
+        if not same_address(quote_address(config, team, lock_ref), lock.address):
+            raise RuntimeError("quote address does not match the driver's own computation")
+        amount_atomic = int(lock.amount_atomic)
+        LOG.info(
+            "quote: pay %s atomic to %s before %s for %s minor (%s)",
+            amount_atomic,
+            lock.address,
+            lock.expires_at.isoformat(),
+            lock.credit_minor,
+            lock.eip681_uri,
+        )
+        if amount_atomic < min_atomic:
+            needed = -(-amount_minor * min_atomic // amount_atomic)
+            raise RuntimeError(
+                f"the quote locks {amount_atomic} atomic, below --min-atomic {min_atomic}; "
+                f"nothing was paid; rerun with --amount-minor of at least {needed}"
             )
-            if client.get_rate_lock(team, lock_ref).address != lock.address:
-                raise RuntimeError("resumed checkout does not match the created lock")
 
-            tx_hash = payer.mint_and_transfer(config.token, lock.address, int(lock.amount_atomic))
-            LOG.info("paid in %s; waiting for finality and credit", tx_hash)
-            deposit = wait_for_deposit(client, team, lock.address, {"credited", "swept"}, 300)
-            event = ledger.wait_for_event(
-                "deposit.credited", lambda data: data["deposit_id"] == str(deposit.id), 120
+        tx_hash = payer.mint_and_transfer(config.token, lock.address, amount_atomic)
+        LOG.info("paid in %s from %s; waiting for finality and credit", tx_hash, payer.address)
+        states = {"credited", "swept"} if until == "credited" else {"swept"}
+        deposit, view = _wait_for_credit(api, team, lock.address, states, timeout)
+        event = next(
+            event["data"]
+            for event in view["events"]
+            if event["type"] == "deposit.credited"
+            and event["data"]["deposit_id"] == str(deposit.id)
+        )
+        if event["amount_minor"] != lock.credit_minor:
+            raise RuntimeError("credited amount differs from the locked quote")
+        credits = [(c["provider_order_id"], c["amount_minor"]) for c in view["credits"]]
+        if credits != [(f"deposit:{deposit.id}", int(lock.credit_minor))]:
+            raise RuntimeError(f"unexpected product ledger credits: {credits}")
+        LOG.info(
+            "deposit %s is %s: credited %s minor (transaction %s); the ledger holds one credit",
+            deposit.id,
+            deposit.state,
+            lock.credit_minor,
+            event["destination_tx_id"],
+        )
+
+
+def _wait_for_credit(
+    api: ProductApi, team: str, address: str, states: set[str], timeout: float
+) -> tuple[DepositResponse, dict[str, Any]]:
+    """Polls the product until a deposit to `address` is in `states` and its credit and
+    `deposit.credited` webhook are in the product ledger."""
+    deadline = time.monotonic() + timeout
+    last_state = None
+    while time.monotonic() < deadline:
+        try:
+            view = api.account(team)
+        except (httpx.HTTPError, ProductApiError) as error:
+            if isinstance(error, ProductApiError) and error.status < 500:
+                raise
+            LOG.warning("product unavailable: %s", error)
+            time.sleep(5)
+            continue
+        for item in view["deposits"]:
+            deposit = DepositResponse.from_dict(item)
+            if not same_address(deposit.address, address):
+                continue
+            if deposit.state != last_state:
+                LOG.info("deposit %s is %s", deposit.id, deposit.state)
+                last_state = deposit.state
+            credited = any(
+                event["type"] == "deposit.credited"
+                and event["data"]["deposit_id"] == str(deposit.id)
+                for event in view["events"]
             )
-            if event["amount_minor"] != lock.credit_minor:
-                raise RuntimeError("credited amount differs from the locked quote")
-            credits = ledger.credits_for(team)
-            if credits != [(f"deposit:{deposit.id}", int(lock.credit_minor))]:
-                raise RuntimeError(f"unexpected product ledger credits: {credits}")
-            LOG.info(
-                "credited %s minor for deposit %s (transaction %s); ledger holds one credit",
-                lock.credit_minor,
-                deposit.id,
-                event["destination_tx_id"],
-            )
+            if deposit.state in states and credited and view["credits"]:
+                return deposit, view
+        time.sleep(5)
+    raise TimeoutError(f"no deposit to {address} reached {sorted(states)} in {timeout:.0f}s")
+
+
+def run_example(config: SandboxConfig) -> None:
+    """Serves the product and drives one deposit through it, in one process."""
+    driver = RequestSigner.from_seed(DRIVER_KEYID, secrets.token_bytes(32))
+    config = replace(config, driver_public_key=driver.public_key_base64())
+    with product_service(config):
+        run_deposit(config, driver, amount_minor=2500, timeout=420)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--config", default=os.environ.get("SANDBOX_CONFIG"), required=False)
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["serve", "deposit"],
+        help="serve the product, or drive one deposit through a running product; "
+        "without a mode, both in one process",
+    )
+    parser.add_argument("--config", default=os.environ.get("SANDBOX_CONFIG"))
+    deposit = parser.add_argument_group("deposit")
+    deposit.add_argument("--driver-seed-file", help="seed file of the driver key (driver/v1)")
+    deposit.add_argument("--amount-minor", type=int, default=2500, help="quote amount in cents")
+    deposit.add_argument(
+        "--min-atomic",
+        type=int,
+        default=0,
+        help="refuse to pay a quote locking fewer atomic units (the route's min_flush_atomic)",
+    )
+    deposit.add_argument("--until", choices=["credited", "swept"], default="credited")
+    deposit.add_argument("--timeout", type=float, default=1800, help="seconds to wait")
     args = parser.parse_args()
     if not args.config:
         parser.error("--config or SANDBOX_CONFIG is required")
+    if args.mode == "deposit" and not args.driver_seed_file:
+        parser.error("deposit needs --driver-seed-file")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    run_example(SandboxConfig.load(args.config))
+    config = SandboxConfig.load(args.config)
+    if args.mode == "serve":
+        serve(config)
+        return 0
+    if args.mode == "deposit":
+        run_deposit(
+            config,
+            RequestSigner.from_seed_file(DRIVER_KEYID, args.driver_seed_file),
+            amount_minor=args.amount_minor,
+            min_atomic=args.min_atomic,
+            until=args.until,
+            timeout=args.timeout,
+        )
+    else:
+        run_example(config)
     print("phala_cloud_integration: OK")
     return 0
 
