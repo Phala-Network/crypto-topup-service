@@ -100,9 +100,15 @@ impl DstackSigner {
         &self,
         version: u32,
     ) -> Result<SecretKey32, SignerError> {
-        let domain = format!("backup/v{version}");
+        self.derive_secret(&format!("backup/v{version}")).await
+    }
+
+    /// Derives the secp256k1 key for a secret domain such as `backup/vN` or `db/owner/v1`.
+    ///
+    /// The algorithm is part of dstack's derivation input, so it is fixed for every secret.
+    pub async fn derive_secret(&self, domain: &str) -> Result<SecretKey32, SignerError> {
         Ok(self
-            .derive_key(&domain, KeyAlgorithm::Secp256k1)
+            .derive_key(domain, KeyAlgorithm::Secp256k1)
             .await?
             .secret)
     }

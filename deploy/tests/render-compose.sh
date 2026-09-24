@@ -17,8 +17,8 @@ TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres \
 
 grep -F "image: $topup" "$tmp/compose.yml" >/dev/null
 grep -F "image: $postgres" "$tmp/compose.yml" >/dev/null
-grep -F 'DATABASE_URL: ${DATABASE_URL:-}' "$tmp/compose.yml" >/dev/null
-grep -F 'MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}' "$tmp/compose.yml" >/dev/null
+grep -F 'TOPUP_PUBLIC_ORIGIN: ${TOPUP_PUBLIC_ORIGIN:-}' "$tmp/compose.yml" >/dev/null
+grep -F 'TOPUP_SERVICE_ENABLED: ${TOPUP_SERVICE_ENABLED:-on}' "$tmp/compose.yml" >/dev/null
 
 if TOPUP_IMAGE=crypto-topup:latest POSTGRES_WALG_IMAGE=$postgres \
     "$root/deploy/render-compose.sh" >"$tmp/bare-tag.out" 2>"$tmp/bare-tag.err"; then

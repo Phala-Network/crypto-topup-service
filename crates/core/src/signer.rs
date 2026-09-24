@@ -21,6 +21,13 @@ pub fn operator_key_domain(version: NonZeroU32) -> String {
 pub const SETTLEMENT_KEY_DOMAIN: &str = "settlement/v1";
 /// Domain used to derive the backup-encryption key.
 pub const BACKUP_KEY_DOMAIN: &str = "backup/v1";
+/// Domain used to derive the database owner (`postgres`) password.
+///
+/// Every CVM of one dstack application derives the same value, so a replacement CVM logs in to a
+/// restored cluster without a supplied secret. Changing the version requires `ALTER ROLE`.
+pub const DB_OWNER_KEY_DOMAIN: &str = "db/owner/v1";
+/// Domain used to derive the application login (`topup_service`) password.
+pub const DB_APP_KEY_DOMAIN: &str = "db/app/v1";
 
 /// A 32-byte secret which is zeroized when dropped.
 pub struct SecretKey32(SecretBox<[u8; 32]>);

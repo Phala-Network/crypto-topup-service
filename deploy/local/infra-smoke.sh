@@ -50,15 +50,19 @@ wait_for dstack-simulator dc exec -T dstack-simulator test -S /var/run/dstack.so
 wait_for backup dc exec -T backup wal-g --version
 echo "local backup service is running"
 
-key_metadata=$(dc exec -T postgres \
-    stat -c '%a:%u:%g' /run/wal-g/backup.key)
-test "$key_metadata" = "600:999:999"
+# The backup key and the database credential files, all derived by `keys`, one volume each.
+key_metadata=$(dc exec -T postgres stat -c '%n:%a:%u:%g' /run/wal-g/backup.key \
+    /run/db-owner/postgres.password /run/db-owner/postgres.pgpass /run/db-app/topup_service.pgpass)
+test "$key_metadata" = "/run/wal-g/backup.key:600:999:999
+/run/db-owner/postgres.password:600:999:999
+/run/db-owner/postgres.pgpass:600:999:999
+/run/db-app/topup_service.pgpass:600:999:999"
 if docker inspect "${project}-postgres-1" --format '{{range .Config.Env}}{{println .}}{{end}}' |
-    grep -q '^WALG_LIBSODIUM_KEY='; then
-    echo "backup key value must not be present in the container environment" >&2
+    grep -Eq '^(WALG_LIBSODIUM_KEY|POSTGRES_PASSWORD|PGPASSWORD)='; then
+    echo "key and password values must not be present in the container environment" >&2
     exit 1
 fi
-echo "backup key tmpfs permissions passed"
+echo "key tmpfs permissions passed"
 
 dc run --rm migrate
 dc run --rm --no-deps topup \

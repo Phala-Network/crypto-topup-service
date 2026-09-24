@@ -63,6 +63,22 @@ jq -e '
     exit 1
 }
 
+# Database credentials are derived in the CVM by `keys` and read from files; no environment may
+# carry a database password.
+jq -e '[.services[].environment // {} | to_entries[]
+    | select((.key | test("PASSWORD$")) or ((.value // "") | test("postgres(ql)?://[^/@]*:[^/@]*@")))]
+    | length == 0' "$rendered_tools" >/dev/null || {
+    echo "a service environment carries a database password" >&2
+    exit 1
+}
+
+# Least privilege by mount: the runtime services see only the application login's credentials.
+jq -e '[.services.topup, .services.heartbeat | .volumes[]?.source]
+    | any(. == "db_owner" or . == "walg_key") | not' "$rendered_tools" >/dev/null || {
+    echo "topup and heartbeat must mount neither db_owner nor walg_key" >&2
+    exit 1
+}
+
 compare_config() {
     name=$1
     path=$2

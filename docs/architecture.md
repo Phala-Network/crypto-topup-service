@@ -536,7 +536,10 @@ verified against; the database stores only the product's slug, webhook URL, and 
 every loaded route that names one product must agree on both values or startup fails. Bumping
 `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
 new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Secrets
-arrive as dstack encrypted environment variables. Startup refuses to run without the dstack
+arrive as dstack encrypted environment variables, except the in-CVM database's passwords: they
+are the hex of `get_key("db/owner/v1")` and `get_key("db/app/v1")`, handed to PostgreSQL and its
+clients as tmpfs files (`POSTGRES_PASSWORD_FILE`, `PGPASSFILE`), identical on every CVM of the app
+id. Startup refuses to run without the dstack
 socket, two RPC providers, or the on-chain contract checks of §4.
 
 All enabled versions are loaded at startup. The highest enabled version of a route is current for

@@ -41,6 +41,7 @@ touch "$tmp/segment" "$tmp/keys/backup-v1.key"
 # archive_command delegates to the key-versioned walg-wal-push, then refreshes the marker.
 PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
+    AWS_ACCESS_KEY_ID=test \
     WALG_KEY_DIR="$tmp/keys" \
     TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
@@ -55,6 +56,7 @@ rm "$tmp/marker/last-success"
 if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
     WALG_TEST_FAIL_PUSH=1 \
+    AWS_ACCESS_KEY_ID=test \
     WALG_KEY_DIR="$tmp/keys" \
     TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
@@ -63,5 +65,19 @@ if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     exit 1
 fi
 [ ! -e "$tmp/marker/last-success" ]
+
+# Unsealed (no S3 key): archive_command fails at once, without calling WAL-G.
+: >"$tmp/wal-g.call"
+if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
+    WALG_TEST_CALL="$tmp/wal-g.call" \
+    AWS_ACCESS_KEY_ID= \
+    WALG_KEY_DIR="$tmp/keys" \
+    TOPUP_BACKUP_KEY_VERSION=1 \
+    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
+    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
+    echo "WAL archiving without S3 credentials unexpectedly succeeded" >&2
+    exit 1
+fi
+[ ! -s "$tmp/wal-g.call" ] && [ ! -e "$tmp/marker/last-success" ]
 
 echo "walg-cron dry-run test passed"

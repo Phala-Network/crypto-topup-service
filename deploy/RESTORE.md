@@ -5,8 +5,10 @@ application ingress, `topup`, `heartbeat`, and `backup` stopped until every chec
 
 ## Backup key and metadata
 
-`backup-key` derives the current `backup/vN` dstack key plus the comma-separated retained versions
-in `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS`. It writes only to the Compose `walg_key` tmpfs:
+`keys` derives the current `backup/vN` dstack key plus the comma-separated retained versions
+in `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (and the database credentials, into their own volumes; see
+[README](README.md#database-credentials)). It writes backup keys only to the Compose `walg_key`
+tmpfs:
 
 ```text
 /run/wal-g/backup.key       current version used for new uploads
@@ -17,6 +19,10 @@ in `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS`. It writes only to the Compose `walg_key
 Every file is atomically published as UID/GID `999:999`, mode `0600`; the directory is mode `0700`.
 WAL-G receives the path through `WALG_LIBSODIUM_KEY_PATH`. No key value appears in an image,
 environment variable, command line, object metadata, or log.
+
+A replacement CVM of the same app id derives the same database passwords that the restored
+cluster's roles already carry, so it needs no database secret; a failed login on the restored
+cluster means the app identity is wrong (stop as for a key mismatch).
 
 Every successful upload writes an unencrypted, uncompressed metadata object containing only the
 integer key version:
@@ -95,9 +101,9 @@ for a real restore as well as a drill, with this restore-time encrypted environm
   `deploy/tests/walg-archive-switch.sh` verifies this on the image.
 - `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for credentials that can only list and read
   `WALG_S3_PREFIX`, so a mistake cannot write, overwrite, or delete backup objects.
-- `DATABASE_URL` empty: `topup run` and `topup heartbeat` exit at their configuration check
-  (`DATABASE_URL is required for …`) before touching the database, keys, or network.
-- Everything else as for production, including `MIGRATE_DATABASE_URL`, `TOPUP_BACKUP_KEY_VERSION`,
+- `TOPUP_SERVICE_ENABLED=off`: `topup run` and `topup heartbeat` exit at their configuration check
+  (`… is disabled while TOPUP_SERVICE_ENABLED=off`) before touching the database, keys, or network.
+- Everything else as for production, including `TOPUP_BACKUP_KEY_VERSION`,
   and `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version).
 
 Alerts during the restore window are expected, not incidents. The replacement archives nothing
@@ -165,7 +171,7 @@ steps using Phala Cloud credentials and the Finance Safe.
    AWS_ACCESS_KEY_ID=<read-only restore key id>
    AWS_SECRET_ACCESS_KEY=<read-only restore secret>
    AWS_SESSION_TOKEN=
-   DATABASE_URL=
+   TOPUP_SERVICE_ENABLED=off
    EOF
    ```
 
@@ -285,13 +291,13 @@ steps using Phala Cloud credentials and the Finance Safe.
    `"rpo_basis":"heartbeat_only"` and `"wal_bytes_behind":null`, so the RPO rests on the heartbeat
    timestamp alone.
 
-2. Confirm the boot environment took effect, then stop everything except `backup-key` and replace
+2. Confirm the boot environment took effect, then stop everything except `keys` and replace
    the `initdb` volume with an empty one. Check the key file's metadata, never its contents:
 
    ```sh
    dc exec -T postgres psql -U postgres -d topup -Atc 'SHOW archive_mode'
    # Expected: off. If it is on, stop postgres immediately and treat the prefix as possibly written.
-   dc logs --no-log-prefix topup heartbeat | grep -F 'DATABASE_URL is required for'
+   dc logs --no-log-prefix topup heartbeat | grep -F 'is disabled while TOPUP_SERVICE_ENABLED=off'
    dc stop topup heartbeat backup migrate postgres
    dc rm -f topup heartbeat backup migrate postgres
    docker volume rm "$(dc config --format json | jq -r '.name')_pgdata"
@@ -361,7 +367,7 @@ steps using Phala Cloud credentials and the Finance Safe.
 
 7. **Real restore only: resume.** Compare incident markers and expected row counts first.
    Switching the encrypted environment to production values (`TOPUP_WAL_ARCHIVE=on`, read-write
-   object-storage credentials, `DATABASE_URL`) restarts the app compose, and `app-compose.sh` brings
+   object-storage credentials, `TOPUP_SERVICE_ENABLED=on`) restarts the app compose, and `app-compose.sh` brings
    `topup`, `heartbeat`, and `backup` up together on the restored database. The gateway routes the
    app's port 8080 to this CVM as soon as `topup` listens, so control ingress before the switch:
    confirm the failed instance is destroyed so only one CVM holds the application keys, and have the
@@ -391,12 +397,12 @@ live instance).
 
 The drill must run as an instance of the staging app itself: a staging-copy app id has a different
 identity and cannot derive the staging backup keys. The dstack gateway can therefore route the
-staging app's port-8080 traffic to the drill CVM, where `topup` keeps exiting on the empty
-`DATABASE_URL`. Pause staging callers for the drill window and announce it; a request that still
+staging app's port-8080 traffic to the drill CVM, where `topup` keeps exiting on
+`TOPUP_SERVICE_ENABLED=off`. Pause staging callers for the drill window and announce it; a request that still
 reaches the drill CVM fails with a connection error and changes nothing.
 
 1. Issue drill object-storage credentials that can only list and read `WALG_S3_PREFIX`, and put them
-   with `TOPUP_WAL_ARCHIVE=off` and an empty `DATABASE_URL` in the drill's encrypted environment.
+   with `TOPUP_WAL_ARCHIVE=off` and `TOPUP_SERVICE_ENABLED=off` in the drill's encrypted environment.
 2. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only (see
    [boot environment](#replacement-cvm-boot-environment)). Run steps 1-6 of the restore. Never run
    step 7 and never switch the drill's environment to production values. Record the
@@ -409,10 +415,12 @@ reaches the drill CVM fails with a connection error and changes nothing.
    would stop it. Keep the compose hash; production uses the same attested compose. Resume the
    staging callers.
 
-`deploy/local/restore-drill.sh` mirrors this: after destroying the source database it boots the
-whole local stack with the restore-time environment, requires `topup` and `heartbeat` to fail closed,
-archiving to be off, and the storage credentials to be read-only, stops and resets PostgreSQL as in
-step 2, runs steps 3-6, and fails if the object-storage listing changed.
+`deploy/local/restore-drill.sh` mirrors this: after destroying the source database and its key
+tmpfs volumes it boots the whole local stack with the restore-time environment, requires `topup` and
+`heartbeat` to fail closed, archiving to be off, and the storage credentials to be read-only, stops
+and resets PostgreSQL as in step 2, runs steps 3-6, requires the re-derived application login to
+work on the restored cluster (`restore-check` already proves the owner login), and fails if the
+object-storage listing changed.
 
 ## Failure handling
 

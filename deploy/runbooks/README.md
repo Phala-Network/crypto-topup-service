@@ -24,7 +24,9 @@ export TOKEN=0x...
 export OPERATOR_ADDRESS=0x...
 export ADMIN_KEY_FILE=/run/secrets/topup-admin-ed25519.pem
 export ADMIN_KEY_ID=admin/v1
-export DATABASE_URL=postgres://topup_service:...@postgres/topup
+# Inside the CVM: the password is derived there; psql in the postgres container needs none.
+export DATABASE_URL=postgresql://topup_service@/topup
+psql() { dc exec -T postgres psql "$@"; }
 ```
 
 `BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`: the service verifies `@target-uri`

@@ -18,14 +18,8 @@ sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle)
 cp "$root/deploy/docker-compose.yml" "$tmp/filled-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/filled-route.yml"
 
-app_password=$(printf 'a%.0s' {1..32})
-owner_password=$(printf 'b%.0s' {1..32})
-awk -F= -v app="$app_password" -v owner="$owner_password" '
+awk -F= '
     /^[[:space:]]*($|#)/ { next }
-    $1 == "DATABASE_URL" { print "DATABASE_URL=postgres://topup_service:" app "@postgres:5432/topup"; next }
-    $1 == "MIGRATE_DATABASE_URL" { print "MIGRATE_DATABASE_URL=postgres://postgres:" owner "@postgres:5432/topup"; next }
-    $1 == "POSTGRES_PASSWORD" { print $1 "=" owner; next }
-    $1 == "TOPUP_APP_PASSWORD" { print $1 "=" app; next }
     $1 == "TOPUP_ADMIN_PUBLIC_KEY" { print $1 "=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="; next }
     $1 == "TOPUP_PUBLIC_ORIGIN" { print $1 "=https://pending.invalid"; next }
     $1 == "TOPUP_RPC_PROVIDER_A_URL" { print $1 "=https://rpc-a.example/sepolia"; next }
@@ -72,5 +66,12 @@ expect_failure stale-render "differs from a fresh render" \
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
+
+# The CI-written env file has the owner-sealed S3 keys empty: accepted only with --unsealed.
+sed -E 's/^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.*/\1=/' "$tmp/complete.env" >"$tmp/unsealed.env"
+expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
+    --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+"$preflight" --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" \
+    --source "$tmp/filled-source.yml" --offline --unsealed >/dev/null
 
 echo "preflight local checks test passed"

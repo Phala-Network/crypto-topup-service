@@ -17,6 +17,13 @@ write_marker() {
 # PostgreSQL archive_command: the key-versioned D3 wrapper uploads and annotates the segment, and
 # the backup-age marker is refreshed only after both succeeded.
 if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
+    # Until the owner seals the S3 keys (deploy/README.md), fail at once: each WAL-G attempt
+    # without credentials takes seconds, and PostgreSQL's shutdown after initdb waits for the
+    # archiver, which would outlast pg_ctl's timeout and fail the first boot.
+    if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+        echo "WAL archiving waits for sealed object-storage credentials" >&2
+        exit 1
+    fi
     walg-wal-push "$2"
     write_marker
     exit 0

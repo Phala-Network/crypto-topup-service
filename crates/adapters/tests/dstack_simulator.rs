@@ -6,7 +6,7 @@ use dstack_sdk::DstackClient;
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::signer::dstack::DstackSigner;
-use topup_core::Signer as _;
+use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, Signer as _};
 
 #[tokio::test]
 async fn dstack_v1_signing_and_attestation() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +35,17 @@ async fn dstack_v1_signing_and_attestation() -> Result<(), Box<dyn std::error::E
         v2
     );
     assert_eq!(rotated.settlement_public_key().await?, public_key);
+
+    // Database passwords: stable per app id, one per login, and distinct from other domains.
+    let owner = signer.derive_secret(DB_OWNER_KEY_DOMAIN).await?;
+    let owner_again = DstackSigner::with_endpoint(endpoint.clone())
+        .derive_secret(DB_OWNER_KEY_DOMAIN)
+        .await?;
+    let app = signer.derive_secret(DB_APP_KEY_DOMAIN).await?;
+    let backup = signer.derive_backup_key().await?;
+    assert_eq!(owner.expose_secret(), owner_again.expose_secret());
+    assert_ne!(owner.expose_secret(), app.expose_secret());
+    assert_ne!(app.expose_secret(), backup.expose_secret());
 
     let evidence = DstackAttestor::with_endpoint(endpoint)
         .attest(b"integration-test")

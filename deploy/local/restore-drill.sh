@@ -293,20 +293,33 @@ seed_drill_volumes() {
     docker rm "$seed_container" >/dev/null
 }
 
-remove_pgdata_volume() {
-    pg_volume=$(docker volume ls -q \
+remove_volume() {
+    volume=$(docker volume ls -q \
         --filter "label=com.docker.compose.project=$project" \
-        --filter "label=com.docker.compose.volume=pgdata")
-    if [ -z "$pg_volume" ]; then
-        echo "could not locate drill PostgreSQL volume" >&2
+        --filter "label=com.docker.compose.volume=$1")
+    if [ -z "$volume" ]; then
+        echo "could not locate drill volume $1" >&2
         return 1
     fi
-    docker volume rm "$pg_volume" >/dev/null
+    docker volume rm "$volume" >/dev/null
 }
 
-# A service booted with an empty DATABASE_URL must exit at its configuration check.
+remove_pgdata_volume() {
+    remove_volume pgdata
+}
+
+# A service booted with TOPUP_SERVICE_ENABLED=off must exit at its configuration check.
 failed_closed() {
-    dc logs --no-log-prefix "$1" 2>/dev/null | grep -F "DATABASE_URL is required for $2"
+    dc logs --no-log-prefix "$1" 2>/dev/null |
+        grep -F "$2 is disabled while TOPUP_SERVICE_ENABLED=off"
+}
+
+# The restored cluster's application login, with the password the replacement derived.
+app_login_works() {
+    dc exec -T postgres sh -c '
+        PGPASSFILE=/run/db-app/topup_service.pgpass \
+            psql -h postgres -U topup_service -d topup -XAtq -c "SELECT current_user"
+    '
 }
 
 storage_write_probe() {
@@ -460,8 +473,9 @@ dc --profile tools config --format json |
 
 dc build postgres dstack-simulator topup
 seed_drill_volumes
-dc up -d backup-key minio-init mock-product
-wait_for backup-key dc exec -T backup-key topup backup-key --check --output /run/wal-g/backup.key
+dc up -d keys minio-init mock-product
+wait_for keys dc exec -T keys topup keys --check \
+    --backup-dir /run/wal-g --owner-dir /run/db-owner --app-dir /run/db-app
 export TOPUP_BACKUP_KEY_VERSION=1
 dc up -d --no-deps postgres
 wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
@@ -547,16 +561,22 @@ else
 fi
 dc rm -f backup postgres heartbeat migrate restore-check >/dev/null 2>&1 || true
 remove_pgdata_volume
+# The key tmpfs volumes die with the source CVM; the replacement derives the backup keys and
+# database credentials again, which only the same app id (here: the same simulator keys) reproduces.
+dc rm -s -f keys >/dev/null
+for volume in walg_key db_owner db_app; do
+    remove_volume "$volume"
+done
 
 # Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole stack comes up, with
 # the restore-time environment from deploy/RESTORE.md: WAL archiving off, read-only object-storage
-# credentials, and an empty service DATABASE_URL. Nothing may reach object storage from here on.
+# credentials, and TOPUP_SERVICE_ENABLED=off. Nothing may reach object storage from here on.
 storage_before=$(storage_listing)
 test -n "$storage_before"
 export TOPUP_WAL_ARCHIVE=off
 export TOPUP_LOCAL_S3_ACCESS_KEY_ID=topup-restore-read
 export TOPUP_LOCAL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
-export TOPUP_LOCAL_DATABASE_URL=
+export TOPUP_SERVICE_ENABLED=off
 dc up --remove-orphans -d
 wait_for "boot PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
 test "$(psql_value 'SHOW archive_mode')" = off
@@ -564,7 +584,7 @@ wait_for "topup failing closed" failed_closed topup run
 wait_for "heartbeat failing closed" failed_closed heartbeat heartbeat
 storage_is_read_only
 
-# RESTORE.md "Restore the database" step 2: stop everything but the key service and reset pgdata.
+# RESTORE.md "Restore the database" step 2: stop everything but `keys` and reset pgdata.
 dc stop topup heartbeat backup migrate postgres >/dev/null
 dc rm -f topup heartbeat backup migrate postgres >/dev/null
 remove_pgdata_volume
@@ -614,6 +634,10 @@ fi
 # JSON log lines share stdout with the report; keep only the report object.
 restore_report=$(printf '%s\n' "$restore_output" | jq -c 'select(has("post_restore_reconciliation"))')
 test -n "$restore_report"
+
+# restore-check logged in as the owner, and the application login works too: the restored roles
+# carry the source's derived passwords, which the replacement derived again.
+test "$(app_login_works)" = topup_service
 
 measured_rpo=$(printf '%s\n' "$restore_report" | jq -er '.measured_rpo_seconds')
 allowed_rpo=$(printf '%s\n' "$restore_report" | jq -er '.allowed_rpo_seconds')
