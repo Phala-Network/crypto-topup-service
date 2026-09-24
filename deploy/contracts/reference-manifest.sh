@@ -44,11 +44,10 @@ init_code_hash="$(cast keccak "$(factory_init_code "$admin" "$treasury")")"
 
 (
     cd "$CONTRACTS_DIR"
-    ADMIN="$admin" TREASURY="$treasury" forge script \
+    ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
         script/DeployFactory.s.sol:DeployFactory \
         --rpc-url "$rpc_url" \
         --broadcast \
-        --private-key "$ANVIL_PRIVATE_KEY" \
         -q
 ) >&2
 

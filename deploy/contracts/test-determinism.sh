@@ -99,11 +99,10 @@ for index in 0 1; do
     else
         (
             cd "$CONTRACTS_DIR"
-            ADMIN="$admin" TREASURY="$treasury" forge script \
+            ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
                 script/DeployFactory.s.sol:DeployFactory \
                 --rpc-url "$rpc_url" \
                 --broadcast \
-                --private-key "$ANVIL_PRIVATE_KEY" \
                 -q
         ) >/dev/null
     fi
@@ -283,9 +282,9 @@ if (
         TREASURY="$treasury" \
         EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$expected")" \
         EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$expected")" \
+        PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
         forge script script/DeployFactory.s.sol:DeployFactory \
         --rpc-url "${rpcs[1]}" \
-        --private-key "$ANVIL_PRIVATE_KEY" \
         -q
 ) >/dev/null 2>&1; then
     die "deployment script accepted an existing factory with the wrong code hash"

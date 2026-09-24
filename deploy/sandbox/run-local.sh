@@ -67,8 +67,8 @@ wait_for anvil cast chain-id --rpc-url "$rpc_url"
 echo "== deploying the forwarder factory and sandbox test contracts"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 (cd "$root/contracts" && ADMIN="$owner" TREASURY="$owner" FOUNDRY_BROADCAST="$tmp/broadcast" \
-    forge script script/DeployFactory.s.sol:DeployFactory --rpc-url "$rpc_url" \
-    --private-key "$ANVIL_PRIVATE_KEY" --broadcast --silent)
+    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script script/DeployFactory.s.sol:DeployFactory \
+    --rpc-url "$rpc_url" --broadcast --silent)
 factory=$(predicted_factory "$owner" "$owner")
 implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url")
 "$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" \

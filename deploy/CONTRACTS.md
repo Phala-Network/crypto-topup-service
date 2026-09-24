@@ -1,8 +1,10 @@
 # Deterministic contract deployment
 
-This runbook implements work package A2. It prepares and verifies deployments; it does not perform
-the Sepolia or mainnet deployment from automation. Every funding or broadcast command below is
-**HUMAN-ONLY**.
+This runbook implements work package A2. Sepolia factory deployments run in CI: the Deploy
+contracts workflow ([deploy-contracts.yml](../.github/workflows/deploy-contracts.yml), `main` only,
+key from the `staging` Environment secret `SEPOLIA_DEPLOYER_PRIVATE_KEY`) runs the
+[Sepolia](#sepolia) commands below, and Verify contracts re-checks the deployment daily. Mainnet is
+never deployed from automation. Every other funding or broadcast command below is **HUMAN-ONLY**.
 
 The Arachnid deterministic deployment proxy is fixed at
 `0x4e59b44847b379578588920cA78FbF26c0B4956C`. Its calldata is the plain 32-byte salt followed by
@@ -123,14 +125,14 @@ architecture explicitly selects another deterministic deployer.
 ## Sepolia
 
 Use the Finance Safe as both factory admin and treasury unless the committed expectations name
-different approved Safes. `ADMIN` and `TREASURY` must match those entries. **HUMAN-ONLY:** after the
-Safe checks pass:
+different approved Safes. `ADMIN` and `TREASURY` must match those entries. Run the Deploy contracts
+workflow (first without, then with `broadcast: true`); it performs these commands with the key in
+the environment:
 
 ```sh
-export ADMIN="$FINANCE_SAFE"
-export TREASURY="$FINANCE_SAFE"
-read -rsp "Deployment private key: " PRIVATE_KEY && printf '\n'
-export PRIVATE_KEY
+# PRIVATE_KEY is the Environment secret SEPOLIA_DEPLOYER_PRIVATE_KEY.
+export ADMIN="$(jq -er .admin deploy/contracts/safe-expectations.json)"
+export TREASURY="$(jq -er .treasury deploy/contracts/safe-expectations.json)"
 
 deploy/contracts/deploy-proxy.sh --rpc-url "$SEPOLIA_RPC_A"
 deploy/contracts/deploy-factory.sh --rpc sepolia/a="$SEPOLIA_RPC_A" --dry-run
@@ -143,8 +145,10 @@ deploy/contracts/verify-deployment.sh \
 jq -e '.passed == true' sepolia-contract-verification.json
 ```
 
-The dry run and broadcast both pass `PRIVATE_KEY` to Foundry with the CLI `--private-key` option;
-the key is never written to a repository file. The Foundry script prints the predicted factory and
+The dry run and broadcast both hand `PRIVATE_KEY` to Foundry through the environment only:
+`DeployFactory.s.sol` reads it with `vm.envUint("PRIVATE_KEY")` and passes it to
+`vm.startBroadcast`, so the key is never a command-line argument (visible in the process list) and
+never written to a repository file. The Foundry script prints the predicted factory and
 implementation addresses before it sends. If the predicted factory already has code, it accepts
 only the exact runtime hashes derived from the local build and constructor arguments.
 
