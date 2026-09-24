@@ -13,12 +13,12 @@
 )]
 
 pub mod api;
-pub mod backup;
 pub mod contracts;
 pub mod db;
 pub mod flusher;
 pub mod heartbeat;
 pub mod jitter;
+pub mod keys;
 pub mod locks;
 pub mod observability;
 pub mod outbox;

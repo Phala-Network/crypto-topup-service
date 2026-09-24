@@ -57,10 +57,6 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | secret | S3/R2 key for the WAL-G bucket |
    | `AWS_SESSION_TOKEN` | secret, optional | only for temporary credentials |
    | `COINMETRICS_API_KEY` | secret, optional | empty selects the community endpoint |
-   | `POSTGRES_PASSWORD`, `TOPUP_APP_PASSWORD` | secret | two different `openssl rand -hex 32` values |
-   | `MIGRATE_DATABASE_URL` | secret | `postgres://postgres:<POSTGRES_PASSWORD>@postgres:5432/topup` |
-   | `DATABASE_URL` | secret | `postgres://topup_service:<TOPUP_APP_PASSWORD>@postgres:5432/topup` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | secret | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy contracts) |
    | `SEPOLIA_DEPLOYER_PRIVATE_KEY` | secret | only for Deploy contracts: a funded Sepolia deployer key |
    | `AWS_ENDPOINT` | variable, optional | S3-compatible endpoint (R2); empty for AWS S3 |
    | `AWS_REGION` | variable | bucket region (`auto` for R2) |
@@ -69,10 +65,13 @@ through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable | from `topup-sdk keygen`; the private key stays with the admin |
    | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable | `1` and `0` |
    | `TOPUP_WAL_ARCHIVE` | variable | `on` |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable | Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy contracts); a URL that embeds a provider API key goes into a secret of the same name, which takes precedence |
    | `DSTACK_OS_IMAGE` | variable | the owner-approved dstack 0.6.0 image name (`0.6.0-rc5`), from `os-images --prod` |
    | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
 
-   `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below).
+   `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below) and writes
+   `TOPUP_SERVICE_ENABLED=on`. There is no database secret
+   ([Database credentials](#database-credentials)).
 3. **Package visibility.** After the first Release images run, make both packages
    (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public, as in
    [Build and publish images](#build-and-publish-images). The organization must first allow public
@@ -151,8 +150,7 @@ Deploy staging, in order; any failure stops the run:
 
 - `docker-compose.yml` is the measured workload. Render immutable image references into a separate
   staging file before giving it to the CLI.
-- `staging.env.example` lists every encrypted environment variable. `MIGRATE_DATABASE_URL` is sent
-  only to the one-shot `migrate` service; `topup` receives only the app-role `DATABASE_URL`.
+- `staging.env.example` lists every encrypted environment variable; none is a database credential.
 - `app-compose.example.json` and `render-app-compose.sh` are review previews of the fields CLI
   1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
 - `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
@@ -181,6 +179,29 @@ Two routes that name the same product must agree on `destination.settlement_url`
 `destination.product_kid`, or startup fails. The `restore-check` tools service pins one route
 file (`phala-cloud-sepolia-pha.yaml`) in its entrypoint, so adding a second route or product also
 requires adding that route to `restore-check` and to the `topup run` command in the compose.
+
+## Database credentials
+
+PostgreSQL runs inside the CVM, so its passwords are derived there like every other key, never
+supplied. The `keys` service (`topup keys`, the only container besides `topup` with the dstack
+socket) derives the WAL-G keys and, as the lowercase hex of `get_key("db/owner/v1")` and
+`get_key("db/app/v1")` (secp256k1), the owner and application passwords. It writes them to three
+tmpfs volumes and holds them mounted; its `--check` healthcheck gates PostgreSQL. Each service
+mounts, read-only, only the volumes it needs:
+
+| Volume (path) | Files | Mounted by |
+|---|---|---|
+| `walg_key` (`/run/wal-g`) | `backup.key`, `backup-vN.key` | `postgres`, `backup`, `restore` |
+| `db_owner` (`/run/db-owner`) | `postgres.password` (`POSTGRES_PASSWORD_FILE`), `postgres.pgpass` | `postgres`, `migrate`, `backup`, `restore-check` |
+| `db_app` (`/run/db-app`) | `topup_service.pgpass` | `postgres` (the init script reads its password field), `topup`, `heartbeat` |
+
+URLs carry no password (`postgres://topup_service@postgres:5432/topup`); sqlx, `psql`, and WAL-G
+read libpq's standard `PGPASSFILE`. Every file is mode `0600`, owned by uid 999, which every
+database client runs as; isolation is by mount, and `deploy/validate-compose.sh` requires that
+`topup` and `heartbeat` mount neither `db_owner` nor `walg_key`. The same app id derives the same
+passwords, so a replacement or restored CVM logs in unchanged
+([RESTORE.md](RESTORE.md#backup-key-and-metadata)). The version is part of the path; rotating
+means an `ALTER ROLE` to a `db/*/v2` value inside the CVM and a new compose.
 
 ## Backup age marker contract
 
@@ -554,8 +575,9 @@ and a restore drill per [RESTORE.md](RESTORE.md) has passed.
 The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`
 overlay, which adds MinIO, the dstack simulator, and a mock product, builds the images from the
 checkout, and replaces secrets, ports, and host paths with local values. It builds dstack's
-simulator from the pinned source revision and shares its `/var/run/dstack.sock` with `topup`. Pass
-both files to any manual command:
+simulator from the pinned source revision and shares its `/var/run/dstack.sock` with `topup` and
+`keys`, so local stacks derive their database credentials exactly as a CVM does. Pass both files to
+any manual command:
 
 ```sh
 docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml ps

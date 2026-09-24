@@ -86,6 +86,39 @@ fn run_requires_a_database_url() {
     );
 }
 
+/// A replacement CVM boots for a restore with `TOPUP_SERVICE_ENABLED=off`; `run` and `heartbeat`
+/// must stop before they touch the network or the database.
+#[test]
+fn service_commands_refuse_to_start_while_disabled_for_a_restore() {
+    let route = format!(
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    for (args, command) in [
+        (vec!["run", "--route", route.as_str()], "run"),
+        (vec!["heartbeat"], "heartbeat"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+            .args(&args)
+            .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
+            .env("TOPUP_SERVICE_ENABLED", "off")
+            .output()
+            .expect("topup process should start");
+        assert!(!output.status.success());
+        let output_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output_text.contains(&format!(
+                "{command} is disabled while TOPUP_SERVICE_ENABLED=off"
+            )),
+            "{output_text}"
+        );
+    }
+}
+
 #[test]
 fn run_requires_a_valid_public_origin() {
     let route = format!(
@@ -178,29 +211,6 @@ fn dev_attestation_prints_the_required_json_shape() {
     assert_eq!(value["compose_hash"], "");
     assert_eq!(value["operator_keyid"], "operator/v1");
     assert_eq!(value["operator_address"].as_str().map(str::len), Some(42));
-}
-
-#[cfg(feature = "dev-signer")]
-#[test]
-fn development_backup_key_is_written_without_printing_it() {
-    let directory = std::env::temp_dir().join(format!("topup-cli-backup-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).expect("temporary directory should be created");
-    let path = directory.join("backup.key");
-    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["backup-key", "--dev", "--output"])
-        .arg(&path)
-        .output()
-        .expect("topup process should start");
-
-    assert!(output.status.success());
-    let key = std::fs::read_to_string(&path).expect("backup key should be written");
-    let fallback = std::fs::read_to_string(directory.join("backup-v0.key"))
-        .expect("fallback backup key should be written");
-    assert_eq!(key.len(), 64);
-    assert_eq!(fallback.len(), 64);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(&key));
-    std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
 }
 
 #[cfg(feature = "dev-signer")]

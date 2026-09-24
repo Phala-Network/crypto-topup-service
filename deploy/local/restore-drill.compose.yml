@@ -15,6 +15,7 @@ services:
   topup:
     volumes: !override
       - dstack_socket:/var/run
+      - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
       - drill_routes:/etc/topup/routes:ro
     ports: !reset []
@@ -26,6 +27,7 @@ services:
   restore-check:
     volumes: !override
       - dstack_socket:/var/run
+      - db_owner:/run/db-owner:ro
       - drill_routes:/etc/topup/routes:ro
 
 volumes:

@@ -51,12 +51,12 @@ jobs:
       - name: Deploy the factory
         env:
           PRIVATE_KEY: ${{ secrets.SEPOLIA_DEPLOYER_PRIVATE_KEY }}
-          RPC_A: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL }}
+          RPC_A: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL || vars.TOPUP_RPC_PROVIDER_A_URL }}
         run: |
           [[ -n "$PRIVATE_KEY" ]] ||
             { echo "::error::Environment secret SEPOLIA_DEPLOYER_PRIVATE_KEY is not set"; exit 1; }
           [[ -n "$RPC_A" ]] ||
-            { echo "::error::Environment secret TOPUP_RPC_PROVIDER_A_URL is not set"; exit 1; }
+            { echo "::error::Environment variable or secret TOPUP_RPC_PROVIDER_A_URL is not set"; exit 1; }
           ADMIN=$(jq -er .admin deploy/contracts/safe-expectations.json)
           TREASURY=$(jq -er .treasury deploy/contracts/safe-expectations.json)
           export ADMIN TREASURY
@@ -69,8 +69,8 @@ jobs:
       - name: Verify the deployment on both providers
         if: inputs.broadcast
         env:
-          RPC_A: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL }}
-          RPC_B: ${{ secrets.TOPUP_RPC_PROVIDER_B_URL }}
+          RPC_A: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL || vars.TOPUP_RPC_PROVIDER_A_URL }}
+          RPC_B: ${{ secrets.TOPUP_RPC_PROVIDER_B_URL || vars.TOPUP_RPC_PROVIDER_B_URL }}
         run: |
           mkdir -p reports
           ADMIN=$(jq -er .admin deploy/contracts/safe-expectations.json) \

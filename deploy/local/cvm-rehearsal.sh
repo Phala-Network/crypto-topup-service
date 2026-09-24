@@ -49,7 +49,7 @@ mapfile -t env_names < <(awk -F= '/^[[:space:]]*($|#)/ { next } { print $1 }' \
 local_images=()
 
 # Compose as the CVM runs it: the rendered file with its `.env`. The staging names are removed
-# from the calling environment so a developer's or CI's DATABASE_URL or AWS_* cannot override
+# from the calling environment so a developer's or CI's AWS_* or TOPUP_* cannot override
 # the `.env` file. The project directory anchors the overlay's `extends` paths.
 dc() {
     local unset=() name
@@ -228,8 +228,6 @@ admin_key=$(product_python -m topup_sdk keygen --keyid rehearsal-admin/v1 \
     --seed-out /tmp/admin.seed)
 product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
     --seed-out /opt/product.seed)
-owner_password=$(openssl rand -hex 32)
-app_password=$(openssl rand -hex 32)
 declare -A values=(
     [AWS_ACCESS_KEY_ID]=topup-minio
     [AWS_ENDPOINT]=http://minio:9000
@@ -238,17 +236,14 @@ declare -A values=(
     [AWS_SECRET_ACCESS_KEY]=topup-minio-secret
     [AWS_SESSION_TOKEN]=
     [COINMETRICS_API_KEY]=
-    [DATABASE_URL]="postgres://topup_service:$app_password@postgres:5432/topup"
-    [MIGRATE_DATABASE_URL]="postgres://postgres:$owner_password@postgres:5432/topup"
-    [POSTGRES_PASSWORD]="$owner_password"
     [TOPUP_ADMIN_KID]=rehearsal-admin/v1
     [TOPUP_ADMIN_PUBLIC_KEY]=$(jq -er .public_key <<<"$admin_key")
     [TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]=0
     [TOPUP_BACKUP_KEY_VERSION]=1
-    [TOPUP_APP_PASSWORD]="$app_password"
     [TOPUP_PUBLIC_ORIGIN]=http://topup:8080
     [TOPUP_RPC_PROVIDER_A_URL]=http://anvil:8545
     [TOPUP_RPC_PROVIDER_B_URL]=http://anvil:8545
+    [TOPUP_SERVICE_ENABLED]=on
     [TOPUP_WAL_ARCHIVE]=on
     [WALG_S3_PREFIX]=s3://topup-backups/postgres
 )
@@ -337,5 +332,5 @@ echo "ok: topup priced a lock from live HTTPS price sources (TLS with system roo
 
 echo "== workload memory (tdx.medium has 4 GiB)"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \
-    $(dc ps -q backup-key postgres topup heartbeat backup) | tee "$tmp/memory"
+    $(dc ps -q keys postgres topup heartbeat backup) | tee "$tmp/memory"
 echo "cvm-rehearsal: all checks passed"

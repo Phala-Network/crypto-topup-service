@@ -18,14 +18,8 @@ sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle)
 cp "$root/deploy/docker-compose.yml" "$tmp/filled-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/filled-route.yml"
 
-app_password=$(printf 'a%.0s' {1..32})
-owner_password=$(printf 'b%.0s' {1..32})
-awk -F= -v app="$app_password" -v owner="$owner_password" '
+awk -F= '
     /^[[:space:]]*($|#)/ { next }
-    $1 == "DATABASE_URL" { print "DATABASE_URL=postgres://topup_service:" app "@postgres:5432/topup"; next }
-    $1 == "MIGRATE_DATABASE_URL" { print "MIGRATE_DATABASE_URL=postgres://postgres:" owner "@postgres:5432/topup"; next }
-    $1 == "POSTGRES_PASSWORD" { print $1 "=" owner; next }
-    $1 == "TOPUP_APP_PASSWORD" { print $1 "=" app; next }
     $1 == "TOPUP_ADMIN_PUBLIC_KEY" { print $1 "=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="; next }
     $1 == "TOPUP_PUBLIC_ORIGIN" { print $1 "=https://pending.invalid"; next }
     $1 == "TOPUP_RPC_PROVIDER_A_URL" { print $1 "=https://rpc-a.example/sepolia"; next }

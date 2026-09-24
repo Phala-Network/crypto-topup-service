@@ -120,21 +120,11 @@ rpc_a=${env[TOPUP_RPC_PROVIDER_A_URL]-} rpc_b=${env[TOPUP_RPC_PROVIDER_B_URL]-}
 [[ "$rpc_a" == https://* && "$rpc_b" == https://* ]] ||
     fail "both RPC provider URLs must use https"
 [[ "$rpc_a" != "$rpc_b" ]] || fail "the two RPC provider URLs must be different providers"
-for pair in POSTGRES_PASSWORD:MIGRATE_DATABASE_URL:postgres \
-    TOPUP_APP_PASSWORD:DATABASE_URL:topup_service; do
-    IFS=: read -r password_name url_name user <<<"$pair"
-    password=${env[$password_name]-}
-    [[ "$password" =~ ^[A-Za-z0-9._~-]{24,}$ ]] ||
-        fail "$password_name must be at least 24 URL-safe characters (openssl rand -hex 32)"
-    [[ "${env[$url_name]-}" == "postgres://$user:$password@postgres:5432/topup" ]] ||
-        fail "$url_name must be postgres://$user:<$password_name>@postgres:5432/topup"
-done
-[[ "${env[POSTGRES_PASSWORD]-}" != "${env[TOPUP_APP_PASSWORD]-}" ]] ||
-    fail "POSTGRES_PASSWORD and TOPUP_APP_PASSWORD must differ"
 admin_key_bytes=$(base64 -d 2>/dev/null <<<"${env[TOPUP_ADMIN_PUBLIC_KEY]-}" | wc -c) || admin_key_bytes=0
 [[ "$admin_key_bytes" == 32 ]] || fail "TOPUP_ADMIN_PUBLIC_KEY must be standard base64 of 32 bytes"
 [[ "${env[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
 [[ "${env[TOPUP_WAL_ARCHIVE]-}" == on ]] || fail "TOPUP_WAL_ARCHIVE must be on for staging"
+[[ "${env[TOPUP_SERVICE_ENABLED]-}" == on ]] || fail "TOPUP_SERVICE_ENABLED must be on for staging"
 
 echo "== compose"
 if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \

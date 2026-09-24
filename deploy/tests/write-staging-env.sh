@@ -30,7 +30,7 @@ diff -u "$tmp/expected" "$tmp/actual" || {
     echo "the written names differ from staging.env.example" >&2
     exit 1
 }
-grep -qx 'POSTGRES_PASSWORD=secret-value-of-POSTGRES_PASSWORD' "$tmp/env" || {
+grep -qx 'AWS_SECRET_ACCESS_KEY=secret-value-of-AWS_SECRET_ACCESS_KEY' "$tmp/env" || {
     echo "a value was not written verbatim" >&2
     exit 1
 }
@@ -38,12 +38,12 @@ grep -qx 'POSTGRES_PASSWORD=secret-value-of-POSTGRES_PASSWORD' "$tmp/env" || {
 
 # A missing required name fails, names it, and prints no value.
 : >"$tmp/partial"
-if env -i PATH="$PATH" "${assignments[@]}" TOPUP_APP_PASSWORD= "$writer" "$tmp/partial" \
+if env -i PATH="$PATH" "${assignments[@]}" TOPUP_ADMIN_PUBLIC_KEY= "$writer" "$tmp/partial" \
     >"$tmp/out" 2>&1; then
-    echo "write-staging-env.sh accepted an empty TOPUP_APP_PASSWORD" >&2
+    echo "write-staging-env.sh accepted an empty TOPUP_ADMIN_PUBLIC_KEY" >&2
     exit 1
 fi
-grep -q 'missing or empty: TOPUP_APP_PASSWORD' "$tmp/out" || {
+grep -q 'missing or empty: TOPUP_ADMIN_PUBLIC_KEY' "$tmp/out" || {
     echo "unexpected failure output:" >&2
     cat "$tmp/out" >&2
     exit 1

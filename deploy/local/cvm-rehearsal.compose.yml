@@ -33,10 +33,12 @@ services:
   anvil:
     extends: { file: ../sandbox/docker-compose.local.yml, service: anvil }
 
-  backup-key:
+  keys:
     volumes: !override
       - dstack_socket:/var/run
       - walg_key:/run/wal-g
+      - db_owner:/run/db-owner
+      - db_app:/run/db-app
     depends_on:
       dstack-simulator:
         condition: service_healthy
@@ -54,6 +56,7 @@ services:
   topup:
     volumes: !override
       - dstack_socket:/var/run
+      - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
     ports: !reset []
     depends_on:

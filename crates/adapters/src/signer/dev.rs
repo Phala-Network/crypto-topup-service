@@ -26,14 +26,6 @@ impl DevSigner {
         }
     }
 
-    /// Derives deterministic local-only backup key material for `backup/vN`.
-    #[must_use]
-    pub fn derive_backup_key_version(&self, version: u32) -> SecretKey32 {
-        let digest = Sha256::digest(format!("topup-dev-backup/v{version}"));
-        let bytes: [u8; 32] = digest.into();
-        SecretKey32::new(bytes)
-    }
-
     /// Derives development keys from `seed` with the same domains as the dstack signer.
     ///
     /// Each key is `SHA-256(seed || domain)`: the operator key uses
@@ -88,17 +80,6 @@ mod tests {
 
     fn signer() -> DevSigner {
         DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]))
-    }
-
-    #[test]
-    fn backup_key_versions_are_stable_and_distinct() {
-        let signer = signer();
-        let first = signer.derive_backup_key_version(1);
-        let repeated = signer.derive_backup_key_version(1);
-        let prior = signer.derive_backup_key_version(0);
-
-        assert_eq!(first.expose_secret(), repeated.expose_secret());
-        assert_ne!(first.expose_secret(), prior.expose_secret());
     }
 
     fn transaction() -> TxRequest {

@@ -10,24 +10,34 @@ x-walg-environment: &walg-environment
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
 services:
-  backup-key:
+  # The only container with the dstack socket besides topup: it derives the WAL-G keys and the
+  # database credentials (deploy/README.md, "Database credentials") into three tmpfs volumes, so
+  # every other service mounts only the ones it needs.
+  keys:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command:
       - topup
-      - backup-key
+      - keys
+      - --backup-dir
+      - /run/wal-g
+      - --owner-dir
+      - /run/db-owner
+      - --app-dir
+      - /run/db-app
       - --version
       - ${TOPUP_BACKUP_KEY_VERSION:-1}
       - --fallback-versions
       - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
-      - --output
-      - /run/wal-g/backup.key
       - --hold
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - walg_key:/run/wal-g
+      - db_owner:/run/db-owner
+      - db_app:/run/db-app
     healthcheck:
-      test: ["CMD", "topup", "backup-key", "--check", "--output", "/run/wal-g/backup.key"]
+      test: ["CMD", "topup", "keys", "--check", "--backup-dir", "/run/wal-g", "--owner-dir",
+             "/run/db-owner", "--app-dir", "/run/db-app"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -39,14 +49,15 @@ services:
       <<: *walg-environment
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-      TOPUP_APP_PASSWORD: ${TOPUP_APP_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: /run/db-owner/postgres.password
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
       TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql
       - walg_key:/run/wal-g:ro
+      - db_owner:/run/db-owner:ro
+      - db_app:/run/db-app:ro
       - observability:/run/topup-observability
     configs:
       - source: postgres_init_topup_role
@@ -58,15 +69,19 @@ services:
       retries: 12
       start_period: 10s
     depends_on:
-      backup-key:
+      keys:
         condition: service_healthy
     restart: unless-stopped
 
   migrate:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    user: "999:999"
     command: ["topup", "migrate"]
     environment:
-      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+      MIGRATE_DATABASE_URL: postgres://postgres@postgres:5432/topup
+      PGPASSFILE: /run/db-owner/postgres.pgpass
+    volumes:
+      - db_owner:/run/db-owner:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +89,8 @@ services:
 
   topup:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    # Database clients run as uid 999, which owns the 0600 credential files; each mounts only its own.
+    user: "999:999"
     command:
       - topup
       - run
@@ -84,7 +101,9 @@ services:
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: postgres://topup_service@postgres:5432/topup
+      PGPASSFILE: /run/db-app/topup_service.pgpass
+      TOPUP_SERVICE_ENABLED: ${TOPUP_SERVICE_ENABLED:-on}
       TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
       TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
       COINMETRICS_API_KEY: ${COINMETRICS_API_KEY:-}
@@ -94,6 +113,7 @@ services:
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
     configs:
       - source: topup_route_phala_cloud_sepolia_pha
@@ -115,9 +135,14 @@ services:
 
   heartbeat:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    user: "999:999"
     command: ["topup", "heartbeat", "--interval-s", "60"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: postgres://topup_service@postgres:5432/topup
+      PGPASSFILE: /run/db-app/topup_service.pgpass
+      TOPUP_SERVICE_ENABLED: ${TOPUP_SERVICE_ENABLED:-on}
+    volumes:
+      - db_app:/run/db-app:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -133,13 +158,14 @@ services:
       PGHOST: postgres
       PGDATABASE: topup
       PGUSER: postgres
-      PGPASSWORD: ${POSTGRES_PASSWORD:-}
+      PGPASSFILE: /run/db-owner/postgres.pgpass
       WALG_RETENTION_FULL: "7"
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql:ro
       - walg_key:/run/wal-g:ro
+      - db_owner:/run/db-owner:ro
       - observability:/run/topup-observability
     healthcheck:
       test: ["CMD", "wal-g", "--version"]
@@ -147,7 +173,7 @@ services:
       timeout: 10s
       retries: 3
     depends_on:
-      backup-key:
+      keys:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -178,12 +204,15 @@ services:
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     command: []
+    user: "999:999"
     environment:
-      MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+      MIGRATE_DATABASE_URL: postgres://postgres@postgres:5432/topup
+      PGPASSFILE: /run/db-owner/postgres.pgpass
       TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
       TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - db_owner:/run/db-owner:ro
     configs:
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
@@ -200,6 +229,18 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: uid=999,gid=999,mode=0700
+  db_owner:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
+  db_app:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
   observability:
 
 configs:
@@ -208,13 +249,18 @@ configs:
       #!/bin/sh
       set -eu
 
-      if [ -z "$${TOPUP_APP_PASSWORD:-}" ]; then
-          echo "TOPUP_APP_PASSWORD is required to initialize the application login" >&2
+      # `keys` derives the application login's password from dstack `db/app/v1`. psql reads it from
+      # the login's pgpass file (field 5), so it never appears in argv or the environment.
+      app_pgpass=/run/db-app/topup_service.pgpass
+      if [ ! -s "$$app_pgpass" ]; then
+          echo "$$app_pgpass is required to initialize the application login" >&2
           exit 1
       fi
 
       psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" \
-          --set=ON_ERROR_STOP=1 --set=app_password="$$TOPUP_APP_PASSWORD" <<'SQL'
+          --set=ON_ERROR_STOP=1 --set=app_pgpass="$$app_pgpass" <<'SQL'
+      \set app_password `cut -d: -f5 :'app_pgpass'`
+
       DO $$$$
       BEGIN
           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_app') THEN

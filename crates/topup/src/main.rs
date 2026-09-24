@@ -32,7 +32,9 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::{SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain};
+use topup_core::{
+    DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain,
+};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
@@ -58,7 +60,8 @@ enum TopupCommand {
     /// Run one reconciliation pass and exit; with --post-restore, only while the service is stopped.
     Reconcile(ReconcileArgs),
     Attest(AttestArgs),
-    BackupKey(BackupKeyArgs),
+    /// Derive the backup key and database credentials from dstack into a shared tmpfs.
+    Keys(KeysArgs),
     Heartbeat(HeartbeatArgs),
     /// Validate a restored database and run post-restore reconciliation.
     ///
@@ -122,10 +125,16 @@ struct AttestArgs {
 }
 
 #[derive(Args)]
-struct BackupKeyArgs {
-    /// File that WAL-G reads through WALG_LIBSODIUM_KEY_PATH.
-    #[arg(long, value_name = "FILE")]
-    output: PathBuf,
+struct KeysArgs {
+    /// Directory (tmpfs) for backup.key and backup-vN.key, which WAL-G reads.
+    #[arg(long, value_name = "DIR")]
+    backup_dir: PathBuf,
+    /// Directory (tmpfs) for the owner login's postgres.password and postgres.pgpass.
+    #[arg(long, value_name = "DIR")]
+    owner_dir: PathBuf,
+    /// Directory (tmpfs) for the application login's topup_service.pgpass.
+    #[arg(long, value_name = "DIR")]
+    app_dir: PathBuf,
     /// dstack backup key version, producing the domain backup/vN.
     #[arg(long, default_value_t = 1)]
     version: u32,
@@ -135,12 +144,9 @@ struct BackupKeyArgs {
     /// Keep the process alive so the shared tmpfs remains mounted.
     #[arg(long, conflicts_with = "check")]
     hold: bool,
-    /// Check only that the key file was atomically published with safe metadata.
+    /// Check only that the files were atomically published with safe metadata.
     #[arg(long, conflicts_with = "hold")]
     check: bool,
-    #[cfg(feature = "dev-signer")]
-    #[arg(long, help = "Use deterministic local-only backup key material")]
-    dev: bool,
 }
 
 #[derive(Args)]
@@ -213,7 +219,7 @@ async fn main() -> ExitCode {
         } => return replay_outbox(id, since.as_deref(), force).await,
         TopupCommand::Reconcile(args) => return reconcile(&args).await,
         TopupCommand::Attest(args) => attest(&args).await,
-        TopupCommand::BackupKey(args) => return backup_key(&args).await,
+        TopupCommand::Keys(args) => return keys(&args).await,
         TopupCommand::Heartbeat(args) => return heartbeat(&args).await,
         TopupCommand::RestoreCheck(args) => return restore_check(&args).await,
     };
@@ -227,70 +233,75 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn backup_key(args: &BackupKeyArgs) -> ExitCode {
+async fn keys(args: &KeysArgs) -> ExitCode {
     if args.check {
-        return if topup::backup::check_libsodium_key(&args.output).is_ok() {
+        return if topup::keys::check(&args.backup_dir, &args.owner_dir, &args.app_dir).is_ok() {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
         };
     }
 
+    let signer = DstackSigner::new();
     let versions = std::iter::once(args.version)
         .chain(args.fallback_versions.iter().copied())
         .collect::<BTreeSet<_>>();
     for version in versions {
-        #[cfg(feature = "dev-signer")]
-        let key = if args.dev {
-            let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
-            signer.derive_backup_key_version(version)
-        } else {
-            match DstackSigner::new().derive_backup_key_version(version).await {
-                Ok(key) => key,
-                Err(_) => {
-                    tracing::error!(version, "failed to derive backup key");
-                    return ExitCode::FAILURE;
-                }
-            }
+        let Ok(key) = signer.derive_backup_key_version(version).await else {
+            tracing::error!(version, "failed to derive backup key");
+            return ExitCode::FAILURE;
         };
-
-        #[cfg(not(feature = "dev-signer"))]
-        let key = match DstackSigner::new().derive_backup_key_version(version).await {
-            Ok(key) => key,
-            Err(_) => {
-                tracing::error!(version, "failed to derive backup key");
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let versioned = topup::backup::versioned_key_path(&args.output, version);
-        if topup::backup::write_libsodium_key(&versioned, &key).is_err() {
+        let versioned = topup::keys::versioned_key_path(&args.backup_dir, version);
+        if topup::keys::write_backup_key(&versioned, &key).is_err() {
             tracing::error!(path = %versioned.display(), version, "failed to write backup key file");
             return ExitCode::FAILURE;
         }
-        if version == args.version
-            && topup::backup::write_libsodium_key(&args.output, &key).is_err()
-        {
-            tracing::error!(path = %args.output.display(), version, "failed to write current backup key file");
+        let current = args.backup_dir.join(topup::keys::BACKUP_KEY_FILE);
+        if version == args.version && topup::keys::write_backup_key(&current, &key).is_err() {
+            tracing::error!(path = %current.display(), version, "failed to write current backup key file");
             return ExitCode::FAILURE;
         }
     }
-    tracing::info!(
-        path = %args.output.display(),
-        version = args.version,
-        "backup key file is ready"
-    );
+    let (Ok(owner), Ok(app)) = tokio::join!(
+        signer.derive_secret(DB_OWNER_KEY_DOMAIN),
+        signer.derive_secret(DB_APP_KEY_DOMAIN),
+    ) else {
+        tracing::error!("failed to derive database credentials");
+        return ExitCode::FAILURE;
+    };
+    if topup::keys::write_database_credentials(&args.owner_dir, &args.app_dir, &owner, &app)
+        .is_err()
+    {
+        tracing::error!("failed to write database credential files");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!(version = args.version, "key files are ready");
     if args.hold {
-        if tokio::signal::ctrl_c().await.is_err() {
-            tracing::error!("failed to listen for backup key shutdown signal");
+        if wait_for_shutdown_signal().await.is_err() {
+            tracing::error!("failed to listen for key holder shutdown signal");
             return ExitCode::FAILURE;
         }
-        tracing::info!("backup key holder stopped");
+        tracing::info!("key holder stopped");
     }
     ExitCode::SUCCESS
 }
 
+/// Refuses service commands on a replacement CVM that boots for a restore (`deploy/RESTORE.md`).
+fn service_enabled(command: &str) -> Result<(), String> {
+    match std::env::var("TOPUP_SERVICE_ENABLED").as_deref() {
+        Err(_) | Ok("on") => Ok(()),
+        Ok("off") => Err(format!(
+            "{command} is disabled while TOPUP_SERVICE_ENABLED=off"
+        )),
+        Ok(_) => Err("TOPUP_SERVICE_ENABLED must be on or off".to_owned()),
+    }
+}
+
 async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
+    if let Err(error) = service_enabled("heartbeat") {
+        tracing::error!(%error, "heartbeat refused to start");
+        return ExitCode::FAILURE;
+    }
     let pool = match connect("DATABASE_URL", "heartbeat", 1).await {
         Ok(pool) => pool,
         Err(code) => return code,
@@ -492,7 +503,7 @@ async fn run(args: &RunArgs) -> ExitCode {
         ..PumpConfig::default()
     };
     // Checked before the on-chain contract check; `connect` reads it again below.
-    if let Err(error) = required_env("DATABASE_URL") {
+    if let Err(error) = service_enabled("run").and_then(|()| required_env("DATABASE_URL")) {
         tracing::error!(%error, "missing runtime configuration");
         return ExitCode::FAILURE;
     }

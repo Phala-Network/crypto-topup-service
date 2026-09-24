@@ -136,7 +136,9 @@ jobs:
           echo "public origin: $origin"
 
       # Exactly the names of deploy/staging.env.example. Sensitive values are Environment secrets;
-      # the others are Environment variables (a secret of the same name is accepted too).
+      # the others are Environment variables (a secret of the same name is accepted too). The RPC
+      # URLs are variables unless they embed a provider key; a same-named secret then wins.
+      # Database credentials are not inputs: the CVM derives them from dstack KMS.
       - name: Write the env file
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -146,17 +148,15 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
           COINMETRICS_API_KEY: ${{ secrets.COINMETRICS_API_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATE_DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID || secrets.TOPUP_ADMIN_KID }}
           TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY || secrets.TOPUP_ADMIN_PUBLIC_KEY }}
           TOPUP_BACKUP_KEY_FALLBACK_VERSIONS: ${{ vars.TOPUP_BACKUP_KEY_FALLBACK_VERSIONS || secrets.TOPUP_BACKUP_KEY_FALLBACK_VERSIONS }}
           TOPUP_BACKUP_KEY_VERSION: ${{ vars.TOPUP_BACKUP_KEY_VERSION || secrets.TOPUP_BACKUP_KEY_VERSION }}
-          TOPUP_APP_PASSWORD: ${{ secrets.TOPUP_APP_PASSWORD }}
           # TOPUP_PUBLIC_ORIGIN comes from the previous step.
-          TOPUP_RPC_PROVIDER_A_URL: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL }}
-          TOPUP_RPC_PROVIDER_B_URL: ${{ secrets.TOPUP_RPC_PROVIDER_B_URL }}
+          TOPUP_RPC_PROVIDER_A_URL: ${{ secrets.TOPUP_RPC_PROVIDER_A_URL || vars.TOPUP_RPC_PROVIDER_A_URL }}
+          TOPUP_RPC_PROVIDER_B_URL: ${{ secrets.TOPUP_RPC_PROVIDER_B_URL || vars.TOPUP_RPC_PROVIDER_B_URL }}
+          # `off` only in a restore-time environment (deploy/RESTORE.md); preflight refuses it.
+          TOPUP_SERVICE_ENABLED: "on"
           TOPUP_WAL_ARCHIVE: ${{ vars.TOPUP_WAL_ARCHIVE || secrets.TOPUP_WAL_ARCHIVE }}
           WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX || secrets.WALG_S3_PREFIX }}
         run: deploy/write-staging-env.sh "$ENV_FILE"
