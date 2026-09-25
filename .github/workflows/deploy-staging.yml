@@ -5,12 +5,14 @@ name: Deploy staging
 #
 # Controls: only a user with write access can dispatch this workflow; the job runs only from
 # `main`, and the GitHub Environment `staging` (deployment branches: `main` only) holds its only
-# secret, PHALA_CLOUD_API_KEY. Runtime secrets never enter GitHub: `provision` sends the env file
-# built from Environment variables with the owner-sealed secrets (S3 keys, Coin Metrics key)
-# empty, and the owner then seals the complete env file from their own machine (the run summary
-# prints the command); `upgrade` sends no env at all, so the sealed env stays. Required reviewers
-# are not available for this private repository's plan, so there is no approval step: dispatching
-# is the decision.
+# secret, PHALA_CLOUD_API_KEY. The CVM's env holds only the owner-sealed secrets
+# (deploy/staging.env.example), which never enter GitHub: `provision` sends them empty, and the
+# owner then seals them from their own machine (the run summary prints the command); `upgrade`
+# sends no env at all, so the sealed env stays. Every other setting is public and attested:
+# deploy/render-compose.sh renders the Environment variables below into the compose, so a changed
+# value is a new compose hash and takes effect only through `upgrade` (deploy/README.md, "Attested
+# settings"). Required reviewers are not available for this private repository's plan, so there
+# is no approval step: dispatching is the decision.
 #
 # Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22):
 # - Authentication is the PHALA_CLOUD_API_KEY environment variable, which the CLI prefers over a
@@ -70,6 +72,19 @@ jobs:
       STAGING_CVM_ID: ${{ vars.STAGING_CVM_ID }}
       PHALA_WORKSPACE: "kingsley's projects"
       CVM_NAME: crypto-topup-staging
+      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_PUBLIC_ORIGIN comes
+      # from step "Resolve the public origin". The RPC URLs are published with the compose, so
+      # they must be keyless public URLs.
+      AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
+      WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX }}
+      TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
+      TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
+      TOPUP_BACKUP_KEY_VERSION: ${{ vars.TOPUP_BACKUP_KEY_VERSION }}
+      TOPUP_BACKUP_KEY_FALLBACK_VERSIONS: ${{ vars.TOPUP_BACKUP_KEY_FALLBACK_VERSIONS }}
+      TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
+      TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
     steps:
       - name: Check inputs and Environment settings
         env:
@@ -83,8 +98,12 @@ jobs:
           done
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
-          [[ -n "$DSTACK_OS_IMAGE" ]] ||
-            { echo "::error::Environment variable DSTACK_OS_IMAGE is not set"; status=1; }
+          for name in DSTACK_OS_IMAGE AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX \
+            TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY TOPUP_BACKUP_KEY_VERSION \
+            TOPUP_BACKUP_KEY_FALLBACK_VERSIONS TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL; do
+            [[ -n "${!name}" ]] ||
+              { echo "::error::Environment variable $name is not set"; status=1; }
+          done
           case "$MODE" in
             provision)
               [[ -z "$STAGING_CVM_ID" ]] || {
@@ -122,8 +141,8 @@ jobs:
         with:
           version: v1.8.3
 
-      # A new CVM boots with a provisional origin until its gateway URL is known (step "Set the
-      # public origin"); an upgrade keeps the existing CVM's gateway URL.
+      # A new CVM is rendered with a provisional origin until its gateway URL is known (step "Set
+      # the public origin"); an upgrade renders the existing CVM's gateway URL.
       - name: Resolve the public origin
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -139,30 +158,13 @@ jobs:
           echo "TOPUP_PUBLIC_ORIGIN=$origin" >>"$GITHUB_ENV"
           echo "public origin: $origin"
 
-      # Exactly the names of deploy/staging.env.example, from Environment variables only; the
-      # writer leaves the owner-sealed secrets empty. Database credentials are not inputs: the CVM
-      # derives them from dstack KMS. `upgrade` writes the file for preflight only and never sends it.
+      # Exactly the names of deploy/staging.env.example, all empty: the owner-sealed secrets.
+      # Database credentials are not inputs: the CVM derives them from dstack KMS. `upgrade` writes
+      # the file for preflight only and never sends it.
       - name: Write the unsealed env file
-        env:
-          AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
-          TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
-          TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
-          TOPUP_BACKUP_KEY_FALLBACK_VERSIONS: ${{ vars.TOPUP_BACKUP_KEY_FALLBACK_VERSIONS }}
-          TOPUP_BACKUP_KEY_VERSION: ${{ vars.TOPUP_BACKUP_KEY_VERSION }}
-          # TOPUP_PUBLIC_ORIGIN comes from the previous step.
-          TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
-          TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
-          # Restore-time values (TOPUP_RESTORE_FROM_BACKUP=on, TOPUP_SERVICE_ENABLED=read-only or
-          # off) belong only in a restore env (deploy/RESTORE.md); preflight refuses them.
-          TOPUP_RESTORE_FROM_BACKUP: "off"
-          TOPUP_SERVICE_ENABLED: "on"
-          TOPUP_WAL_ARCHIVE: ${{ vars.TOPUP_WAL_ARCHIVE }}
-          WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX }}
         run: deploy/write-staging-env.sh "$ENV_FILE"
 
-      - name: Render the compose from this commit with the input digests
+      - name: Render the compose from this commit with the input digests and the settings
         run: deploy/render-compose.sh >"$WORK/docker-compose.staging.yml"
 
       - name: Preflight (read-only; both RPCs, anonymous image pulls, Phala Cloud workspace and OS image)
@@ -231,6 +233,9 @@ jobs:
             fi
           } >>"$GITHUB_STEP_SUMMARY"
 
+      # A new CVM's PostgreSQL cannot list the backup prefix until the owner seals the storage
+      # credentials, so it refuses to initialize and the service is not up yet: only an upgrade
+      # waits for /healthz.
       - name: Wait for the CVM and the service
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -250,6 +255,7 @@ jobs:
           domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
           gateway_origin="https://${APP_ID#0x}-8080.$domain"
           echo "GATEWAY_ORIGIN=$gateway_origin" >>"$GITHUB_ENV"
+          [[ "$MODE" == upgrade ]] || exit 0
           for _ in $(seq 60); do
             curl -fsS --max-time 10 "$gateway_origin/healthz" >/dev/null && exit 0
             sleep 10
@@ -257,52 +263,39 @@ jobs:
           echo "::error::$gateway_origin/healthz did not answer"
           exit 1
 
-      # Env values are not part of the app-compose, so the same name set keeps the compose hash;
-      # with Phala KMS the update applies directly. Only a new CVM: an upgrade leaves the sealed
-      # env, and with it the origin the owner sealed, untouched.
+      # The gateway URL is known only after provisioning, and it is attested configuration: upgrade
+      # the new CVM to the compose rendered with it (no -e: the env stays).
       - name: Set the public origin
         if: inputs.mode == 'provision'
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          if [[ "$TOPUP_PUBLIC_ORIGIN" == "$GATEWAY_ORIGIN" ]]; then
-            echo "TOPUP_PUBLIC_ORIGIN is already $GATEWAY_ORIGIN"
-            exit 0
-          fi
-          (
-            umask 077
-            awk -v origin="$GATEWAY_ORIGIN" \
-              '/^TOPUP_PUBLIC_ORIGIN=/ { print "TOPUP_PUBLIC_ORIGIN=" origin; next } { print }' \
-              "$ENV_FILE" >"$ENV_FILE.new"
-          )
-          cat "$ENV_FILE.new" >"$ENV_FILE"
-          rm -f "$ENV_FILE.new"
-          deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" --offline --unsealed
-          before=$(jq -c '.progress' "$WORK/cvm.json")
-          # CLI 1.1.22 returns as soon as the API answers `in_progress`; the restart follows.
-          npx --yes phala@1.1.22 envs update "$CVM_ID" -e "$ENV_FILE"
+          TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN deploy/render-compose.sh >"$WORK/docker-compose.staging.yml"
           echo "TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN" >>"$GITHUB_ENV"
-          # First see the restart begin (not running, an operation in progress, or a new progress
-          # record), within 5 minutes; then wait up to 15 minutes for running and /healthz.
-          restarted=0
+          deploy/preflight.sh --env "$ENV_FILE" --compose "$WORK/docker-compose.staging.yml" --offline --unsealed
+          npx --yes phala@1.1.22 deploy --json \
+            --cvm-id "$CVM_ID" \
+            --compose "$WORK/docker-compose.staging.yml" \
+            --no-public-logs \
+            --no-public-sysinfo \
+            --wait 2>&1 | tee "$WORK/deploy-public-origin.raw"
+          sed -n '/^{/,$p' "$WORK/deploy-public-origin.raw" >"$WORK/deploy-public-origin.json"
+          jq -e '.success == true' "$WORK/deploy-public-origin.json" >/dev/null
+          # Wait for the new compose hash and a running CVM.
           for _ in $(seq 60); do
             if npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              jq -e --argjson before "$before" \
-                '.status != "running" or .in_progress or .progress != $before' \
+              jq -e --arg before "$DEPLOYED_COMPOSE_HASH" \
+                '.status == "running" and (.in_progress | not)
+                  and ((.compose_hash | ascii_downcase | ltrimstr("0x")) != $before)' \
                 "$WORK/cvm.json" >/dev/null; then
-              restarted=1
-              break
+              deployed_hash=$(jq -er '.compose_hash' "$WORK/cvm.json")
+              deployed_hash=${deployed_hash#0x}
+              echo "DEPLOYED_COMPOSE_HASH=${deployed_hash,,}" >>"$GITHUB_ENV"
+              exit 0
             fi
-            sleep 5
-          done
-          ((restarted)) || { echo "::error::the CVM did not start the env update within 5 minutes"; exit 1; }
-          for _ in $(seq 60); do
-            npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              jq -e '.status == "running" and (.in_progress | not)' "$WORK/cvm.json" >/dev/null &&
-              curl -fsS --max-time 10 "$GATEWAY_ORIGIN/healthz" >/dev/null && exit 0
             sleep 15
           done
-          echo "::error::the service did not come back within 15 minutes after the origin update"
+          echo "::error::the CVM did not run the compose with the public origin within 15 minutes"
           exit 1
 
       - name: Read back and verify the attested compose
@@ -344,28 +337,28 @@ jobs:
           {
             echo "### Owner: seal the runtime secrets"
             echo
-            echo "The CVM runs with empty S3 and Coin Metrics keys: the service is up, but WAL"
-            echo "archiving and backups fail (TopupBackupTooOld) until the owner seals the complete"
-            echo "env file from their own machine. Use exactly the staging.env.example names, the"
-            echo "Environment variables' values, TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN, and the secrets;"
-            echo "the same name set keeps the compose hash. From a checkout of \`$GITHUB_SHA\`:"
+            echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
+            echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
+            echo "write \`.env.staging\` (mode 0600) with exactly the staging.env.example names:"
+            echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, and \`SENTRY_DSN\` (may be empty). The"
+            echo "same name set keeps the compose hash. From a checkout of \`$GITHUB_SHA\`:"
             echo
             echo '```sh'
             echo "deploy/preflight.sh --env .env.staging --compose docker-compose.staging.yml --offline"
             echo "npx --yes phala@1.1.22 envs update $CVM_ID -e .env.staging"
             echo '```'
             echo
-            echo "\`docker-compose.staging.yml\` is in this run's artifact. Backups have started when"
-            echo "the WAL key-version marker is younger than two minutes:"
+            echo "\`docker-compose.staging.yml\` is in this run's artifact. The service answers"
+            echo "$GATEWAY_ORIGIN/healthz once the CVM has restarted with the secrets, and backups have"
+            echo "started when the WAL key-version marker is younger than two minutes:"
             echo
             echo '```sh'
-            # shellcheck disable=SC2016 # printed for the owner's shell, not expanded here
-            echo 'aws s3 ls "${WALG_S3_PREFIX%/}/key-versions/current.json" ${AWS_ENDPOINT:+--endpoint-url "$AWS_ENDPOINT"}'
+            echo "aws s3 ls \"${WALG_S3_PREFIX%/}/key-versions/current.json\" --endpoint-url \"$AWS_ENDPOINT\""
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
-      # No secrets: the compose holds only variable references, and the CLI outputs hold ids,
-      # hashes, and the attested app-compose.
+      # No secrets: the compose holds the public settings and references to the sealed secrets,
+      # and the CLI outputs hold ids, hashes, and the attested app-compose.
       - name: Upload the deployment record
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -375,6 +368,7 @@ jobs:
           path: |
             ${{ runner.temp }}/deploy-staging/docker-compose.staging.yml
             ${{ runner.temp }}/deploy-staging/deploy.json
+            ${{ runner.temp }}/deploy-staging/deploy-public-origin.json
             ${{ runner.temp }}/deploy-staging/cvm.json
             ${{ runner.temp }}/deploy-staging/attestation.json
             ${{ runner.temp }}/deploy-staging/info.json

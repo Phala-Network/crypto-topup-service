@@ -35,17 +35,17 @@ its dedicated tools service with owner credentials and checks the same migration
 ## Decision tree
 
 - Planned drill and a verified backup exists: proceed only in a throwaway instance of the app,
-  following the "Staging restore drill" section of `deploy/RESTORE.md` (restore-time environment:
-  `TOPUP_RESTORE_FROM_BACKUP=on`, `TOPUP_WAL_ARCHIVE=off`, `TOPUP_SERVICE_ENABLED=read-only`,
-  read-only object-storage credentials; verify through `/healthz` and signed reads only, then
-  delete the instance).
+  following the "Staging restore drill" section of `deploy/RESTORE.md` (the restore-check variant
+  of the compose, `deploy/render-compose.sh --restore-check`: restore required, archiving and
+  base backups off, `topup` read-only; read-only object-storage credentials; verify through
+  `/healthz` and signed reads only, then delete the instance).
 - Primary database unavailable: declare incident and restore to a new encrypted volume/CVM.
 - Backup list empty, stale, or unverifiable: do not resume; escalate data-loss risk.
 
 ## Remediation
 
 **HUMAN-ONLY:** execute `deploy/RESTORE.md`: create a new instance of the original app id with the
-restore-time environment. It derives the retained backup keys, restores the newest base backup,
+restore-check variant of the compose. It derives the retained backup keys, restores the newest base backup,
 replays encrypted WAL, promotes, and runs the restore check at boot; its report is on the
 instance's `/healthz`. This runbook delegates restore execution to that procedure.
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Renders the Sepolia sandbox compose: deploy/docker-compose.yml with literal image digests
-# (deploy/render-compose.sh), merged with docker-compose.sepolia.yml, and the validated sandbox
-# route inlined as the `topup_route_sandbox` config. Output is compose JSON on stdout; secret
-# `${NAME:-}` references stay uninterpolated for the CVM's encrypted environment.
+# Renders the Sepolia sandbox compose: deploy/docker-compose.yml with literal image digests and
+# the attested settings from the environment (deploy/render-compose.sh), merged with
+# docker-compose.sepolia.yml, and the validated sandbox route inlined as the `topup_route_sandbox`
+# config. Output is compose JSON on stdout; secret `${NAME:-}` references stay uninterpolated for
+# the CVM's encrypted environment.
 #
-# Usage: TOPUP_IMAGE=...@sha256:... POSTGRES_WALG_IMAGE=...@sha256:... \
+# Usage: TOPUP_IMAGE=...@sha256:... POSTGRES_WALG_IMAGE=...@sha256:... <settings> \
 #   render-sepolia-compose.sh ROUTE_FILE > sandbox-compose.json
 set -euo pipefail
 

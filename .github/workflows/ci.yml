@@ -163,11 +163,6 @@ jobs:
           deploy/tests/product-preflight.sh
           deploy/tests/write-staging-env.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
-          TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-          POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
-            deploy/render-app-compose.sh deploy/staging.env.example | jq -e \
-              '.docker_compose_file | contains("@sha256:1111111111111111111111111111111111111111111111111111111111111111")' \
-              >/dev/null
       - uses: ./.github/actions/rust
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -184,7 +179,7 @@ jobs:
         run: docker run --rm postgres-walg:ci wal-g --version
       - name: postgres-walg carries TLS roots for the object store
         run: docker run --rm --entrypoint sh postgres-walg:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
-      - name: Check the WAL archive switch
+      - name: Check the PostgreSQL bootstrap and WAL archive switch
         run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 
   contracts:

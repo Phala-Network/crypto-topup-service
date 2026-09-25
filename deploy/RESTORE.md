@@ -2,11 +2,14 @@
 
 This runbook implements architecture sections 13-15. A restore is a bootstrap from backup, the
 pattern of CloudNativePG's `bootstrap.recovery` and Spilo's clone from backup: a new instance of
-the same dstack application boots with an empty database volume and the
-[restore-time environment](#restore-time-environment), and PostgreSQL itself fetches the newest
-base backup, replays every archived WAL segment, and promotes. Production OS images have no SSH or
-logs, so no step runs inside the CVM: the operator sets the environment, creates the instance, and
-verifies it only through its `/healthz` and read API on its own gateway URL.
+the same dstack application boots with an empty database volume, and PostgreSQL itself fetches the
+newest base backup, replays every archived WAL segment, and promotes
+([Bootstrap from backup](#bootstrap-from-backup)). The instance boots the
+[restore-check variant](#the-restore-check-variant) of the attested compose, which verifies the
+restore read-only; a real restore then resumes by upgrading that instance to the service compose.
+Production OS images have no SSH or logs, so no step runs inside the CVM: the operator renders the
+compose, creates the instance, and verifies it only through its `/healthz` and read API on its own
+gateway URL.
 
 ## Backup key and metadata
 
@@ -77,9 +80,11 @@ no adjacent segment was uploaded, rotates PostgreSQL to v2 while the rest are pe
 archiver finish them under v2, decrypts every rotation segment with its recorded key version (and
 proves the other version fails), and restores across the rotation boundary.
 
-Both modes then destroy the source database and its key volumes and boot the whole stack at once,
-as dstack does, with the [restore-time environment](#restore-time-environment). They require that
-PostgreSQL restored the newest base backup and promoted with `archive_mode=off`, that `heartbeat`
+Both modes start the source from an empty object store, so its PostgreSQL must list the prefix and
+initialize a new cluster. They then destroy the source database and its key volumes and boot the
+whole [restore-check variant](#the-restore-check-variant) at once, as dstack does, with read-only
+storage credentials. They require that PostgreSQL restored the newest base backup and promoted
+with `archive_mode=off`, that `heartbeat`
 fails closed and `backup` idles, that the storage credentials are read-only, that `/healthz` serves
 a `restore-check` report with `"status":"ok"` and a complete post-restore reconciliation, that a
 write request is refused with `503` while a read reaches authentication, that the re-derived
@@ -91,45 +96,65 @@ tags.
 The `Restore drill` workflow (`.github/workflows/restore-drill.yml`) runs `make restore-drill` every
 Monday at 03:17 UTC on the CI runner and can be started manually. Instead of the full drill, the
 `deployment` CI job (pull requests and pushes to `main`) runs the bounded `walg-cron`, WAL-G
-restore-command, and archive and restore switch tests on the self-hosted runner. The CI runner
+restore-command, and bootstrap and archive switch tests on the self-hosted runner. The CI runner
 reaches the host Docker daemon through its socket and the daemon cannot see the checkout, so the
 drill never bind-mounts a host path: `deploy/local/restore-drill.compose.yml` swaps the local
 stack's file mounts for project volumes that the drill fills with `docker cp`, locally and on CI
 alike.
 
-## Restore-time environment
+## Bootstrap from backup
 
-When a replacement instance is created, dstack's `app-compose.sh` immediately runs
-`docker compose up --remove-orphans -d` for the whole attested compose with the encrypted
-environment the instance was created with. The replacement therefore always boots, for a real
-restore as well as a drill, with a restore-time environment:
+The PostgreSQL entrypoint (`deploy/scripts/postgres-walg-entrypoint.sh`) bootstraps an empty data
+directory on every boot of every instance, from `WALG_S3_PREFIX`:
 
-- `TOPUP_RESTORE_FROM_BACKUP=on`. The PostgreSQL entrypoint finds the data directory empty,
-  selects the newest base backup (`wal-g backup-list`, latest `time`), fetches it with
-  `walg-backup-fetch` beside the data directory, and moves it into place only when complete, with
-  `recovery.signal`. PostgreSQL then replays every archived segment through `walg-restore-command`
-  and promotes at the end of the archive. A data directory that holds anything is started as is
-  and never overwritten; an interrupted fetch starts over and an interrupted recovery resumes. While
-  the switch is on, archiving is forced off whatever `TOPUP_WAL_ARCHIVE` says, `walg-cron` refuses
-  `wal-push`, and `backup` idles (`base backups are disabled while TOPUP_RESTORE_FROM_BACKUP=on`),
-  so neither a base backup nor `wal-g delete retain` touches the prefix. `deploy/tests/walg-archive-switch.sh`
-  verifies the switch on the image.
-- `TOPUP_WAL_ARCHIVE=off`, which the switch implies as well.
+- It lists the base backups (`wal-g backup-list --json`). If the prefix holds any, it selects the
+  newest (latest `time`), fetches it with `walg-backup-fetch` beside the data directory, and moves
+  it into place only when complete, with `recovery.signal`. PostgreSQL then replays every archived
+  segment through `walg-restore-command` and promotes at the end of the archive.
+- Only a listing that succeeds and is empty (`[]`) lets PostgreSQL initialize a new cluster.
+- Any listing error (object storage unreachable, credentials not sealed yet or wrong, a missing
+  bucket) stops the container, which Docker restarts; it never initializes a cluster then,
+  because a new cluster archiving into a prefix that holds a timeline would fork it. A new CVM
+  therefore waits for its sealed storage credentials ([README](README.md#deploy) step 5).
+
+A data directory that holds anything is started as is and never overwritten; an interrupted fetch
+starts over and an interrupted recovery resumes (`restore_command` is always set; PostgreSQL uses
+it only in recovery). A new app needs a prefix of its own: its keys cannot decrypt another app's
+backups, so the fetch fails and the instance stays down. `deploy/tests/walg-archive-switch.sh`
+verifies these paths on the image.
+
+## The restore-check variant
+
+`deploy/render-compose.sh --restore-check` renders the same source as the service with two
+attested differences, so a verification instance is identifiable by its compose hash:
+
+- `TOPUP_RESTORE_FROM_BACKUP=on`. PostgreSQL requires a base backup (an empty prefix fails like a
+  listing error) and never archives: archiving is off whatever flags are passed, `walg-cron`
+  refuses `wal-push`, and `backup` idles (`base backups are disabled while
+  TOPUP_RESTORE_FROM_BACKUP=on`), so neither a base backup nor `wal-g delete retain` touches the
+  prefix. `restore-check` runs (below).
 - `TOPUP_SERVICE_ENABLED=read-only`: `topup run` serves only `GET` and `HEAD` requests (anything
   else answers `503`) and runs no scanner, pump, flusher, webhook delivery, reconciler, or
   lease-owner lock; it skips the startup contract check because it issues nothing. `heartbeat`
   exits at its configuration check (`heartbeat is disabled while TOPUP_SERVICE_ENABLED=read-only`).
-- `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for credentials that can only list and read
-  `WALG_S3_PREFIX`, so a mistake cannot write, overwrite, or delete backup objects. On Cloudflare
-  R2 this is an R2 API token with the permission **Object Read only**, scoped to the backup bucket
-  only (staging: `crypto-topup-test`), with `AWS_SESSION_TOKEN` empty.
-- `TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation; the instance's own gateway URL is
-  known only afterwards ([Verify the restored instance](#verify-the-restored-instance)).
-- Everything else as for production, including `TOPUP_BACKUP_KEY_VERSION` and
-  `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version), and
-  `SENTRY_DSN`: a read-only instance reports errors under the Sentry environment
-  `<environment>-restore`, never as the live environment, and sends no Crons check-in because no
-  loop runs ([deploy/README.md, "Sentry"](README.md#sentry)).
+  With `SENTRY_DSN` set, it reports errors under the Sentry environment `<environment>-restore`,
+  never as the live environment, and sends no Crons check-in because no loop runs
+  ([deploy/README.md, "Sentry"](README.md#sentry)).
+
+Every other setting is the service's, rendered from the same values (for staging, the `staging`
+Environment variables), including `TOPUP_BACKUP_KEY_VERSION` and
+`TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version), except
+`TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation: the instance's own gateway URL is known
+only afterwards ([Verify the restored instance](#verify-the-restored-instance)). Render it from the
+commit of the live compose, with the live images and every attested setting
+([README](README.md#attested-settings)) exported:
+
+```sh
+export TOPUP_IMAGE=<live crypto-topup digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>
+TOPUP_PUBLIC_ORIGIN=https://pending.invalid deploy/render-compose.sh --restore-check >restore-check.yml
+deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
+  --restore-check --offline
+```
 
 After PostgreSQL has promoted (its health check passes only once it is out of recovery; the start
 period allows the one-hour RTO) and `migrate` has confirmed the schema, the `restore-check` service
@@ -150,8 +175,8 @@ It writes its report to the `observability` volume, and the read-only `topup` se
 product lookup that fails, is not found, is still processing, fails identity verification, or
 would need an unsafe transition makes `status` `incomplete` and is listed in `failures`. The
 regular reconciliation checks run in the same round; their findings and `failed_checks` (for
-example an unreachable chain RPC) are reported but do not gate resume. With
-`TOPUP_RESTORE_FROM_BACKUP=off`, `restore-check` exits at once on every boot.
+example an unreachable chain RPC) are reported but do not gate resume. In the service variant,
+`restore-check` exits at once on every boot.
 
 Alerts during the restore window are expected, not incidents. The replacement archives nothing
 and refreshes no backup-age marker, so `TopupBackupTooOld` fires whenever an old or missing marker
@@ -164,37 +189,24 @@ deleted.
 
 ### The restore env file
 
-`restore.env` holds every production secret plus the restore overrides in plaintext. Create it
-only on the operator's machine, in a private directory, and only for this restore. It has one
-`KEY=VALUE` line for every name in `deploy/app-compose.example.json` `allowed_envs`, with the
-production values (staging values for a drill) except these overrides:
+The env holds only the owner-sealed secrets ([staging.env.example](staging.env.example)); every
+setting is in the rendered compose. `restore.env` holds object-storage credentials that can only
+list and read `WALG_S3_PREFIX`, so a mistake cannot write, overwrite, or delete backup objects. On
+Cloudflare R2 this is an R2 API token with the permission **Object Read only**, scoped to the
+backup bucket only (staging: `crypto-topup-test`). Create it only on the operator's machine, in a
+private directory, and only for this restore:
 
 ```sh
 umask 077
 export RESTORE_ENV_DIR="$(mktemp -d)"
-cat >"$RESTORE_ENV_DIR/restore.env" <<'EOF'
-TOPUP_RESTORE_FROM_BACKUP=on
-TOPUP_WAL_ARCHIVE=off
-TOPUP_SERVICE_ENABLED=read-only
-TOPUP_PUBLIC_ORIGIN=https://pending.invalid
-AWS_ACCESS_KEY_ID=<read-only restore key id>
-AWS_SECRET_ACCESS_KEY=<read-only restore secret>
-AWS_SESSION_TOKEN=
-EOF
+printf '%s\n' 'AWS_ACCESS_KEY_ID=<read-only restore key id>' \
+  'AWS_SECRET_ACCESS_KEY=<read-only restore secret>' 'SENTRY_DSN=<the live DSN, or empty>' \
+  >"$RESTORE_ENV_DIR/restore.env"
 ```
 
-Append every other `allowed_envs` name with its production value, then require that both checks
-print nothing (no name duplicated, missing, or extra):
-
-```sh
-jq -r '.allowed_envs[]' deploy/app-compose.example.json | sort >"$RESTORE_ENV_DIR/expected"
-cut -d= -f1 "$RESTORE_ENV_DIR/restore.env" | sort | uniq -d
-cut -d= -f1 "$RESTORE_ENV_DIR/restore.env" | sort -u | diff - "$RESTORE_ENV_DIR/expected"
-```
-
-The names must already be the application's `allowed_envs`, which the compose hash fixes: an
-instance of a compose revision without `TOPUP_RESTORE_FROM_BACKUP` cannot restore on boot. Delete
-the file when the instance exists, and also when the restore is abandoned:
+The names must be exactly the application's `allowed_envs`, which the compose hash fixes
+(`preflight.sh` above checks them). Delete the file when the instance exists, and also when the
+restore is abandoned:
 
 ```sh
 shred -u "$RESTORE_ENV_DIR/restore.env"
@@ -205,11 +217,15 @@ rm -rf "$RESTORE_ENV_DIR"
 
 A replacement derives the same `backup/vN` keys and database passwords only under the original
 dstack application identity: the same app id and KMS, with an allowed attested compose. It is a new
-instance of that app, never a new app. Pass `--env-file` on every create: without it, Phala Cloud
-gives the new instance the encrypted environment of an existing instance of the app, and a
-replacement booting with production values would archive a fresh cluster into the production WAL
-prefix (colliding segment names and rewriting `key-versions/current.json`), let `backup` push an
-empty base backup and run `wal-g delete retain`, and run `topup` with the application's keys.
+instance of that app, never a new app, created with the `restore-check.yml` rendered
+[above](#the-restore-check-variant). `phala instances add` accepts a compose of its own for the new
+instance (CLI 1.1.22 `--compose-file`, sent as the request's `docker_compose_file`; the SDK's
+`createAppInstance`: "Deploy a new CVM instance under an existing app, optionally with a new Docker
+Compose file"). Never create it with the live compose revision (`--compose-hash`, or neither
+option): that is the service variant, which would restore and then archive, run `backup`, and run
+the full `topup` next to the live instance. Pass `--env-file` on every create: without it, Phala
+Cloud gives the new instance the encrypted environment of an existing instance of the app, with
+its read-write storage credentials.
 
 Each instance gets its own gateway endpoint, `https://<instance_id>-<port>.<gateway.base_domain>`;
 Phala Cloud does not distribute traffic across the instances of an app. Still, while a
@@ -219,15 +235,13 @@ instance (an empty `200` on `/healthz`, never the read-only JSON).
 ### Phala Cloud KMS (staging)
 
 With `--kms phala` there is no on-chain authorization: `phala instances add` creates and boots the
-instance in one call (CLI 1.1.22, `cli/src/commands/instances/add`). Name the compose revision
-explicitly, as the live instance's (`cvms get --json` `.compose_hash`), and record the returned
+instance in one call (CLI 1.1.22, `cli/src/commands/instances/add`). Record the returned
 `vm_uuid`:
 
 ```sh
 npx --yes phala@1.1.22 cvms get "$SOURCE_CVM_ID" --json >source.json
 export APP_ID="$(jq -er '.app_id' source.json)"
-npx --yes phala@1.1.22 instances add --app-id "$APP_ID" \
-  --compose-hash "$(jq -er '.compose_hash' source.json)" \
+npx --yes phala@1.1.22 instances add --app-id "$APP_ID" --compose-file restore-check.yml \
   --env-file "$RESTORE_ENV_DIR/restore.env" --name crypto-topup-restore --json >instance.json
 export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
 ```
@@ -246,11 +260,13 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    ```
 
    Require the owner to be the recorded Finance Safe and the KMS chain/root to match the failed
-   instance. Stop if the original app id or KMS root cannot be established.
+   instance. `ORIGINAL_COMPOSE_HASH` is the live service compose, needed again to
+   [resume](#resume-real-restore-only). Stop if the original app id or KMS root cannot be established.
 
 2. Prepare a new instance of that existing app with `phala instances add`, not the new-application
    workflow; `phala cvms replicate` needs the source CVM, which may be gone. The commands and JSON
-   paths below match phala CLI 1.1.22. Reuse the retained attested compose revision and pass
+   paths below match phala CLI 1.1.22. Pass the `restore-check.yml` rendered from the retained
+   production compose's commit, images, and settings, and
    [the restore env file](#the-restore-env-file). `--env-file` encrypts it with the key of an
    existing instance record of the app, so stop the failed CVM but do not delete it before this
    step. `NODE_ID` is the numeric node (teepod) id to run the replacement on:
@@ -259,7 +275,7 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    npx --yes phala@1.1.22 nodes list --json
    export NODE_ID=<node id>
    npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --node-id "$NODE_ID" \
-     --compose-hash "$ORIGINAL_COMPOSE_HASH" --env-file "$RESTORE_ENV_DIR/restore.env" \
+     --compose-file restore-check.yml --env-file "$RESTORE_ENV_DIR/restore.env" \
      --prepare-only --json > prepare.json
    ```
 
@@ -277,7 +293,6 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    hex() { printf '0x%s' "${1#0x}" | tr 'A-F' 'a-f'; }
    test "$(hex "$(jq -r '.appId' prepare.json)")" = "$(hex "$ORIGINAL_APP_ID")"
    export COMPOSE_HASH="$(hex "$(jq -r '.composeHash' prepare.json)")"
-   test "$COMPOSE_HASH" = "$(hex "$ORIGINAL_COMPOSE_HASH")"
    export DEVICE_ID="$(hex "$(jq -r '.deviceId' prepare.json)")"
    test "$(jq -r '.kmsInfo.chain_id' prepare.json)" = "$(cast chain-id --rpc-url "$ETH_RPC_URL")"
    export COMPOSE_HASH_PREVIOUSLY_ALLOWED="$(jq -r '.onchainStatus.compose_hash_allowed' prepare.json)"
@@ -321,7 +336,7 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
 
    ```sh
    deploy/verify-attestation.sh \
-     attestation.json info.json "$ORIGINAL_APP_ID" deploy/docker-compose.yml
+     attestation.json info.json "$ORIGINAL_APP_ID" restore-check.yml
    ```
 
 ## Verify the restored instance
@@ -357,12 +372,16 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    ```
 
 4. Signed product requests carry the URL they were sent to in `@target-uri`, so set the instance's
-   own URL as its origin: replace `TOPUP_PUBLIC_ORIGIN` in a fresh copy of the restore env file
-   (same names, so the compose hash is unchanged) and update the instance. It restarts; its data
-   directory is no longer empty, so it starts as is, and `restore-check` runs again:
+   own URL as its origin: render the restore-check variant again with
+   `TOPUP_PUBLIC_ORIGIN=$RESTORE_URL` and upgrade this instance only (no `-e`, so its env stays;
+   with on-chain KMS, approve the returned hash as in [README](README.md#b-upgrade-an-existing-cvm)
+   section B). It restarts; its data directory is no longer empty, so it starts as is, and
+   `restore-check` runs again:
 
    ```sh
-   npx --yes phala@1.1.22 envs update "$RESTORE_CVM_ID" -e "$RESTORE_ENV_DIR/restore.env"
+   TOPUP_PUBLIC_ORIGIN=$RESTORE_URL deploy/render-compose.sh --restore-check >restore-check.yml
+   npx --yes phala@1.1.22 deploy --json --cvm-id "$RESTORE_CVM_ID" --compose restore-check.yml \
+     --no-public-logs --no-public-sysinfo --wait
    ```
 
    Wait for `/healthz` to serve an `ok` report again, then check known deposits with
@@ -372,14 +391,16 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
 
 ## Resume (real restore only)
 
-Compare incident markers and expected row counts first. Switching the encrypted environment to
-production values restarts the app compose on the restored database, which is then started as
-is. Control ingress before the switch: confirm the failed instance is deleted so only one instance
-holds the application keys, and have the product owner hold calls to the service
-([incident communication](runbooks/incident-communication.md)). Then update the environment with
-`TOPUP_RESTORE_FROM_BACKUP=off`, `TOPUP_WAL_ARCHIVE=on`, the read-write object-storage
-credentials, `TOPUP_SERVICE_ENABLED=on`, and the production `TOPUP_PUBLIC_ORIGIN`
-(`phala envs update "$RESTORE_CVM_ID" -e <production env file>`), and require:
+Compare incident markers and expected row counts first. Resuming upgrades the verified instance to
+the service compose, which restarts it on the restored database, which is then started as is.
+Control ingress before the switch: confirm the failed instance is deleted so only one instance
+holds the application keys and archives into the prefix, and have the product owner hold calls to
+the service ([incident communication](runbooks/incident-communication.md)). Then render the service
+variant (`deploy/render-compose.sh`, no `--restore-check`) with the production settings and the
+origin products will call, upgrade the instance to it (staging: `phala deploy --cvm-id
+"$RESTORE_CVM_ID" --compose <file>`, no `-e`; production: README section B), and seal the
+read-write object-storage credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the
+same three names). Require:
 
 - `/healthz` answers `200` with an empty body (the full service, not the read-only one);
 - `backup` finds no base backup on the promoted timeline and takes one at once (`walg-timeline-backup`);
@@ -402,15 +423,17 @@ never write to the source WAL prefix: after promotion it is on a new timeline, a
 file, segments, and `key-versions/current.json` would make a later real restore follow
 `recovery_target_timeline=latest` onto the drill's timeline. It must also never run `backup`
 (`wal-g delete retain` on the shared prefix) or the full `topup` (the live application's keys, next
-to the live instance). The restore-time environment guarantees all three.
+to the live instance). The restore-check variant guarantees all three.
 
-1. Issue an R2 API token with **Object Read only** on the staging bucket only, and build the
-   [restore env file](#the-restore-env-file) with it and the live staging values.
+1. Issue an R2 API token with **Object Read only** on the staging bucket only, build the
+   [restore env file](#the-restore-env-file) with it, and render the
+   [restore-check variant](#the-restore-check-variant) with the live staging images and settings.
 2. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only.
 3. Record the drill start time (the RPO anchor), then
    [create the instance](#phala-cloud-kms-staging) and delete the env file.
 4. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
-   and RTO in the drill log. Never switch the drill's environment to production values.
+   and RTO in the drill log. Never upgrade the drill instance to the service compose or seal
+   read-write credentials into it.
 5. Delete the drill instance by its own `vm_uuid` (never by app id or name, which also match the
    live instance), revoke the read-only token, and remove the drill silences:
 
@@ -425,7 +448,7 @@ to the live instance). The restore-time environment guarantees all three.
 - **App id, KMS, compose, or attestation mismatch:** stop. Correct the original app authorization;
   never copy key files between CVMs.
 - **`/healthz` never answers, or `restore_check` stays `null` past the RTO:** the base backup
-  could not be listed, fetched, or decrypted, or recovery failed (the WAL wrapper returns `126` on
+  could not be listed (or the prefix is empty), fetched, or decrypted, or recovery failed (the WAL wrapper returns `126` on
   decryption, metadata, and storage errors, so PostgreSQL aborts instead of promoting). Delete the
   instance, verify object-storage access, integrity, and the retained version list with the
   owner's credentials, and retry with a new instance. `backup-list` success is not evidence of a

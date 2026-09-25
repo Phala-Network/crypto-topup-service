@@ -18,14 +18,6 @@ case "$1" in
     *) exec /usr/local/bin/docker-entrypoint.sh "$@" ;;
 esac
 
-archive=${TOPUP_WAL_ARCHIVE:-on}
-case "$archive" in
-    on|off) ;;
-    *)
-        echo "TOPUP_WAL_ARCHIVE must be on or off" >&2
-        exit 64
-        ;;
-esac
 restore=${TOPUP_RESTORE_FROM_BACKUP:-off}
 case "$restore" in
     on|off) ;;
@@ -43,19 +35,35 @@ as_postgres() {
     fi
 }
 
-# Bootstrap from backup (deploy/RESTORE.md): an empty data directory is filled with the newest
-# base backup and then recovers through every archived WAL segment and promotes. The base backup
-# is fetched beside PGDATA and moved into place only when complete, so an interrupted fetch starts
-# over, and a data directory that holds anything is never touched.
-restore_from_backup() {
-    staging="$(dirname "$PGDATA")/restore-from-backup.partial"
-    rm -rf "$staging"
-    backup_name=$(as_postgres "${WALG_BIN:-wal-g}" backup-list --json |
-        jq -er 'max_by(.time | sub("[.][0-9]+"; "") | fromdateiso8601) | .backup_name') || {
-        echo "TOPUP_RESTORE_FROM_BACKUP=on: no base backup could be listed" >&2
+# Bootstrap (deploy/RESTORE.md): an empty data directory is filled with the newest base backup in
+# the backup prefix, then recovers through every archived WAL segment and promotes. Only a listing
+# that succeeds and is empty lets docker-entrypoint.sh initialize a new cluster; any listing error
+# (storage unreachable, credentials not sealed yet) stops here, because a new cluster archiving
+# into a prefix that holds a timeline would fork it. The base backup is fetched beside PGDATA and
+# moved into place only when complete, so an interrupted fetch starts over, and a data directory
+# that holds anything is never touched.
+bootstrap() {
+    backups=$(as_postgres "${WALG_BIN:-wal-g}" backup-list --json) &&
+        count=$(printf '%s\n' "$backups" | jq -er 'if type == "array" then length else error end') || {
+        echo "the backup prefix could not be listed; refusing to initialize an empty data directory" >&2
         exit 1
     }
-    echo "TOPUP_RESTORE_FROM_BACKUP=on: restoring base backup $backup_name" >&2
+    if [ "$count" -eq 0 ]; then
+        if [ "$restore" = on ]; then
+            echo "TOPUP_RESTORE_FROM_BACKUP=on: the backup prefix holds no base backup" >&2
+            exit 1
+        fi
+        echo "the backup prefix holds no base backup; initializing a new cluster" >&2
+        return 0
+    fi
+    backup_name=$(printf '%s\n' "$backups" |
+        jq -er 'max_by(.time | sub("[.][0-9]+"; "") | fromdateiso8601) | .backup_name') || {
+        echo "the base backup listing is invalid" >&2
+        exit 1
+    }
+    echo "restoring base backup $backup_name" >&2
+    staging="$(dirname "$PGDATA")/restore-from-backup.partial"
+    rm -rf "$staging"
     as_postgres walg-backup-fetch "$staging" "$backup_name"
     as_postgres test -s "$staging/PG_VERSION"
     as_postgres touch "$staging/recovery.signal"
@@ -66,27 +74,21 @@ restore_from_backup() {
     mv "$staging" "$PGDATA"
 }
 
-if [ "$restore" = on ]; then
-    if [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
-        restore_from_backup
-    else
-        echo "TOPUP_RESTORE_FROM_BACKUP=on: $PGDATA is not empty and is started as is" >&2
-    fi
-    # On every start, so an interrupted recovery resumes; PostgreSQL uses it only in recovery.
-    set -- "$@" -c "restore_command=walg-restore-command %f %p"
-    # A restored instance must never archive into the WAL prefix it restores from.
-    archive=off
+if [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+    bootstrap
 fi
+# On every start, so an interrupted recovery resumes; PostgreSQL uses it only in recovery.
+set -- "$@" -c "restore_command=walg-restore-command %f %p"
 
-# Archive flags are appended after user arguments, so they always win. TOPUP_WAL_ARCHIVE=off is
-# for restore drills: a drill instance must never archive into the production WAL prefix.
-if [ "$archive" = on ]; then
+# Archive flags are appended after user arguments, so they always win. The restore-check variant
+# must never archive into the prefix it restores from (deploy/RESTORE.md).
+if [ "$restore" = off ]; then
     set -- "$@" \
         -c archive_mode=on \
         -c archive_timeout=60 \
         -c "archive_command=walg-cron wal-push %p"
 else
-    echo "WAL archiving is disabled for this instance" >&2
+    echo "WAL archiving is disabled while TOPUP_RESTORE_FROM_BACKUP=on" >&2
     set -- "$@" -c archive_mode=off
 fi
 

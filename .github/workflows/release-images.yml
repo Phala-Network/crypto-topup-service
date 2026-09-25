@@ -134,8 +134,8 @@ jobs:
           postgres_walg=$(cat "$RUNNER_TEMP/postgres-walg.ref")
           product=$(cat "$RUNNER_TEMP/reference-product.ref")
           # render-compose.sh rejects anything but a nonzero repository@sha256 reference.
-          TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres_walg deploy/render-compose.sh >/dev/null
-          PRODUCT_IMAGE=$product deploy/render-compose.sh deploy/product/docker-compose.yml >/dev/null
+          TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres_walg deploy/render-compose.sh --images-only >/dev/null
+          PRODUCT_IMAGE=$product deploy/render-compose.sh --images-only deploy/product/docker-compose.yml >/dev/null
           mkdir -p "$RUNNER_TEMP/images"
           jq -n --arg topup "$topup" --arg postgres_walg "$postgres_walg" --arg product "$product" \
             '{TOPUP_IMAGE: $topup, POSTGRES_WALG_IMAGE: $postgres_walg, PRODUCT_IMAGE: $product}' \

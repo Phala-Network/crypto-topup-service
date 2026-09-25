@@ -2,8 +2,8 @@
 # compose (deploy/render-compose.sh output with a real route inlined). It replaces only what a
 # CVM provides and a workstation does not: the dstack socket (the simulator), object storage
 # (s3.compose.yml), and the asset chain (Anvil with Sepolia's chain id). Images, commands,
-# environment (from a `.env` shaped like staging.env.example), inline configs, and healthchecks all
-# come from the rendered file.
+# settings, inline configs, and healthchecks all come from the rendered file, and the secrets from a
+# `.env` shaped like staging.env.example.
 #
 # Like the restore drill, nothing here bind-mounts a host path (CI's Docker daemon cannot see
 # the checkout) and the workload publishes no host port; only Anvil is published, on a loopback
@@ -59,7 +59,7 @@ services:
       anvil:
         condition: service_healthy
 
-  # Starts with every boot and exits at once while TOPUP_RESTORE_FROM_BACKUP=off.
+  # Starts with every boot and, in the service variant, exits at once.
   restore-check:
     volumes: !override
       - dstack_socket:/var/run

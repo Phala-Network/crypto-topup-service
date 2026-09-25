@@ -4,8 +4,6 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
-compose="$root/deploy/docker-compose.yml"
-local_compose="$root/deploy/local/docker-compose.yml"
 # No bind mounts: CI's Docker daemon cannot see the checkout (see restore-drill.compose.yml).
 drill_compose="$root/deploy/local/restore-drill.compose.yml"
 mode=${1:-all}
@@ -34,8 +32,11 @@ writer_pid=
 samples_file=
 routes_dir=
 seed_container="$project-seed"
+# The source runs the service variant of the rendered compose; the replacement boots the
+# restore-check variant (deploy/RESTORE.md).
+variant=()
 dc() {
-    docker compose -p "$project" -f "$compose" -f "$local_compose" -f "$drill_compose" "$@"
+    "$root/deploy/local/compose.sh" "${variant[@]}" -p "$project" -f "$drill_compose" "$@"
 }
 
 cleanup() {
@@ -296,8 +297,8 @@ remove_pgdata_volume() {
     remove_volume pgdata
 }
 
-# The heartbeat writer, booted with TOPUP_SERVICE_ENABLED=read-only, must exit at its
-# configuration check.
+# The heartbeat writer, booted in the restore-check variant (TOPUP_SERVICE_ENABLED=read-only),
+# must exit at its configuration check.
 failed_closed() {
     dc logs --no-log-prefix "$1" 2>/dev/null |
         grep -F "$2 is disabled while TOPUP_SERVICE_ENABLED=read-only"
@@ -499,6 +500,12 @@ wait_for keys dc exec -T keys topup keys --check \
 export TOPUP_BACKUP_KEY_VERSION=1
 dc up -d --no-deps postgres
 wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
+# The object store is empty, so the bootstrap listed no base backup and initialized a new cluster.
+dc logs --no-log-prefix postgres 2>&1 |
+    grep -Fx 'the backup prefix holds no base backup; initializing a new cluster' >/dev/null || {
+    echo "the source did not initialize from a provably empty backup prefix" >&2
+    exit 1
+}
 dc up -d --no-deps backup
 # A new cluster has no base backup on its timeline, so backup takes one at start.
 wait_for "startup base backup" startup_base_backup_listed
@@ -590,21 +597,19 @@ for volume in walg_key db_owner db_app; do
     remove_volume "$volume"
 done
 
-# Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole stack comes up at
-# once with the restore-time environment of deploy/RESTORE.md: restore from backup, WAL archiving
-# off, read-only object-storage credentials, and TOPUP_SERVICE_ENABLED=read-only. PostgreSQL
-# restores the newest base backup into the empty volume and replays every archived segment; no
-# command runs inside the stack. Nothing may reach object storage from here on.
+# Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole restore-check
+# variant of deploy/RESTORE.md comes up at once with read-only object-storage credentials, its only
+# sealed difference. PostgreSQL restores the newest base backup into the empty volume, replays
+# every archived segment, and never archives; `backup` idles; topup is read-only. No command runs
+# inside the stack. Nothing may reach object storage from here on.
 storage_before=$(storage_listing)
 test -n "$storage_before"
-export TOPUP_RESTORE_FROM_BACKUP=on
-export TOPUP_WAL_ARCHIVE=off
+variant=(--restore-check)
 export TOPUP_LOCAL_S3_ACCESS_KEY_ID=topup-restore-read
 export TOPUP_LOCAL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
-export TOPUP_SERVICE_ENABLED=read-only
 dc up --remove-orphans -d
 dc logs --no-log-prefix postgres 2>&1 |
-    grep -F "TOPUP_RESTORE_FROM_BACKUP=on: restoring base backup $backup_name" >/dev/null || {
+    grep -Fx "restoring base backup $backup_name" >/dev/null || {
     echo "the replacement did not restore the newest base backup $backup_name" >&2
     exit 1
 }
@@ -663,7 +668,7 @@ psql_value 'CHECKPOINT' >/dev/null
 restored_timeline=$(psql_value 'SELECT timeline_id FROM pg_control_checkpoint()')
 test "$restored_timeline" -gt 1
 test "$(storage_listing)" = "$storage_before" || {
-    echo "restored instance with TOPUP_WAL_ARCHIVE=off changed object storage" >&2
+    echo "the restore-check instance changed object storage" >&2
     exit 1
 }
 
@@ -680,6 +685,6 @@ printf 'archive_wait_seconds=%s\n' "$archive_wait_seconds"
 printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'key_rotation_v1_wal=%s\n' "$rotation_v1_wal"
 printf 'key_rotation_v2_wals=%s\n' "$rotation_v2_wals"
-printf 'restored_timeline=%s storage_unchanged_with_archive_off=true\n' "$restored_timeline"
+printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 echo "restore drill $mode passed"

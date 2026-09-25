@@ -2,8 +2,6 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-compose="$root/deploy/docker-compose.yml"
-local_compose="$root/deploy/local/docker-compose.yml"
 project="topup-infra-smoke-$$"
 tmp=$(mktemp -d "$root/.infra-smoke.XXXXXX")
 topup_container=
@@ -12,7 +10,7 @@ export TOPUP_LOCAL_POSTGRES_IMAGE="$project-postgres"
 export TOPUP_LOCAL_SERVICE_IMAGE="$project-topup"
 
 dc() {
-    docker compose -p "$project" -f "$compose" -f "$local_compose" "$@"
+    "$root/deploy/local/compose.sh" -p "$project" "$@"
 }
 
 cleanup() {

@@ -1,5 +1,4 @@
-# Local sandbox overlay: `docker compose -f deploy/docker-compose.yml
-# -f deploy/local/docker-compose.yml -f deploy/sandbox/docker-compose.local.yml ...`. Adds a
+# Local sandbox overlay: `deploy/local/compose.sh -f deploy/sandbox/docker-compose.local.yml ...`. Adds a
 # disposable Anvil chain with Sepolia's chain id and points the service at it; run-local.sh
 # drives the whole flow.
 services:

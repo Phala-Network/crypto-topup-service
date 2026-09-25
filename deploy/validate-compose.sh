@@ -2,8 +2,9 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-compose="$root/deploy/docker-compose.yml"
 local_compose="$root/deploy/local/docker-compose.yml"
+compose=$(mktemp)
+restore_check_compose=$(mktemp)
 rendered=$(mktemp)
 rendered_tools=$(mktemp)
 compose_envs=$(mktemp)
@@ -13,10 +14,24 @@ staging_envs=$(mktemp)
 product_compose=$(mktemp)
 
 cleanup() {
-    rm -f "$rendered" "$rendered_tools" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs" \
+    rm -f "$compose" "$restore_check_compose" "$rendered" "$rendered_tools" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs" \
         "$product_compose"
 }
 trap cleanup EXIT INT TERM
+
+# Both variants of the attested compose, rendered as Deploy staging does.
+render() {
+    TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+        POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+        AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto \
+        AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres \
+        TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
+        TOPUP_BACKUP_KEY_VERSION=1 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 \
+        TOPUP_PUBLIC_ORIGIN=https://topup.example TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example \
+        TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example "$root/deploy/render-compose.sh" "$@"
+}
+render >"$compose"
+render --restore-check >"$restore_check_compose"
 
 docker compose -f "$compose" config --format json >"$rendered"
 docker compose -f "$compose" --profile tools config --format json >"$rendered_tools"
@@ -74,6 +89,28 @@ jq -e '[.services[].environment // {} | to_entries[]
     exit 1
 }
 
+# The two variants differ only in the mode switches and the rendered-sha256 label.
+docker compose -f "$restore_check_compose" --profile tools config --format json |
+    jq -e --slurpfile service "$rendered_tools" '
+        def normal: del(.services[].labels)
+            | (.services[] | select(.environment.TOPUP_SERVICE_ENABLED != null)
+                | .environment.TOPUP_SERVICE_ENABLED) |= "on"
+            | (.services[] | select(.environment.TOPUP_RESTORE_FROM_BACKUP != null)
+                | .environment.TOPUP_RESTORE_FROM_BACKUP) |= "off";
+        (.services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only")
+        and (.services.postgres.environment.TOPUP_RESTORE_FROM_BACKUP == "on")
+        and (normal == ($service[0] | del(.services[].labels)))' >/dev/null || {
+    echo "the restore-check variant must differ from the service only in its mode switches" >&2
+    exit 1
+}
+jq -e '(.services.topup.environment.TOPUP_SERVICE_ENABLED == "on")
+    and (.services.heartbeat.environment.TOPUP_SERVICE_ENABLED == "on")
+    and ([.services[].environment.TOPUP_RESTORE_FROM_BACKUP // empty] | unique == ["off"])' \
+    "$rendered_tools" >/dev/null || {
+    echo "the service variant must run the service and never restore-check" >&2
+    exit 1
+}
+
 # Least privilege by mount: the runtime services see only the application login's credentials.
 jq -e '[.services.topup, .services.heartbeat | .volumes[]?.source]
     | any(. == "db_owner" or . == "walg_key") | not' "$rendered_tools" >/dev/null || {
@@ -99,9 +136,9 @@ compare_config postgres_init_topup_role "$root/deploy/postgres-init/10-topup-rol
 compare_config topup_route_phala_cloud_sepolia_pha \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml"
 
+# The rendered compose reads only the owner-sealed secrets from the env.
 docker compose -f "$compose" config --variables |
     awk 'NR > 1 && NF > 0 { print $1 }' |
-    grep -Ev '^(POSTGRES_WALG_IMAGE|TOPUP_IMAGE)$' |
     sort >"$compose_envs"
 jq -r '.allowed_envs[]' "$root/deploy/app-compose.example.json" | sort >"$allowed_envs"
 cmp -s "$compose_envs" "$allowed_envs" || {
@@ -126,9 +163,9 @@ cmp -s "$staging_envs" "$allowed_envs" || {
     exit 1
 }
 
-# The local stack is an overlay on the attested compose; check every combination the scripts use.
+# The local stack is an overlay on the rendered compose; check every combination the scripts use.
 local_stack() {
-    docker compose -f "$compose" -f "$local_compose" "$@" --profile tools config --format json
+    "$root/deploy/local/compose.sh" "$@" --profile tools config --format json
 }
 local_stack >"$rendered_tools"
 local_stack -f "$root/deploy/sandbox/docker-compose.local.yml" |
@@ -141,7 +178,7 @@ jq -e '[.services[].volumes[]? | select(.source == "/var/run/dstack.sock")] | le
     echo "the local overlay must replace the host dstack socket with the simulator's" >&2
     exit 1
 }
-local_stack -f "$root/deploy/local/restore-drill.compose.yml" >"$rendered"
+local_stack --restore-check -f "$root/deploy/local/restore-drill.compose.yml" >"$rendered"
 jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$rendered" >/dev/null || {
     echo "the restore-drill stack bind-mounts a host path; CI's Docker daemon cannot see it" >&2
     exit 1
