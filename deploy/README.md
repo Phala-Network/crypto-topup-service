@@ -85,7 +85,7 @@ not an OS image bump.
    | `WALG_S3_PREFIX` | variable, attested | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable, attested | from `topup-sdk keygen`; the private key stays with the admin |
    | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable, attested | `1` and `0` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
    | `DSTACK_OS_IMAGE` | variable | the owner-approved OS image, `dstack-0.5.9` ([OS image](#os-image)) |
    | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
 

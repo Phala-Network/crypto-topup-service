@@ -60,6 +60,7 @@ mkdir -p "$TOPUP_LOCAL_ROUTES_DIR"
 dc build postgres dstack-simulator topup
 dc up -d anvil
 wait_for anvil cast chain-id --rpc-url "$rpc_url"
+install_anvil_multicall3 "$rpc_url"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 (cd "$root/contracts" && ADMIN="$owner" TREASURY="$owner" FOUNDRY_BROADCAST="$tmp/broadcast" \
     PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script script/DeployFactory.s.sol:DeployFactory \

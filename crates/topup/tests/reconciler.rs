@@ -1147,6 +1147,46 @@ async fn loop_respects_cancellation() -> Result<()> {
     .await
 }
 
+#[tokio::test]
+async fn loop_publishes_failed_checks_for_the_daily_report() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        let seed = seed_identity(&pool, &route, 81).await?;
+        let chain = Arc::new(MockChain::at(150));
+        chain.derive(&[&seed]);
+        chain.fail_derivation.store(true, Ordering::SeqCst);
+        let reconciler = Reconciler::with_dependencies(
+            pool.clone(),
+            route_set(route)?,
+            BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
+            Arc::new(MockSettlement::default()),
+        );
+        let cancellation = CancellationToken::new();
+        // The first tick is immediate; no other test completes a loop round in this binary.
+        let round = async {
+            while topup::observability::reconciliation().is_none() {
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            () = reconciler.run_loop(StdDuration::from_secs(3_600), cancellation.clone()) => {}
+            result = tokio::time::timeout(StdDuration::from_secs(10), round) => result?,
+        }
+        cancellation.cancel();
+        let status = topup::observability::reconciliation().context("round status")?;
+        ensure!(
+            status.failed_checks
+                == [(
+                    "address_derivation".to_owned(),
+                    "addressOf timed out".to_owned()
+                )],
+            "{status:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// Progress gauge the reconciler sets only after a round in which every check completed.
 const RECONCILER_PROGRESS: &str = "topup_loop_progress_unixtime_seconds{loop=\"reconciler\"";
 

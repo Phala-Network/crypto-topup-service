@@ -30,6 +30,13 @@ export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55436/postgres
 For the CLI exercises, deploy a mock token and a real `ForwarderFactory` on Anvil with Anvil's
 public development key #0 as admin and development account #1 as treasury:
 
+Since #125 balance and `addressOf` reads go through the canonical Multicall3, which Anvil lacks, so
+install it first (`topup run` refuses a chain without it):
+
+```sh
+(source deploy/contracts/common.sh && install_anvil_multicall3 http://127.0.0.1:8547)
+```
+
 ```sh
 export ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 cd contracts

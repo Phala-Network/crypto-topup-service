@@ -98,6 +98,26 @@ start_anvil() {
     die "anvil did not become ready; last log lines: $(tail -n 5 "$log")"
 }
 
+# Installs the canonical Multicall3 (deploy/contracts/multicall3.json) on a local Anvil chain,
+# which has none. Real chains carry the canonical deployment; `topup run` refuses a chain where it
+# is missing, because every balance and addressOf read is aggregated through it.
+# Usage: install_anvil_multicall3 RPC_URL
+install_anvil_multicall3() {
+    local rpc_url="$1"
+    local recorded="$DEPLOY_CONTRACTS_DIR/multicall3.json"
+    local address client
+
+    require_command jq
+    client="$(cast rpc --rpc-url "$rpc_url" web3_clientVersion | tr -d '"')"
+    [[ "$(lower "$client")" == *anvil* ]] || die "Multicall3 is installed only on Anvil"
+    address="$(jq -er .address "$recorded")"
+    cast rpc --rpc-url "$rpc_url" anvil_setCode "$address" "$(jq -er .runtime_code "$recorded")" \
+        >/dev/null
+    [[ "$(lower "$(code_hash "$rpc_url" "$address")")" == \
+        "$(lower "$(jq -er .runtime_code_hash "$recorded")")" ]] ||
+        die "Multicall3 at $address does not have the recorded code hash"
+}
+
 is_address() {
     [[ "$1" =~ ^0x[0-9a-fA-F]{40}$ ]]
 }

@@ -67,6 +67,7 @@ stale backup are Sentry Crons monitors, and `/healthz` is a Sentry Uptime monito
 | `TopupDepositStateAgeExceeded{state="cleared"}`, repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
 | Settlement HTTP `422`, `resend_forbidden=true` | [422 payload mismatch](payload-mismatch-422.md) |
 | `TopupLoopStopped{loop="flusher"}`, reverted flush, isolated forwarder | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
+| Unflushed balance or `credited` deposits not swept after a flush schedule, `topup-flush-<route>` or `topup-reconciler` check-in `error` | Read the route's `flush_planning` and the report's `reconciliation.failed_checks` in `GET /v1/admin/report/daily` (production has no logs), then the runbook for the failing step: [Flush reverted or bisected](flush-reverted-or-bisected.md), [Reconciliation mismatch](reconciliation-mismatch.md), or [Provider disagreement](provider-disagreement.md) for RPC errors |
 | `TopupLoopStopped{loop="outbox"}`, `topup_outbox_backlog` growth | [Outbox backlog](outbox-backlog.md) |
 | `TopupLoopStopped{loop="pump"}` | [Stuck settlement](stuck-settlement.md) |
 | `TopupUnsupportedInflows`, rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |

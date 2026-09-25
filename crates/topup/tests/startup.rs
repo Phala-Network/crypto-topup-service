@@ -65,6 +65,29 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         .map_err(anyhow::Error::msg)
         .context("restored code must pass again")?;
 
+    // Balance and addressOf reads are aggregated through Multicall3: without the canonical
+    // deployment the service must refuse to start rather than fail every read later.
+    let multicall = Address::from_str("0xcA11bde05977b3631167028862bE2a173976CA11")?;
+    let canonical = cast(&["code", &format!("{multicall:#x}"), "--rpc-url", &rpc_url])?;
+    for (code, expected) in [
+        ("0x", "has no code on chain"),
+        ("0x00", "is not the canonical deployment"),
+    ] {
+        set_code(&rpc_url, multicall, code)?;
+        let error = topup::contracts::verify_routes(&route_set(&route)?)
+            .await
+            .expect_err("a missing or different Multicall3 must fail");
+        ensure!(
+            error.contains("Multicall3") && error.contains(expected),
+            "{error}"
+        );
+    }
+    set_code(&rpc_url, multicall, &canonical)?;
+    topup::contracts::verify_routes(&route_set(&route)?)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("the canonical Multicall3 must pass again")?;
+
     let path = std::env::temp_dir().join(format!("topup-startup-{}.yaml", uuid::Uuid::new_v4()));
     std::fs::write(
         &path,

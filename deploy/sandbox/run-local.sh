@@ -67,6 +67,7 @@ echo "== building and starting postgres, dstack simulator, and anvil"
 "${compose[@]}" build postgres dstack-simulator topup
 "${compose[@]}" up -d postgres dstack-simulator anvil
 wait_for anvil cast chain-id --rpc-url "$rpc_url"
+install_anvil_multicall3 "$rpc_url"
 "${compose[@]}" run --rm migrate >"$tmp/migrate.log" 2>&1 || { cat "$tmp/migrate.log" >&2; exit 1; }
 
 echo "== deploying the forwarder factory and sandbox test contracts"

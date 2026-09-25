@@ -1717,6 +1717,17 @@
             "format": "date-time",
             "description": "Report snapshot time."
           },
+          "reconciliation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReconciliationRoundReport",
+                "description": "Latest reconciliation round of the serving process; absent until the first round after a\nrestart."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "routes": {
             "type": "array",
             "items": {
@@ -1981,6 +1992,50 @@
           "error": {
             "$ref": "#/components/schemas/ErrorDetail",
             "description": "Error details."
+          }
+        }
+      },
+      "FailedCheckReport": {
+        "type": "object",
+        "description": "One reconciliation check that could not complete.",
+        "required": [
+          "check",
+          "error"
+        ],
+        "properties": {
+          "check": {
+            "type": "string",
+            "description": "Check code, such as `custody_balance`."
+          },
+          "error": {
+            "type": "string",
+            "description": "Error that stopped the check, without provider URLs."
+          }
+        }
+      },
+      "FlushPlanningReport": {
+        "type": "object",
+        "description": "Outcome of one scheduled flush planning run.",
+        "required": [
+          "at",
+          "outcome"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the run finished."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error of a failed run, without provider URLs."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`planned`; `idle` when no address met the flush policy, a flush was already in flight, or\nreconciliation froze the chain; `operator_not_authorized` when the operator was not known\nto hold `OPERATOR_ROLE`; `failed`; or `send_failed` when planning succeeded but sending or\nmaintaining a flush afterwards failed."
           }
         }
       },
@@ -2474,6 +2529,28 @@
           }
         }
       },
+      "ReconciliationRoundReport": {
+        "type": "object",
+        "description": "Latest reconciliation round of the serving process.",
+        "required": [
+          "at",
+          "failed_checks"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the round finished."
+          },
+          "failed_checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailedCheckReport"
+            },
+            "description": "Checks that could not complete; empty after a complete round."
+          }
+        }
+      },
       "RecordRefundRequest": {
         "type": "object",
         "description": "Administrative refund record body owned by C12.",
@@ -2641,6 +2718,17 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "flush_planning": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FlushPlanningReport",
+                "description": "Latest scheduled flush planning run of this route in the serving process; absent for\nunrouted assets and until the first run after a restart."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "open_rate_lock_exposure_atomic": {
             "type": "string",

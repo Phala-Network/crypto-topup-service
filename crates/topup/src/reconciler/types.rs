@@ -115,6 +115,8 @@ pub struct ReconciliationReport {
     pub findings: Vec<Finding>,
     /// Checks which could not complete; every other check still ran.
     pub failed_checks: Vec<CheckName>,
+    /// The error of each check in `failed_checks`, in the same order.
+    pub check_errors: Vec<String>,
     /// Whether a post-restore caller must keep the service stopped.
     ///
     /// Only the post-restore product lookups set this flag; alert-only findings never do.
