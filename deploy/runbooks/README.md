@@ -95,7 +95,7 @@ for any runbook.
 | Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
 | Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |
 | 422 payload mismatch | Complete: 422, no resend, GET-first adoption with the mock product | [x] |
-| Restore | Partial: local `deploy/local/restore-drill.sh` controlled and crash drills pass; staging drill pending | [ ] |
+| Restore | Partial: local `deploy/local/restore-drill.sh` controlled and crash drills pass; first staging drill restored but was aborted on live routing (fixed), clean rerun pending | [ ] |
 | Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
 | Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
 | Refund execution | Complete: request, approve, record, finality-checked confirm | [x] |

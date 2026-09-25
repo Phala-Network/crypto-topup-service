@@ -89,25 +89,36 @@ jq -e '[.services[].environment // {} | to_entries[]
     exit 1
 }
 
-# The two variants differ only in the mode switches and the rendered-sha256 label.
+# The two variants differ only in the mode switches, topup's published port, and the
+# rendered-sha256 label. The service publishes only topup:8080 and the restore-check variant only
+# topup:8081: the gateway sends `<app_id>-8080` to whichever instance accepts the connection, so a
+# restore-check instance next to the live one must not listen on 8080 (deploy/RESTORE.md).
+ingress='def ingress($port): [.services | to_entries[] | select((.value.ports // []) | length > 0)
+    | {service: .key, ports: .value.ports}] == [{service: "topup", ports: [{mode: "ingress",
+    target: 8080, published: $port, protocol: "tcp"}]}];'
 docker compose -f "$restore_check_compose" --profile tools config --format json |
-    jq -e --slurpfile service "$rendered_tools" '
+    jq -e --slurpfile service "$rendered_tools" "$ingress"'
         def normal: del(.services[].labels)
             | (.services[] | select(.environment.TOPUP_SERVICE_ENABLED != null)
                 | .environment.TOPUP_SERVICE_ENABLED) |= "on"
             | (.services[] | select(.environment.TOPUP_RESTORE_FROM_BACKUP != null)
-                | .environment.TOPUP_RESTORE_FROM_BACKUP) |= "off";
+                | .environment.TOPUP_RESTORE_FROM_BACKUP) |= "off"
+            | .services.topup.ports[0].published |= "8080";
         (.services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only")
         and (.services.postgres.environment.TOPUP_RESTORE_FROM_BACKUP == "on")
+        and ingress("8081")
         and (normal == ($service[0] | del(.services[].labels)))' >/dev/null || {
-    echo "the restore-check variant must differ from the service only in its mode switches" >&2
+    echo "the restore-check variant must differ from the service only in its mode switches and" \
+        "in publishing topup on 8081" >&2
     exit 1
 }
-jq -e '(.services.topup.environment.TOPUP_SERVICE_ENABLED == "on")
+jq -e "$ingress"'(.services.topup.environment.TOPUP_SERVICE_ENABLED == "on")
     and (.services.heartbeat.environment.TOPUP_SERVICE_ENABLED == "on")
-    and ([.services[].environment.TOPUP_RESTORE_FROM_BACKUP // empty] | unique == ["off"])' \
+    and ([.services[].environment.TOPUP_RESTORE_FROM_BACKUP // empty] | unique == ["off"])
+    and ingress("8080")' \
     "$rendered_tools" >/dev/null || {
-    echo "the service variant must run the service and never restore-check" >&2
+    echo "the service variant must run the service, publish only topup:8080, and never" \
+        "restore-check" >&2
     exit 1
 }
 

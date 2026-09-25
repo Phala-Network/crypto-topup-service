@@ -114,10 +114,11 @@ compose hash, and so the attestation, covers it. In
 variables above) and refused unless it is 1-512 printable ASCII characters without spaces,
 quotes, backslashes, or `$`. The renderer also writes:
 
-- the mode switches, from the variant it renders, never from the environment: the service
-  (`TOPUP_RESTORE_FROM_BACKUP=off`, `TOPUP_SERVICE_ENABLED=on`), or with `--restore-check` the
-  restore verification instance of [RESTORE.md](RESTORE.md#the-restore-check-variant)
-  (`on`, `read-only`); the two variants have different compose hashes;
+- the mode switches and `topup`'s published port, from the variant it renders, never from the
+  environment: the service (`TOPUP_RESTORE_FROM_BACKUP=off`, `TOPUP_SERVICE_ENABLED=on`,
+  `TOPUP_INGRESS_PORT=8080`), or with `--restore-check` the restore verification instance of
+  [RESTORE.md](RESTORE.md#the-restore-check-variant) (`on`, `read-only`, `8081`); the two variants
+  have different compose hashes;
 - the label `crypto-topup.rendered-sha256` on every service, the SHA-256 of the rendered file.
   Compose recreates a container only when its service definition changes, not when an inline
   config does, so the label makes every rendered change recreate every service.
@@ -242,8 +243,9 @@ Deploy staging, in order; any failure stops the run:
   the replayed compose hash equal to the SHA-256 of the attested app-compose, whose
   `docker_compose_file` must be `COMPOSE` byte for byte. Finally it checks the compose policy:
   `allowed_envs` equal to the reviewed secret names and to the only variables the compose reads,
-  no `MIGRATE_DATABASE_URL` in `topup`, and the single 8080 ingress (for the reference product,
-  `ENV_EXAMPLE SERVICE:PORT`).
+  no `MIGRATE_DATABASE_URL` in `topup`, and the single `topup` ingress: 8080, or 8081 for the
+  restore-check variant ([RESTORE.md](RESTORE.md#addressing-the-restore-check-instance)) (for the
+  reference product, `ENV_EXAMPLE SERVICE:PORT`).
 - `Dockerfile.postgres-walg` supplies PostgreSQL 18 plus WAL-G and the D3 wrappers for encrypted,
   key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
 - `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and

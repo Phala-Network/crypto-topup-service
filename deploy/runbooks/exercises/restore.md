@@ -9,7 +9,17 @@ use the current [runbook](../restore.md). The migration history was later squash
 
 Status: partial. The C8 post-restore gate ran against seeded data before D3 landed. D3 (#58) now
 implements `topup restore-check` and `deploy/RESTORE.md`, and `deploy/local/restore-drill.sh`
-exercises both end to end locally; the staging drill has not run yet.
+exercises both end to end locally.
+
+The first staging drill ran on 2026-09-25 (21:55-22:25 UTC; 2:55-3:25 PM PDT) with CLI 1.1.22 and
+Phala Cloud KMS: the restore passed (`restore_check` ok, reconciliation complete, RPO within
+bounds, no writes to the backup prefix), but the drill was aborted because its restore-check
+instance, then publishing 8080 like the service, answered 8 of 12 `/healthz` requests to the live
+staging URL: the dstack gateway balances `<app_id>-8080` across every instance of the app that
+accepts the connection, and `cvms get` reported the drill's `instance_id` as `null`, so it had no
+separate URL. The restore-check variant now publishes 8081 only and the drill aborts on a failed
+live isolation check (`deploy/RESTORE.md`, "Addressing the restore-check instance"); a clean
+staging drill is still pending.
 
 G2 exercised once: [ ]
 
