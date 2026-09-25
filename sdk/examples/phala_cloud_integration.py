@@ -971,9 +971,9 @@ def pin_settlement_key(config: SandboxConfig, *, wait_s: float = 0) -> Ed25519Pu
 
     `verify_attestation_binding` checks that the report data binds the nonce, the key, and the
     flusher operators. Production integrators must also verify the TDX quote with the dstack
-    verification flow (deploy/README.md) and then pin `(keyid, public key)` in configuration;
-    a configured `settlement_public_key` skips the fetch. While the service is unreachable this
-    retries for up to `wait_s` seconds.
+    verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin `(keyid, public key)` in
+    configuration; a configured `settlement_public_key` skips the fetch. While the service is
+    unreachable this retries for up to `wait_s` seconds.
     """
     if config.settlement_public_key is not None:
         return load_public_key(config.settlement_public_key)

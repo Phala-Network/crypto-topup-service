@@ -301,8 +301,9 @@ class TopupClient:
         """Fetches attestation evidence binding `nonce` to the settlement key and operators.
 
         Raises `AttestationError` unless `report_data` binds `nonce`, `settlement_pubkey`, and
-        every entry of `operators`. Verify the quote with the dstack verification flow, including
-        that its report data equals `report_data`, before pinning the key or trusting an operator.
+        every entry of `operators`. Verify the quote with the dstack verifier
+        (`deploy/dstack-verifier.sh`), including that its report data is `report_data` zero-padded
+        to 64 bytes, before pinning the key or trusting an operator.
         """
         response = self._call(
             lambda: get_attestation.sync_detailed(client=self._client, nonce=nonce.hex()),
