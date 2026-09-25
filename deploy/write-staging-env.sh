@@ -7,8 +7,9 @@
 #
 # Usage: deploy/write-staging-env.sh [--product] OUTPUT
 #
-# --product writes the reference product's env file instead: the names of
-# deploy/product/staging.env.example, with its only secret, PRODUCT_SEED, empty.
+# --product writes the reference product's env file instead: its only name, the secret
+# PRODUCT_SEED (deploy/product/staging.env.example), empty. The product's public settings are not
+# env values; deploy/product/render-compose.sh renders them into the attested compose.
 #
 # OUTPUT must already exist (create it with mktemp, mode 0600); it is overwritten. Every name must
 # be set and non-empty, except the ones preflight.sh --unsealed allows to be empty. A value must be one line

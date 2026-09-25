@@ -1,14 +1,20 @@
 # Staging reference product CVM (deploy/README.md, "Staging reference product"): the settlement
 # endpoint, webhook receiver, and account API of sdk/examples/phala_cloud_integration.py for the
-# phala-cloud product on the Sepolia staging route. Deploy staging product renders PRODUCT_IMAGE
-# to a digest with deploy/render-compose.sh; the other variables are exactly the names of
-# deploy/product/staging.env.example. PRODUCT_SEED is the product's signing seed (64 hex), sealed
-# by the owner; everything else is public configuration.
+# phala-cloud product on the Sepolia staging route. Deploy staging product renders this file with
+# deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
+# (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they
+# are attested and a change is a compose upgrade. The only env value is PRODUCT_SEED, the product's
+# signing seed (64 hex), sealed by the owner (deploy/product/staging.env.example).
 services:
   product:
     image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/crypto-topup-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
       PRODUCT_SEED: ${PRODUCT_SEED:-}
+    # Compose recreates a container only when its service definition changes, not when an inline
+    # config's content does, and a restart keeps the old config file. The renderer sets this label
+    # to the digest of the rendered file, so every rendered change recreates the product.
+    labels:
+      crypto-topup.rendered-sha256: "${PRODUCT_RENDERED_SHA256:-}"
     configs:
       - source: product_config
         target: /etc/product/config.json
