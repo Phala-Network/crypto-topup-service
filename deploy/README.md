@@ -856,6 +856,75 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
 env, a re-rendered public URL (which must recreate the container), the sealed env, and one deposit
 driven by `deposit` mode.
 
+### Abnormal paths
+
+The deposit driver also plays the sandbox scenarios' abnormal payments
+([sandbox/README.md](sandbox/README.md#scenarios)) against staging, through the product CVM, and
+checks the outcome from the product's view: the deposit state, the verified webhooks, and the
+product ledger. The scenarios themselves (`scenarios/run.py`) cannot run here: they serve their
+own product endpoint and need the product key, while staging settles with the product CVM. Each
+run registers a fresh workspace, so runs are independent. Every step is **HUMAN-ONLY**, with
+`driver.json`, `ETH_KEYSTORE`, and `ETH_PASSWORD` exactly as in step 7 of
+[End-to-end order](#end-to-end-order).
+
+| Path | Options | Pays | Expected final state (docs/architecture.md §7, §9, §15) |
+|---|---|---|---|
+| (a) underpayment | `--pay-bps 9700` | 97% of a fresh quote, outside the 1% `lock_tolerance_bps` | `credited`, then `swept`: valued at spot for what arrived (`deposit.confirmed` `price_source` `spot`), about 3% below the quoted credit; the lock is not consumed and later expires (`rate_lock.expired`); one product credit of the deposit's credit |
+| (b) after the quote window | `--pay-after-expiry` | the quoted amount, 60 s after `expires_at` | `rate_lock.expired`, then `credited` at spot and `swept`; the deposit keeps its `lock_ref` and the lock stays `expired` |
+| (c) persistent address | `--persistent ATOMIC` | `ATOMIC` to the workspace's persistent address, no quote | `credited` at spot, then `swept` |
+| (e) unsupported token | `--persistent ATOMIC --token T --until rejected` | an unrouted token `T` | only after finality (the head scan ignores unrouted tokens): `rejected`, `deposit.rejected` reason `unsupported_asset`; the product is never asked to settle; the flusher sweeps only the route asset, so the tokens stay in the forwarder; `TopupUnsupportedInflows` fires where metrics are scraped |
+| (d) refund | `--persistent ATOMIC --until refunded --refund-to A` | more than the route's `max_deposit_atomic` (200000 test PHA) | `rejected` reason `out_of_bounds` (refundable, §15), swept to the treasury with other funds; the driver files a refund request for the whole deposit (`requested`) and waits while finance runs [refund-execution.md](runbooks/refund-execution.md): `approved`, `sent`, then `confirmed` and one `deposit.refunded` webhook |
+
+Credited runs pay at least the route's `min_flush_atomic` (20000 test PHA) so the flusher sweeps
+them; a smaller credited deposit is never swept and raises `TopupDepositStateAgeExceeded` after
+48 hours. `--min-atomic` applies to the amount actually paid. As in step 7, the credited rows
+need PHA below about $0.24, or the product refuses them with `per_deposit_cap`. A refund is
+exercised on an out-of-bounds deposit because its funds reach the treasury by the regular flush
+and the Safe refunds them with one token transfer; refunding an unsupported token first needs a
+separately reviewed Safe flush of that token (refund-execution.md, decision tree), which this
+plan does not run.
+
+The refund request and the `rate_lock.expired` events in the account view need a product CVM
+running this driver's release: run Release images and Deploy staging product in mode `upgrade`
+with the new `product_image` first. The other rows also work with the earlier product image.
+Each run costs the payer two Sepolia transactions (`mint`, `transfer`, about 120000 gas; under
+0.001 ETH at 5 gwei) and mints its test tokens for free; the sweeps cost the flusher operator its
+usual flush gas, and the refund costs the Safe one ERC-20 transfer.
+
+```sh
+export ETH_KEYSTORE=~/.foundry/keystores/staging-payer
+export ETH_PASSWORD=~/staging/payer.password
+rpc=$(jq -er .rpc_url driver.json)
+driver=(uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py
+  deposit --config driver.json --driver-seed-file ~/staging/driver.seed --timeout 3600)
+# (a) underpayment: prints the --amount-minor needed if 97% of the quote is below 20000 PHA
+"${driver[@]}" --amount-minor <cents> --min-atomic 20000000000000000000000 --pay-bps 9700
+# (b) payment after the quote window: about 35 minutes
+"${driver[@]}" --amount-minor <cents> --min-atomic 20000000000000000000000 --pay-after-expiry
+# (c) persistent address, no quote
+"${driver[@]}" --persistent 20000000000000000000000
+# (e) unsupported token: the Sepolia unsupported test token, expected to be a MockERC20
+unsupported=0x287E3577c66866a3F5Cb7a8Dac6761EB43608392
+cast call "$unsupported" 'decimals()(uint8)' --rpc-url "$rpc"
+cast call --from 0x000000000000000000000000000000000000dEaD "$unsupported" \
+  'mint(address,uint256)' "$(cast wallet address)" 1 --rpc-url "$rpc"
+"${driver[@]}" --persistent 1000000000000000000000 --token "$unsupported" --until rejected
+# (d) refund: back to the payer, an address the operator controls; waits up to 12 hours
+"${driver[@]}" --persistent 200001000000000000000000 --until refunded \
+  --refund-to "$(cast wallet address)" --timeout 43200
+```
+
+For (e), `decimals` must print 18 and the `mint` call must succeed (an `eth_call`, nothing is
+sent); otherwise skip the row. For (d), once the driver logs `REFUND_ID=...` the admin key holder
+approves it with the signed `POST /v1/admin/refunds/$REFUND_ID/approve` (require
+`status=approved`). The Safe owner waits for the out-of-bounds deposit's sweep (the treasury's
+`balanceOf` of the test token grows by the deposit amount), then submits
+`transfer(<refund destination>, <amount>)` on the test token from the treasury Safe, and the
+admin key holder records the transaction hash with `POST /v1/admin/refunds/$REFUND_ID/record`,
+all exactly as [refund-execution.md](runbooks/refund-execution.md) shows. After the transfer is
+final the driver logs `refund ... is confirmed` and exits 0. Any driver failure exits non-zero
+with the reason; a rejection where a credit was expected, or the reverse, is a failure.
+
 ## Local verification
 
 The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`

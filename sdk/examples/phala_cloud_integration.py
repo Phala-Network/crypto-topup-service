@@ -12,7 +12,10 @@ staging). The product (`serve`) is a long-running service:
 The deposit driver (`deposit`) plays that user from an operator's machine: it registers a
 workspace, gets a quote and recomputes its address locally, pays the exact locked amount with the
 test token, polls until the deposit is credited, and checks that the product ledger credited the
-locked amount exactly once and received the verified `deposit.credited` webhook.
+locked amount exactly once and received the verified `deposit.credited` webhook. Its options
+drive the abnormal paths instead: a different amount, a payment after the quote window, a payment
+to the persistent address, another token, and a refund request for a rejected deposit
+(deploy/README.md, "Abnormal paths").
 
 With no mode, the example runs both in one process (`deploy/sandbox/run-local.sh`).
 
@@ -92,6 +95,9 @@ ORDER_PROVIDER = "crypto_topup"
 DRIVER_KEYID = "driver/v1"
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
+EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+# The driver pays this long after a quote's `expires_at` to be late by chain time too.
+LATE_MARGIN_S = 60
 
 
 @dataclass(frozen=True)
@@ -837,8 +843,10 @@ class AccountApi:
     - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
     - `POST /accounts/{id}/quotes` `{"lock_ref", "amount_minor"}` creates a quote-first lock
       (`create_quote`) and returns the service's lock;
+    - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"to_address", "amount_atomic"}`
+      files a refund request for one of the workspace's deposits (`request_refund`);
     - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
-      (from the ledger), and the verified webhook events for those deposits.
+      (from the ledger), and the verified webhook events for those deposits and its quotes.
 
     The product calls the service with its own key on the user's behalf, as Phala Cloud's
     backend does. Requests must carry an RFC 9421 signature by the pinned driver key
@@ -896,6 +904,27 @@ class AccountApi:
                     amount_minor=amount_minor,
                 )
                 return Answer(HTTPStatus.OK, lock.to_dict())
+            if (
+                len(parts) == 4
+                and parts[1] == "deposits"
+                and parts[3] == "refunds"
+                and method == "POST"
+            ):
+                team = _account_ref(parts[0])
+                deposit = uuid.UUID(parts[2])
+                request = _json_object(body)
+                to_address = request.get("to_address")
+                amount = _decimal(request.get("amount_atomic"))
+                if not isinstance(to_address, str) or not EVM_ADDRESS.fullmatch(to_address):
+                    raise ValueError("to_address must be a 0x-prefixed 20-byte address")
+                if amount is None or amount <= 0:
+                    raise ValueError("amount_atomic must be a positive decimal string")
+                if self.ledger.team_suspended(team) is None or not any(
+                    item.id == deposit for item in self._service().list_deposits(team)
+                ):
+                    return Answer(HTTPStatus.NOT_FOUND)
+                refund = self._service().request_refund(deposit, to_address, amount)
+                return Answer(HTTPStatus.OK, refund.to_dict())
             if len(parts) == 1 and method == "GET":
                 team = _account_ref(parts[0])
                 if self.ledger.team_suspended(team) is None:
@@ -935,6 +964,7 @@ class AccountApi:
                 event
                 for event in self.ledger.all_events()
                 if event["data"].get("deposit_id") in ids
+                or event["data"].get("external_id") == team
             ],
         }
 
@@ -1141,6 +1171,14 @@ class ProductApi:
     def account(self, team: str) -> dict[str, Any]:
         return self._call("GET", f"/accounts/{quote(team)}")
 
+    def refund(
+        self, team: str, deposit_id: str, to_address: str, amount_atomic: str
+    ) -> dict[str, Any]:
+        body = {"to_address": to_address, "amount_atomic": amount_atomic}
+        return self._call(
+            "POST", f"/accounts/{quote(team)}/deposits/{quote(deposit_id)}/refunds", body
+        )
+
     def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self._http.request(method, self._base + path, json=body)
         if response.status_code != HTTPStatus.OK:
@@ -1159,8 +1197,23 @@ def run_deposit(
     min_atomic: int = 0,
     until: str = "credited",
     timeout: float = 1800,
+    pay_bps: int = 10_000,
+    pay_after_expiry: bool = False,
+    persistent_atomic: int | None = None,
+    token: str | None = None,
+    refund_to: str | None = None,
 ) -> None:
-    """Registers a workspace through the product, pays one quote, and checks the credit."""
+    """Registers a workspace through the product, pays one deposit, and checks its outcome.
+
+    By default it pays the exact amount of a fresh quote and expects exactly the quoted credit
+    at the lock price. `pay_bps` pays that fraction of the quote instead, `pay_after_expiry`
+    pays it after the quote's window, and `persistent_atomic` pays the workspace's persistent
+    address without a quote; those deposits must be credited at spot. `token` pays another
+    token. `until` is `credited` or `swept` for a credit, `rejected` for a rejection, or
+    `refunded`: a rejection, then a refund request to `refund_to` for the whole deposit, which
+    finance approves and executes (deploy/runbooks/refund-execution.md) while this waits for the
+    `deposit.refunded` webhook.
+    """
     rpc = JsonRpc(config.rpc_url)
     payer = Payer(config, rpc)
     with ProductApi(config.public_url, driver) as api:
@@ -1168,58 +1221,177 @@ def run_deposit(
         persistent = api.register(team)
         LOG.info("registered workspace %s (persistent address %s)", team, persistent)
 
-        lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
-        lock = api.quote(team, lock_ref, amount_minor)
-        # Pay only an address recomputed here from the product slug, workspace, and lock_ref.
-        if not same_address(quote_address(config, team, lock_ref), lock.address):
-            raise RuntimeError("quote address does not match the driver's own computation")
-        amount_atomic = int(lock.amount_atomic)
-        LOG.info(
-            "quote: pay %s atomic to %s before %s for %s minor (%s)",
-            amount_atomic,
-            lock.address,
-            lock.expires_at.isoformat(),
-            lock.credit_minor,
-            lock.eip681_uri,
-        )
-        if amount_atomic < min_atomic:
-            needed = -(-amount_minor * min_atomic // amount_atomic)
-            raise RuntimeError(
-                f"the quote locks {amount_atomic} atomic, below --min-atomic {min_atomic}; "
-                f"nothing was paid; rerun with --amount-minor of at least {needed}"
+        lock: RateLockResponse | None = None
+        lock_ref = None
+        if persistent_atomic is not None:
+            address, amount_atomic = persistent, persistent_atomic
+        else:
+            lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
+            lock = api.quote(team, lock_ref, amount_minor)
+            # Pay only an address recomputed here from the product slug, workspace, and lock_ref.
+            if not same_address(quote_address(config, team, lock_ref), lock.address):
+                raise RuntimeError("quote address does not match the driver's own computation")
+            address = lock.address
+            amount_atomic = int(lock.amount_atomic) * pay_bps // 10_000
+            LOG.info(
+                "quote: pay %s atomic to %s before %s for %s minor (%s)",
+                lock.amount_atomic,
+                lock.address,
+                lock.expires_at.isoformat(),
+                lock.credit_minor,
+                lock.eip681_uri,
             )
+        if amount_atomic < min_atomic:
+            hint = ""
+            if lock is not None:
+                needed = -(-amount_minor * min_atomic // amount_atomic)
+                hint = f"; rerun with --amount-minor of at least {needed}"
+            raise RuntimeError(
+                f"the payment would be {amount_atomic} atomic, below --min-atomic {min_atomic}; "
+                f"nothing was paid{hint}"
+            )
+        if lock is not None and pay_after_expiry:
+            wait_s = lock.expires_at.timestamp() + LATE_MARGIN_S - time.time()
+            LOG.info("waiting %.0fs to pay after the quote window", max(wait_s, 0))
+            time.sleep(max(wait_s, 0))
 
-        tx_hash = payer.mint_and_transfer(config.token, lock.address, amount_atomic)
-        LOG.info("paid in %s from %s; waiting for finality and credit", tx_hash, payer.address)
+        tx_hash = payer.mint_and_transfer(token or config.token, address, amount_atomic)
+        LOG.info("paid %s atomic in %s from %s", amount_atomic, tx_hash, payer.address)
+        if until in {"rejected", "refunded"}:
+            _check_rejection(api, team, address, refund_to, timeout)
+            return
+        at_lock_price = lock is not None and pay_bps == 10_000 and not pay_after_expiry
         states = {"credited", "swept"} if until == "credited" else {"swept"}
-        deposit, view = _wait_for_credit(api, team, lock.address, states, timeout)
-        event = next(
-            event["data"]
-            for event in view["events"]
-            if event["type"] == "deposit.credited"
-            and event["data"]["deposit_id"] == str(deposit.id)
+        expired_ref = lock_ref if pay_after_expiry else None
+        deposit, view = _wait_for_account(
+            api, team, timeout, lambda view: _credited(view, address, states, expired_ref)
         )
-        if event["amount_minor"] != lock.credit_minor:
-            raise RuntimeError("credited amount differs from the locked quote")
+        credited = _event(view, "deposit.credited", deposit_id=str(deposit.id))
+        confirmed = _event(view, "deposit.confirmed", deposit_id=str(deposit.id))
+        if confirmed["price_source"] != ("lock" if at_lock_price else "spot"):
+            raise RuntimeError(f"deposit was valued at the {confirmed['price_source']} price")
+        expected_minor = deposit.credit_minor
+        if lock is not None and at_lock_price:
+            expected_minor = lock.credit_minor
+        if credited["amount_minor"] != expected_minor:
+            raise RuntimeError("credited amount differs from the expected credit")
+        if lock is not None and deposit.lock_ref != lock_ref:
+            raise RuntimeError("deposit does not reference its quote")
         credits = [(c["provider_order_id"], c["amount_minor"]) for c in view["credits"]]
-        if credits != [(f"deposit:{deposit.id}", int(lock.credit_minor))]:
+        if credits != [(f"deposit:{deposit.id}", int(credited["amount_minor"]))]:
             raise RuntimeError(f"unexpected product ledger credits: {credits}")
         LOG.info(
-            "deposit %s is %s: credited %s minor (transaction %s); the ledger holds one credit",
+            "deposit %s is %s: credited %s minor at the %s price (quoted %s; transaction %s); "
+            "the ledger holds one credit",
             deposit.id,
             deposit.state,
-            lock.credit_minor,
-            event["destination_tx_id"],
+            credited["amount_minor"],
+            confirmed["price_source"],
+            None if lock is None else lock.credit_minor,
+            credited["destination_tx_id"],
         )
 
 
-def _wait_for_credit(
-    api: ProductApi, team: str, address: str, states: set[str], timeout: float
+def _check_rejection(
+    api: ProductApi, team: str, address: str, refund_to: str | None, timeout: float
+) -> None:
+    """Waits for the deposit's rejection; with `refund_to`, requests and awaits its refund."""
+    deposit, view = _wait_for_account(api, team, timeout, lambda view: _rejected(view, address))
+    rejected = _event(view, "deposit.rejected", deposit_id=str(deposit.id))
+    if view["credits"]:
+        raise RuntimeError(f"a rejected deposit was credited: {view['credits']}")
+    LOG.info("deposit %s is rejected (%s); nothing was credited", deposit.id, rejected["reason"])
+    if refund_to is None:
+        return
+    refund = api.refund(team, str(deposit.id), refund_to, deposit.amount_atomic)
+    LOG.info(
+        "refund %s is %s: %s atomic to %s; approve and execute it with "
+        "deploy/runbooks/refund-execution.md (REFUND_ID=%s)",
+        refund["id"],
+        refund["status"],
+        refund["amount_atomic"],
+        refund["to_address"],
+        refund["id"],
+    )
+    _, view = _wait_for_account(
+        api,
+        team,
+        timeout,
+        lambda view: (
+            (deposit, view)
+            if _find_event(view, "deposit.refunded", refund_id=refund["id"])
+            else None
+        ),
+    )
+    refunded = _event(view, "deposit.refunded", refund_id=refund["id"])
+    if refunded["amount_atomic"] != refund["amount_atomic"] or not same_address(
+        refunded["to_address"], refund["to_address"]
+    ):
+        raise RuntimeError(f"deposit.refunded differs from the request: {refunded}")
+    LOG.info("refund %s is confirmed in %s", refund["id"], refunded["tx_hash"])
+
+
+def _deposit_at(view: dict[str, Any], address: str) -> DepositResponse | None:
+    for item in view["deposits"]:
+        deposit = DepositResponse.from_dict(item)
+        if same_address(deposit.address, address):
+            return deposit
+    return None
+
+
+def _find_event(view: dict[str, Any], event_type: str, **fields: str) -> dict[str, Any] | None:
+    for event in view["events"]:
+        data = event["data"]
+        if event["type"] == event_type and all(data.get(k) == v for k, v in fields.items()):
+            return dict(data)
+    return None
+
+
+def _event(view: dict[str, Any], event_type: str, **fields: str) -> dict[str, Any]:
+    event = _find_event(view, event_type, **fields)
+    if event is None:
+        raise RuntimeError(f"no {event_type} webhook for {fields}")
+    return event
+
+
+def _credited(
+    view: dict[str, Any], address: str, states: set[str], expired_lock_ref: str | None
+) -> tuple[DepositResponse, dict[str, Any]] | None:
+    """Ready once the deposit is in `states` with its `deposit.confirmed` and
+    `deposit.credited` webhooks (and `rate_lock.expired` for a late payment) recorded."""
+    deposit = _deposit_at(view, address)
+    if deposit is None or deposit.state not in states:
+        return None
+    for event_type in ("deposit.confirmed", "deposit.credited"):
+        if _find_event(view, event_type, deposit_id=str(deposit.id)) is None:
+            return None
+    if expired_lock_ref is not None and (
+        _find_event(view, "rate_lock.expired", product_lock_ref=expired_lock_ref) is None
+    ):
+        return None
+    return deposit, view
+
+
+def _rejected(view: dict[str, Any], address: str) -> tuple[DepositResponse, dict[str, Any]] | None:
+    deposit = _deposit_at(view, address)
+    if deposit is not None and deposit.state in {"credited", "swept"}:
+        raise RuntimeError(f"deposit {deposit.id} is {deposit.state}, not rejected")
+    if deposit is None or deposit.state != "rejected":
+        return None
+    if _find_event(view, "deposit.rejected", deposit_id=str(deposit.id)) is None:
+        return None
+    return deposit, view
+
+
+def _wait_for_account(
+    api: ProductApi,
+    team: str,
+    timeout: float,
+    ready: Callable[[dict[str, Any]], tuple[DepositResponse, dict[str, Any]] | None],
 ) -> tuple[DepositResponse, dict[str, Any]]:
-    """Polls the product until a deposit to `address` is in `states` and its credit and
-    `deposit.credited` webhook are in the product ledger."""
+    """Polls the product's view of the workspace until `ready` returns a result."""
     deadline = time.monotonic() + timeout
-    last_state = None
+    states: dict[str, str] = {}
     while time.monotonic() < deadline:
         try:
             view = api.account(team)
@@ -1230,21 +1402,14 @@ def _wait_for_credit(
             time.sleep(5)
             continue
         for item in view["deposits"]:
-            deposit = DepositResponse.from_dict(item)
-            if not same_address(deposit.address, address):
-                continue
-            if deposit.state != last_state:
-                LOG.info("deposit %s is %s", deposit.id, deposit.state)
-                last_state = deposit.state
-            credited = any(
-                event["type"] == "deposit.credited"
-                and event["data"]["deposit_id"] == str(deposit.id)
-                for event in view["events"]
-            )
-            if deposit.state in states and credited and view["credits"]:
-                return deposit, view
+            if states.get(item["id"]) != item["state"]:
+                LOG.info("deposit %s is %s", item["id"], item["state"])
+                states[item["id"]] = item["state"]
+        result = ready(view)
+        if result is not None:
+            return result
         time.sleep(5)
-    raise TimeoutError(f"no deposit to {address} reached {sorted(states)} in {timeout:.0f}s")
+    raise TimeoutError(f"workspace {team} did not reach the expected state in {timeout:.0f}s")
 
 
 def run_example(config: SandboxConfig) -> None:
@@ -1272,15 +1437,47 @@ def main() -> int:
         "--min-atomic",
         type=int,
         default=0,
-        help="refuse to pay a quote locking fewer atomic units (the route's min_flush_atomic)",
+        help="refuse to pay fewer atomic units (the route's min_flush_atomic)",
     )
-    deposit.add_argument("--until", choices=["credited", "swept"], default="credited")
+    deposit.add_argument(
+        "--until",
+        choices=["credited", "swept", "rejected", "refunded"],
+        default="credited",
+        help="the outcome to wait for; refunded requests a refund of a rejected deposit",
+    )
     deposit.add_argument("--timeout", type=float, default=1800, help="seconds to wait")
+    deposit.add_argument(
+        "--pay-bps",
+        type=int,
+        default=10_000,
+        help="pay this fraction of the quoted amount, in basis points (credited at spot)",
+    )
+    deposit.add_argument(
+        "--pay-after-expiry",
+        action="store_true",
+        help="pay the quoted amount after the quote window (credited at spot)",
+    )
+    deposit.add_argument(
+        "--persistent",
+        type=int,
+        metavar="ATOMIC",
+        help="pay ATOMIC to the workspace's persistent address instead of a quote",
+    )
+    deposit.add_argument("--token", help="pay with this token instead of the route's")
+    deposit.add_argument("--refund-to", help="refund destination for --until refunded")
     args = parser.parse_args()
     if not args.config:
         parser.error("--config or SANDBOX_CONFIG is required")
     if args.mode == "deposit" and not args.driver_seed_file:
         parser.error("deposit needs --driver-seed-file")
+    if args.pay_bps <= 0 or (args.persistent is not None and args.persistent <= 0):
+        parser.error("--pay-bps and --persistent must be positive")
+    if args.persistent is not None and (args.pay_bps != 10_000 or args.pay_after_expiry):
+        parser.error("--persistent pays no quote: drop --pay-bps and --pay-after-expiry")
+    if (args.until == "refunded") != (args.refund_to is not None):
+        parser.error("--refund-to goes with --until refunded, and only with it")
+    if args.refund_to is not None and not EVM_ADDRESS.fullmatch(args.refund_to):
+        parser.error("--refund-to must be a 0x-prefixed 20-byte address")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = SandboxConfig.load(args.config)
@@ -1295,6 +1492,11 @@ def main() -> int:
             min_atomic=args.min_atomic,
             until=args.until,
             timeout=args.timeout,
+            pay_bps=args.pay_bps,
+            pay_after_expiry=args.pay_after_expiry,
+            persistent_atomic=args.persistent,
+            token=args.token,
+            refund_to=args.refund_to,
         )
     else:
         run_example(config)
