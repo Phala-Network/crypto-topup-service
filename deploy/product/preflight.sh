@@ -194,7 +194,7 @@ else
     fail "TOPUP_ORIGIN does not serve a settlement/v1 attestation"
 fi
 
-check_phala_cloud "$workspace" "$os_image" phala ""
+check_phala_cloud "$workspace" "$os_image"
 
 if ((failures)); then
     echo "preflight: $failures check(s) failed" >&2

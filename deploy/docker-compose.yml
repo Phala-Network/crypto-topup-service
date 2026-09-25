@@ -1,7 +1,7 @@
 # Never deployed as is: deploy/render-compose.sh renders it (deploy/README.md, "Attested
 # settings"). A reference to an owner-sealed secret (staging.env.example) stays a reference to the
-# CVM's encrypted env; every other variable is a public setting written inline from the `staging`
-# Environment variables, and the two mode switches, TOPUP_RESTORE_FROM_BACKUP and
+# CVM's encrypted env; every other variable is a public setting written inline from the deploy
+# workflow's GitHub Environment (`staging` or `production`) variables, and the two mode switches, TOPUP_RESTORE_FROM_BACKUP and
 # TOPUP_SERVICE_ENABLED, come from the rendered variant (the service, or --restore-check).
 x-walg-environment: &walg-environment
   WALG_S3_PREFIX: "${WALG_S3_PREFIX:-}"
@@ -133,7 +133,7 @@ services:
       # Sentry reporting (deploy/README.md, "Sentry"): off while the owner-sealed DSN is empty. The
       # release is the digest of the image rendered here; the environment is this deployment's.
       SENTRY_DSN: ${SENTRY_DSN:-}
-      SENTRY_ENVIRONMENT: staging
+      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-}"
       TOPUP_IMAGE: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock

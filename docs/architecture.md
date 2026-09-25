@@ -587,7 +587,12 @@ min, RTO ≤ 1 h, weekly restore drill in staging). Restore = restore → post-r
 via the dstack gateway; egress limited to providers, price sources, object storage, product
 URLs. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
-it. Upgrade = reproducible build → digest → compose hash → on-chain allow-list → redeploy.
+it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI
+deploy (production after reviewer approval) → attested read-back. Keys come from Phala Cloud's
+KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury and the
+product verifies every settlement on its own node, so a malicious upgrade could cause downtime or
+read service data but not move funds or credits, and the attested compose hash makes it
+detectable. Upgrade governance can move to dstack's on-chain KMS later.
 `GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
 `/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, where `operators` lists each configured chain's
 flusher operator in ascending `chain_id` order (`chain_id`, `operator_key_version` from the
@@ -595,7 +600,7 @@ chain's current routes, `keyid = operator/v{n}`, and the address the flusher sig
 record `i` is the 32 bytes `chain_id` (u64 big-endian) ‖ `operator_key_version` (u32 big-endian) ‖
 address. With no operators this is the original `sha256(nonce ‖ settlement_pubkey)`. Verifiers
 run the official dstack verifier of the pinned release on it (`deploy/dstack-verifier.sh`: quote
-and TCB, RTMR3 event-log replay, OS image; then the app id and allowed compose hash), check that
+and TCB, RTMR3 event-log replay, OS image; then the app id and deployed compose hash), check that
 the verified report data is this hash zero-padded to 64 bytes, and then pin
 `(keyid, public key)`; the owner grants `OPERATOR_ROLE` to, and funds, only an operator address
 verified this way, since a production CVM exposes no logs or shell.

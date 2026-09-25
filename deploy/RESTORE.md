@@ -286,11 +286,15 @@ calls until then. The procedure is otherwise unchanged.
 [gw-connect-06]: https://github.com/Dstack-TEE/dstack/blob/gateway-v0.6.0-rc5/dstack/gateway/src/proxy/tls_passthough.rs#L214-L277
 [phala-refresh]: https://github.com/Phala-Network/phala-cloud/blob/cli-v1.1.22/js/src/actions/cvms/refresh_cvm_instance_id.ts
 
-### Phala Cloud KMS (staging)
+### Create and read back the instance
 
-With `--kms phala` there is no on-chain authorization: `phala instances add` creates and boots the
-instance in one call (CLI 1.1.22, `cli/src/commands/instances/add`). Record the returned
-`vm_uuid`:
+Every CVM uses Phala Cloud's KMS ([README](README.md#kms)), so there is no on-chain
+authorization: `phala instances add` creates and boots the instance in one call (CLI 1.1.22,
+`cli/src/commands/instances/add`). `SOURCE_CVM_ID` is the Environment's `TOPUP_CVM_ID`. Pass the
+`restore-check.yml` rendered from the live compose's commit, images, and settings, and
+[the restore env file](#the-restore-env-file). `--env-file` encrypts it with the key of an
+existing instance record of the app, so in a real restore stop the failed CVM but do not delete
+it before this step. Record the returned `vm_uuid`:
 
 ```sh
 npx --yes phala@1.1.22 cvms get "$SOURCE_CVM_ID" --json >source.json
@@ -300,106 +304,22 @@ npx --yes phala@1.1.22 instances add --app-id "$APP_ID" --compose-file restore-c
 export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
 ```
 
-### On-chain KMS (production)
+Fetch `attestation.json` and the instance's guest-agent `info.json` (as in the deploy read-back,
+[README](README.md#authoritative-manifest-and-hash)), addressed by the instance id from the
+attested event log, because `cvms get` may report `instance_id` as `null`
+([Addressing the restore-check instance](#addressing-the-restore-check-instance)). Then verify the
+attestation with the original app id; it replays that event log:
 
-These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Safe.
-
-1. Retrieve the original incident records and set the original `DstackApp` authorization contract:
-
-   ```sh
-   export ORIGINAL_APP_ID=0x<original-dstack-app-address>
-   export APP_AUTH_CONTRACT="$ORIGINAL_APP_ID"
-   export ORIGINAL_COMPOSE_HASH=0x<last-approved-compose-hash>
-   cast call "$APP_AUTH_CONTRACT" 'owner()(address)' --rpc-url "$ETH_RPC_URL"
-   ```
-
-   Require the owner to be the recorded Finance Safe and the KMS chain/root to match the failed
-   instance. `ORIGINAL_COMPOSE_HASH` is the live service compose, needed again to
-   [resume](#resume-real-restore-only). Stop if the original app id or KMS root cannot be established.
-
-2. Prepare a new instance of that existing app with `phala instances add`, not the new-application
-   workflow; `phala cvms replicate` needs the source CVM, which may be gone. The commands and JSON
-   paths below match phala CLI 1.1.22. Pass the `restore-check.yml` rendered from the retained
-   production compose's commit, images, and settings, and
-   [the restore env file](#the-restore-env-file). `--env-file` encrypts it with the key of an
-   existing instance record of the app, so stop the failed CVM but do not delete it before this
-   step. `NODE_ID` is the numeric node (teepod) id to run the replacement on:
-
-   ```sh
-   npx --yes phala@1.1.22 nodes list --json
-   export NODE_ID=<node id>
-   npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --node-id "$NODE_ID" \
-     --compose-file restore-check.yml --env-file "$RESTORE_ENV_DIR/restore.env" \
-     --prepare-only --json > prepare.json
-   ```
-
-   The prepare output uses camelCase keys, and only the `onchainStatus` object is snake_case.
-   Validate every field's type before reading it, because `jq -r` prints `null` for a missing path
-   and `export X="$(…)"` would hide the failure. Hex values may lack `0x`, so normalize them. Record
-   whether the host device was already allowed: another CVM of this app may run on the same host.
-
-   ```sh
-   jq -e '(.appId | type == "string") and (.composeHash | type == "string")
-     and (.deviceId | type == "string") and (.commitToken | type == "string")
-     and (.kmsInfo.chain_id != null)
-     and (.onchainStatus.compose_hash_allowed | type == "boolean")
-     and (.onchainStatus.device_id_allowed | type == "boolean")' prepare.json
-   hex() { printf '0x%s' "${1#0x}" | tr 'A-F' 'a-f'; }
-   test "$(hex "$(jq -r '.appId' prepare.json)")" = "$(hex "$ORIGINAL_APP_ID")"
-   export COMPOSE_HASH="$(hex "$(jq -r '.composeHash' prepare.json)")"
-   export DEVICE_ID="$(hex "$(jq -r '.deviceId' prepare.json)")"
-   test "$(jq -r '.kmsInfo.chain_id' prepare.json)" = "$(cast chain-id --rpc-url "$ETH_RPC_URL")"
-   export COMPOSE_HASH_PREVIOUSLY_ALLOWED="$(jq -r '.onchainStatus.compose_hash_allowed' prepare.json)"
-   export DEVICE_PREVIOUSLY_ALLOWED="$(jq -r '.onchainStatus.device_id_allowed' prepare.json)"
-   export COMMIT_TOKEN="$(jq -r '.commitToken' prepare.json)"
-   jq '{appId, composeHash, deviceId, chain_id: .kmsInfo.chain_id, onchainStatus}' prepare.json
-   ```
-
-   Record `DEVICE_PREVIOUSLY_ALLOWED` (`true` or `false`) in the incident log.
-
-3. **Finance Safe:** authorize what is not yet allowed on the original contract: `addComposeHash`
-   only when `COMPOSE_HASH_PREVIOUSLY_ALLOWED` is `false`, and `addDevice` only when
-   `DEVICE_PREVIOUSLY_ALLOWED` is `false`. Submit the calldata through the Safe, wait for finality,
-   then verify both reads return `true`:
-
-   ```sh
-   cast calldata 'addComposeHash(bytes32)' "$COMPOSE_HASH"
-   cast calldata 'addDevice(bytes32)' "$DEVICE_ID"
-   cast call "$APP_AUTH_CONTRACT" 'allowedComposeHashes(bytes32)(bool)' "$COMPOSE_HASH" \
-     --rpc-url "$ETH_RPC_URL"
-   cast call "$APP_AUTH_CONTRACT" 'allowedDeviceIds(bytes32)(bool)' "$DEVICE_ID" \
-     --rpc-url "$ETH_RPC_URL"
-   ```
-
-4. Commit the prepared replacement only after both authorizations are final; it boots with the
-   restore env at once. Pass the Safe transaction hash, or `already-registered` when nothing was
-   added, and the compose hash exactly as the server returned it, as the CLI's own commit path
-   does, not the normalized `0x` form used for `cast`:
-
-   ```sh
-   npx --yes phala@1.1.22 instances add --app-id "$ORIGINAL_APP_ID" --commit \
-     --token "$COMMIT_TOKEN" --compose-hash "$(jq -r '.composeHash' prepare.json)" \
-     --transaction-hash "${AUTH_TX_HASH:-already-registered}" --json >instance.json
-   export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
-   ```
-
-   Fetch `attestation.json` and the instance's guest-agent `info.json` (as in the deploy
-   read-back, [README](README.md#a-first-time-provisioning)), addressed by the instance id from the
-   attested event log, because `cvms get` may report `instance_id` as `null`
-   ([Addressing the restore-check instance](#addressing-the-restore-check-instance)). Then verify
-   the attestation with the original app id; it replays that event log:
-
-   ```sh
-   npx --yes phala@1.1.22 cvms attestation "$RESTORE_CVM_ID" --json >attestation.json
-   npx --yes phala@1.1.22 cvms get "$RESTORE_CVM_ID" --json >restore-cvm.json
-   INSTANCE_ID="$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
-     | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
-     attestation.json)"
-   curl -fsS "https://$INSTANCE_ID-8090.$(jq -er '.gateway.base_domain' restore-cvm.json)/prpc/Info" \
-     >info.json
-   deploy/verify-attestation.sh \
-     attestation.json info.json "$ORIGINAL_APP_ID" restore-check.yml
-   ```
+```sh
+npx --yes phala@1.1.22 cvms attestation "$RESTORE_CVM_ID" --json >attestation.json
+npx --yes phala@1.1.22 cvms get "$RESTORE_CVM_ID" --json >restore-cvm.json
+INSTANCE_ID="$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
+  | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
+  attestation.json)"
+curl -fsS "https://$INSTANCE_ID-8090.$(jq -er '.gateway.base_domain' restore-cvm.json)/prpc/Info" \
+  >info.json
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml
+```
 
 ## Verify the restored instance
 
@@ -437,9 +357,8 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
 
 4. Signed product requests carry the URL they were sent to in `@target-uri`, so set the instance's
    own URL as its origin: render the restore-check variant again with
-   `TOPUP_PUBLIC_ORIGIN=$RESTORE_URL` and upgrade this instance only (no `-e`, so its env stays;
-   with on-chain KMS, approve the returned hash as in [README](README.md#b-upgrade-an-existing-cvm)
-   section B). It restarts; its data directory is no longer empty, so it starts as is, and
+   `TOPUP_PUBLIC_ORIGIN=$RESTORE_URL` and upgrade this instance only (no `-e`, so its env
+   stays). It restarts; its data directory is no longer empty, so it starts as is, and
    `restore-check` runs again:
 
    ```sh
@@ -460,9 +379,9 @@ the service compose, which restarts it on the restored database, which is then s
 Control ingress before the switch: confirm the failed instance is deleted so only one instance
 holds the application keys and archives into the prefix, and have the product owner hold calls to
 the service ([incident communication](runbooks/incident-communication.md)). Then render the service
-variant (`deploy/render-compose.sh`, no `--restore-check`) with the production settings and the
-origin products will call, upgrade the instance to it (staging: `phala deploy --cvm-id
-"$RESTORE_CVM_ID" --compose <file>`, no `-e`; production: README section B), and seal the
+variant (`deploy/render-compose.sh`, no `--restore-check`) with the Environment's settings and the
+origin products will call, upgrade the instance to it (`phala deploy --cvm-id "$RESTORE_CVM_ID"
+--compose <file>`, no `-e`), and seal the
 read-write object-storage credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the
 same three names). Require:
 
@@ -515,7 +434,7 @@ live URL's traffic because it publishes 8081, not 8080
 
 3. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only.
 4. Record the drill start time (the RPO anchor), then
-   [create the instance](#phala-cloud-kms-staging) and delete the env file.
+   [create the instance](#create-and-read-back-the-instance) and delete the env file.
 5. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
    and RTO in the drill log. Never upgrade the drill instance to the service compose or seal
    read-write credentials into it. **Hard abort:** run `live_isolated` right after the instance is
@@ -534,8 +453,8 @@ live URL's traffic because it publishes 8081, not 8080
 
 ## Failure handling
 
-- **App id, KMS, compose, or attestation mismatch:** stop. Correct the original app authorization;
-  never copy key files between CVMs.
+- **App id, KMS, compose, or attestation mismatch:** stop. Create the instance under the original
+  app id again; never copy key files between CVMs.
 - **`/healthz` never answers, or `restore_check` stays `null` past the RTO:** the base backup
   could not be listed (or the prefix is empty), fetched, or decrypted, or recovery failed (the WAL wrapper returns `126` on
   decryption, metadata, and storage errors, so PostgreSQL aborts instead of promoting). Delete the

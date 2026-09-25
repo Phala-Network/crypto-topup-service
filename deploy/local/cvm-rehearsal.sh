@@ -9,8 +9,8 @@
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
 #    committed route lives, and renders the compose with the rehearsal's settings and the
-#    provisional origin, as Deploy staging provisions.
-# 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy staging does (exactly
+#    provisional origin, as Deploy provisions.
+# 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy does (exactly
 #    the names of deploy/staging.env.example, all empty), and runs `docker compose up` on the
 #    rendered file plus cvm-rehearsal.compose.yml (simulator, S3, Anvil), as dstack's app-compose
 #    runner does. Without storage credentials PostgreSQL must refuse to initialize (the prefix
@@ -250,13 +250,13 @@ awk -v route="$tmp/route.yaml" '
     skipping && (/^      / || /^$/) { next }
     { skipping = 0; in_config = 0; print }
 ' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
-# render_topup ORIGIN: the settings Deploy staging renders from the `staging` Environment
+# render_topup ORIGIN: the settings Deploy renders from the `staging` Environment
 # variables, for this network.
 render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
         WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=rehearsal-admin/v1 \
         TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key TOPUP_BACKUP_KEY_VERSION=1 \
-        TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 TOPUP_PUBLIC_ORIGIN=$1 \
+        TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 TOPUP_PUBLIC_ORIGIN=$1 SENTRY_ENVIRONMENT=staging \
         TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 TOPUP_RPC_PROVIDER_B_URL=http://anvil:8545 \
         "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
 }
@@ -309,7 +309,7 @@ if docker run --rm --entrypoint test -v "${project}_pgdata:/var/lib/postgresql" 
 fi
 echo "ok: unsealed, PostgreSQL refuses to initialize without a listed backup prefix"
 
-echo "== re-rendering with the gateway origin (Deploy staging's provisioning upgrade)"
+echo "== re-rendering with the gateway origin (Deploy's provisioning upgrade)"
 keys_before=$(dc ps -q keys)
 render_topup http://topup:8080
 dc up -d --remove-orphans >/dev/null 2>&1 || true

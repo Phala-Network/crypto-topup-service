@@ -8,23 +8,21 @@
 # images.
 #
 # Usage: deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
-#          --workspace NAME --os-image NAME [--kms base|phala] [--kms-contract ADDRESS] \
-#          [--source COMPOSE] [--restore-check] [--offline] [--unsealed]
+#          --workspace NAME --os-image NAME [--source COMPOSE] [--restore-check] [--offline] \
+#          [--unsealed]
 #
 # --os-image must be the owner-approved OS image, dstack-0.5.9 (deploy/README.md): the pinned dstack
 # SDK speaks the dstack 0.5 guest API. Online, the image must be a listed production image and a
 # node of the workspace must offer it (`api /teepods/available`), or provisioning fails with
 # "OS image ... is not available on the selected node".
-# --kms base (default) also checks that the on-chain KMS contract allows a device and the OS image,
-# and that a node offering the image supports on-chain KMS; --kms phala (Phala Cloud's KMS, used for
-# staging) has no contract to check. Images are pulled
-# anonymously (an empty Docker client config), because the CVM pulls them without credentials: a
-# private image fails here.
+# Every CVM uses Phala Cloud's KMS (`--kms phala`), so there is no KMS contract to check. Images
+# are pulled anonymously (an empty Docker client config), because the CVM pulls them without
+# credentials: a private image fails here.
 #
 # --source is the unrendered compose the rendered file must come from (default
 # deploy/docker-compose.yml of this checkout). --restore-check expects the compose rendered with
 # render-compose.sh --restore-check (deploy/RESTORE.md). --offline runs only the local checks (env
-# file, compose, route). --unsealed accepts empty owner-sealed secrets: Deploy staging provisions
+# file, compose, route). --unsealed accepts empty owner-sealed secrets: Deploy provisions
 # with them empty and the owner seals them from their own machine; check that file without
 # --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure is
 # reported; the exit status is 1 if any.
@@ -46,21 +44,18 @@ approved_os_image=dstack-0.5.9
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
-        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--restore-check]" \
+        "[--source COMPOSE] [--restore-check]" \
         "[--offline] [--unsealed]" >&2
     exit 64
 }
-env_file="" compose="" workspace="" os_image="" kms=base offline=0 unsealed=0 variant=()
+env_file="" compose="" workspace="" os_image="" offline=0 unsealed=0 variant=()
 source_compose="$REPO_ROOT/deploy/docker-compose.yml"
-kms_contract=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 while (($#)); do
     case "$1" in
         --env) env_file="${2:-}"; shift 2 ;;
         --compose) compose="${2:-}"; shift 2 ;;
         --workspace) workspace="${2:-}"; shift 2 ;;
         --os-image) os_image="${2:-}"; shift 2 ;;
-        --kms) kms="${2:-}"; shift 2 ;;
-        --kms-contract) kms_contract="${2:-}"; shift 2 ;;
         --source) source_compose="${2:-}"; shift 2 ;;
         --restore-check) variant=(--restore-check); shift ;;
         --offline) offline=1; shift ;;
@@ -70,7 +65,6 @@ while (($#)); do
 done
 [[ -f "$env_file" && -f "$compose" ]] || usage
 ((offline)) || [[ -n "$workspace" && -n "$os_image" ]] || usage
-[[ "$kms" == base || "$kms" == phala ]] || usage
 for command in docker jq; do
     require_command "$command"
 done
@@ -163,7 +157,7 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     origin=${setting[TOPUP_PUBLIC_ORIGIN]-}
     if [[ "$origin" =~ ^https://[a-z0-9.-]+(:[0-9]+)?$ ]]; then
         if [[ "$origin" == *.invalid || "$origin" == *.invalid:* ]]; then
-            echo "note: TOPUP_PUBLIC_ORIGIN is provisional; Deploy staging replaces it with the" \
+            echo "note: TOPUP_PUBLIC_ORIGIN is provisional; Deploy replaces it with the" \
                 "gateway URL after provisioning (deploy/README.md)"
         fi
     else
@@ -314,7 +308,7 @@ elif ((chain_ok)); then
     fail "$expectations names no network with chain id ${route[chain_id]}"
 fi
 
-check_phala_cloud "$workspace" "$os_image" "$kms" "$kms_contract"
+check_phala_cloud "$workspace" "$os_image"
 
 if ((failures)); then
     echo "preflight: $failures check(s) failed" >&2

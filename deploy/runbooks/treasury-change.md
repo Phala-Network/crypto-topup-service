@@ -93,15 +93,15 @@ committed Sepolia file is a template and needs `--template` until it carries rea
 topup route validate "$NEW_ROUTE_FILE"
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:<digest>
 export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:<digest>
-# Export the attested settings first: the `staging` Environment variables
+# Export the attested settings first: the Environment's variables
 # (deploy/README.md, "Attested settings").
 deploy/render-compose.sh > deploy/docker-compose.staging.yml
 deploy/validate-compose.sh
 docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```
 
-**HUMAN-ONLY:** approve the exact prepared compose hash through the Finance Safe and use the D2
-upgrade flow.
+After the route PR merges, run Deploy in mode `upgrade` for the Environment
+([deploy/README.md, "Deploy"](../README.md#deploy)); a production run waits for reviewer approval.
 
 ## Verification
 

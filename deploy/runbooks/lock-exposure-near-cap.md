@@ -96,8 +96,8 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${head
 Exposure drains as locks are consumed, cancelled by the product, or expired by the worker. The
 service never needs a manual write to `lock_exposure` or `rate_locks` for a legitimate near-cap
 condition. A cap change is attested route configuration:
-create a new route version, run `topup route validate`, render a new compose hash, and use the D2
-Safe-approved upgrade flow.
+create a new route version, run `topup route validate`, render a new compose hash, and run Deploy
+in mode `upgrade` ([deploy/README.md, "Deploy"](../README.md#deploy)).
 
 ## Verification
 

@@ -11,11 +11,11 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111
 export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222
-# The public settings, as Deploy staging passes them from the `staging` Environment variables.
+# The public settings, as Deploy passes them from the `staging` Environment variables.
 export AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
 export AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres
 export TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
-export TOPUP_BACKUP_KEY_VERSION=1 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0
+export TOPUP_BACKUP_KEY_VERSION=1 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 SENTRY_ENVIRONMENT=staging
 export TOPUP_PUBLIC_ORIGIN=https://pending.invalid
 export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
 # A source compose whose inline route still has zero-address placeholders, as before the route PR.

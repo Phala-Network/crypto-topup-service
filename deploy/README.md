@@ -1,46 +1,60 @@
-# dstack staging deployment
+# dstack deployment
 
 This directory implements work packages D1 and D2 from `docs/plan.md`: images, deployment
-artifacts, and the CI workflows that deploy staging. D3 encrypted backups, restore, and restore
-drills are documented in [RESTORE.md](RESTORE.md).
+artifacts, and the CI workflows that deploy staging and production. D3 encrypted backups, restore,
+and restore drills are documented in [RESTORE.md](RESTORE.md).
 
-Staging is deployed only by GitHub Actions; nothing is deployed from a laptop. Commands outside
+Every CVM is deployed only by GitHub Actions; nothing is deployed from a laptop. Commands outside
 those workflows that change a registry, Phala Cloud, a CVM, a Safe, an on-chain contract, or secret
-state are marked **HUMAN-ONLY** and describe the production path (on-chain Base KMS, Finance Safe).
-The commands were checked on 2026-09-22 against dstack commit
+state are marked **HUMAN-ONLY**. The commands were checked on 2026-09-22 against dstack commit
 `721df1b93fd93884224f2261c37dd86ca250432f` and Phala Cloud CLI `phala` 1.1.22 (tag `cli-v1.1.22`
 of `Phala-Network/phala-cloud`); the SDK and the simulator now target the dstack `v0.5.9` release,
 commit `282eeb27d22d8f091ad0fa5a90e638f85cf68751` ([OS image](#os-image)), and the linked dstack
 documents are those of that commit.
 
-## First staging deploy checklist
+## Deploy checklist
 
-Release images publishes the images; the other workflows run against the GitHub Environment
-`staging`:
+Release images publishes the images; Deploy runs against the GitHub Environment it is given,
+`staging` or `production`, and the other workflows against `staging`:
 
 | Workflow | Trigger | Does |
 |---|---|---|
 | Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup`, `postgres-walg`, and `crypto-topup-reference-product` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
-| Deploy staging ([deploy-staging.yml](../.github/workflows/deploy-staging.yml)) | manual, `main` only | provisions or upgrades the staging CVM (below) |
+| Deploy ([deploy.yml](../.github/workflows/deploy.yml)) | manual, `main` only; `production` after reviewer approval | provisions or upgrades the topup CVM of the chosen Environment with the images of a Release images run (below) |
 | Deploy staging product ([deploy-staging-product.yml](../.github/workflows/deploy-staging-product.yml)) | manual, `main` only | provisions or upgrades the staging reference-product CVM ([Staging reference product](#staging-reference-product)) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
 
 ### Controls
 
-The `staging` Environment admits only the `main` branch, and the deploy jobs also check
-`github.ref`. Starting a workflow needs write access to the repository. Required reviewers are not
-available for a private repository on the current GitHub plan, so there is **no approval gate**:
-dispatching Deploy staging is the decision, and the run's actor is the record.
-GitHub holds exactly one secret, the `staging` Environment secret `PHALA_CLOUD_API_KEY`, which
-reaches the CLI through an environment variable, never a command-line argument. No runtime secret
-is stored in GitHub: the S3 keys and the Coin Metrics key are sealed into the CVM by the owner from
-their own machine (see [Deploy](#deploy)). No signing key is stored in GitHub:
-contract deployments and Safe transactions are signed by the Safe owner outside CI. The workflows have
-`permissions: contents: read`, pin every action by commit SHA, and serialize runs
-(`deploy-staging`) without cancelling one in progress.
+Both Environments admit only the `main` branch, and the deploy jobs also check `github.ref`.
+Starting a workflow needs write access to the repository. `staging` has **no approval gate**
+(dispatching is the decision, and the run's actor is the record). `production` has required
+reviewers: a run waits until a reviewer approves it, and Deploy refuses to run in `production`
+if the Environment has no required-reviewers rule. Deploy takes a Release images run id, not
+image references: it deploys only the digests of a successful Release images run on `main`, read
+from that run's `images.json` artifact.
+GitHub holds exactly one secret, the Environment secret `PHALA_CLOUD_API_KEY` of each Environment,
+which reaches the CLI through an environment variable, never a command-line argument. No runtime
+secret is stored in GitHub: the S3 keys and the Sentry DSN are sealed into the CVM by the owner
+from their own machine (see [Deploy](#deploy)). No signing key is stored in GitHub: contract
+deployments and Safe transactions are signed by the Safe owner outside CI. The workflows have
+`permissions: contents: read` (Deploy also `actions: read`), pin every action by commit SHA, and
+serialize runs per Environment (`deploy-staging`, `deploy-production`) without cancelling one in
+progress.
 
-Mainnet is never deployed from CI. Mainnet contracts and any production CVM stay HUMAN-ONLY
-through the Finance Safe ([CONTRACTS.md](CONTRACTS.md#mainnet), sections A and B below).
+Contracts are never deployed from CI: the mainnet contracts are deployed by the Safe owner with
+their own key ([CONTRACTS.md](CONTRACTS.md#mainnet)).
+
+### KMS
+
+Every CVM, staging and production, uses Phala Cloud's KMS (`--kms phala`, owner decision): no
+`DstackApp` contract, no provisioner key, and an upgrade applies without an on-chain compose-hash
+approval. Fund safety does not depend on upgrade governance: forwarders pay only the immutable
+treasury. Neither does credit safety: the product verifies every settlement against its own chain
+node. A malicious upgrade could cause downtime or read service data, and the attestation (the
+compose hash in the event log, verified after every deploy) makes it detectable. Upgrade
+governance can move to dstack's on-chain KMS later if required; that is a new app id, and so a
+key migration ([OS image](#os-image)).
 
 ### OS image
 
@@ -54,7 +68,7 @@ release (commit `282eeb27d22d8f091ad0fa5a90e638f85cf68751`, tag `v0.5.9`), and t
 dropped from its `reqwest` features. Both speak the dstack 0.5 guest API on
 `/var/run/dstack.sock` (`/GetKey`, `/Attest`, `/Info`). [preflight.sh](preflight.sh) accepts only this image name and,
 online, requires `os-images --prod` to list it as a non-dev 0.5.9 image and at least one node of
-the workspace (`api /teepods/available`) to offer it, with on-chain KMS support for `--kms base`.
+the workspace (`api /teepods/available`) to offer it.
 
 The dstack 0.5 key derivation differs from 0.6's `/v1` API: a key depends on the app identity and
 the domain only, not on the algorithm, and 0.6 derives different keys for the same domain. Keys
@@ -65,40 +79,49 @@ not an OS image bump.
 
 ### One-time setup (HUMAN-ONLY, repository owner)
 
-1. **Phala Cloud API key.** Create an API key in the Phala Cloud dashboard for the workspace
-   "kingsley's projects" and store it as the Environment secret `PHALA_CLOUD_API_KEY` (done). The
-   CLI reads it from that variable; the workflow gives the CLI an empty configuration directory, so
-   no stored login profile is ever used. The workflow checks the workspace display name.
-2. **Environment secret and variables** of `staging`. The CVM's env holds only the owner-sealed
-   secrets, exactly the names of [staging.env.example](staging.env.example); they never enter
-   GitHub. Everything else is a public setting that Deploy staging renders into the attested
-   compose ([Attested settings](#attested-settings)).
+1. **Environments.** In repository Settings > Environments, `staging` exists (deployment
+   branches: `main` only). Create `production` with deployment branches `main` only, **Required
+   reviewers** (the people who approve a production deploy; also tick *Prevent self-review*), and
+   *Allow administrators to bypass* off. GitHub offers required reviewers on a private repository only
+   with GitHub Enterprise (a public repository has them on every plan); until the rule exists,
+   Deploy refuses `production`.
+2. **Phala Cloud API key.** Create an API key in the Phala Cloud dashboard for the Environment's
+   workspace and store it as that Environment's secret `PHALA_CLOUD_API_KEY` (`staging`: workspace
+   "kingsley's projects", done). An Environment secret is visible only to jobs of that
+   Environment, so `production` can use a key of another workspace (or of the same one) without a
+   second secret name. The CLI reads it from that variable; the workflow gives the CLI an empty
+   configuration directory, so no stored login profile is ever used. Preflight checks the
+   workspace display name against `PHALA_WORKSPACE`.
+3. **Environment variables** of each Environment. The CVM's env holds only the owner-sealed
+   secrets, exactly the names of [staging.env.example](staging.env.example) (the same names in
+   production); they never enter GitHub. Everything else is a public setting that Deploy renders
+   into the attested compose ([Attested settings](#attested-settings)).
 
    | Name | Kind | Value |
    |---|---|---|
-   | `PHALA_CLOUD_API_KEY` | secret (the only one) | Phala Cloud API key (step 1) |
+   | `PHALA_CLOUD_API_KEY` | secret (the only one) | Phala Cloud API key (step 2) |
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | owner-sealed, not in GitHub | S3/R2 key for the WAL-G bucket |
    | `SENTRY_DSN` | owner-sealed, optional | DSN of the Sentry project `phala-network/crypto-topup-service`; empty turns reporting off ([Sentry](#sentry)) |
    | `AWS_ENDPOINT` | variable, attested | S3-compatible HTTPS endpoint (R2: `https://<account>.r2.cloudflarestorage.com`; AWS: `https://s3.<region>.amazonaws.com`) |
    | `AWS_REGION` | variable, attested | bucket region (`auto` for R2) |
    | `AWS_S3_FORCE_PATH_STYLE` | variable, attested | `false` (or `true` for a path-style endpoint) |
-   | `WALG_S3_PREFIX` | variable, attested | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
-   | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable, attested | from `topup-sdk keygen`; the private key stays with the admin |
+   | `WALG_S3_PREFIX` | variable, attested | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)), and production a bucket or prefix staging's keys cannot reach |
+   | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable, attested | from `topup-sdk keygen`, a separate key per Environment; the private key stays with the admin |
    | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable, attested | `1` and `0` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public Sepolia HTTPS RPC URLs from two different providers (also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
+   | `SENTRY_ENVIRONMENT` | variable, attested | the Environment's name, `staging` or `production` ([Sentry](#sentry)); Deploy refuses any other value |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public HTTPS RPC URLs of the route's chain (Sepolia for staging, Ethereum mainnet for production) from two different providers (staging's are also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
+   | `PHALA_WORKSPACE` | variable | display name of the API key's Phala Cloud workspace (`staging`: `kingsley's projects`) |
    | `DSTACK_OS_IMAGE` | variable | the owner-approved OS image, `dstack-0.5.9` ([OS image](#os-image)) |
-   | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
+   | `TOPUP_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports (`staging`: the value of the former `STAGING_CVM_ID`, which can then be deleted) |
 
-   `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below). There is no database
+   `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy derives it (below). There is no database
    secret ([Database credentials](#database-credentials)).
-3. **Package visibility.** After the first Release images run, make both packages
+4. **Package visibility.** After the first Release images run, make both packages
    (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public, as in
    [Build and publish images](#build-and-publish-images). The organization must first allow public
    container packages, and making a package public is irreversible. The CVM pulls them without
    credentials, and the preflight fails on an image it cannot pull anonymously.
-4. **Owner decisions.** Staging uses Phala Cloud's KMS (`--kms phala`): no `DstackApp` contract, no
-   provisioner key, and upgrades apply without an on-chain compose-hash approval. The on-chain
-   Base KMS stays the production path (sections A and B). The staging `settlement_url` in
+5. **Owner decisions.** Every CVM uses Phala Cloud's KMS ([KMS](#kms)). The staging `settlement_url` in
    `deploy/config/routes/phala-cloud-sepolia-pha.yaml` is the reference-product CVM's
    `/settlements` endpoint ([Staging reference product](#staging-reference-product)).
 
@@ -110,8 +133,8 @@ update` could change it without changing the compose hash. So the env holds only
 compose hash, and so the attestation, covers it. In
 [docker-compose.yml](docker-compose.yml), a `${NAME:-}` whose `NAME` is in
 [staging.env.example](staging.env.example) stays a reference to the encrypted env; every other
-`${NAME:-}` is a setting, taken from the environment (Deploy staging: the `staging` Environment
-variables above) and refused unless it is 1-512 printable ASCII characters without spaces,
+`${NAME:-}` is a setting, taken from the environment (Deploy: the chosen Environment's variables
+above) and refused unless it is 1-512 printable ASCII characters without spaces,
 quotes, backslashes, or `$`. The renderer also writes:
 
 - the mode switches and `topup`'s published port, from the variant it renders, never from the
@@ -123,7 +146,7 @@ quotes, backslashes, or `$`. The renderer also writes:
   Compose recreates a container only when its service definition changes, not when an inline
   config does, so the label makes every rendered change recreate every service.
 
-To change a setting, change the variable and run Deploy staging `upgrade`; `envs update` changes
+To change a setting, change the variable and run Deploy `upgrade`; `envs update` changes
 only secrets. [product/render-compose.sh](product/render-compose.sh) renders the reference
 product's compose the same way, and the local stacks ([local/compose.sh](local/compose.sh), the
 drill, the rehearsal) with local values.
@@ -137,26 +160,29 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
 
 ### Deploy
 
+The same steps deploy `staging` and `production`; `ENV` below is the Environment's name.
+
 1. Merge the change to `main`.
-2. Run **Release images** on `main` (the only ref it publishes from); copy both
-   `repository@sha256:<digest>` references from its summary or its `images.json` artifact.
-3. Run **Deploy staging** on `main` with `mode: provision`, `topup_image`, and
-   `postgres_walg_image`. The run refuses `provision` while `STAGING_CVM_ID` is set.
-4. Set the `staging` variable `STAGING_CVM_ID` to the CVM id in the run summary. From then on use
-   `mode: upgrade` with new digests; an upgrade sends only the compose, never an env file, so the
-   sealed env stays.
+2. Run **Release images** on `main` (the only ref it publishes from) and note its run id.
+3. Run **Deploy** on `main` with `environment`, `mode: provision`, and `release_run_id`. The run
+   refuses `provision` while `TOPUP_CVM_ID` is set. A `production` run starts only after a
+   required reviewer approves it.
+4. Set the Environment variable `TOPUP_CVM_ID` to the CVM id in the run summary. From then on use
+   `mode: upgrade` with a newer release; an upgrade sends only the compose, never an env file, so
+   the sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back
+   destructively, use a forward repair migration.
 5. **HUMAN-ONLY, owner: seal the runtime secrets.** The new CVM waits for its storage
    credentials: PostgreSQL bootstraps an empty data directory only after listing the backup prefix
    ([RESTORE.md](RESTORE.md#bootstrap-from-backup)), so without them it refuses to initialize and
-   the service is not up. From your own machine, write `.env.staging` (mode 0600) with exactly
+   the service is not up. From your own machine, write `.env.ENV` (mode 0600) with exactly
    the names of [staging.env.example](staging.env.example): `AWS_ACCESS_KEY_ID`,
    `AWS_SECRET_ACCESS_KEY`, and `SENTRY_DSN` (may be empty), and seal it; the same name set keeps
    the compose hash. From a checkout of the deployed commit, with the rendered compose from the
    run's artifact:
 
    ```sh
-   deploy/preflight.sh --env .env.staging --compose docker-compose.staging.yml --offline
-   npx --yes phala@1.1.22 envs update "$STAGING_CVM_ID" -e .env.staging
+   deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml --offline
+   npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.ENV
    ```
 
    Without `--unsealed`, preflight requires the S3 keys. The CVM restarts, PostgreSQL finds the
@@ -172,7 +198,7 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
 
    **Recovery from a failed provision.** If the run fails after `phala deploy` created the CVM
    (while waiting, setting the origin, or verifying the attestation), the summary already shows
-   the CVM id. Set `STAGING_CVM_ID` to it and re-run with `mode: upgrade` and the same digests,
+   the CVM id. Set `TOPUP_CVM_ID` to it and re-run with `mode: upgrade` and the same release,
    which renders the real origin and repeats the checks (it waits for `/healthz`, so seal the
    secrets as in step 5 first). Do not re-run `provision`, which would create a second CVM. If
    the run failed before the CVM was created (no CVM id in the summary), fix the cause and re-run
@@ -181,43 +207,70 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
    (the dstack verifier on the nonce-bound settlement key, the egress restriction) before
    issuing product credentials ([Product credentials](#product-credentials)).
 
-Deploy staging, in order; any failure stops the run:
+Deploy, in order; any failure stops the run:
 
-1. checks the inputs (both images `repository@sha256:<64 hex>`), the mode against
-   `STAGING_CVM_ID`, and that `PHALA_CLOUD_API_KEY`, `DSTACK_OS_IMAGE`, and every attested setting
-   are set;
-2. resolves `TOPUP_PUBLIC_ORIGIN`: `https://pending.invalid` for a new CVM, and for an upgrade
+1. checks the mode against `TOPUP_CVM_ID`; that `PHALA_CLOUD_API_KEY`, `PHALA_WORKSPACE`,
+   `DSTACK_OS_IMAGE`, and every attested setting are set and `SENTRY_ENVIRONMENT` is the
+   Environment's name; for `production`, that the Environment has required reviewers; and that
+   `release_run_id` is a successful Release images run of `main`;
+2. takes both image references from that run's `images.json` artifact (each
+   `repository@sha256:<64 hex>`);
+3. resolves `TOPUP_PUBLIC_ORIGIN`: `https://pending.invalid` for a new CVM, and for an upgrade
    `https://<app_id>-8080.<gateway.base_domain>` of the existing CVM (`cvms get --json`);
-3. writes the unsealed env file (`mktemp`, mode 0600, under the runner's temporary directory) with
+4. writes the unsealed env file (`mktemp`, mode 0600, under the runner's temporary directory) with
    [write-staging-env.sh](write-staging-env.sh): the owner-sealed names, all empty;
-4. renders the compose of the checked-out commit with the input digests and the settings
-   (`render-compose.sh`, [Attested settings](#attested-settings));
-5. runs [preflight.sh](preflight.sh) `--kms phala --unsealed`: env file, compose (identical to a
+5. renders the compose of the checked-out commit with the release's digests and the settings
+   (`render-compose.sh`, [Attested settings](#attested-settings)); for `production`, every route
+   in it must be on Ethereum mainnet (chain 1);
+6. runs [preflight.sh](preflight.sh) `--unsealed`: env file, compose (identical to a
    fresh render with its images and settings, the service variant, variables equal to the env
    names, settings well formed, route without placeholder addresses), anonymous pulls of both
    images, `topup route validate`, both RPC providers' chain id, `verify-deployment.sh` against
    both providers, the route's token and oracle code, the Phala workspace, and that
    `DSTACK_OS_IMAGE` is the approved `dstack-0.5.9`, a listed production image offered by a node;
-6. `phala deploy` (CLI 1.1.22 via `npx`): a new CVM with `--kms phala --instance-type tdx.medium
+7. `phala deploy` (CLI 1.1.22 via `npx`): a new CVM with `--kms phala --instance-type tdx.medium
    --fs ext4 --image "$DSTACK_OS_IMAGE" --no-dev-os --no-public-logs --no-public-sysinfo
    --public-tcbinfo --secure-time` and the unsealed env file, or an update with
-   `--cvm-id "$STAGING_CVM_ID" --wait` and no `-e`: CLI 1.1.22 then sends neither `allowed_envs` nor
+   `--cvm-id "$TOPUP_CVM_ID" --wait` and no `-e`: CLI 1.1.22 then sends neither `allowed_envs` nor
    `encrypted_env` (`resolveEnvVars` and `updateCvm` in `cli/src/commands/deploy/handler.ts` at tag
    `cli-v1.1.22`), so the sealed env and its name set stay;
-7. waits until the CVM is `running` with no operation in progress and records the CVM's compose
+8. waits until the CVM is `running` with no operation in progress and records the CVM's compose
    hash; an upgrade also waits until `/healthz` answers at the gateway URL (a new CVM waits for
    its secrets, step 5 above);
-8. for a new CVM, renders the compose again with the gateway URL as `TOPUP_PUBLIC_ORIGIN`, checks
+9. for a new CVM, renders the compose again with the gateway URL as `TOPUP_PUBLIC_ORIGIN`, checks
    it offline, and upgrades the CVM to it (`deploy --cvm-id`, no `-e`), then waits (at most 15
    minutes) for `running` with the new compose hash. An upgrade skips this step;
-9. polls `cvms attestation` (at most 10 minutes) until its event log records the deployed compose
-   hash, so an upgrade never checks the previous compose, reads the guest agent's public info
-   (port 8090) for the CVM's vm_config, and runs [verify-attestation.sh](verify-attestation.sh)
-   against the rendered compose (see [Deployment artifacts](#deployment-artifacts));
-10. records the CVM id, app id, compose hash, images, and origin in the job summary (for a new
-    CVM also the owner's sealing commands of step 5 above); uploads the rendered compose,
-    `deploy.json`, `cvm.json`, `attestation.json`, `info.json`, and the verification output
+10. polls `cvms attestation` (at most 10 minutes) until its event log records the deployed
+    compose hash, so an upgrade never checks the previous compose, reads the guest agent's public
+    info (port 8090) for the CVM's vm_config, and runs [verify-attestation.sh](verify-attestation.sh)
+    (the official dstack verifier) against the rendered compose (see
+    [Deployment artifacts](#deployment-artifacts));
+11. records the CVM id, app id, compose hash, release run, images, and origin in the job summary
+    (for a new CVM also the owner's sealing commands of step 5 above); uploads the rendered
+    compose, the release's `images.json`, `deploy.json`, `cvm.json`, `attestation.json`, `info.json`, and the verification output
     (no secrets); deletes the env file even when a step failed.
+
+### Production
+
+Production runs the same workflow and checks as staging. Its prerequisites: the Safe owner has
+deployed the mainnet contracts ([CONTRACTS.md](CONTRACTS.md#mainnet)), and a reviewed route PR
+has put the mainnet route into the compose (Deploy refuses a `production` compose with any route
+off chain 1). Then, in order:
+
+1. **Owner:** create the `production` Environment and set its secret and variables (One-time
+   setup above; `SENTRY_ENVIRONMENT=production`, mainnet RPC providers, its own backup prefix and
+   admin key).
+2. **Workflow, reviewer-approved:** Deploy with `environment: production`, `mode: provision`,
+   and the Release images run id; then set `TOPUP_CVM_ID` ([Deploy](#deploy) steps 3 and 4).
+3. **Owner:** seal the three secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+   `SENTRY_DSN` ([Deploy](#deploy) step 5, `ENV` = `production`).
+4. **Verifier:** verify the public attestation, ingress, and egress
+   ([Attestation, ingress, and egress](#attestation-ingress-and-egress)).
+5. **Admin Safe and gas funds:** grant `OPERATOR_ROLE` to the attested flusher operator and fund
+   it ([Flusher operator](#flusher-operator)).
+6. **Admin key holder:** register the product ([Product credentials](#product-credentials)).
+7. **Finance, risk, and operations:** approve the pilot limits (route bounds, lock-exposure caps,
+   product-side caps; architecture §17) before the product enables deposits.
 
 `make cvm-rehearsal` runs the same artifact locally against Anvil, Garage (S3), and the dstack simulator
 (see [Local verification](#local-verification)).
@@ -270,8 +323,8 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
 
 - **Release and environment.** The release is the image digest (`sha256:...`) of `TOPUP_IMAGE`,
   which `render-compose.sh` pins into the topup service's environment; the environment is the
-  compose's literal `SENTRY_ENVIRONMENT` (`staging`; a production compose sets `production`). Both
-  are attested with the compose. A restore-check instance (`TOPUP_SERVICE_ENABLED=read-only`,
+  setting `SENTRY_ENVIRONMENT`, the Environment's name (`staging` or `production`). Both are
+  attested with the compose. A restore-check instance (`TOPUP_SERVICE_ENABLED=read-only`,
   [RESTORE.md](RESTORE.md)) reports as `<environment>-restore` (`staging-restore`) and runs no
   loop, so it never checks in to a Crons monitor or raises an alert scoped to the live
   environment.
@@ -329,7 +382,8 @@ step against the Sentry UI; nothing here is in the repository.
    connect any that are missing.
 3. **Uptime monitor** (Monitors > Uptime > Add): `GET https://<app_id>-8080.<gateway base
    domain>/healthz` (the `TOPUP_PUBLIC_ORIGIN` of the run summary plus `/healthz`), interval
-   1 minute, timeout 10 seconds, environment `staging`, project `crypto-topup-service`. Sentry
+   1 minute, timeout 10 seconds, the Environment's `SENTRY_ENVIRONMENT`, project
+   `crypto-topup-service`; one monitor per Environment. Sentry
    documents no API for creating uptime monitors, so use the UI.
 4. **Seal the DSN.** Copy the project's DSN (Settings > Client Keys) into the owner's sealed env
    file as `SENTRY_DSN` and seal it with `phala envs update` from the owner's machine as in
@@ -418,8 +472,8 @@ suffix, and `SOURCE_DATE_EPOCH` is the commit time:
 Run the workflow on `main` from the Actions tab, or with
 `gh workflow run release-images.yml --ref main`. The job summary and the `images.json` artifact
 hold the manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`, `PRODUCT_IMAGE`): pass the
-first two to Deploy staging as `topup_image` and `postgres_walg_image`, and `PRODUCT_IMAGE` to
-Deploy staging product as `product_image`. For a local render or preflight:
+first two are what Deploy takes from the run given as `release_run_id`, and `PRODUCT_IMAGE` goes
+to Deploy staging product as `product_image`. For a local render or preflight:
 
 ```sh
 images=$(mktemp -d)
@@ -441,7 +495,7 @@ Settings, Packages, Package creation, with Public enabled for containers); other
 option is unavailable. After the first publish, for `crypto-topup`, `postgres-walg`, and
 `crypto-topup-reference-product`: open
 the package under the organization's Packages tab, then Package settings, Danger Zone, Change
-visibility, Public, and confirm with the package name. Deploy staging's preflight pulls both
+visibility, Public, and confirm with the package name. Deploy's preflight pulls both
 digests anonymously (Deploy staging product's preflight its own) and fails while a package is
 still private.
 
@@ -451,9 +505,9 @@ Developer check, no push and no credentials: the same two-build comparison runs 
 deploy/verify-image.sh   # or make verify-image
 ```
 
-Deploy staging renders literal, nonzero image digests and the settings into the compose; secret
+Deploy renders literal, nonzero image digests and the settings into the compose; secret
 values remain `${NAME:-}` references ([Attested settings](#attested-settings)). To review a render
-locally, export the settings of the `staging` Environment variables and:
+locally, export the settings of the Environment's variables and:
 
 ```sh
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:<64-hex-digest>
@@ -468,218 +522,28 @@ Both database URLs are encrypted, but the compose enforces their separate consum
 CLI 1.1.22 builds app-compose internally from the exact YAML bytes, privacy/storage flags, and env
 names passed to `phala deploy`. It derives `allowed_envs` from `-e`; it does not submit this repo's
 `app-compose.example.json`, and it does not submit that old template's `port_policy`. The CLI has no
-command that prints the complete app-compose before initial provisioning.
+command that prints the complete app-compose before a deploy.
 
-Therefore:
-
-- Never authorize a hash produced from `render-app-compose.sh` before deployment. It is only useful
-  for review and tests.
-- For an existing on-chain-KMS CVM, `phala deploy --prepare-only --json` returns the authoritative
-  `compose_hash` and a commit token bound to that prepared update. Approve that hash, then commit the
-  same token against the same `--cvm-id`.
-- For first-time provisioning, CLI 1.1.22 does not stop at `--prepare-only`. It provisions the CVM,
-  deploys its app authorization contract, registers the initial hash, and commits the CVM. Treat the
-  first CVM as staging, read back its attested `compose_file`, and verify it before enabling a route.
-
-## A. First-time provisioning
-
-Staging is provisioned by the Deploy staging workflow with Phala Cloud's KMS (see the checklist).
-This section and section B are the production path, which has not been exercised yet: on-chain
-KMS on Base mainnet, chain ID 8453, with the app authorization contract owned by the Finance Safe.
-Its env file (the `staging.env.example` names with the production secrets) and rendered compose
-(`render-compose.sh` with the production settings, [Attested settings](#attested-settings), and
-`TOPUP_PUBLIC_ORIGIN=https://pending.invalid`) are prepared like the workflow's and never
-committed. The asset chain in the route is independent of
-the KMS control plane. On 2026-09-22, CLI 1.1.22 reported the Base KMS contract as
-`0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C`; re-query it and confirm the selected contract has
-allowed devices and an allowed production OS image. **HUMAN-ONLY, Phala Cloud credentials required:** authenticate before querying the
-operator's available KMS control plane:
+Therefore never treat a hash produced by `render-app-compose.sh` as the deployed one; it is only
+useful for review and tests. The authoritative hash is the one the attestation's event log
+records, and Deploy verifies the attested app-compose against the rendered compose after every
+deploy ([Deploy](#deploy), step 10). To re-check a CVM from a checkout of the deployed commit,
+with the rendered compose from the run's artifact and the Environment's Phala Cloud API key in
+`PHALA_CLOUD_API_KEY` (read-only):
 
 ```sh
-npx --yes phala@1.1.22 login --no-open
-npx --yes phala@1.1.22 kms base --json > base-kms.json
-jq '{chain_id, contracts: [.contracts[] | {contract_address, devices, os_images}]}' base-kms.json
-export KMS_CONTRACT=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
-```
-
-**HUMAN-ONLY, Phala Cloud, Base RPC, and provisioner-key credentials required:** authenticate
-and load `PRIVATE_KEY` and `ETH_RPC_URL` from the operator's secret manager; the CLI reads both
-from the environment, so neither appears on a command line. Do not add `--prepare-only`; it does
-not halt the create path in this CLI version. Run [preflight.sh](preflight.sh) first with the
-default `--kms base`, which also checks the KMS contract's devices and OS images, and pass the
-same `$OS_IMAGE` (`dstack-0.5.9`, [OS image](#os-image)): without `--image` the platform picks
-the OS image, and a different dstack release derives different keys:
-
-```sh
-deploy/preflight.sh --env .env.production --compose deploy/docker-compose.production.yml \
-  --workspace "$PHALA_WORKSPACE" --os-image "$OS_IMAGE" --kms-contract "$KMS_CONTRACT"
-```
-
-Phala CLI 1.1.22 writes `Provisioning CVM ...` to stdout before writing the pretty-printed JSON
-object, and its deploy command has no separate output-file option. Preserve the complete stdout for
-the deployment record, then extract from the first JSON object line and validate it before reading
-any fields. See the pinned
-[create handler](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts#L750-L752),
-[JSON response](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts#L869-L887),
-and [deploy options](https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts#L373-L377).
-
-```sh
-npx --yes phala@1.1.22 deploy --json \
-  --name crypto-topup \
-  --compose deploy/docker-compose.production.yml \
-  -e .env.production \
-  --instance-type tdx.medium \
-  --fs ext4 \
-  --kms base \
-  --kms-contract "$KMS_CONTRACT" \
-  --image "$OS_IMAGE" \
-  --no-dev-os \
-  --no-public-logs \
-  --no-public-sysinfo \
-  --public-tcbinfo \
-  --secure-time \
-  --wait > provision.raw
-sed -n '/^{/,$p' provision.raw > provision.json
-jq -e . provision.json >/dev/null
-CVM_ID=$(jq -er '.vm_uuid' provision.json) || exit 1
-APP_ID=$(jq -er '.app_id' provision.json) || exit 1
-export CVM_ID APP_ID
-case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
-```
-
-The CLI deploys a new `DstackApp` authorization contract and returns its address as `app_id`. Its
-initializer registers the initial compose hash and device, and the provisioner EOA initially owns
-the contract.
-
-**HUMAN-ONLY, provisioner key and Finance Safe required:** transfer ownership using the
-`Ownable2Step` flow, then have the Finance Safe execute `acceptOwnership()` on Base:
-
-```sh
-cast send "$APP_AUTH_CONTRACT" 'transferOwnership(address)' "$FINANCE_SAFE" \
-  --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY"
-cast calldata 'acceptOwnership()'
-cast call "$APP_AUTH_CONTRACT" 'owner()(address)' --rpc-url "$ETH_RPC_URL"
-```
-
-The final owner must equal `$FINANCE_SAFE`. The calldata printed above is the Safe transaction data;
-do not remove the provisioner's access until the Safe acceptance is final.
-
-Read back and verify the artifact that was actually deployed:
-
-```sh
+export CVM_ID=<TOPUP_CVM_ID of the Environment>
 npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) || exit 1
 GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
-deploy/verify-attestation.sh \
-  attestation.json info.json "$APP_ID" deploy/docker-compose.production.yml
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml
+export TOPUP_PUBLIC_ORIGIN="https://${APP_ID#0x}-8080.$GATEWAY_DOMAIN"
 ```
 
-If the attestation is unavailable or its `compose_file` cannot be read back, stop. Do not enable the
-route or represent the locally previewed manifest as the deployed artifact.
-
-### Public origin follow-up
-
-Deploy staging performs this follow-up for a staging CVM. A production CVM boots with the
-provisional `TOPUP_PUBLIC_ORIGIN=https://pending.invalid`, which passes startup validation, but
-every request signed for the real URL is rejected until the origin is updated; during this window only the admin key exists, and no product credentials may
-be issued. Derive the gateway URL of port 8080 from the provisioned app, confirm it serves the
-service, and only then render it into the compose. CLI 1.1.22 `cvms get --json` (API
-2026-06-23) reports the gateway domain as `gateway.base_domain`; every extraction below stops on
-a missing field instead of writing a URL containing `null`:
-
-```sh
-GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
-TOPUP_PUBLIC_ORIGIN="https://${APP_ID#0x}-8080.$GATEWAY_DOMAIN"
-curl -fsS "$TOPUP_PUBLIC_ORIGIN/healthz" || exit 1
-export TOPUP_PUBLIC_ORIGIN
-deploy/render-compose.sh > deploy/docker-compose.production.yml
-deploy/preflight.sh --env .env.production --compose deploy/docker-compose.production.yml --offline
-```
-
-The origin is attested, so this is a new compose hash: apply it as an upgrade with
-[B. Upgrade an existing CVM](#b-upgrade-an-existing-cvm) (Finance Safe approval of the returned
-hash).
-
-When `topup` is running again, repeat the read-back above (the compose hash must be the approved
-one), confirm that a correctly signed administrative request is accepted (see
-[Attestation, ingress, and egress](#attestation-ingress-and-egress)), and request an attestation
-through the public URL:
-
-```sh
-export NONCE="$(openssl rand -hex 32)"
-curl -fsS "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
-jq -e --arg nonce "$NONCE" '.keyid == "settlement/v1" and (.quote | length > 0)' \
-  public-attestation.json
-```
-
-Check the `report_data` binding and verify the quote as described in
-[Attestation, ingress, and egress](#attestation-ingress-and-egress) before any product pins the
-settlement key, then grant and fund the flusher operator it reports
-([Flusher operator](#flusher-operator)).
-
-## B. Upgrade an existing CVM
-
-Staging upgrades run Deploy staging with `mode: upgrade`. For an on-chain-KMS (production) CVM, use
-the same literal compose and env file for prepare and commit. The commit token binds the update,
-so any compose/env change requires a new prepare. A changed setting
-([Attested settings](#attested-settings)) is a re-rendered compose and so an upgrade like this one.
-
-**HUMAN-ONLY, Phala Cloud and encrypted-env credentials required:** prepare against the existing CVM:
-
-```sh
-export CVM_ID=<existing-cvm-id>
-npx --yes phala@1.1.22 deploy --json \
-  --cvm-id "$CVM_ID" \
-  --compose deploy/docker-compose.production.yml \
-  -e .env.production \
-  --prepare-only > prepare.json
-COMPOSE_HASH=$(jq -er '.compose_hash' prepare.json) || exit 1
-COMMIT_TOKEN=$(jq -er '.commit_token' prepare.json) || exit 1
-APP_ID=$(jq -er '.app_id' prepare.json) || exit 1
-export COMPOSE_HASH COMMIT_TOKEN APP_ID
-case "$APP_ID" in 0x*) export APP_AUTH_CONTRACT="$APP_ID" ;; *) export APP_AUTH_CONTRACT="0x$APP_ID" ;; esac
-```
-
-Confirm `prepare_only` is true and review `onchain_status`. **HUMAN-ONLY, Finance Safe required:**
-approve the exact returned hash on the Base `DstackApp`, wait for finality, and record the Safe
-transaction hash:
-
-```sh
-jq '{prepare_only, compose_hash, app_id, device_id, chain_id, onchain_status}' prepare.json
-cast calldata 'addComposeHash(bytes32)' "$COMPOSE_HASH"
-cast call "$APP_AUTH_CONTRACT" 'allowedComposeHashes(bytes32)(bool)' "$COMPOSE_HASH" \
-  --rpc-url "$ETH_RPC_URL"
-export ALLOWLIST_TRANSACTION_HASH=<final-safe-transaction-hash>
-```
-
-The call must return `true`. If `onchain_status.device_id_allowed` is false, the Safe must also
-execute `addDevice(bytes32)` for the returned `device_id` before commit.
-
-**HUMAN-ONLY, Phala Cloud credentials required:** commit the same prepared update to the same target:
-
-```sh
-npx --yes phala@1.1.22 deploy --json \
-  --cvm-id "$CVM_ID" \
-  --commit \
-  --token "$COMMIT_TOKEN" \
-  --compose-hash "$COMPOSE_HASH" \
-  --transaction-hash "$ALLOWLIST_TRANSACTION_HASH" \
-  --wait > commit.json
-npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
-npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
-APP_ID=$(jq -er '.app_id' cvm.json) || exit 1
-GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
-curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
-deploy/verify-attestation.sh \
-  attestation.json info.json "$APP_ID" deploy/docker-compose.production.yml
-```
-
-After the observation window, **HUMAN-ONLY, Finance Safe required:** remove the old hash with
-`removeComposeHash(bytes32)`. Rollback is another upgrade: prepare the retained old compose, approve
-its returned hash if necessary, commit its token, and repeat attestation checks. Never roll a schema
-back destructively; use a forward repair migration.
+If the attestation is unavailable or its `compose_file` cannot be read back, stop: do not enable
+the route or represent the locally previewed manifest as the deployed artifact.
 
 ## Attestation, ingress, and egress
 
@@ -696,7 +560,8 @@ settlement key and the flusher operator addresses.
 **HUMAN-ONLY, verifier approval required:** `quote` is the guest agent's versioned attestation
 (quote, event log, and vm_config), so [dstack-verifier.sh](dstack-verifier.sh) verifies it as is:
 quote and TCB, the RTMR3 replay, and the OS image. Its app id and compose hash must be the CVM's
-(`cvm.json` and the `attestation.json` read back above) and its 64-byte report data the 32-byte
+(`cvm.json` and `attestation.json`, read back as in
+[Authoritative manifest and hash](#authoritative-manifest-and-hash)) and its 64-byte report data the 32-byte
 `report_data` zero-padded:
 
 ```sh
@@ -798,9 +663,8 @@ flusher to report the role.
 
 To rotate the operator key:
 
-1. Bump `operator_key_version` in the attested chain and route files, then upgrade as in
-   [B. Upgrade an existing CVM](#b-upgrade-an-existing-cvm) (new compose hash, allow-list, deploy). Every current route on one
-   chain must share the version. Unsigned plans are re-bound to the new operator and in-flight
+1. Bump `operator_key_version` in the attested chain and route files, then run Deploy in mode
+   `upgrade` (a new compose hash). Every current route on one chain must share the version. Unsigned plans are re-bound to the new operator and in-flight
    flushes of the old one keep confirming; new flushes wait for the grant.
 2. Request a fresh attestation, verify it, and read the new `operators` entry.
 3. Grant `OPERATOR_ROLE` to the new address and fund it, as in steps 1 and 2 above; the flusher
@@ -875,7 +739,7 @@ requests.
 
 The product's public configuration is attested: the workflow renders it into the product
 config inside the compose, so it is part of the compose hash. `TOPUP_ORIGIN` is read by the
-workflow from the topup CVM (`vars.STAGING_CVM_ID`) and `PRODUCT_PUBLIC_URL` is the product CVM's
+workflow from the topup CVM (the `staging` variable `TOPUP_CVM_ID`) and `PRODUCT_PUBLIC_URL` is the product CVM's
 own gateway URL; `PRODUCT_RPC_URL` (the product's own Sepolia RPC, preferably a provider topup does
 not use) and `PRODUCT_DRIVER_PUBLIC_KEY` are `staging` Environment variables. The sealed env holds
 only `PRODUCT_SEED`. At startup the product fetches `TOPUP_ORIGIN/v1/attestation` with a fresh
@@ -936,7 +800,7 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
    `<product URL>/settlements` in `deploy/config/routes/phala-cloud-sepolia-pha.yaml` and in the
    inline copy in `deploy/docker-compose.yml` (`deploy/validate-compose.sh` compares them). This
    is attested route content, so it changes topup's compose hash: after merging, run Deploy
-   staging in mode `upgrade` ([B. Upgrade an existing CVM](#b-upgrade-an-existing-cvm)).
+   (`staging`) in mode `upgrade` ([Deploy](#deploy)).
 7. **Run the deposit driver** from the operator's machine. The payer is a Foundry keystore
    holding a throwaway test key with some Sepolia ETH for gas (public faucet); no key is ever in
    the environment, on a command line, or in CI. The Sepolia test PHA token
@@ -1139,5 +1003,3 @@ sources; it bind-mounts nothing.
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts>
 - Phala CLI 1.1.22 flags:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/command.ts>
-- dstack `DstackApp` authorization contract:
-  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/kms/auth-eth/contracts/DstackApp.sol>

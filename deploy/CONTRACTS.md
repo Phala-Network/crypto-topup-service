@@ -185,15 +185,15 @@ Create a new route version; never mutate the contract tuple of an enabled versio
 
 ```sh
 deploy/validate-compose.sh
-# Export the attested settings first: the `staging` Environment variables
+# Export the attested settings first: the Environment's variables
 # (deploy/README.md, "Attested settings").
 deploy/render-compose.sh > deploy/docker-compose.staging.yml
 docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```
 
-Follow `deploy/README.md` to obtain the authoritative prepared compose hash, approve that exact hash
-with the Finance Safe, commit the update, and verify the attested read-back. A locally guessed hash
-is not an authorization artifact. Keep both contract verification reports with the deployment
+Deploy the merged route with the Deploy workflow in mode `upgrade` (`deploy/README.md`, "Deploy";
+a production run waits for reviewer approval), which verifies the attested read-back. A locally
+rendered compose is only a review aid. Keep both contract verification reports with the deployment
 record.
 
 ## Rollback and treasury changes
