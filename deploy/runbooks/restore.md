@@ -34,21 +34,23 @@ its dedicated tools service with owner credentials and checks the same migration
 
 ## Decision tree
 
-- Planned drill and a verified backup exists: proceed only in a throwaway CVM, following the
-  "Staging restore drill" section of `deploy/RESTORE.md` (`TOPUP_WAL_ARCHIVE=off`, read-only
-  object-storage credentials, stop after `restore-check`, never start `topup`, `heartbeat`, or
-  `backup`, then destroy the CVM).
+- Planned drill and a verified backup exists: proceed only in a throwaway instance of the app,
+  following the "Staging restore drill" section of `deploy/RESTORE.md` (restore-time environment:
+  `TOPUP_RESTORE_FROM_BACKUP=on`, `TOPUP_WAL_ARCHIVE=off`, `TOPUP_SERVICE_ENABLED=read-only`,
+  read-only object-storage credentials; verify through `/healthz` and signed reads only, then
+  delete the instance).
 - Primary database unavailable: declare incident and restore to a new encrypted volume/CVM.
 - Backup list empty, stale, or unverifiable: do not resume; escalate data-loss risk.
 
 ## Remediation
 
-**HUMAN-ONLY:** execute `deploy/RESTORE.md`: authorize the replacement CVM for the original app id,
-derive the retained backup keys, fetch the base backup, and replay encrypted WAL. This runbook
-delegates restore execution to that procedure.
+**HUMAN-ONLY:** execute `deploy/RESTORE.md`: create a new instance of the original app id with the
+restore-time environment. It derives the retained backup keys, restores the newest base backup,
+replays encrypted WAL, promotes, and runs the restore check at boot; its report is on the
+instance's `/healthz`. This runbook delegates restore execution to that procedure.
 
-With PostgreSQL restored and `topup`, `heartbeat`, and `backup` still stopped, run the restore
-check. It verifies migrations, WAL position, externally anchored RPO, and table counts, then runs
+On a stack with a shell (a local or sandbox stack), the restore check can also run by hand with an
+external anchor, with PostgreSQL restored and `topup`, `heartbeat`, and `backup` stopped. It verifies migrations, WAL position, externally anchored RPO, and table counts, then runs
 the architecture section 13 restore gate from C8: it `GET`s the product for every deposit at or
 beyond `cleared`, adopts the product's answer, and exits non-zero while any settlement is
 incomplete. The gate refuses to start with `lease_owner_lock_held` while `topup run` or

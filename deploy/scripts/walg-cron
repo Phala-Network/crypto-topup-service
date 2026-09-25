@@ -17,6 +17,11 @@ write_marker() {
 # PostgreSQL archive_command: the key-versioned D3 wrapper uploads and annotates the segment, and
 # the backup-age marker is refreshed only after both succeeded.
 if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
+    # The entrypoint already sets archive_mode=off for a restore; refuse a stray call as well.
+    if [ "${TOPUP_RESTORE_FROM_BACKUP:-off}" = on ]; then
+        echo "WAL archiving is disabled while TOPUP_RESTORE_FROM_BACKUP=on" >&2
+        exit 1
+    fi
     # Until the owner seals the S3 keys (deploy/README.md), fail at once: each WAL-G attempt
     # without credentials takes seconds, and PostgreSQL's shutdown after initdb waits for the
     # archiver, which would outlast pg_ctl's timeout and fail the first boot.
@@ -64,6 +69,16 @@ fi
 
 echo "parsed schedule: minute=$minute hour=$hour day-of-month=$3 month=$4 day-of-week=$5"
 
+# A restored instance (deploy/RESTORE.md) must not push base backups or delete retained ones in
+# the prefix it restores from. It idles so the container stays up and healthy.
+if [ "${TOPUP_RESTORE_FROM_BACKUP:-off}" = on ]; then
+    echo "base backups are disabled while TOPUP_RESTORE_FROM_BACKUP=on"
+    if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
+        exit 0
+    fi
+    exec sleep infinity
+fi
+
 if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
     now=$(date -u +%s)
     run_at=$(date -u -d "$(date -u +%F) $hour:$minute:00" +%s)
@@ -97,6 +112,25 @@ checkpoint_on_start() {
     done
 }
 checkpoint_on_start &
+
+# A base backup is due now, not at the schedule, when none covers the cluster's current timeline:
+# a new cluster, or one promoted after a restore (deploy/RESTORE.md, "Resume"). A failed check or
+# backup (PostgreSQL still starting, storage unreachable) is retried for five minutes.
+attempts=10
+while :; do
+    status=0
+    walg-timeline-backup "${PGDATA:-/var/lib/postgresql/data}" || status=$?
+    case "$status" in
+        0) write_marker; break ;;
+        3) break ;;
+    esac
+    attempts=$((attempts - 1))
+    if [ "$attempts" -eq 0 ]; then
+        echo "base backup check failed; waiting for the schedule" >&2
+        break
+    fi
+    sleep 30
+done
 
 while :; do
     now=$(date -u +%s)

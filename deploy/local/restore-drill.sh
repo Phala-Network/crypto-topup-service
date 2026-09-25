@@ -253,20 +253,8 @@ INSERT INTO restore_drill_marker(mode) VALUES ('base');
 SQL
 }
 
-# Runs the base-backup selection commands exactly as deploy/RESTORE.md step 3 writes them.
-check_runbook_selection_commands() {
-    BACKUP_NAME=$1
-    dc run --rm --no-deps restore 'wal-g backup-list --json' |
-        jq -e --arg name "$BACKUP_NAME" 'any(.[]; .backup_name == $name)' >/dev/null || {
-        echo "runbook backup-list command did not list $BACKUP_NAME" >&2
-        return 1
-    }
-    dc run --rm --no-deps restore "wal-g st cat key-versions/base/$BACKUP_NAME.json" |
-        jq -e --arg name "$BACKUP_NAME" '.kind == "base" and .object == $name
-            and .key_version == 1' >/dev/null || {
-        echo "runbook base metadata command did not return version 1 for $BACKUP_NAME" >&2
-        return 1
-    }
+startup_base_backup_listed() {
+    dc exec -T backup sh -c 'wal-g backup-list --json | jq -e "length > 0"'
 }
 
 # Full object listing with modification times, to prove a drill instance wrote nothing.
@@ -308,10 +296,42 @@ remove_pgdata_volume() {
     remove_volume pgdata
 }
 
-# A service booted with TOPUP_SERVICE_ENABLED=off must exit at its configuration check.
+# The heartbeat writer, booted with TOPUP_SERVICE_ENABLED=read-only, must exit at its
+# configuration check.
 failed_closed() {
     dc logs --no-log-prefix "$1" 2>/dev/null |
-        grep -F "$2 is disabled while TOPUP_SERVICE_ENABLED=off"
+        grep -F "$2 is disabled while TOPUP_SERVICE_ENABLED=read-only"
+}
+
+backup_idle() {
+    dc logs --no-log-prefix backup 2>/dev/null |
+        grep -Fx 'base backups are disabled while TOPUP_RESTORE_FROM_BACKUP=on'
+}
+
+# The drill publishes no ports; the mock product's Python reaches topup on the compose network.
+topup_request() {
+    dc exec -T mock-product python3 - "$1" "$2" <<'PY'
+import sys, urllib.error, urllib.request
+request = urllib.request.Request("http://topup:8080" + sys.argv[2], method=sys.argv[1])
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        print(response.status)
+        print(response.read().decode())
+except urllib.error.HTTPError as error:
+    print(error.code)
+PY
+}
+
+topup_status() {
+    topup_request "$1" "$2" | head -1
+}
+
+topup_get() {
+    topup_request GET "$1" | tail -n +2
+}
+
+restore_report_served() {
+    topup_get /healthz | jq -e '.restore_check != null'
 }
 
 # The restored cluster's application login, with the password the replacement derived.
@@ -480,6 +500,8 @@ export TOPUP_BACKUP_KEY_VERSION=1
 dc up -d --no-deps postgres
 wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
 dc up -d --no-deps backup
+# A new cluster has no base backup on its timeline, so backup takes one at start.
+wait_for "startup base backup" startup_base_backup_listed
 wait_for mock-product dc exec -T mock-product python3 -c \
     "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"
 dc run --rm --no-deps migrate >/dev/null
@@ -568,80 +590,58 @@ for volume in walg_key db_owner db_app; do
     remove_volume "$volume"
 done
 
-# Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole stack comes up, with
-# the restore-time environment from deploy/RESTORE.md: WAL archiving off, read-only object-storage
-# credentials, and TOPUP_SERVICE_ENABLED=off. Nothing may reach object storage from here on.
+# Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole stack comes up at
+# once with the restore-time environment of deploy/RESTORE.md: restore from backup, WAL archiving
+# off, read-only object-storage credentials, and TOPUP_SERVICE_ENABLED=read-only. PostgreSQL
+# restores the newest base backup into the empty volume and replays every archived segment; no
+# command runs inside the stack. Nothing may reach object storage from here on.
 storage_before=$(storage_listing)
 test -n "$storage_before"
+export TOPUP_RESTORE_FROM_BACKUP=on
 export TOPUP_WAL_ARCHIVE=off
 export TOPUP_LOCAL_S3_ACCESS_KEY_ID=topup-restore-read
 export TOPUP_LOCAL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
-export TOPUP_SERVICE_ENABLED=off
+export TOPUP_SERVICE_ENABLED=read-only
 dc up --remove-orphans -d
-wait_for "boot PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
+dc logs --no-log-prefix postgres 2>&1 |
+    grep -F "TOPUP_RESTORE_FROM_BACKUP=on: restoring base backup $backup_name" >/dev/null || {
+    echo "the replacement did not restore the newest base backup $backup_name" >&2
+    exit 1
+}
+recovery_promoted
 test "$(psql_value 'SHOW archive_mode')" = off
-wait_for "topup failing closed" failed_closed topup run
 wait_for "heartbeat failing closed" failed_closed heartbeat heartbeat
+wait_for "backup idling" backup_idle
 storage_is_read_only
 
-# RESTORE.md "Restore the database" step 2: stop everything but `keys` and reset pgdata.
-dc stop topup heartbeat backup migrate postgres >/dev/null
-dc rm -f topup heartbeat backup migrate postgres >/dev/null
-remove_pgdata_volume
-
-# Step 3: select and fetch into the new empty volume, with the runbook's exact commands.
-check_runbook_selection_commands "$backup_name"
-dc run --rm --no-deps -e BACKUP_NAME="$backup_name" restore '
-    test -z "$(ls -A "$PGDATA")"
-    walg-backup-fetch "$PGDATA" "$BACKUP_NAME"
-    test -s "$PGDATA/PG_VERSION"
-'
-
-# Step 4: recovery configuration; controlled mode stops at the recorded LSN.
-if [ "$mode" = controlled ]; then
-    recovery_target=$expected_lsn
-else
-    recovery_target=
-fi
-dc run --rm --no-deps -e RECOVERY_TARGET_LSN="$recovery_target" restore '
-    printf "%s\n" "restore_command = '\''walg-restore-command %f %p'\''" \
-        >>"$PGDATA/postgresql.auto.conf"
-    if [ -n "$RECOVERY_TARGET_LSN" ]; then
-        printf "%s\n" \
-            "recovery_target_lsn = '\''$RECOVERY_TARGET_LSN'\''" \
-            "recovery_target_inclusive = true" \
-            "recovery_target_action = '\''promote'\''" >>"$PGDATA/postgresql.auto.conf"
-    fi
-    touch "$PGDATA/recovery.signal"
-    chmod 0700 "$PGDATA"
-'
-
-dc up -d --no-deps postgres
-wait_for "restored PostgreSQL" dc exec -T postgres pg_isready -U postgres -d topup
-test "$(psql_value 'SHOW archive_mode')" = off
-wait_for "archive recovery promotion" recovery_promoted
-
-set +e
-restore_output=$(dc run --rm --no-deps restore-check \
-    --expected-heartbeat-at "$expected_heartbeat_at" \
-    --expected-lsn "$expected_lsn")
-restore_status=$?
-set -e
-if [ "$restore_status" -ne 0 ]; then
-    printf 'restore-check: %s\n' "$restore_output" >&2
-    exit "$restore_status"
-fi
-# JSON log lines share stdout with the report; keep only the report object.
-restore_report=$(printf '%s\n' "$restore_output" | jq -c 'select(has("post_restore_reconciliation"))')
-test -n "$restore_report"
+# The operator's only view of the replacement: /healthz and the read API on its gateway URL.
+wait_for "restore-check report on /healthz" restore_report_served
+health=$(topup_get /healthz)
+restore_report=$(printf '%s\n' "$health" | jq -ce '.restore_check')
+printf '%s\n' "$health" | jq -e '.mode == "read-only"' >/dev/null
+test "$(printf '%s\n' "$restore_report" | jq -er '.status')" = ok || {
+    printf 'restore-check: %s\n' "$restore_report" >&2
+    exit 1
+}
+test "$(topup_status POST /v1/admin/products)" = 503
+test "$(topup_status GET /v1/products/restore-drill/deposits?tx_hash=0x00)" = 401
 
 # restore-check logged in as the owner, and the application login works too: the restored roles
 # carry the source's derived passwords, which the replacement derived again.
 test "$(app_login_works)" = topup_service
 
-measured_rpo=$(printf '%s\n' "$restore_report" | jq -er '.measured_rpo_seconds')
+# The boot-time report is unanchored; compare it with the source point recorded above, as the
+# operator compares it with theirs.
+restored_heartbeat_at=$(printf '%s\n' "$restore_report" | jq -er '.restored_heartbeat_at')
+measured_rpo=$(( $(date -u -d "$expected_heartbeat_at" +%s) - $(date -u -d "$restored_heartbeat_at" +%s) ))
+if [ "$measured_rpo" -lt 0 ]; then
+    measured_rpo=0
+fi
 allowed_rpo=$(printf '%s\n' "$restore_report" | jq -er '.allowed_rpo_seconds')
-wal_bytes_behind=$(printf '%s\n' "$restore_report" | jq -er '.wal_bytes_behind')
+latest_applied_lsn=$(printf '%s\n' "$restore_report" | jq -er '.latest_applied_lsn')
+wal_bytes_behind=$(psql_value \
+    "SELECT GREATEST(pg_wal_lsn_diff('$expected_lsn', '$latest_applied_lsn'), 0)::bigint")
+test "$(printf '%s\n' "$restore_report" | jq -er '.rpo_basis')" = unanchored
 reconciliation=$(printf '%s\n' "$restore_report" | jq -er '.post_restore_reconciliation.status')
 restored_marker=$(psql_value 'SELECT max(id) FROM restore_drill_marker')
 restored_pricing=$(psql_value \

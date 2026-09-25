@@ -59,5 +59,15 @@ services:
       anvil:
         condition: service_healthy
 
+  # Starts with every boot and exits at once while TOPUP_RESTORE_FROM_BACKUP=off.
+  restore-check:
+    volumes: !override
+      - dstack_socket:/var/run
+      - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+
 volumes:
   dstack_socket:

@@ -66,7 +66,9 @@ enum TopupCommand {
     /// Validate a restored database and run post-restore reconciliation.
     ///
     /// Run only while the service, heartbeat, and backup processes are stopped: the post-restore
-    /// round claims every deposit at or beyond `cleared` and adopts the product's answers.
+    /// round claims every deposit at or beyond `cleared` and adopts the product's answers. It does
+    /// nothing while TOPUP_RESTORE_FROM_BACKUP=off, and writes its report to
+    /// TOPUP_RESTORE_REPORT_FILE when that is set.
     RestoreCheck(RestoreCheckArgs),
 }
 
@@ -155,12 +157,14 @@ struct KeysArgs {
 
 #[derive(Args)]
 struct RestoreCheckArgs {
-    /// Last source heartbeat committed before the recorded failure point.
+    /// Last source heartbeat committed before the recorded failure point. Omitted at boot after a
+    /// restore from backup: the report is then `unanchored` and the operator compares its
+    /// `restored_heartbeat_at` with their own external anchor.
     #[arg(long, value_name = "RFC3339")]
-    expected_heartbeat_at: DateTime<Utc>,
+    expected_heartbeat_at: Option<DateTime<Utc>>,
     /// Source WAL location from the same heartbeat log line. Omit only as a declared incident
     /// exception; RPO is then proven by the heartbeat timestamp alone and flagged in the report.
-    #[arg(long, value_name = "PG_LSN")]
+    #[arg(long, value_name = "PG_LSN", requires = "expected_heartbeat_at")]
     expected_lsn: Option<String>,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
@@ -290,19 +294,49 @@ async fn keys(args: &KeysArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Refuses service commands on a replacement CVM that boots for a restore (`deploy/RESTORE.md`).
-fn service_enabled(command: &str) -> Result<(), String> {
-    match std::env::var("TOPUP_SERVICE_ENABLED").as_deref() {
-        Err(_) | Ok("on") => Ok(()),
-        Ok("off") => Err(format!(
-            "{command} is disabled while TOPUP_SERVICE_ENABLED=off"
-        )),
-        Ok(_) => Err("TOPUP_SERVICE_ENABLED must be on or off".to_owned()),
+/// `TOPUP_SERVICE_ENABLED` of a replacement CVM that boots for a restore (`deploy/RESTORE.md`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceMode {
+    On,
+    /// `topup run` serves only reads; nothing else runs.
+    ReadOnly,
+    Off,
+}
+
+impl ServiceMode {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("TOPUP_SERVICE_ENABLED").as_deref() {
+            Err(_) | Ok("on") => Ok(Self::On),
+            Ok("read-only") => Ok(Self::ReadOnly),
+            Ok("off") => Ok(Self::Off),
+            Ok(_) => Err("TOPUP_SERVICE_ENABLED must be on, read-only, or off".to_owned()),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::ReadOnly => "read-only",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Refuses a command in any `TOPUP_SERVICE_ENABLED` mode it does not run in.
+fn service_enabled(command: &str, allowed: &[ServiceMode]) -> Result<ServiceMode, String> {
+    let mode = ServiceMode::from_env()?;
+    if allowed.contains(&mode) {
+        Ok(mode)
+    } else {
+        Err(format!(
+            "{command} is disabled while TOPUP_SERVICE_ENABLED={}",
+            mode.name()
+        ))
     }
 }
 
 async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
-    if let Err(error) = service_enabled("heartbeat") {
+    if let Err(error) = service_enabled("heartbeat", &[ServiceMode::On]) {
         tracing::error!(%error, "heartbeat refused to start");
         return ExitCode::FAILURE;
     }
@@ -344,46 +378,36 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
 }
 
 async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
-    let routes = match load_routes(&args.routes) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::error!(%error, "failed to load route configuration");
+    // In the compose, restore-check starts with every boot; it runs only after a restore.
+    match std::env::var("TOPUP_RESTORE_FROM_BACKUP").as_deref() {
+        Err(_) | Ok("on") => {}
+        Ok("off") => {
+            tracing::info!("restore-check skipped: TOPUP_RESTORE_FROM_BACKUP=off");
+            return ExitCode::SUCCESS;
+        }
+        Ok(_) => {
+            tracing::error!("TOPUP_RESTORE_FROM_BACKUP must be on or off");
             return ExitCode::FAILURE;
         }
+    }
+    let result = run_restore_check(args).await;
+    let encoded = match &result {
+        Ok(report) => serde_json::to_value(report),
+        Err(message) => Ok(json!({ "status": "failed", "failures": [message] })),
     };
-    // The post-restore gate reads and repairs with owner credentials, never the service login.
-    let pool = match connect("MIGRATE_DATABASE_URL", "restore-check", 4).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
+    let Ok(encoded) = encoded else {
+        tracing::error!("failed to encode restore check report");
+        return ExitCode::FAILURE;
     };
-    let signer = match spawn_signer(None) {
-        Ok(signer) => signer,
-        Err(error) => {
-            tracing::error!(%error, "failed to start restore-check signer actor");
+    if let Some(path) = std::env::var_os("TOPUP_RESTORE_REPORT_FILE") {
+        let path = PathBuf::from(path);
+        if let Err(error) = write_restore_report(&path, &encoded) {
+            tracing::error!(%error, path = %path.display(), "failed to write restore check report");
             return ExitCode::FAILURE;
         }
-    };
-    let reconciler =
-        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
-            Ok(reconciler) => reconciler,
-            Err(error) => {
-                tracing::error!(%error, "failed to configure post-restore reconciler");
-                return ExitCode::FAILURE;
-            }
-        };
-    let expectations = topup::restore::RestoreExpectations {
-        expected_heartbeat_at: args.expected_heartbeat_at,
-        expected_lsn: args.expected_lsn.clone(),
-    };
-    let report = match topup::restore::check(&pool, &expectations, &reconciler).await {
-        Ok(report) => report,
-        Err(message) => {
-            tracing::error!(%message, "restore check failed");
-            return ExitCode::FAILURE;
-        }
-    };
-    match serde_json::to_string(&report) {
-        Ok(encoded) => {
+    }
+    match result {
+        Ok(report) => {
             println!("{encoded}");
             if report.status == "ok" {
                 ExitCode::SUCCESS
@@ -391,11 +415,48 @@ async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Err(_) => {
-            tracing::error!("failed to encode restore check report");
+        Err(message) => {
+            tracing::error!(%message, "restore check failed");
             ExitCode::FAILURE
         }
     }
+}
+
+async fn run_restore_check(
+    args: &RestoreCheckArgs,
+) -> Result<topup::restore::RestoreReport, String> {
+    let routes = load_routes(&args.routes).map_err(|error| {
+        tracing::error!(%error, "failed to load route configuration");
+        "failed to load route configuration".to_owned()
+    })?;
+    // The post-restore gate reads and repairs with owner credentials, never the service login.
+    let pool = connect("MIGRATE_DATABASE_URL", "restore-check", 4)
+        .await
+        .map_err(|_| "failed to connect to the restored database".to_owned())?;
+    let signer = spawn_signer(None).map_err(|error| {
+        tracing::error!(%error, "failed to start restore-check signer actor");
+        "failed to start the signer".to_owned()
+    })?;
+    let reconciler =
+        topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer)
+            .map_err(|error| {
+                tracing::error!(%error, "failed to configure post-restore reconciler");
+                "failed to configure the post-restore reconciler".to_owned()
+            })?;
+    let expectations = topup::restore::RestoreExpectations {
+        expected_heartbeat_at: args.expected_heartbeat_at,
+        expected_lsn: args.expected_lsn.clone(),
+    };
+    topup::restore::check(&pool, &expectations, &reconciler).await
+}
+
+/// Publishes the report atomically, so a reader never sees a partial file.
+fn write_restore_report(path: &Path, report: &serde_json::Value) -> std::io::Result<()> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".tmp.{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, report.to_string())?;
+    std::fs::rename(&temporary, path)
 }
 
 async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
@@ -538,10 +599,15 @@ async fn run(args: &RunArgs) -> ExitCode {
         ..PumpConfig::default()
     };
     // Checked before the on-chain contract check; `connect` reads it again below.
-    if let Err(error) = service_enabled("run").and_then(|()| required_env("DATABASE_URL")) {
-        tracing::error!(%error, "missing runtime configuration");
-        return ExitCode::FAILURE;
-    }
+    let mode = match service_enabled("run", &[ServiceMode::On, ServiceMode::ReadOnly])
+        .and_then(|mode| required_env("DATABASE_URL").map(|_| mode))
+    {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::error!(%error, "missing runtime configuration");
+            return ExitCode::FAILURE;
+        }
+    };
     let admin_kid = match required_env("TOPUP_ADMIN_KID") {
         Ok(value) => value,
         Err(error) => {
@@ -572,6 +638,20 @@ async fn run(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if mode == ServiceMode::ReadOnly {
+        let state = topup::api::AppState {
+            pool: match connect("DATABASE_URL", "run", 4).await {
+                Ok(pool) => pool,
+                Err(code) => return code,
+            },
+            routes: Arc::new(routes),
+            admin_key,
+            public_origin,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes,
+        };
+        return serve_read_only(args.bind, state).await;
+    }
     // Architecture §4: before the database is touched, every provider must show the route's
     // factory, implementation, and treasury, so nothing issues addresses or moves funds otherwise.
     if let Err(error) = topup::contracts::verify_routes(&routes).await {
@@ -875,6 +955,41 @@ async fn run(args: &RunArgs) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Serves only the read API of a database restored from backup (`deploy/RESTORE.md`), so the
+/// operator can verify it through the product-signed lookups: no lease-owner lock, scanner, pump,
+/// flusher, webhook delivery, reconciler, or signer runs, and every non-GET request is refused.
+async fn serve_read_only(bind: std::net::SocketAddr, state: topup::api::AppState) -> ExitCode {
+    let pool = state.pool.clone();
+    let listener = match tokio::net::TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(%error, %bind, "failed to bind API listener");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = std::env::var_os("TOPUP_RESTORE_REPORT_FILE").map(PathBuf::from);
+    let application = topup::api::read_only_router(state, report);
+    tracing::warn!(%bind, "API listening read-only while TOPUP_SERVICE_ENABLED=read-only");
+    let served = axum::serve(listener, application)
+        .with_graceful_shutdown(async {
+            if let Err(error) = wait_for_shutdown_signal().await {
+                tracing::error!(%error, "failed to listen for shutdown signal");
+            }
+        })
+        .await;
+    pool.close().await;
+    match served {
+        Ok(()) => {
+            tracing::info!("read-only API stopped");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(%error, "read-only API failed");
+            ExitCode::FAILURE
+        }
     }
 }
 

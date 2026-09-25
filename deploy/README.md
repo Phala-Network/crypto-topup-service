@@ -92,7 +92,7 @@ not an OS image bump.
    | `STAGING_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports |
 
    `TOPUP_PUBLIC_ORIGIN` is not stored: Deploy staging derives it (below) and writes
-   `TOPUP_SERVICE_ENABLED=on`. There is no database secret
+   `TOPUP_SERVICE_ENABLED=on` and `TOPUP_RESTORE_FROM_BACKUP=off`. There is no database secret
    ([Database credentials](#database-credentials)).
 3. **Package visibility.** After the first Release images run, make both packages
    (`crypto-topup` and `postgres-walg` under the `phala-network` organization) public, as in
@@ -225,7 +225,7 @@ affected. Restore the provider or wait for it; do not remove it from the route t
 check, since the route is attested.
 
 Two routes that name the same product must agree on `destination.settlement_url` and
-`destination.product_kid`, or startup fails. The `restore-check` tools service pins one route
+`destination.product_kid`, or startup fails. The `restore-check` service pins one route
 file (`phala-cloud-sepolia-pha.yaml`) in its entrypoint, so adding a second route or product also
 requires adding that route to `restore-check` and to the `topup run` command in the compose.
 

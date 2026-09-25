@@ -146,6 +146,7 @@ services:
     volumes: !override
       - dstack_socket:/var/run
       - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
       - ${TOPUP_LOCAL_ROUTES_DIR:-./config/routes}:/etc/topup/routes:ro
     configs: !reset []
     depends_on:

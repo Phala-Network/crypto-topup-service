@@ -38,6 +38,7 @@ COPY deploy/scripts/walg-cron /usr/local/bin/walg-cron
 COPY deploy/scripts/walg-key-manifest /usr/local/bin/walg-key-manifest
 COPY deploy/scripts/walg-wal-push /usr/local/bin/walg-wal-push
 COPY deploy/scripts/walg-base-backup /usr/local/bin/walg-base-backup
+COPY deploy/scripts/walg-timeline-backup /usr/local/bin/walg-timeline-backup
 COPY deploy/scripts/walg-backup-fetch /usr/local/bin/walg-backup-fetch
 COPY deploy/scripts/walg-restore-command /usr/local/bin/walg-restore-command
 

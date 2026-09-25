@@ -17,8 +17,10 @@ const ALLOWED_RPO_SECONDS: i32 = RPO_SECONDS + HEARTBEAT_SAMPLING_SECONDS;
 /// Source-side failure point recorded outside the PostgreSQL volume being restored.
 #[derive(Clone, Debug)]
 pub struct RestoreExpectations {
-    /// Last heartbeat known committed on the source immediately before destruction.
-    pub expected_heartbeat_at: DateTime<Utc>,
+    /// Last heartbeat known committed on the source immediately before destruction. `None` when
+    /// the check runs at boot without one: the report then leaves the RPO comparison against the
+    /// operator's external anchor to the operator (`rpo_basis` `unanchored`).
+    pub expected_heartbeat_at: Option<DateTime<Utc>>,
     /// Source WAL location logged with that heartbeat; `None` is a declared incident exception.
     pub expected_lsn: Option<String>,
 }
@@ -42,15 +44,16 @@ pub struct RestoreReport {
     pub expected_lsn: Option<String>,
     /// WAL bytes between the external source point and the restored replay point.
     pub wal_bytes_behind: Option<i64>,
-    /// `heartbeat_and_lsn`, or `heartbeat_only` when no source LSN was supplied and the RPO rests
-    /// on the heartbeat timestamp alone.
+    /// `heartbeat_and_lsn`, `heartbeat_only` when no source LSN was supplied and the RPO rests
+    /// on the heartbeat timestamp alone, or `unanchored` when no source heartbeat was supplied and
+    /// the operator compares `restored_heartbeat_at` with their own external anchor.
     pub rpo_basis: &'static str,
-    /// Externally recorded last committed source heartbeat.
-    pub expected_heartbeat_at: DateTime<Utc>,
+    /// Externally recorded last committed source heartbeat, when one was supplied.
+    pub expected_heartbeat_at: Option<DateTime<Utc>>,
     /// Newest heartbeat present after restore.
     pub restored_heartbeat_at: DateTime<Utc>,
-    /// Data loss measured between source and restored heartbeat samples.
-    pub measured_rpo_seconds: i64,
+    /// Data loss measured between source and restored heartbeat samples, when anchored.
+    pub measured_rpo_seconds: Option<i64>,
     /// Maximum accepted loss between committed heartbeat samples.
     pub allowed_rpo_seconds: i32,
     /// RPO target before sampling tolerance.
@@ -128,11 +131,12 @@ pub async fn check(
     let restored_heartbeat_at: DateTime<Utc> = heartbeat
         .try_get("recorded_at")
         .map_err(|_| "restore heartbeat timestamp is invalid".to_owned())?;
-    let measured_rpo_seconds = expectations
-        .expected_heartbeat_at
-        .signed_duration_since(restored_heartbeat_at)
-        .num_seconds()
-        .max(0);
+    let measured_rpo_seconds = expectations.expected_heartbeat_at.map(|expected| {
+        expected
+            .signed_duration_since(restored_heartbeat_at)
+            .num_seconds()
+            .max(0)
+    });
 
     let round = reconciler::post_restore_once(reconciler)
         .await
@@ -158,9 +162,11 @@ pub async fn check(
     }
 
     let mut failures = Vec::new();
-    if measured_rpo_seconds > i64::from(ALLOWED_RPO_SECONDS) {
+    if let Some(measured) = measured_rpo_seconds
+        && measured > i64::from(ALLOWED_RPO_SECONDS)
+    {
         failures.push(format!(
-            "restore RPO exceeded: measured {measured_rpo_seconds}s > allowed {ALLOWED_RPO_SECONDS}s"
+            "restore RPO exceeded: measured {measured}s > allowed {ALLOWED_RPO_SECONDS}s"
         ));
     }
     failures.extend(
@@ -197,10 +203,13 @@ pub async fn check(
         latest_applied_lsn,
         expected_lsn,
         wal_bytes_behind,
-        rpo_basis: if expectations.expected_lsn.is_some() {
-            "heartbeat_and_lsn"
-        } else {
-            "heartbeat_only"
+        rpo_basis: match (
+            expectations.expected_heartbeat_at,
+            &expectations.expected_lsn,
+        ) {
+            (None, _) => "unanchored",
+            (Some(_), Some(_)) => "heartbeat_and_lsn",
+            (Some(_), None) => "heartbeat_only",
         },
         expected_heartbeat_at: expectations.expected_heartbeat_at,
         restored_heartbeat_at,
