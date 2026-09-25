@@ -34,7 +34,7 @@ grep -qx 'WALG_S3_PREFIX=secret-value-of-WALG_S3_PREFIX' "$tmp/env" || {
     echo "a value was not written verbatim" >&2
     exit 1
 }
-for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY; do
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY SENTRY_DSN; do
     grep -qx "$name=" "$tmp/env" || {
         echo "the owner-sealed $name was not written empty" >&2
         exit 1

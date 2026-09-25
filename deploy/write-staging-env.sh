@@ -20,8 +20,8 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 example="$root/deploy/staging.env.example"
 # Same lists as preflight.sh.
-optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
-owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY "
+optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY SENTRY_DSN "
+owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY SENTRY_DSN "
 
 if [[ "${1:-}" == --product ]]; then
     example="$root/deploy/product/staging.env.example"

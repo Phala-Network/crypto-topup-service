@@ -16,11 +16,15 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use topup_core::route::RouteFile;
 
+use super::reporting::CronMonitor;
 use crate::reconciler::CheckName;
 
 static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
 const DEFAULT_BACKUP_TIMESTAMP_FILE: &str = "/run/topup-observability/last-backup-unix-seconds";
 const COLLECTION_INTERVAL: Duration = Duration::from_secs(15);
+/// Backup marker age beyond which `TopupBackupTooOld` fires; the heartbeat forces a WAL segment
+/// every minute.
+const BACKUP_MAX_AGE_S: u64 = 120;
 const LOCK_EXPOSURE_SCOPES: [&str; 3] = ["account", "product", "global"];
 const DEPOSIT_STATES: [&str; 6] = [
     "detected",
@@ -340,6 +344,12 @@ impl LockExposureCaps {
         caps
     }
 
+    fn cap(&self, scope: &str, id: &str) -> Option<u64> {
+        self.scopes()
+            .find(|(cap_scope, cap_id, _)| *cap_scope == scope && *cap_id == id)
+            .map(|(_, _, cap)| cap)
+    }
+
     fn scopes(&self) -> impl Iterator<Item = (&'static str, &str, u64)> {
         self.global
             .map(|cap| ("global", "global", cap))
@@ -389,7 +399,7 @@ pub async fn collect_database_metrics(
     }
     loop {
         heartbeat("metrics", instance);
-        if let Err(error) = collect_database_once(&pool).await {
+        if let Err(error) = collect_database_once(&pool, &lock_exposure_caps).await {
             tracing::error!(%error, "observability database metric collection failed");
         } else {
             progress("metrics", instance);
@@ -409,6 +419,7 @@ pub async fn collect_backup_metrics(cancellation: CancellationToken) {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BACKUP_TIMESTAMP_FILE));
     let instance = "backup";
     register_loop("metrics", instance);
+    let monitor = CronMonitor::backup();
     loop {
         heartbeat("metrics", instance);
         let timestamp = backup_timestamp(&marker).unwrap_or_default();
@@ -417,6 +428,7 @@ pub async fn collect_backup_metrics(cancellation: CancellationToken) {
         if timestamp > 0 {
             progress("metrics", instance);
         }
+        monitor.check_in(timestamp > 0 && unix_now().saturating_sub(timestamp) <= BACKUP_MAX_AGE_S);
         waiting("metrics", instance, COLLECTION_INTERVAL);
         tokio::select! {
             () = cancellation.cancelled() => return,
@@ -425,7 +437,10 @@ pub async fn collect_backup_metrics(cancellation: CancellationToken) {
     }
 }
 
-async fn collect_database_once(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn collect_database_once(
+    pool: &PgPool,
+    lock_exposure_caps: &LockExposureCaps,
+) -> Result<(), sqlx::Error> {
     let rows = sqlx::query("SELECT state, count(*)::bigint AS count FROM deposits GROUP BY state")
         .fetch_all(pool)
         .await?;
@@ -491,11 +506,31 @@ async fn collect_database_once(pool: &PgPool) -> Result<(), sqlx::Error> {
         let scope: String = row.try_get("scope")?;
         let id: String = row.try_get("id")?;
         let open: String = row.try_get("open_minor")?;
+        if let Some(cap) = lock_exposure_caps.cap(&scope, &id)
+            && near_cap(&open, cap)
+        {
+            tracing::warn!(
+                tags.alert = "TopupLockExposureNearCap",
+                tags.scope = scope.as_str(),
+                tags.id = id.as_str(),
+                open_minor = open.as_str(),
+                cap_minor = cap,
+                "open rate-lock exposure is at least 90 percent of its cap"
+            );
+        }
         let open = open.parse::<f64>().unwrap_or(f64::INFINITY);
         gauge!("topup_open_lock_exposure_minor", "scope" => scope, "id" => id, "producer_enabled" => "true")
             .set(open);
     }
     Ok(())
+}
+
+/// Whether `open` minor units reach 90 percent of a nonzero `cap`, as `TopupLockExposureNearCap`.
+fn near_cap(open: &str, cap: u64) -> bool {
+    let Ok(open) = open.parse::<u128>() else {
+        return false;
+    };
+    cap > 0 && open.saturating_mul(10) >= u128::from(cap).saturating_mul(9)
 }
 
 fn backup_timestamp(path: &Path) -> Option<u64> {
@@ -522,7 +557,7 @@ mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
     use tower::ServiceExt as _;
 
-    use super::{init, metrics_router, register_metrics};
+    use super::{init, metrics_router, near_cap, register_metrics};
 
     #[test]
     fn registered_contract_contains_every_metric_name() {
@@ -558,6 +593,18 @@ mod tests {
         ] {
             assert!(rendered.contains(name), "missing {name}\n{rendered}");
         }
+    }
+
+    #[test]
+    fn near_cap_matches_the_ninety_percent_alert_threshold() {
+        assert!(!near_cap("899", 1000));
+        assert!(near_cap("900", 1000));
+        assert!(near_cap(
+            "340282366920938463463374607431768211455",
+            u64::MAX
+        ));
+        assert!(!near_cap("0", 0));
+        assert!(!near_cap("not a number", 1000));
     }
 
     #[tokio::test]

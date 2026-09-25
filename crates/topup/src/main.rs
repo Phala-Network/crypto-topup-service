@@ -205,6 +205,15 @@ enum RouteCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before the subscriber, which adds the Sentry layer only when reporting is enabled. The
+    // guard flushes queued events when `main` returns.
+    let reporting = match topup::observability::init_reporting() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(error) = topup::observability::log_subscriber(std::io::stdout).try_init() {
         eprintln!("failed to initialize tracing: {error}");
         return ExitCode::FAILURE;
@@ -217,7 +226,14 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        TopupCommand::Run(args) => return run(&args).await,
+        TopupCommand::Run(args) => {
+            // Only here: other commands print their result on stdout, which the log shares.
+            tracing::info!(
+                sentry_enabled = reporting.is_some(),
+                "error reporting configured"
+            );
+            return run(&args).await;
+        }
         TopupCommand::Migrate => return migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },

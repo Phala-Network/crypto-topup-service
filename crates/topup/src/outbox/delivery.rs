@@ -150,11 +150,13 @@ where
     /// Polls one named delivery worker until shutdown.
     pub async fn run_with_instance(&self, instance: String, shutdown: CancellationToken) {
         crate::observability::register_loop("outbox", instance.clone());
+        let monitor = crate::observability::CronMonitor::outbox(&instance);
         loop {
             if shutdown.is_cancelled() {
                 return;
             }
             crate::observability::heartbeat("outbox", instance.clone());
+            monitor.check_in(true);
 
             let should_pause = match self.run_once().await {
                 Ok(claimed) => {

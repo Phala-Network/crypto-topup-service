@@ -274,11 +274,13 @@ impl Pump {
     /// Runs one named worker until cancellation.
     pub async fn run_with_instance(&self, instance: String, cancellation: CancellationToken) {
         crate::observability::register_loop("pump", instance.clone());
+        let monitor = crate::observability::CronMonitor::pump(&instance);
         loop {
             if cancellation.is_cancelled() {
                 return;
             }
             crate::observability::heartbeat("pump", instance.clone());
+            monitor.check_in(true);
             crate::observability::execution_deadline(
                 "pump",
                 instance.clone(),

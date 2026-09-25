@@ -126,7 +126,10 @@ restore as well as a drill, with a restore-time environment:
 - `TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation; the instance's own gateway URL is
   known only afterwards ([Verify the restored instance](#verify-the-restored-instance)).
 - Everything else as for production, including `TOPUP_BACKUP_KEY_VERSION` and
-  `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version).
+  `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version), and
+  `SENTRY_DSN`: a read-only instance reports errors under the Sentry environment
+  `<environment>-restore`, never as the live environment, and sends no Crons check-in because no
+  loop runs ([deploy/README.md, "Sentry"](README.md#sentry)).
 
 After PostgreSQL has promoted (its health check passes only once it is out of recovery; the start
 period allows the one-hour RTO) and `migrate` has confirmed the schema, the `restore-check` service

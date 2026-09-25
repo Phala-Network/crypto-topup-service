@@ -453,6 +453,7 @@ where
     let mut last_progress = (0_u64, 0_u64);
     let instance = chain_id.to_string();
     crate::observability::register_scanner(chain_id);
+    let monitor = crate::observability::CronMonitor::scanner(chain_id);
     loop {
         crate::observability::heartbeat("scanner", instance.clone());
         let result = tokio::select! {
@@ -474,6 +475,7 @@ where
                     0,
                 );
                 crate::observability::record_scanner_success(chain_id);
+                monitor.check_in(true);
                 if made_progress {
                     crate::observability::progress("scanner", instance.clone());
                 }
@@ -535,6 +537,12 @@ fn record_committed(
             "producer_enabled" => "true",
         )
         .increment(committed.unsupported_inserted);
+        tracing::warn!(
+            tags.alert = "TopupUnsupportedInflows",
+            tags.chain_id = chain_id,
+            count = committed.unsupported_inserted,
+            "unsupported finalized inflows observed"
+        );
     }
     Ok(())
 }
