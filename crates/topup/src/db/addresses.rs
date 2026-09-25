@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::types::{address_hex, b256_hex, parse_address, parse_b256, to_i64, to_u64};
+use super::types::{parse_address, parse_b256, to_i64, to_u64};
 
 /// The derivation purpose of a deposit address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,13 +15,6 @@ pub enum AddressKind {
 }
 
 impl AddressKind {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Persistent => "persistent",
-            Self::Lock => "lock",
-        }
-    }
-
     fn parse(value: &str) -> Result<Self, sqlx::Error> {
         match value {
             "persistent" => Ok(Self::Persistent),
@@ -36,29 +29,6 @@ impl AddressKind {
 /// A stored physical deposit address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Address {
-    /// Address row identifier.
-    pub id: Uuid,
-    /// Owning account identifier.
-    pub account_id: Uuid,
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Address derivation purpose.
-    pub kind: AddressKind,
-    /// Persistent address version, or zero for locks.
-    pub version: u64,
-    /// Product lock reference for lock addresses.
-    pub lock_ref: Option<String>,
-    /// CREATE2 salt.
-    pub salt: B256,
-    /// Physical chain address.
-    pub address: EvmAddress,
-    /// Retirement time for rotated persistent addresses.
-    pub retired_at: Option<DateTime<Utc>>,
-}
-
-/// Values used to insert an address.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewAddress {
     /// Address row identifier.
     pub id: Uuid,
     /// Owning account identifier.
@@ -129,36 +99,6 @@ impl TryFrom<AddressRecord> for Address {
             retired_at: record.retired_at,
         })
     }
-}
-
-/// Inserts an address.
-pub async fn insert_address(pool: &PgPool, address: &NewAddress) -> Result<Address, sqlx::Error> {
-    let kind = address.kind.code();
-    let chain_id = to_i64(address.chain_id, "addresses.chain_id")?;
-    let version = to_i64(address.version, "addresses.version")?;
-    let salt = b256_hex(address.salt);
-    let physical_address = address_hex(address.address);
-    let record = sqlx::query_as!(
-        AddressRecord,
-        r#"
-        INSERT INTO addresses
-            (id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
-        "#,
-        address.id,
-        address.account_id,
-        chain_id,
-        kind,
-        version,
-        address.lock_ref,
-        salt,
-        physical_address,
-        address.retired_at
-    )
-    .fetch_one(pool)
-    .await?;
-    record.try_into()
 }
 
 /// Fetches an address by row identifier.

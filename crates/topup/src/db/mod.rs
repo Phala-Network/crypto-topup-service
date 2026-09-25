@@ -2,7 +2,6 @@
 
 mod accounts;
 mod addresses;
-mod audit;
 mod deposits;
 mod flushes;
 mod outbox;
@@ -15,12 +14,9 @@ mod types;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
-pub use accounts::{Account, NewAccount, create_account, get_account, set_account_paused_scopes};
+pub use accounts::{Account, get_account};
 pub(crate) use addresses::list_chain_addresses_with_pause_scopes;
-pub use addresses::{
-    Address, AddressKind, NewAddress, get_address, insert_address, list_chain_addresses,
-};
-pub use audit::{AuditEntry, insert_audit};
+pub use addresses::{Address, AddressKind, get_address, list_chain_addresses};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, SettlementAdoption, StoredValuation,
@@ -40,12 +36,11 @@ pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_account_pending,
     list_address_pending, list_watched_addresses, touch_persistent_requested,
 };
-pub use products::{NewProduct, Product, create_product, get_product, set_product_paused_scopes};
+pub use products::{Product, get_product};
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
 pub use settlements::{
-    Settlement, SettlementIntent, SettlementStatus, get_settlement, mark_accepted,
-    mark_payload_mismatch, mark_rejected, mark_sent, mark_sent_with_receipt, upsert_intent,
-    upsert_intent_in,
+    Settlement, SettlementIntent, SettlementStatus, mark_accepted, mark_payload_mismatch,
+    mark_rejected, mark_sent, mark_sent_with_receipt, upsert_intent, upsert_intent_in,
 };
 
 /// Embedded SQL migrations for the service database.

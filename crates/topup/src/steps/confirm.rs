@@ -345,12 +345,8 @@ impl ConfirmStep {
                     evidence,
                 );
             }
-            FinalityResult::Retry(evidence) => {
-                return retry(
-                    RetryError::RpcDisagreement,
-                    evidence,
-                    TransitionEffects::default(),
-                );
+            FinalityResult::Retry(error, evidence) => {
+                return retry(error, evidence, TransitionEffects::default());
             }
         };
         let selected_route = if canonical.token == deposit.asset_contract {
@@ -628,7 +624,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
 enum FinalityResult {
     Ready(TransferLog),
     Wait(Value),
-    Retry(Value),
+    Retry(RetryError, Value),
 }
 
 async fn finalized_evidence(
@@ -652,14 +648,17 @@ async fn finalized_evidence(
                 (primary_head, secondary_head, primary, secondary)
             }
             (primary_head, secondary_head, primary_log, secondary_log) => {
-                return FinalityResult::Retry(json!({
-                    "stage": "finality",
-                    "error": "rpc_failure",
-                    "provider_a_head": chain_result_code(&primary_head),
-                    "provider_b_head": chain_result_code(&secondary_head),
-                    "provider_a_receipt": chain_result_code(&primary_log),
-                    "provider_b_receipt": chain_result_code(&secondary_log),
-                }));
+                return FinalityResult::Retry(
+                    RetryError::RpcDisagreement,
+                    json!({
+                        "stage": "finality",
+                        "error": "rpc_failure",
+                        "provider_a_head": chain_result_code(&primary_head),
+                        "provider_b_head": chain_result_code(&secondary_head),
+                        "provider_a_receipt": chain_result_code(&primary_log),
+                        "provider_b_receipt": chain_result_code(&secondary_log),
+                    }),
+                );
             }
         };
     let required_block = primary
@@ -681,22 +680,39 @@ async fn finalized_evidence(
     match (primary, secondary) {
         (Some(primary), Some(secondary)) if primary == secondary => {
             if primary.to != address {
-                return FinalityResult::Retry(json!({
-                    "stage": "finality",
-                    "error": "recipient_mismatch",
-                    "expected_to": format!("{address:#x}"),
-                    "provider_a": provider_evidence(&primary),
-                    "provider_b": provider_evidence(&secondary),
-                }));
+                return FinalityResult::Retry(
+                    RetryError::RpcDisagreement,
+                    json!({
+                        "stage": "finality",
+                        "error": "recipient_mismatch",
+                        "expected_to": format!("{address:#x}"),
+                        "provider_a": provider_evidence(&primary),
+                        "provider_b": provider_evidence(&secondary),
+                    }),
+                );
             }
             FinalityResult::Ready(primary)
         }
-        (primary, secondary) => FinalityResult::Retry(json!({
-            "stage": "finality",
-            "error": "rpc_disagreement",
-            "provider_a": primary.as_ref().map(provider_evidence),
-            "provider_b": secondary.as_ref().map(provider_evidence),
-        })),
+        // Deposits are born final, so both providers denying the log past its block is a
+        // finality or provider fault, not a disagreement between them.
+        (None, None) => FinalityResult::Retry(
+            RetryError::InvariantViolation,
+            json!({
+                "stage": "finality",
+                "error": "log_absent_at_finality",
+                "provider_a_finalized": primary_head,
+                "provider_b_finalized": secondary_head,
+            }),
+        ),
+        (primary, secondary) => FinalityResult::Retry(
+            RetryError::RpcDisagreement,
+            json!({
+                "stage": "finality",
+                "error": "rpc_disagreement",
+                "provider_a": primary.as_ref().map(provider_evidence),
+                "provider_b": secondary.as_ref().map(provider_evidence),
+            }),
+        ),
     }
 }
 
@@ -1146,6 +1162,27 @@ mod tests {
             }
         );
         assert_eq!(result.evidence["error"], "rpc_disagreement");
+    }
+
+    #[tokio::test]
+    async fn log_absent_on_both_final_providers_is_not_a_disagreement() {
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, Vec::new()),
+            chain(100, Vec::new()),
+            prices(now_seconds()),
+            no_product(),
+            context(None),
+        )
+        .run(&deposit(1_000))
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Retry {
+                error: RetryError::InvariantViolation
+            }
+        );
+        assert_eq!(result.evidence["error"], "log_absent_at_finality");
     }
 
     #[tokio::test]

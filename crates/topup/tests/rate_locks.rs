@@ -14,7 +14,6 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
-use topup::db::{NewAccount, NewProduct};
 use topup::locks::pricing::ValidatedQuote;
 use topup::locks::{self, QuoteProvider, RateLockError, RequestedAmount};
 use topup::reconciler::{CheckName, Reconciler, ReconciliationError, SettlementLookup};
@@ -28,6 +27,7 @@ use topup_core::valuation::{SourceId, UnixSeconds};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewProduct};
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
@@ -208,12 +208,8 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         .await?;
         ensure!(other_locks == 0);
 
-        topup::db::set_account_paused_scopes(
-            &database.app_pool,
-            account.id,
-            &["quotes".to_owned()],
-        )
-        .await?;
+        seed::set_account_paused_scopes(&database.app_pool, account.id, &["quotes".to_owned()])
+            .await?;
         let paused = app
             .clone()
             .oneshot(signed_request(
@@ -262,13 +258,9 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         ensure!(paused_mismatch.status() == StatusCode::CONFLICT);
 
-        topup::db::set_account_paused_scopes(&database.app_pool, account.id, &[]).await?;
-        topup::db::set_product_paused_scopes(
-            &database.app_pool,
-            product.id,
-            &["quotes".to_owned()],
-        )
-        .await?;
+        seed::set_account_paused_scopes(&database.app_pool, account.id, &[]).await?;
+        seed::set_product_paused_scopes(&database.app_pool, product.id, &["quotes".to_owned()])
+            .await?;
         let product_paused = app
             .clone()
             .oneshot(signed_request(
@@ -285,7 +277,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         ensure!(product_paused.status() == StatusCode::LOCKED);
 
-        topup::db::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
+        seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
         sqlx::query("INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['quotes'])")
             .bind(&route.route)
             .execute(&database.app_pool)
@@ -1699,7 +1691,7 @@ async fn seed_product(
     slug: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
-    Ok(topup::db::create_product(
+    Ok(seed::create_product(
         pool,
         &NewProduct {
             id: Uuid::new_v4(),
@@ -1722,7 +1714,7 @@ async fn seed_account(
     product_id: Uuid,
     external_id: &str,
 ) -> Result<topup::db::Account> {
-    Ok(topup::db::create_account(
+    Ok(seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),

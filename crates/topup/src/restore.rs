@@ -8,7 +8,7 @@ use sqlx::{AssertSqlSafe, PgPool, Row as _};
 
 use crate::db::MIGRATOR;
 use crate::heartbeat::RPO_SECONDS;
-use crate::reconciler::{self, CheckName, Finding, Reconciler};
+use crate::reconciler::{CheckName, Finding, Reconciler};
 
 const HEARTBEAT_SAMPLING_SECONDS: i32 = 60;
 /// A committed heartbeat can be up to one sampling interval older than the failure point.
@@ -78,7 +78,7 @@ pub struct PostRestoreReconciliation {
 }
 
 /// Validates migration state, WAL application, externally anchored RPO, and table counts, then runs
-/// the §13 post-restore reconciliation through [`reconciler::post_restore_once`].
+/// the §13 post-restore reconciliation through [`Reconciler::post_restore_once`].
 ///
 /// The service, heartbeat, and backup processes must remain stopped while this runs: the
 /// post-restore round claims every deposit at or beyond `cleared` and may apply product answers.
@@ -138,7 +138,8 @@ pub async fn check(
             .max(0)
     });
 
-    let round = reconciler::post_restore_once(reconciler)
+    let round = reconciler
+        .post_restore_once()
         .await
         .map_err(|error| format!("post-restore reconciliation failed: {}", error.code()))?;
     let post_restore_reconciliation = PostRestoreReconciliation {

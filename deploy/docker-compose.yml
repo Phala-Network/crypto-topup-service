@@ -136,9 +136,9 @@ services:
     expose:
       - "9464"
     healthcheck:
-      test: ["CMD", "topup", "attest", "--nonce", "00"]
+      test: ["CMD", "topup", "healthcheck"]
       interval: 30s
-      timeout: 15s
+      timeout: 10s
       retries: 3
       start_period: 20s
     depends_on:
@@ -181,11 +181,6 @@ services:
       - walg_key:/run/wal-g:ro
       - db_owner:/run/db-owner:ro
       - observability:/run/topup-observability
-    healthcheck:
-      test: ["CMD", "wal-g", "--version"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
     depends_on:
       keys:
         condition: service_healthy

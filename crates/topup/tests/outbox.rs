@@ -25,7 +25,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use topup::db::{self, NewOutboxEvent, NewProduct};
+use topup::db::{self, NewOutboxEvent};
 use topup::outbox::{DeliveryConfig, DeliveryWorker, SignedWebhook};
 use topup_core::{
     Ed25519PublicKey, Ed25519Signature, SignedTx, Signer as CoreSigner, SignerError, TxRequest,
@@ -33,6 +33,7 @@ use topup_core::{
 use uuid::Uuid;
 
 use support::TestDatabase;
+use support::seed::{self, NewProduct};
 
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
@@ -354,7 +355,7 @@ fn worker_with_timeout(
 
 async fn seed_product(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
     let product_id = Uuid::new_v4();
-    db::create_product(
+    seed::create_product(
         pool,
         &NewProduct {
             id: product_id,

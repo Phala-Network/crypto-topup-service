@@ -18,7 +18,7 @@ use topup::api::models::{AttestationResponse, OperatorIdentity};
 use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
-use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::db::{AddressKind, NewDeposit};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::{AttestedOperator, OperatorKey, report_data};
@@ -33,6 +33,7 @@ use topup_core::{SETTLEMENT_KEY_DOMAIN, SecretKey32, Signer as _};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::{
     SignatureOptions, SignatureParameter, TEST_ORIGIN, TestDatabase, public_key_base64,
     signed_request, signed_request_with_options,
@@ -713,7 +714,7 @@ async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()>
         let admin_key = SigningKey::from_bytes(&[24; 32]);
         let product =
             seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        topup::db::create_account(
+        seed::create_account(
             &database.app_pool,
             &NewAccount {
                 id: Uuid::new_v4(),
@@ -776,7 +777,7 @@ async fn route_pause_controls_address_routes() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[27; 32]);
         let admin_key = SigningKey::from_bytes(&[28; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let account = topup::db::create_account(
+        let account = seed::create_account(
             &database.app_pool,
             &NewAccount {
                 id: Uuid::new_v4(),
@@ -786,18 +787,10 @@ async fn route_pause_controls_address_routes() -> Result<()> {
             },
         )
         .await?;
-        topup::db::set_product_paused_scopes(
-            &database.app_pool,
-            product.id,
-            &["quotes".to_owned()],
-        )
-        .await?;
-        topup::db::set_account_paused_scopes(
-            &database.app_pool,
-            account.id,
-            &["settlement".to_owned()],
-        )
-        .await?;
+        seed::set_product_paused_scopes(&database.app_pool, product.id, &["quotes".to_owned()])
+            .await?;
+        seed::set_account_paused_scopes(&database.app_pool, account.id, &["settlement".to_owned()])
+            .await?;
 
         let app = test_router(&database.app_pool, &admin_key);
         let health = app
@@ -919,7 +912,7 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[31; 32]);
         let admin_key = SigningKey::from_bytes(&[32; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        topup::db::create_account(
+        seed::create_account(
             &database.app_pool,
             &NewAccount {
                 id: Uuid::new_v4(),
@@ -1176,7 +1169,7 @@ async fn seed_product(
     slug: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
-    Ok(topup::db::create_product(
+    Ok(seed::create_product(
         pool,
         &NewProduct {
             id: Uuid::new_v4(),
@@ -1190,7 +1183,7 @@ async fn seed_product(
 }
 
 async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, product_id: Uuid) -> Result<Uuid> {
-    let account = topup::db::create_account(
+    let account = seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),
@@ -1200,7 +1193,7 @@ async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, product_id: Uuid) -> Res
         },
     )
     .await?;
-    let address = topup::db::insert_address(
+    let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),

@@ -453,16 +453,6 @@ fn outbox_replay_validates_selector_and_timestamp_before_connecting() {
 }
 
 #[test]
-fn reconcile_help_exposes_the_post_restore_mode() {
-    let output = topup(&["reconcile", "--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("--post-restore"));
-    assert!(help.contains("--route"));
-    assert!(help.contains("processes are stopped"));
-}
-
-#[test]
 fn restore_check_help_requires_a_stopped_service() {
     let output = topup(&["restore-check", "--help"]);
     assert!(output.status.success());
