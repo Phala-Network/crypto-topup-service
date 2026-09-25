@@ -114,8 +114,9 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
   or revokes `OPERATOR_ROLE`.
 - Pilot supports plain ERC-20 with verified behaviour (PHA). Fee-on-transfer or rebasing
   tokens are out of scope; hook-bearing tokens require reentrancy tests before enabling.
-- Startup verifies on chain: factory code hash, `implementation()`, `treasury()`, and
-  `addressOf(sample salt)` against the route file.
+- Startup verifies on chain, on every provider: the canonical Multicall3 code hash (balance and
+  `addressOf` reads go through it, §14; `topup run` refuses a chain without it), factory code hash,
+  `implementation()`, `treasury()`, and `addressOf(sample salt)` against the route file.
 - No external audit; internal review + tests. The contracts are two files (~109 lines) built
   from audited OpenZeppelin components (Clones, SafeERC20, AccessControl); funds can only move
   to the immutable treasury; unit, fuzz, and invariant tests cover them; the pilot keeps
@@ -556,11 +557,14 @@ Gas policy compares gas-token value and token balance value in USD using separat
 rates. Changing any of these fields requires a new attested configuration version. Engineering
 limits that do not decide money are code constants: RPC timeout, replacement delay (3 blocks),
 gas-limit buffer, nonce-recovery window, estimation exclusion retry delay, and maintenance
-interval. Balance and `addressOf` reads send one JSON-RPC request per address and never batch:
-public providers throttle batches far below their single-request limits (Tenderly's public
-gateway refuses a batch of more than five `eth_call`s), which would fail every planning run and
-reconciliation round once a chain has more addresses than the batch cap. The price scale (8) and the Coin Metrics metric (`ReferenceRateUSD`, 1m)
-are fixed by §8 and §11, not configured.
+interval. Reads over every issued address (token balances, native balances, `addressOf`) are
+aggregated through the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`) with
+`aggregate3` and `allowFailure = false`, one `eth_call` per 200 calls (a code constant bounding
+calldata and gas), at the block each read needs (`finalized` for custody reconciliation). They
+never use JSON-RPC batches, which public providers throttle far below their single-request limits
+(Tenderly's public gateway refuses a batch of more than five `eth_call`s), nor one request per
+address, which grows with every address ever issued. The price scale (8) and the Coin Metrics
+metric (`ReferenceRateUSD`, 1m) are fixed by §8 and §11, not configured.
 
 ```yaml
 services:

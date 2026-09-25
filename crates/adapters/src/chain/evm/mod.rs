@@ -10,19 +10,20 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::chain::flush::{
-    ContractAddressGetter, DecodedFlushed, decode_address_of, decode_balance_of,
+    ContractAddressGetter, DecodedFlushed, addressOfCall, balanceOfCall,
     decode_contract_address_getter, decode_flushed, encode_address_of, encode_balance_of,
     encode_contract_address_getter, flushed_signature,
 };
 use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, Bytes, U256};
-use alloy::providers::{Provider, RootProvider};
+use alloy::providers::bindings::IMulticall3::getEthBalanceCall;
+use alloy::providers::{CallItem, MULTICALL3_ADDRESS, MulticallError, Provider, RootProvider};
 use alloy::rpc::types::{
     Filter, Log, Topic, TransactionInput, TransactionReceipt, TransactionRequest,
 };
 use alloy::sol;
-use alloy::sol_types::SolEvent;
+use alloy::sol_types::{SolCall, SolEvent};
 use alloy::transports::TransportError;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -242,6 +243,12 @@ impl BlockTimes {
 
 /// Timeout for one bounded RPC request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Canonical Multicall3 deployment, through which every balance and `addressOf` read is
+/// aggregated; `topup run` refuses a chain where it is missing or differs.
+pub const MULTICALL3: Address = MULTICALL3_ADDRESS;
+/// Calls aggregated into one Multicall3 `eth_call`, bounding its calldata (about 200 bytes per
+/// call) and gas (a few thousand per view call) far below provider `eth_call` limits.
+pub const MULTICALL_CHUNK: usize = 200;
 
 /// Alloy HTTP client for one RPC provider of one chain, shared by every consumer.
 ///
@@ -325,81 +332,91 @@ impl EvmClient {
             .map_err(|error| self.transport(operation, &error))
     }
 
-    /// Runs one `eth_call` per item, each as its own request, and decodes each result.
+    /// Aggregates same-typed view calls through Multicall3 `aggregate3` at `block`, one `eth_call`
+    /// per [`MULTICALL_CHUNK`] calls, each with `allowFailure = false`, so one failing call fails
+    /// the read instead of yielding a partial answer.
     ///
-    /// These reads never use JSON-RPC batches: public providers throttle batches far below their
-    /// single-request limits. Tenderly's public Sepolia gateway refuses any batch of more than
-    /// five `eth_call`s with `429 rate limit exceeded`, which stalled flush planning and failed
-    /// reconciliation once a chain had six addresses.
-    async fn calls<I, T>(
+    /// These reads never use JSON-RPC batches or one request per item: public providers throttle
+    /// batches far below their single-request limits (Tenderly's public Sepolia gateway refuses
+    /// any batch of more than five `eth_call`s with `429 rate limit exceeded`, which stalled flush
+    /// planning and failed reconciliation once a chain had six addresses), and one request per
+    /// address grows with every address ever issued.
+    async fn aggregate<D: SolCall + 'static>(
         &self,
         operation: &'static str,
-        items: &[I],
-        call: impl Fn(&I) -> (Address, Bytes),
-        block: BlockNumberOrTag,
-        decode: impl Fn(&[u8]) -> Result<T, String>,
-    ) -> Result<Vec<T>, ChainError> {
-        let mut result = Vec::with_capacity(items.len());
-        for item in items {
-            let (to, input) = call(item);
-            let output = self.call(operation, to, input, Some(block.into())).await?;
-            result.push(decode(&output).map_err(ChainError::InvalidResponse)?);
+        calls: Vec<CallItem<D>>,
+        block: BlockId,
+    ) -> Result<Vec<D::Return>, ChainError> {
+        let mut results = Vec::with_capacity(calls.len());
+        let mut calls = calls.into_iter().peekable();
+        while calls.peek().is_some() {
+            let multicall = self
+                .provider
+                .multicall()
+                .dynamic::<D>()
+                .extend_calls(calls.by_ref().take(MULTICALL_CHUNK))
+                .block(block);
+            let returns = timeout(self.request_timeout, multicall.aggregate3())
+                .await
+                .map_err(|_| ChainError::Transport(self.endpoint.timeout_error(operation)))?
+                .map_err(|error| match error {
+                    MulticallError::TransportError(error) => self.transport(operation, &error),
+                    other => ChainError::InvalidResponse(format!("{operation}: {other}")),
+                })?;
+            for returned in returns {
+                results.push(returned.map_err(|failure| {
+                    ChainError::InvalidResponse(format!(
+                        "{operation}: call {} returned undecodable data",
+                        failure.idx
+                    ))
+                })?);
+            }
         }
-        Ok(result)
+        Ok(results)
     }
 
-    /// Reads ERC-20 balances at one block, one request per address.
+    /// Reads ERC-20 balances at one block through Multicall3.
     pub async fn token_balances(
         &self,
         token: Address,
         addresses: &[Address],
         block: BlockNumberOrTag,
     ) -> Result<Vec<U256>, ChainError> {
-        self.calls(
-            "balanceOf call",
-            addresses,
-            |address| (token, encode_balance_of(*address)),
-            block,
-            |output| {
-                decode_balance_of(output)
-                    .map_err(|error| format!("decode balanceOf result: {error}"))
-            },
-        )
-        .await
+        let calls = addresses
+            .iter()
+            .map(|address| CallItem::<balanceOfCall>::new(token, encode_balance_of(*address)))
+            .collect();
+        self.aggregate("balanceOf multicall", calls, block.into())
+            .await
     }
 
-    /// Reads latest native balances, one request per address.
+    /// Reads latest native balances through Multicall3 `getEthBalance`.
     pub async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
-        let mut result = Vec::with_capacity(addresses.len());
-        for address in addresses {
-            result.push(
-                self.bounded(
-                    "eth_getBalance",
-                    self.provider.get_balance(*address).latest(),
+        let calls = addresses
+            .iter()
+            .map(|address| {
+                CallItem::<getEthBalanceCall>::new(
+                    MULTICALL3,
+                    getEthBalanceCall { addr: *address }.abi_encode().into(),
                 )
-                .await?,
-            );
-        }
-        Ok(result)
+            })
+            .collect();
+        self.aggregate("getEthBalance multicall", calls, BlockId::latest())
+            .await
     }
 
-    /// Reads deterministic forwarder addresses at the latest block, one request per salt.
+    /// Reads deterministic forwarder addresses at the latest block through Multicall3.
     pub async fn factory_addresses(
         &self,
         factory: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ChainError> {
-        self.calls(
-            "addressOf call",
-            salts,
-            |salt| (factory, encode_address_of(*salt)),
-            BlockNumberOrTag::Latest,
-            |output| {
-                decode_address_of(output)
-                    .map_err(|error| format!("decode addressOf result: {error}"))
-            },
-        )
-        .await
+        let calls = salts
+            .iter()
+            .map(|salt| CallItem::<addressOfCall>::new(factory, encode_address_of(*salt)))
+            .collect();
+        self.aggregate("addressOf multicall", calls, BlockId::latest())
+            .await
     }
 
     /// Reads the runtime code deployed at `address`.
@@ -1011,69 +1028,138 @@ mod tests {
         (client, server)
     }
 
+    /// One `eth_call` the mock node answered: the block tag and each aggregated call's
+    /// `allowFailure` flag.
+    type ObservedCall = (Value, Vec<bool>);
+
     /// Answers like Tenderly's public Sepolia gateway (staging's provider A): a JSON-RPC batch
     /// carrying more than five `eth_call`s is refused with `429` and one `-32005` object, while
-    /// the same calls sent one by one are served. Every call returns the word `1`.
-    async fn batch_capped_node() -> (EvmClient, tokio::task::JoinHandle<std::io::Result<()>>) {
+    /// single requests are served. A single `eth_call` must be Multicall3 `aggregate3`; every
+    /// aggregated call returns the word `1`, and the node records what it answered.
+    async fn batch_capped_node() -> (
+        EvmClient,
+        Arc<Mutex<Vec<ObservedCall>>>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        use alloy::providers::bindings::IMulticall3::{Result as Call3Result, aggregate3Call};
         use axum::http::StatusCode;
         use axum::routing::post;
         use axum::{Json, Router};
 
-        fn answer(request: &Value) -> Value {
-            let result = match request["method"].as_str() {
-                Some("eth_call") => format!("0x{:064x}", 1),
-                _ => "0x1".to_owned(),
+        fn answer(request: &Value, observed: &Mutex<Vec<ObservedCall>>) -> Value {
+            let transaction = &request["params"][0];
+            let input = transaction
+                .get("input")
+                .or_else(|| transaction.get("data"))
+                .and_then(Value::as_str)
+                .and_then(|input| input.parse::<Bytes>().ok());
+            let aggregate = input.and_then(|input| aggregate3Call::abi_decode(&input).ok());
+            let (true, Some(aggregate)) = (
+                transaction["to"].as_str().and_then(|to| to.parse().ok()) == Some(MULTICALL3),
+                aggregate,
+            ) else {
+                return serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+                    "code": -32000, "message": "only Multicall3 aggregate3 is served"}});
             };
-            serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+            observed.lock().expect("observed calls").push((
+                request["params"][1].clone(),
+                aggregate
+                    .calls
+                    .iter()
+                    .map(|call| call.allowFailure)
+                    .collect(),
+            ));
+            let word = Bytes::from(U256::from(1).to_be_bytes::<32>());
+            let results = aggregate
+                .calls
+                .iter()
+                .map(|_| Call3Result {
+                    success: true,
+                    returnData: word.clone(),
+                })
+                .collect::<Vec<_>>();
+            let output = Bytes::from(aggregate3Call::abi_encode_returns(&results));
+            serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": output})
         }
 
+        let observed = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("local listener binds");
         let address = listener.local_addr().expect("listener address");
         let node = Router::new().route(
             "/rpc",
-            post(|Json(body): Json<Value>| async move {
-                let Some(batch) = body.as_array() else {
-                    return (StatusCode::OK, Json(answer(&body)));
-                };
-                let calls = batch
-                    .iter()
-                    .filter(|request| request["method"] == "eth_call")
-                    .count();
-                if calls > 5 {
-                    let refusal = serde_json::json!({"jsonrpc": "2.0", "id": 0, "error": {
-                        "code": -32005, "message": "rate limit exceeded"}});
-                    return (StatusCode::TOO_MANY_REQUESTS, Json(refusal));
+            post({
+                let observed = Arc::clone(&observed);
+                move |Json(body): Json<Value>| async move {
+                    let Some(batch) = body.as_array() else {
+                        return (StatusCode::OK, Json(answer(&body, &observed)));
+                    };
+                    let calls = batch
+                        .iter()
+                        .filter(|request| request["method"] == "eth_call")
+                        .count();
+                    if calls > 5 {
+                        let refusal = serde_json::json!({"jsonrpc": "2.0", "id": 0, "error": {
+                            "code": -32005, "message": "rate limit exceeded"}});
+                        return (StatusCode::TOO_MANY_REQUESTS, Json(refusal));
+                    }
+                    let answers = batch
+                        .iter()
+                        .map(|request| answer(request, &observed))
+                        .collect();
+                    (StatusCode::OK, Json(answers))
                 }
-                (StatusCode::OK, Json(batch.iter().map(answer).collect()))
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, node).await });
         let client = EvmClient::new(&format!("http://{address}/rpc"))
             .expect("production adapter accepts URL")
             .with_provider("provider-a");
-        (client, server)
+        (client, observed, server)
     }
 
     #[tokio::test]
     async fn balance_and_address_reads_never_depend_on_provider_batch_limits() {
-        let (client, server) = batch_capped_node().await;
-        let addresses = (1..=6).map(Address::repeat_byte).collect::<Vec<_>>();
-        let salts = (1..=6).map(B256::repeat_byte).collect::<Vec<_>>();
+        let (client, observed, server) = batch_capped_node().await;
+        let count = MULTICALL_CHUNK + 1;
+        let addresses = (0..count)
+            .map(|index| Address::with_last_byte(u8::try_from(index % 256).expect("byte")))
+            .collect::<Vec<_>>();
+        let salts = vec![B256::repeat_byte(1); 6];
 
         let tokens = client
-            .token_balances(Address::ZERO, &addresses, BlockNumberOrTag::Latest)
+            .token_balances(Address::ZERO, &addresses, BlockNumberOrTag::Number(7))
             .await;
-        let natives = client.native_balances(&addresses).await;
+        let natives = client.native_balances(&addresses[..6]).await;
         let derived = client.factory_addresses(Address::ZERO, &salts).await;
         server.abort();
 
-        assert_eq!(tokens.expect("token balances"), vec![U256::from(1); 6]);
+        assert_eq!(tokens.expect("token balances"), vec![U256::from(1); count]);
         assert_eq!(natives.expect("native balances"), vec![U256::from(1); 6]);
         assert_eq!(
             derived.expect("derived addresses"),
             vec![Address::with_last_byte(1); 6]
+        );
+        // One aggregate3 `eth_call` per chunk, at the read's block, where no call may fail.
+        let observed = observed.lock().expect("observed calls").clone();
+        let shape = observed
+            .iter()
+            .map(|(block, calls)| (block.clone(), calls.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                (Value::from("0x7"), MULTICALL_CHUNK),
+                (Value::from("0x7"), 1),
+                (Value::from("latest"), 6),
+                (Value::from("latest"), 6),
+            ]
+        );
+        assert!(
+            observed
+                .iter()
+                .all(|(_, calls)| calls.iter().all(|allow| !allow))
         );
     }
 

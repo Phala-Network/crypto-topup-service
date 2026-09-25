@@ -38,20 +38,10 @@ pub fn encode_balance_of(account: Address) -> Bytes {
     balanceOfCall { account }.abi_encode().into()
 }
 
-/// Decodes an ERC-20 `balanceOf` result.
-pub fn decode_balance_of(output: &[u8]) -> Result<U256, alloy_sol_types::Error> {
-    balanceOfCall::abi_decode_returns(output)
-}
-
 /// Encodes `ForwarderFactory.addressOf(salt)`.
 #[must_use]
 pub fn encode_address_of(salt: B256) -> Bytes {
     addressOfCall { salt }.abi_encode().into()
-}
-
-/// Decodes a `ForwarderFactory.addressOf(salt)` result.
-pub fn decode_address_of(output: &[u8]) -> Result<Address, alloy_sol_types::Error> {
-    addressOfCall::abi_decode_returns(output)
 }
 
 /// Encodes a view call to `ForwarderFactory.implementation()`, `Forwarder.treasury()`, or

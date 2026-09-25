@@ -7,7 +7,7 @@ use topup_adapters::chain::flush::ContractAddressGetter;
 use topup_core::address::forwarder_address;
 use topup_core::route::RouteFile;
 
-use topup_adapters::chain::evm::{ChainError, EvmClient};
+use topup_adapters::chain::evm::{ChainError, EvmClient, MULTICALL3};
 
 use crate::routes::RouteSet;
 
@@ -31,6 +31,11 @@ const FORWARDER_TREASURY_OFFSETS: &[usize] = &[82, 356, 650, 783, 843];
 
 /// Byte offsets of the 32-byte `factory` words in `Forwarder` runtime code.
 const FORWARDER_FACTORY_OFFSETS: &[usize] = &[207, 253];
+
+/// Runtime code hash of the canonical Multicall3, identical on Ethereum mainnet and Sepolia; a
+/// unit test keeps it equal to `deploy/contracts/multicall3.json`.
+const MULTICALL3_RUNTIME_CODE_HASH: B256 =
+    b256!("d5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891");
 
 /// Salt used to compare the factory's `addressOf` with local address derivation.
 #[must_use]
@@ -74,6 +79,24 @@ async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> 
     let factory = contracts.forwarder_factory;
     let implementation = contracts.implementation;
     let read = |error: ChainError| error.to_string();
+
+    // Every balance and `addressOf` read, including the sample below, goes through Multicall3.
+    let multicall = client.code_at(MULTICALL3).await.map_err(read)?;
+    if multicall.is_empty() {
+        return Err(format!(
+            "Multicall3 {MULTICALL3:#x} has no code on chain {}; balance and addressOf reads \
+             are aggregated through it",
+            route.chain.chain_id
+        ));
+    }
+    if keccak256(&multicall) != MULTICALL3_RUNTIME_CODE_HASH {
+        return Err(format!(
+            "Multicall3 {MULTICALL3:#x} on chain {} is not the canonical deployment (code hash \
+             {:#x})",
+            route.chain.chain_id,
+            keccak256(&multicall)
+        ));
+    }
 
     let actual = client
         .contract_address(factory, ContractAddressGetter::Implementation)
@@ -167,6 +190,23 @@ fn verify_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multicall3_code_hash_matches_the_recorded_deployment() {
+        let recorded: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deploy/contracts/multicall3.json"))
+                .expect("recorded Multicall3 parses");
+        assert_eq!(recorded["address"], MULTICALL3.to_checksum(None));
+        assert_eq!(
+            recorded["runtime_code_hash"],
+            MULTICALL3_RUNTIME_CODE_HASH.to_string()
+        );
+        let code = recorded["runtime_code"]
+            .as_str()
+            .and_then(|code| code.parse::<alloy_primitives::Bytes>().ok())
+            .expect("recorded runtime code is hex");
+        assert_eq!(keccak256(&code), MULTICALL3_RUNTIME_CODE_HASH);
+    }
 
     #[test]
     fn template_hashes_match_the_recorded_contract_build() {

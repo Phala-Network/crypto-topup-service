@@ -3,7 +3,8 @@
 #
 # 1. Builds the three images and pushes them to a throwaway loopback registry, so the composes are
 #    rendered by deploy/render-compose.sh with immutable repository@sha256 references.
-# 2. Starts Anvil with Sepolia's chain id and deploys the forwarder factory with the A2 scripts
+# 2. Starts Anvil with Sepolia's chain id, installs the canonical Multicall3 that Sepolia carries
+#    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
 #    (deploy/contracts: canonical proxy, mock Safe as admin and treasury, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
@@ -174,6 +175,8 @@ echo "PRODUCT_IMAGE=$PRODUCT_IMAGE"
 
 echo "== starting Anvil (chain id 11155111) and the client container"
 dc up -d --wait anvil >/dev/null
+# Sepolia carries the canonical Multicall3 that topup's balance and addressOf reads go through.
+install_anvil_multicall3 "$rpc_url"
 docker run -d --name "$client" --network "${project}_default" "$client_image" sleep infinity \
     >/dev/null
 # `docker cp` streams through the API, so this works where the daemon cannot see the checkout.

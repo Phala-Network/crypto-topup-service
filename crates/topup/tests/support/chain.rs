@@ -88,7 +88,11 @@ impl Anvil {
         let error = match address {
             Ok(address) => {
                 anvil.rpc_url = format!("http://{address}");
-                match anvil.wait_for_rpc().await {
+                match anvil
+                    .wait_for_rpc()
+                    .await
+                    .and_then(|()| anvil.install_multicall3())
+                {
                     Ok(()) => return Ok(anvil),
                     Err(error) => error,
                 }
@@ -134,6 +138,33 @@ impl Anvil {
         run_checked(
             "cast",
             &["rpc", "--rpc-url", &self.rpc_url, "anvil_reset"],
+            None,
+        )?;
+        self.install_multicall3()
+    }
+
+    /// Installs the canonical Multicall3, which every real chain carries and Anvil lacks; the
+    /// service aggregates its balance and `addressOf` reads through it.
+    pub fn install_multicall3(&self) -> Result<()> {
+        let recorded: Value = serde_json::from_str(&std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../deploy/contracts/multicall3.json"),
+        )?)?;
+        let field = |name: &str| {
+            recorded[name]
+                .as_str()
+                .with_context(|| format!("multicall3.json lacks {name}"))
+        };
+        run_checked(
+            "cast",
+            &[
+                "rpc",
+                "--rpc-url",
+                &self.rpc_url,
+                "anvil_setCode",
+                field("address")?,
+                field("runtime_code")?,
+            ],
             None,
         )?;
         Ok(())
