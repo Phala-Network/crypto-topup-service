@@ -75,7 +75,7 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
                 .max()
                 .context("embedded migrations")?;
             ensure!(report.latest_migration == latest);
-            ensure!(report.measured_rpo_seconds == 0);
+            ensure!(report.measured_rpo_seconds == Some(0));
             ensure!(report.rpo_basis == "heartbeat_and_lsn");
             ensure!(report.wal_bytes_behind == Some(0));
             ensure!(report.expected_lsn.as_deref() == Some(heartbeat.wal_lsn.as_str()));
@@ -103,7 +103,7 @@ async fn restore_check_without_a_source_lsn_flags_heartbeat_only_rpo() -> Result
             let lookup = Arc::new(RestoreLookup::default());
             let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
             let expectations = restore::RestoreExpectations {
-                expected_heartbeat_at: heartbeat.recorded_at,
+                expected_heartbeat_at: Some(heartbeat.recorded_at),
                 expected_lsn: None,
             };
             let report = restore::check(&context.owner_pool, &expectations, &reconciler)
@@ -113,6 +113,30 @@ async fn restore_check_without_a_source_lsn_flags_heartbeat_only_rpo() -> Result
             ensure!(report.rpo_basis == "heartbeat_only");
             ensure!(report.expected_lsn.is_none());
             ensure!(report.wal_bytes_behind.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn restore_check_at_boot_reports_an_unanchored_rpo() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let heartbeat = heartbeat::record(&context.app_pool).await?;
+            let lookup = Arc::new(RestoreLookup::default());
+            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let expectations = restore::RestoreExpectations {
+                expected_heartbeat_at: None,
+                expected_lsn: None,
+            };
+            let report = restore::check(&context.owner_pool, &expectations, &reconciler)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            ensure!(report.status == "ok");
+            ensure!(report.rpo_basis == "unanchored");
+            ensure!(report.measured_rpo_seconds.is_none());
+            ensure!(report.restored_heartbeat_at == heartbeat.recorded_at);
             Ok(())
         })
     })
@@ -1176,7 +1200,7 @@ async fn insert_restore_settlement(
 /// Failure point exactly as an operator reads it from the last heartbeat log line.
 fn restore_expectations(heartbeat: &heartbeat::Heartbeat) -> restore::RestoreExpectations {
     restore::RestoreExpectations {
-        expected_heartbeat_at: heartbeat.recorded_at,
+        expected_heartbeat_at: Some(heartbeat.recorded_at),
         expected_lsn: Some(heartbeat.wal_lsn.clone()),
     }
 }

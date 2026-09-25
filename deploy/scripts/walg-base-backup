@@ -17,6 +17,7 @@ if [ ! -f "$key_path" ]; then
     exit 126
 fi
 WALG_LIBSODIUM_KEY_PATH=$key_path "$walg" backup-push "$1"
-backup_name=$("$walg" backup-list --json | jq -er 'sort_by(.start_time) | last | .backup_name')
+# WAL-G 3.0.9 `backup-list --json` has `backup_name` and `time`; the newest is the one just pushed.
+backup_name=$("$walg" backup-list --json | jq -er 'max_by(.time | sub("[.][0-9]+"; "") | fromdateiso8601) | .backup_name')
 walg-key-manifest base "$backup_name"
 printf '%s\n' "$backup_name"

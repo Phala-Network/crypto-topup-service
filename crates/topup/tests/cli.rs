@@ -119,6 +119,74 @@ fn service_commands_refuse_to_start_while_disabled_for_a_restore() {
     }
 }
 
+/// `read-only` serves the API of a restored database; the heartbeat writer stays stopped.
+#[test]
+fn heartbeat_refuses_to_start_while_read_only() {
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .arg("heartbeat")
+        .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
+        .env("TOPUP_SERVICE_ENABLED", "read-only")
+        .output()
+        .expect("topup process should start");
+    assert!(!output.status.success());
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output_text.contains("heartbeat is disabled while TOPUP_SERVICE_ENABLED=read-only"),
+        "{output_text}"
+    );
+}
+
+/// The compose starts restore-check on every boot; it acts only after a restore from backup and
+/// publishes even a failed check to TOPUP_RESTORE_REPORT_FILE for the read-only `/healthz`.
+#[test]
+fn restore_check_runs_only_after_a_restore_and_reports_failures() {
+    let route = format!(
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let report =
+        std::env::temp_dir().join(format!("topup-restore-check-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&report);
+    let restore_check = |switch: &str| {
+        Command::new(env!("CARGO_BIN_EXE_topup"))
+            .args(["restore-check", "--route", &route])
+            .env_remove("MIGRATE_DATABASE_URL")
+            .env("TOPUP_RESTORE_FROM_BACKUP", switch)
+            .env("TOPUP_RESTORE_REPORT_FILE", &report)
+            .output()
+            .expect("topup process should start")
+    };
+
+    let output = restore_check("off");
+    assert!(output.status.success());
+    assert!(!report.exists());
+
+    let output = restore_check("on");
+    assert!(!output.status.success());
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("report written"))
+            .expect("report is JSON");
+    std::fs::remove_file(&report).expect("report removed");
+    assert_eq!(written["status"], "failed");
+    assert_eq!(
+        written["failures"][0],
+        "failed to connect to the restored database"
+    );
+}
+
+#[test]
+fn restore_check_needs_a_heartbeat_anchor_for_an_lsn() {
+    let output = topup(&[
+        "restore-check",
+        "--expected-lsn",
+        "0/0",
+        "--route",
+        "unused.yaml",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--expected-heartbeat-at"));
+}
+
 #[test]
 fn run_requires_a_valid_public_origin() {
     let route = format!(

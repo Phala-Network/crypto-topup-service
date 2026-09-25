@@ -22,10 +22,11 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 ## Decision tree
 
 - Restore window or staging restore drill in progress (`deploy/RESTORE.md`): expected. The
-  replacement runs with `TOPUP_WAL_ARCHIVE=off` and never refreshes the marker, and its `topup` is
-  stopped, so its scrape target is also down. Silence `TopupBackupTooOld` and the target-down alert
-  for that instance only, and lift them when the restore resumes archiving or the drill CVM is
-  destroyed. Never silence them for the live instance.
+  replacement restores from backup with archiving off and never refreshes the marker, and its
+  `topup` serves read-only without metrics, so its scrape target is also down. Silence
+  `TopupBackupTooOld` and the target-down alert for that instance only, and lift them when the
+  restore resumes archiving or the drill instance is deleted. Never silence them for the live
+  instance.
 
 - Idle-database margin: the only WAL on an idle database is the heartbeat's row every 60 seconds,
   and `archive_timeout=60` switches a segment only once new WAL exists. If a heartbeat commits just

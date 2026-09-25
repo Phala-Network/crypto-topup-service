@@ -52,6 +52,9 @@ services:
       POSTGRES_PASSWORD_FILE: /run/db-owner/postgres.password
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
       TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
+      # `on` only for a replacement CVM (deploy/RESTORE.md): an empty data directory is restored
+      # from the newest base backup and all archived WAL, with archiving forced off.
+      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql
@@ -62,12 +65,15 @@ services:
     configs:
       - source: postgres_init_topup_role
         target: /docker-entrypoint-initdb.d/10-topup-role.sh
+    # Healthy only once out of recovery, so nothing starts on a database still being restored.
+    # Checks run every 5s from the start; failures count only after the one-hour start period,
+    # the restore's RTO.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d topup"]
+      test: ["CMD-SHELL", "psql -U postgres -d topup -XAtqc 'SELECT NOT pg_is_in_recovery()' | grep -qx t"]
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 10s
+      start_period: 3600s
     depends_on:
       keys:
         condition: service_healthy
@@ -111,6 +117,8 @@ services:
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
       TOPUP_PUBLIC_ORIGIN: ${TOPUP_PUBLIC_ORIGIN:-}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
+      # Served on /healthz while TOPUP_SERVICE_ENABLED=read-only.
+      TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - db_app:/run/db-app:ro
@@ -161,6 +169,7 @@ services:
       PGPASSFILE: /run/db-owner/postgres.pgpass
       WALG_RETENTION_FULL: "7"
       TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql:ro
@@ -193,11 +202,11 @@ services:
       - walg_key:/run/wal-g:ro
     restart: "no"
 
+  # Runs on every boot and acts only while TOPUP_RESTORE_FROM_BACKUP=on: after the restored
+  # database is promoted and migrated, it validates it, runs the post-restore reconciliation, and
+  # writes the report that the read-only topup serves on /healthz (deploy/RESTORE.md).
   restore-check:
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    profiles: ["tools"]
-    # The operator appends the recorded failure point:
-    # run --rm --no-deps restore-check --expected-heartbeat-at <RFC3339> --expected-lsn <PG_LSN>
     entrypoint:
       - topup
       - restore-check
@@ -210,15 +219,18 @@ services:
       PGPASSFILE: /run/db-owner/postgres.pgpass
       TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
       TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
+      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
+      TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
     configs:
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
 
 volumes:

@@ -140,6 +140,8 @@ admin_key_bytes=$(base64 -d 2>/dev/null <<<"${env[TOPUP_ADMIN_PUBLIC_KEY]-}" | w
 [[ "${env[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
 [[ "${env[TOPUP_WAL_ARCHIVE]-}" == on ]] || fail "TOPUP_WAL_ARCHIVE must be on for staging"
 [[ "${env[TOPUP_SERVICE_ENABLED]-}" == on ]] || fail "TOPUP_SERVICE_ENABLED must be on for staging"
+[[ "${env[TOPUP_RESTORE_FROM_BACKUP]-}" == off ]] ||
+    fail "TOPUP_RESTORE_FROM_BACKUP must be off for staging (deploy/RESTORE.md sets it only in a restore env)"
 
 if [[ -n "$os_image" && "$os_image" != "$approved_os_image" ]]; then
     fail "OS image $os_image is not the approved $approved_os_image (deploy/README.md)"

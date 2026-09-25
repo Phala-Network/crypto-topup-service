@@ -1,17 +1,21 @@
 #!/bin/sh
 # Starts the postgres-walg image and proves TOPUP_WAL_ARCHIVE controls archiving, even against
-# user-supplied flags, so a restore drill cannot write into the production WAL prefix.
+# user-supplied flags, so a restore drill cannot write into the production WAL prefix, and that
+# TOPUP_RESTORE_FROM_BACKUP=on forces archiving off and never touches a data directory that holds
+# anything. deploy/local/restore-drill.sh runs the restore itself end to end.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 prefix="topup-archive-switch-$$"
 containers=
+volume="$prefix-data"
 built_image=
 
 cleanup() {
     for container in $containers; do
         docker rm -f "$container" >/dev/null 2>&1 || true
     done
+    docker volume rm "$volume" >/dev/null 2>&1 || true
     if [ -n "$built_image" ]; then
         docker image rm "$built_image" >/dev/null 2>&1 || true
     fi
@@ -87,4 +91,41 @@ test "$status" -eq 64 || {
     exit 1
 }
 
-echo "TOPUP_WAL_ARCHIVE switch tests passed"
+set +e
+docker run --rm -e POSTGRES_PASSWORD=postgres -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image" \
+    >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 64 || {
+    echo "invalid TOPUP_RESTORE_FROM_BACKUP returned $status instead of 64" >&2
+    exit 1
+}
+
+# An empty data directory without a reachable backup must fail, not fall back to initdb.
+set +e
+docker run --rm -v "$volume:/var/lib/postgresql" -e POSTGRES_PASSWORD=postgres \
+    -e TOPUP_RESTORE_FROM_BACKUP=on "$image" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0 || {
+    echo "restore from backup without object storage unexpectedly started PostgreSQL" >&2
+    exit 1
+}
+test -z "$(docker run --rm -v "$volume:/var/lib/postgresql" --entrypoint ls "$image" \
+    -A /var/lib/postgresql/data)" || {
+    echo "a failed restore from backup left files in the data directory" >&2
+    exit 1
+}
+
+# A data directory that holds a cluster is started as is: no fetch, archiving off even when
+# TOPUP_WAL_ARCHIVE=on and a user flag asks for it, and the restore command set for recovery.
+start existing -v "$volume:/var/lib/postgresql" "$image"
+sql existing 'CREATE TABLE existing_probe (id int); INSERT INTO existing_probe VALUES (1)' >/dev/null
+docker rm -f "$prefix-existing" >/dev/null
+start restored -v "$volume:/var/lib/postgresql" -e TOPUP_RESTORE_FROM_BACKUP=on \
+    -e TOPUP_WAL_ARCHIVE=on "$image" postgres -c archive_mode=on
+expect restored 'SHOW archive_mode' off
+expect restored 'SHOW restore_command' 'walg-restore-command %f %p'
+expect restored 'SELECT count(*) FROM existing_probe' 1
+
+echo "TOPUP_WAL_ARCHIVE and TOPUP_RESTORE_FROM_BACKUP switch tests passed"

@@ -28,6 +28,7 @@ services:
     volumes: !override
       - dstack_socket:/var/run
       - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
       - drill_routes:/etc/topup/routes:ro
 
 volumes:

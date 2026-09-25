@@ -524,6 +524,73 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
     result.and(cleanup)
 }
 
+/// An instance restored from backup serves reads only, and its `/healthz` carries the boot-time
+/// restore-check report (`deploy/RESTORE.md`).
+#[tokio::test]
+async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let report = std::env::temp_dir().join(format!(
+        "topup-api-restore-check-{}.json",
+        std::process::id()
+    ));
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[43; 32]);
+        let admin_key = SigningKey::from_bytes(&[44; 32]);
+        let app = topup::api::read_only_router(
+            app_state(database.app_pool.clone(), &admin_key),
+            Some(report.clone()),
+        );
+        let healthz = || -> Result<_> {
+            Ok(axum::http::Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())?)
+        };
+
+        let response = app.clone().oneshot(healthz()?).await?;
+        ensure!(response.status() == StatusCode::OK);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        ensure!(
+            body == json!({"mode": "read-only", "restore_check": null}),
+            "{body}"
+        );
+
+        std::fs::write(&report, r#"{"status":"ok","rpo_basis":"unanchored"}"#)?;
+        let response = app.clone().oneshot(healthz()?).await?;
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        ensure!(body["restore_check"]["status"] == "ok", "{body}");
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/admin/products",
+                serde_json::to_vec(&json!({
+                    "slug": "phala-cloud",
+                    "public_key": public_key_base64(&product_key),
+                    "webhook_url": "https://product.test/webhooks",
+                }))?,
+                ADMIN_KID,
+                &admin_key,
+                Utc::now().timestamp(),
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        ensure!(body["error"]["code"] == "unavailable", "{body}");
+        let products: i64 = sqlx::query_scalar("SELECT count(*) FROM products")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(products == 0);
+        Ok(())
+    }
+    .await;
+    let _ = std::fs::remove_file(&report);
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 /// `POST /v1/admin/products` is the only way to issue product credentials: admin-signed,
 /// validated at the boundary, idempotent for identical values, and audited once.
 #[tokio::test]

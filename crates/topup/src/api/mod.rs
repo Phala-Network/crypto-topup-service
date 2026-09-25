@@ -9,13 +9,15 @@ mod pending;
 mod rate_locks;
 mod repository;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::locks::QuoteProvider;
 use crate::routes::RouteSet;
-use axum::extract::{Extension, State};
-use axum::http::StatusCode;
-use axum::middleware;
+use axum::extract::{Extension, Request, State};
+use axum::http::{Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use sqlx::PgPool;
@@ -145,6 +147,35 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     (router, openapi)
 }
 
+/// Builds the router of an instance restored from backup (`TOPUP_SERVICE_ENABLED=read-only`,
+/// `deploy/RESTORE.md`): every request other than `GET` and `HEAD` is refused, and `/healthz`
+/// reports the boot-time `restore-check` result read from `restore_report`.
+pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Router {
+    let (router, _) = router(state);
+    router
+        .layer(middleware::from_fn(reject_writes))
+        .layer(Extension(ReadOnly {
+            restore_report: restore_report.map(Arc::from),
+        }))
+}
+
+/// Marks a read-only router and locates its restore-check report.
+#[derive(Clone)]
+struct ReadOnly {
+    restore_report: Option<Arc<Path>>,
+}
+
+async fn reject_writes(request: Request, next: Next) -> Response {
+    if matches!(*request.method(), Method::GET | Method::HEAD) {
+        next.run(request).await
+    } else {
+        error::ApiError::service_unavailable(
+            "the service is read-only while a restored database is verified",
+        )
+        .into_response()
+    }
+}
+
 /// Returns the deterministic pretty-printed OpenAPI snapshot.
 pub fn openapi_json(state: AppState) -> Result<String, serde_json::Error> {
     let (_, openapi) = router(state);
@@ -155,13 +186,47 @@ async fn serve_openapi(Extension(openapi): Extension<Arc<OpenApi>>) -> Json<Open
     Json((*openapi).clone())
 }
 
-async fn healthz(State(state): State<AppState>) -> StatusCode {
-    match sqlx::query_scalar::<_, i32>("SELECT 1")
+async fn healthz(
+    State(state): State<AppState>,
+    read_only: Option<Extension<ReadOnly>>,
+) -> Response {
+    let status = match sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.pool)
         .await
     {
         Ok(1) => StatusCode::OK,
         Ok(_) | Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let Some(Extension(read_only)) = read_only else {
+        return status.into_response();
+    };
+    let restore_check = match &read_only.restore_report {
+        Some(path) => read_restore_report(path).await,
+        None => serde_json::Value::Null,
+    };
+    (
+        status,
+        Json(serde_json::json!({ "mode": "read-only", "restore_check": restore_check })),
+    )
+        .into_response()
+}
+
+/// The restore-check report, or `null` while it has not been written.
+async fn read_restore_report(path: &Arc<Path>) -> serde_json::Value {
+    let file = Arc::clone(path);
+    let read = tokio::task::spawn_blocking(move || std::fs::read(&file))
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+    match read {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            tracing::warn!(path = %path.display(), "restore-check report is not valid JSON");
+            serde_json::Value::Null
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Value::Null,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "failed to read restore-check report");
+            serde_json::Value::Null
+        }
     }
 }
 

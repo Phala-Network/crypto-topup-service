@@ -43,7 +43,9 @@ case "$1:$2" in
         ;;
     backup-push:*) ;;
     backup-list:*)
-        printf '[{"backup_name":"base_000000010000000000000001","start_time":"2026-09-22T00:00:00Z"}]\n'
+        # WAL-G 3.0.9's non-detailed JSON: backup_name, time, wal_file_name, storage_name, and no
+        # start_time. Newest first, so relying on listing order picks the wrong backup.
+        printf '%s\n' '[{"backup_name":"base_000000010000000000000003","time":"2026-09-23T03:00:00.123Z","wal_file_name":"000000010000000000000003","storage_name":"default"},{"backup_name":"base_000000010000000000000001","time":"2026-09-22T03:00:00Z","wal_file_name":"000000010000000000000001","storage_name":"default"}]'
         ;;
     backup-fetch:*) mkdir -p "$2"; printf '16\n' >"$2/PG_VERSION" ;;
     wal-push:*) ;;
@@ -62,7 +64,11 @@ export WALG_KEY_DIR="$tmp/keys"
 touch "$tmp/keys/backup-v1.key"
 
 backup_name=$(walg-base-backup "$tmp/pgdata")
-test "$backup_name" = base_000000010000000000000001
+# walg-base-backup must annotate the backup it just pushed: the newest by WAL-G's `time`.
+test "$backup_name" = base_000000010000000000000003 || {
+    echo "walg-base-backup selected $backup_name instead of the newest base backup" >&2
+    exit 1
+}
 jq -e '.key_version == 1 and .kind == "base"' \
     "$tmp/store/key-versions/base/$backup_name.json" >/dev/null
 jq -e '.key_version == 1' "$tmp/store/key-versions/current.json" >/dev/null
