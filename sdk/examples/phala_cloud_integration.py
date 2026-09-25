@@ -166,16 +166,20 @@ class JsonRpc:
         self._url = url
 
     def call(self, method: str, params: list[Any]) -> Any:
+        # Messages name the method and the failure class only: the URL may carry an API key.
         try:
             response = self._http.post(
                 self._url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
             )
             response.raise_for_status()
             body = response.json()
+        except httpx.HTTPStatusError as error:
+            raise TransientError(f"{method} answered HTTP {error.response.status_code}") from error
         except (httpx.HTTPError, ValueError) as error:
-            raise TransientError(f"{method} failed") from error
+            raise TransientError(f"{method} failed: {type(error).__name__}") from error
         if "error" in body:
-            raise TransientError(f"{method} returned an error")
+            code = body["error"].get("code") if isinstance(body["error"], dict) else None
+            raise TransientError(f"{method} returned JSON-RPC error {code}")
         return body["result"]
 
     def finalized_block_number(self) -> int:
@@ -502,9 +506,11 @@ class SettlementService:
 
         try:
             refusal = self.refusal_reason(key, payload)
-        except TransientError:
-            LOG.warning("settlement %s deferred: dependency unavailable", key)
-            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        except TransientError as error:
+            # The reason is non-sensitive and lands in the service's retry evidence, which is
+            # the only diagnostic when the product runs without logs.
+            LOG.warning("settlement %s deferred: %s", key, error)
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {"retry_reason": str(error)})
         return self._commit(key, payload, refusal)
 
     def handle_get(self, target: str, headers: Mapping[str, str]) -> Answer:

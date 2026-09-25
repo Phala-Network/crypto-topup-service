@@ -153,7 +153,10 @@ def _post(service: reference.SettlementService) -> reference.Answer:
 )
 def test_transient_chain_reads_answer_503_and_store_nothing(rpc: FakeRpc) -> None:
     service = _service(rpc)
-    assert _post(service).status == 503
+    answer = _post(service)
+    assert answer.status == 503
+    assert answer.body is not None
+    assert answer.body["retry_reason"]
     assert service.ledger.find_order(KEY) is None
     assert service.ledger.credits_for(TEAM) == []
 
