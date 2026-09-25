@@ -48,7 +48,10 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 
 ## Alert and symptom index
 
-Alert names are from `deploy/alerts/prometheus-rules.yml`.
+Alert names are from `deploy/alerts/prometheus-rules.yml`. A CVM reports the same names to Sentry
+as the `alert` tag of an issue, with a `runbook` tag linking the page below; stopped loops and a
+stale backup are Sentry Crons monitors, and `/healthz` is a Sentry Uptime monitor
+([deploy/README.md, "Sentry"](../README.md#sentry)).
 
 | Alert or symptom | Runbook |
 |---|---|

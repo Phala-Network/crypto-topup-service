@@ -192,6 +192,9 @@ impl AgeAlerter {
             });
             if age_seconds > threshold_seconds && reminder_due {
                 tracing::warn!(
+                    tags.alert = "TopupDepositStateAgeExceeded",
+                    tags.route = route,
+                    tags.state = state_label,
                     deposit_id = %row.id,
                     route,
                     route_version = version,

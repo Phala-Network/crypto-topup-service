@@ -15,8 +15,9 @@
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
 #    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
-#    the mock Safe grants it and it is funded, and no backup marker exists yet; then it
-#    seals the complete `.env` (the owner's `envs update`) and requires a fresh backup marker.
+#    the mock Safe grants it and it is funded, Sentry reporting is off with the empty DSN, and no
+#    backup marker exists yet; then it seals the complete `.env` (the owner's `envs update`) and
+#    requires a fresh backup marker.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
 #    deploy/product/render-compose.sh with the pushed image and a provisional public URL, an
 #    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
@@ -265,6 +266,8 @@ declare -A values=(
     [AWS_SECRET_ACCESS_KEY]=topup-s3-secret-key
     [AWS_SESSION_TOKEN]=
     [COINMETRICS_API_KEY]=
+    # Empty: the rehearsal proves the service runs unchanged with Sentry reporting off.
+    [SENTRY_DSN]=
     [TOPUP_ADMIN_KID]=rehearsal-admin/v1
     [TOPUP_ADMIN_PUBLIC_KEY]=$admin_public_key
     [TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]=0
@@ -315,6 +318,10 @@ if dc logs topup 2>&1 | grep -q 'on-chain contract check failed'; then
     die "topup logged a failed startup contract check"
 fi
 echo "ok: topup passed its startup contract check; GET /healthz is 200"
+# The sealed SENTRY_DSN stays empty here: reporting must be off and the service unchanged.
+dc logs --no-color topup 2>&1 | grep -F '"error reporting configured"' |
+    grep -qF '"sentry_enabled":false' || die "topup did not start with Sentry reporting off"
+echo "ok: topup runs with Sentry reporting off (empty SENTRY_DSN)"
 
 # The owner learns the flusher operator only from /v1/attestation: production has no logs or SSH.
 nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')

@@ -31,6 +31,7 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+sentry.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
@@ -50,6 +51,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 anyhow = "=1.0.104"
+sentry = { workspace = true, features = ["test"] }
 sfv.workspace = true
 tower.workspace = true
 tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }

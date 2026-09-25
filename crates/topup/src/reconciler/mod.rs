@@ -380,6 +380,7 @@ impl Reconciler {
     /// Runs periodic reconciliation until cancellation.
     pub async fn run_loop(&self, every: Duration, cancellation: CancellationToken) {
         crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
+        let monitor = crate::observability::CronMonitor::reconciler(every);
         let mut ticks = interval(every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -392,7 +393,7 @@ impl Reconciler {
                     crate::observability::execution_deadline(LOOP_NAME, LOOP_INSTANCE, every);
                     tokio::select! {
                         () = cancellation.cancelled() => return,
-                        _report = self.run_checks(false) => {}
+                        report = self.run_checks(false) => monitor.check_in(report.succeeded()),
                     }
                     crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, every);
                 }
@@ -1277,6 +1278,8 @@ fn log_finding(finding: &Finding, inserted: bool) {
         );
     } else {
         tracing::warn!(
+            tags.alert = "TopupReconciliationMismatch",
+            tags.check = finding.check.code(),
             check = finding.check.code(),
             subjects = ?finding.subjects,
             expected = %finding.expected,

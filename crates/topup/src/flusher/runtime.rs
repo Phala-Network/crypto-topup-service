@@ -83,6 +83,16 @@ impl FlusherTask {
         let instance = self.instance();
         crate::observability::register_loop("flusher", instance.clone());
         crate::observability::heartbeat("flusher", instance.clone());
+        let monitor = crate::observability::CronMonitor::flush_planning(
+            &self.route.route,
+            &self.route.chain.flush.schedule,
+        );
+        if monitor.is_none() {
+            tracing::warn!(
+                route = %self.route.route,
+                "flush schedule is not a five-field crontab; Sentry Crons cannot monitor it"
+            );
+        }
         let mut authorized = false;
         let startup_span = crate::observability::flush_action_span(
             self.route.chain.chain_id,
@@ -147,6 +157,7 @@ impl FlusherTask {
                 () = sleep_until(next_plan) => {
                     crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
+                    let mut planned = false;
                     if authorized {
                         let plan_span = crate::observability::flush_action_span(
                             self.route.chain.chain_id,
@@ -156,6 +167,7 @@ impl FlusherTask {
                         );
                         match self.planner.plan(&self.route).instrument(plan_span).await {
                             Ok(flush_id) => {
+                                planned = true;
                                 if flush_id.is_some() {
                                     crate::observability::progress("flusher", instance.clone());
                                 }
@@ -178,6 +190,9 @@ impl FlusherTask {
                                 tracing::error!(%error, route = %self.route.route, "flush planning failed");
                             }
                         }
+                    }
+                    if let Some(monitor) = &monitor {
+                        monitor.check_in(planned);
                     }
                     next_plan = match next_deadline(&self.schedule) {
                         Ok(deadline) => deadline,
@@ -219,6 +234,7 @@ impl FlusherTask {
                 granted: false,
             }) => {
                 tracing::error!(
+                    tags.alert = "OperatorRoleMissing",
                     chain_id,
                     route,
                     operator_key_version,
@@ -343,7 +359,7 @@ struct TracingAlertSink;
 
 impl AlertSink for TracingAlertSink {
     fn emit(&self, alert: FlushAlert) {
-        tracing::warn!(?alert, "flusher alert");
+        tracing::warn!(tags.alert = alert.name(), ?alert, "flusher alert");
     }
 }
 

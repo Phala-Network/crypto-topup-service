@@ -684,6 +684,7 @@ impl ExpiryWorker {
         const LOOP_NAME: &str = "lock_expiry";
         const LOOP_INSTANCE: &str = "0";
         crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
+        let monitor = crate::observability::CronMonitor::lock_expiry();
         let mut ticker = interval(self.scan_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -694,10 +695,15 @@ impl ExpiryWorker {
                     match expire_once(&self.pool).await {
                         Ok(_) => {
                             crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
+                            monitor.check_in(true);
                         }
                         Err(error) => {
                             crate::observability::record_lock_expiry_failure();
-                            tracing::error!(%error, "rate-lock expiry scan failed");
+                            tracing::error!(
+                                tags.alert = "TopupLockExpiryFailing",
+                                %error,
+                                "rate-lock expiry scan failed"
+                            );
                         }
                     }
                     crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, self.scan_interval);
@@ -761,6 +767,7 @@ pub async fn repair_exposure(pool: &PgPool) -> Result<Vec<ExposureRepair>, RateL
     for scope_key in drifted {
         if let Some(repair) = repair_scope(pool, &scope_key).await? {
             tracing::error!(
+                tags.alert = "TopupLockExposureDrift",
                 scope_key = %repair.scope_key,
                 before_minor = repair.before_minor,
                 after_minor = repair.after_minor,

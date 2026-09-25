@@ -21,8 +21,8 @@
 #
 # --source is the unrendered compose the rendered file must come from (default
 # deploy/docker-compose.yml of this checkout). --offline runs only the local checks (env file,
-# compose, route). --unsealed accepts empty owner-sealed secrets (the S3 keys and the Coin Metrics
-# key): Deploy staging provisions with them empty and the owner seals the complete env file from
+# compose, route). --unsealed accepts empty owner-sealed secrets (the S3 keys, the Coin Metrics
+# key, and the Sentry DSN): Deploy staging provisions with them empty and the owner seals the complete env file from
 # their own machine; check that file without --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure
 # is reported; the exit status is 1 if any.
 #
@@ -40,11 +40,11 @@ expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
 route_config=topup_route_phala_cloud_sepolia_pha
 # May stay empty: a static S3 key has no session token, AWS S3 needs no endpoint, and an empty
 # Coin Metrics key selects the community endpoint.
-optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY "
+optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY SENTRY_DSN "
 # The owner-approved OS image (deploy/README.md, "OS image"): production, dstack 0.5.9.
 approved_os_image=dstack-0.5.9
 # The only secrets of the env file. GitHub never holds them; the owner seals them (README).
-owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY "
+owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY SENTRY_DSN "
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
@@ -138,6 +138,10 @@ rpc_a=${env[TOPUP_RPC_PROVIDER_A_URL]-} rpc_b=${env[TOPUP_RPC_PROVIDER_B_URL]-}
 admin_key_bytes=$(base64 -d 2>/dev/null <<<"${env[TOPUP_ADMIN_PUBLIC_KEY]-}" | wc -c) || admin_key_bytes=0
 [[ "$admin_key_bytes" == 32 ]] || fail "TOPUP_ADMIN_PUBLIC_KEY must be standard base64 of 32 bytes"
 [[ "${env[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
+# Empty turns Sentry reporting off; the service refuses to start with a malformed DSN.
+sentry_dsn=${env[SENTRY_DSN]-}
+[[ -z "$sentry_dsn" || "$sentry_dsn" =~ ^https://[0-9a-f]{32}@[a-z0-9.-]+/[0-9]+$ ]] ||
+    fail "SENTRY_DSN must be empty or the project's DSN, https://KEY@HOST/PROJECT_ID"
 [[ "${env[TOPUP_WAL_ARCHIVE]-}" == on ]] || fail "TOPUP_WAL_ARCHIVE must be on for staging"
 [[ "${env[TOPUP_SERVICE_ENABLED]-}" == on ]] || fail "TOPUP_SERVICE_ENABLED must be on for staging"
 [[ "${env[TOPUP_RESTORE_FROM_BACKUP]-}" == off ]] ||

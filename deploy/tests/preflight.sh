@@ -26,7 +26,7 @@ awk -F= '
     $1 == "TOPUP_RPC_PROVIDER_A_URL" { print $1 "=https://rpc-a.example/sepolia"; next }
     $1 == "TOPUP_RPC_PROVIDER_B_URL" { print $1 "=https://rpc-b.example/sepolia"; next }
     $1 == "WALG_S3_PREFIX" { print $1 "=s3://topup-staging/postgres"; next }
-    $1 == "AWS_SESSION_TOKEN" || $1 == "COINMETRICS_API_KEY" { print $1 "="; next }
+    $1 == "AWS_SESSION_TOKEN" || $1 == "COINMETRICS_API_KEY" || $1 == "SENTRY_DSN" { print $1 "="; next }
     $2 == "replace-me" { print $1 "=staging-value"; next }
     { print }
 ' "$root/deploy/staging.env.example" >"$tmp/complete.env"
@@ -76,6 +76,19 @@ for image in dstack-0.6.0-rc5 dstack-dev-0.5.9 dstack-nvidia-0.5.9 dstack-0.5.8;
 done
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --os-image dstack-0.5.9 --offline >/dev/null
+
+# A sealed Sentry DSN is accepted; a malformed one is refused without printing it.
+sed -E 's|^SENTRY_DSN=.*|SENTRY_DSN=https://0123456789abcdef0123456789abcdef@o1.ingest.us.sentry.io/2|' \
+    "$tmp/complete.env" >"$tmp/sentry.env"
+"$preflight" --env "$tmp/sentry.env" --compose "$tmp/filled-route.yml" \
+    --source "$tmp/filled-source.yml" --offline >/dev/null
+sed -E 's|^SENTRY_DSN=.*|SENTRY_DSN=http://sentry-secret@example|' "$tmp/complete.env" >"$tmp/bad-sentry.env"
+expect_failure bad-sentry "SENTRY_DSN must be empty or the project's DSN" \
+    --env "$tmp/bad-sentry.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+if grep -q sentry-secret "$tmp/bad-sentry.out" "$tmp/bad-sentry.err"; then
+    echo "preflight printed the SENTRY_DSN value" >&2
+    exit 1
+fi
 
 # The CI-written env file has the owner-sealed S3 keys empty: accepted only with --unsealed.
 sed -E 's/^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.*/\1=/' "$tmp/complete.env" >"$tmp/unsealed.env"

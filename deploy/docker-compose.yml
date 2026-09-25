@@ -119,6 +119,11 @@ services:
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       # Served on /healthz while TOPUP_SERVICE_ENABLED=read-only.
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
+      # Sentry reporting (deploy/README.md, "Sentry"): off while the owner-sealed DSN is empty. The
+      # release is the digest of the image rendered here; the environment is this deployment's.
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: staging
+      TOPUP_IMAGE: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - db_app:/run/db-app:ro

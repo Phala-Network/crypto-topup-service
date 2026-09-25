@@ -6,11 +6,13 @@ use tracing_subscriber::layer::SubscriberExt as _;
 /// Targets whose spans or events can carry raw provider URLs, including credentials.
 const PROVIDER_TRANSPORT_TARGETS: [&str; 3] = ["alloy_transport_http", "reqwest", "hyper_util"];
 
-/// Builds the production JSON log subscriber.
+/// Builds the production JSON log subscriber, with the Sentry layer when reporting is enabled.
 ///
 /// The INFO ceiling and the silenced transport targets are a redaction boundary: alloy's DEBUG
 /// `ReqwestTransport` span records the credentialed provider URL. The target filter is a global
-/// layer, so a later `EnvFilter` or `RUST_LOG` cannot re-enable those targets.
+/// layer, so a later `EnvFilter` or `RUST_LOG` cannot re-enable those targets, and the Sentry
+/// layer sees only the lines the JSON log shows. Start reporting first
+/// ([`super::init_reporting`]).
 pub fn log_subscriber<W>(writer: W) -> impl Subscriber + Send + Sync
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
@@ -26,6 +28,7 @@ where
         .with_writer(writer)
         .finish()
         .with(targets)
+        .with(super::reporting::tracing_layer())
 }
 
 #[cfg(test)]

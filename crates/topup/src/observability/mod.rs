@@ -1,8 +1,9 @@
-//! Tracing conventions, secret redaction, and Prometheus metrics.
+//! Tracing conventions, secret redaction, Prometheus metrics, and optional Sentry reporting.
 
 mod logging;
 mod metrics;
 mod redaction;
+mod reporting;
 mod request;
 mod spans;
 
@@ -15,5 +16,6 @@ pub use metrics::{
     register_metrics, register_scanner, waiting,
 };
 pub use redaction::{Redacted, RedactedTransportError};
+pub use reporting::{CronMonitor, ReportingError, init_reporting};
 pub use request::request_context;
 pub use spans::{deposit_step_span, flush_action_span, outbox_delivery_span, scanner_window_span};

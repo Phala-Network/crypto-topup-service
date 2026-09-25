@@ -97,6 +97,8 @@ services:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     environment:
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+      # The attested file reads SENTRY_DSN from the shell; local stacks never report to Sentry.
+      SENTRY_DSN: ""
       # Drivers that call the admin API (deploy/sandbox/run-local.sh) supply a key they hold.
       TOPUP_ADMIN_KID: ${TOPUP_LOCAL_ADMIN_KID:-local-admin/v1}
       TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_LOCAL_ADMIN_PUBLIC_KEY:-11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=}

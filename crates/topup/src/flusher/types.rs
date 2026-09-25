@@ -184,6 +184,22 @@ pub enum FlushAlert {
     },
 }
 
+impl FlushAlert {
+    /// The alert name reported to Sentry: the variant name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::NativeBalance { .. } => "NativeBalance",
+            Self::Reverted { .. } => "Reverted",
+            Self::IsolatedAddress { .. } => "IsolatedAddress",
+            Self::MissingConsumedReceipt { .. } => "MissingConsumedReceipt",
+            Self::PlanningExcluded { .. } => "PlanningExcluded",
+            Self::OperatorRoleMissing { .. } => "OperatorRoleMissing",
+            Self::FeeCapReached { .. } => "FeeCapReached",
+        }
+    }
+}
+
 /// Sink for flusher alerts and alert metrics.
 pub trait AlertSink: Send + Sync {
     /// Records one alert occurrence.

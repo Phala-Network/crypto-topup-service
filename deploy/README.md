@@ -80,6 +80,7 @@ not an OS image bump.
    | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | owner-sealed, not in GitHub | S3/R2 key for the WAL-G bucket |
    | `AWS_SESSION_TOKEN` | owner-sealed, optional | only for temporary credentials |
    | `COINMETRICS_API_KEY` | owner-sealed, optional | empty selects the community endpoint |
+   | `SENTRY_DSN` | owner-sealed, optional | DSN of the Sentry project `phala-network/crypto-topup-service`; empty turns reporting off ([Sentry](#sentry)) |
    | `AWS_ENDPOINT` | variable, optional | S3-compatible endpoint (R2); empty for AWS S3 |
    | `AWS_REGION` | variable | bucket region (`auto` for R2) |
    | `AWS_S3_FORCE_PATH_STYLE` | variable | `false` (or `true` for a path-style endpoint) |
@@ -222,10 +223,84 @@ Deploy staging, in order; any failure stops the run:
   Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and is served on the
   separate `--metrics-bind` listener (default `127.0.0.1:9464`). The measured compose binds that
   listener to the container network on port 9464 with `expose`; it is not published through the
-  port-8080 gateway. Only the monitoring collector may reach it. The local compose publishes it on
+  port-8080 gateway. Only the monitoring collector may reach it; no collector runs in a CVM, which
+  reports to Sentry instead ([Sentry](#sentry)). The local compose publishes it on
   loopback port 19464 for smoke testing. `make alerts-check` (`check-alerts.sh`) runs
   `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
   pinned Prometheus image.
+
+## Sentry
+
+Production CVMs have no logs and nothing scrapes `/metrics`, so the service reports to the Sentry
+project `phala-network/crypto-topup-service` itself, using the official
+[`sentry`](https://docs.rs/sentry/0.49.3) crate (`crates/topup/src/observability/reporting.rs`).
+It is on only while the owner-sealed `SENTRY_DSN` is non-empty: without it no client is created,
+no tracing layer is installed, and check-ins return at once, so the service behaves exactly as
+before (`make cvm-rehearsal` runs with it empty and asserts `"sentry_enabled":false`). A malformed
+DSN stops `topup run` at startup; `preflight.sh` checks the format without printing it.
+
+- **Release and environment.** The release is the image digest (`sha256:...`) of `TOPUP_IMAGE`,
+  which `render-compose.sh` pins into the topup service's environment; the environment is the
+  compose's literal `SENTRY_ENVIRONMENT` (`staging`; a production compose sets `production`). Both
+  are attested with the compose.
+- **Events.** Every `ERROR` log line and every panic (the panic hook flushes before the release
+  profile aborts) is an event, grouped by its constant message. `WARN` lines tagged `tags.alert`
+  are events too; other `INFO` and `WARN` lines are only breadcrumbs of the next event. At most one
+  event per issue is sent every 10 minutes, since failing loops retry every few seconds.
+- **Alerts.** A line tagged `tags.alert` carries the Prometheus alert name
+  ([runbooks index](runbooks/README.md#alert-and-symptom-index)), is fingerprinted by that name
+  and its other `tags.*` (route, state, check, chain, scope; never a deposit id), and gets a
+  `runbook` tag linking the runbook: `TopupDepositStateAgeExceeded`,
+  `TopupReconciliationMismatch`, `TopupLockExpiryFailing`, `TopupLockExposureDrift`,
+  `TopupLockExposureNearCap`, `TopupUnsupportedInflows`, `OperatorRoleMissing`, and the other
+  flusher alerts by variant name (`Reverted`, `IsolatedAddress`, `MissingConsumedReceipt`,
+  `PlanningExcluded`, `FeeCapReached`, `NativeBalance`).
+- **Data.** An event holds what the production JSON log line holds, behind the same INFO ceiling
+  and silenced provider-transport targets (no RPC URL), minus `account_id`, a product's end-user
+  identifier. Internal UUIDs, chain ids, routes, and on-chain addresses stay: the runbooks need
+  them, and they are public on chain. Spans are not sent, there is no HTTP integration (no request
+  body, header, URL, or client IP), and `send_default_pii` is off.
+- **Crons.** Each loop that must keep running checks in with its monitor configuration, which
+  creates or updates the monitor (upsert); a monitor checks in at most once a minute. A monitor
+  exists only after its first check-in.
+
+  | Monitor slug | Check-in | Schedule | Margin | Replaces |
+  |---|---|---|---|---|
+  | `topup-scanner-<chain_id>` (`topup-scanner-11155111`) | `ok` after each successful finalized scan | every 1 min | 5 min | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` |
+  | `topup-pump-<n>` (`topup-pump-0`) | `ok` at each pump iteration (a step may take 4 min) | every 1 min | 5 min | `TopupLoopStopped{loop="pump"}` |
+  | `topup-outbox-<n>` (`topup-outbox-0`) | `ok` at each webhook delivery poll | every 1 min | 5 min | `TopupLoopStopped{loop="outbox"}` |
+  | `topup-lock-expiry` | `ok` after each successful rate-lock expiry scan | every 1 min | 5 min | `TopupLockExpiryFailing`, `TopupLoopStopped{loop="lock_expiry"}` |
+  | `topup-reconciler` | `ok` after a complete round, `error` after a round with failed checks | every 10 min | 10 min | `TopupLoopStopped{loop="reconciler"}` |
+  | `topup-backup` | `ok` while the WAL-G marker is at most 120 s old, else `error`; 3 errors in a row open an issue | every 1 min | 2 min | `TopupBackupTooOld` |
+  | `topup-flush-<route>` (`topup-flush-phala-cloud-sepolia-pha-usd`) | `ok` after scheduled planning, `error` when planning failed or the operator lacks `OPERATOR_ROLE` | the route's `flush.schedule` (`0 */6 * * *`), UTC | 15 min | `TopupLoopStopped{loop="flusher"}` |
+
+- **Uptime.** `/healthz` at the gateway is watched by a Sentry Uptime monitor (below).
+- **Egress.** With a DSN, `topup` sends HTTPS (443) to the DSN's ingest host
+  (`o<org>.ingest.<region>.sentry.io`); add it to the egress allow-list
+  ([Attestation, ingress, and egress](#attestation-ingress-and-egress)).
+
+`TopupOperatorGasReserveLow` has no producer yet (`producer_enabled="false"`), so neither
+Prometheus nor Sentry can raise it; `/metrics` stays the standard local surface.
+
+**One-time setup (HUMAN-ONLY, Sentry project admin).** The Crons monitors need none. Verify every
+step against the Sentry UI; nothing here is in the repository.
+
+1. Project **Settings > Security & Privacy**: keep *Data Scrubber* and *Use Default Scrubbers* on,
+   and turn *Prevent Storing of IP Addresses* on.
+2. **Alerts**: an alert on `crypto-topup-service` for all environments that notifies the on-call
+   owner when an issue is created or moves from resolved back to unresolved, without a level
+   filter (alert lines are `warning` events). After steps 3 and 4, open the alert's details and
+   confirm that the Crons monitors and the Uptime monitor are listed as connected monitors;
+   connect any that are missing.
+3. **Uptime monitor** (Monitors > Uptime > Add): `GET https://<app_id>-8080.<gateway base
+   domain>/healthz` (the `TOPUP_PUBLIC_ORIGIN` of the run summary plus `/healthz`), interval
+   1 minute, timeout 10 seconds, environment `staging`, project `crypto-topup-service`. Sentry
+   documents no API for creating uptime monitors, so use the UI.
+4. **Seal the DSN.** Copy the project's DSN (Settings > Client Keys) into the owner's sealed env
+   file as `SENTRY_DSN`. Adding a name changes `allowed_envs`: first run Deploy staging (`upgrade`)
+   with an image of this change, then seal with `phala envs update` from the owner's machine as in
+   [Deploy](#deploy) step 5, which sets `allowed_envs` to the file's names. Within a minute of the
+   restart the Crons page lists the monitors above.
 
 ## Service startup checks
 
@@ -651,7 +726,8 @@ returning `401` usually means the two differ.
 
 dstack app-compose has no hostname egress allow-list. **HUMAN-ONLY, cloud network authority
 required:** restrict outbound access to the two RPC hosts, configured price-source hosts, object
-storage host, attested product settlement host, DNS, and required Phala/dstack platform endpoints.
+storage host, attested product settlement host, the Sentry ingest host of `SENTRY_DSN` when it is
+set ([Sentry](#sentry)), DNS, and required Phala/dstack platform endpoints.
 Record resolved hostnames, ports, and enforcement rules. Do not treat `pre_launch_script` as the
 firewall boundary because it runs after Docker startup.
 
