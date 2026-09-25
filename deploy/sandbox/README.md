@@ -182,3 +182,7 @@ Sepolia finality takes about 15 minutes per deposit, so a full run takes a few h
 scenario names to run a subset. The sandbox route's rate-lock window is 120 seconds, so the late
 payment scenario waits at least that long. `restart_mid_flow` is reported as `SKIP` without a
 `restart_command`.
+
+Staging settles with its own product CVM, so the scenarios do not run there; the deposit
+driver's options play their payments through that product instead (deploy/README.md,
+"Abnormal paths").
