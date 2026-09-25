@@ -242,7 +242,10 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
 - **Release and environment.** The release is the image digest (`sha256:...`) of `TOPUP_IMAGE`,
   which `render-compose.sh` pins into the topup service's environment; the environment is the
   compose's literal `SENTRY_ENVIRONMENT` (`staging`; a production compose sets `production`). Both
-  are attested with the compose.
+  are attested with the compose. A restore or drill instance (`TOPUP_SERVICE_ENABLED=read-only`,
+  [RESTORE.md](RESTORE.md)) reports as `<environment>-restore` (`staging-restore`) and runs no
+  loop, so it never checks in to a Crons monitor or raises an alert scoped to the live
+  environment.
 - **Events.** Every `ERROR` log line and every panic (the panic hook flushes before the release
   profile aborts) is an event, grouped by its constant message. `WARN` lines tagged `tags.alert`
   are events too; other `INFO` and `WARN` lines are only breadcrumbs of the next event. At most one
@@ -289,7 +292,8 @@ step against the Sentry UI; nothing here is in the repository.
 
 1. Project **Settings > Security & Privacy**: keep *Data Scrubber* and *Use Default Scrubbers* on,
    and turn *Prevent Storing of IP Addresses* on.
-2. **Alerts**: an alert on `crypto-topup-service` for all environments that notifies the on-call
+2. **Alerts**: an alert on `crypto-topup-service` for the environments `staging` and `production`
+   (not `*-restore`, which only restore and drill instances use) that notifies the on-call
    owner when an issue is created or moves from resolved back to unresolved, without a level
    filter (alert lines are `warning` events). After steps 3 and 4, open the alert's details and
    confirm that the Crons monitors and the Uptime monitor are listed as connected monitors;

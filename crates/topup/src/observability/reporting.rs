@@ -56,20 +56,32 @@ impl std::error::Error for ReportingError {}
 /// or empty.
 ///
 /// The release is the image digest from `TOPUP_IMAGE`, which the rendered compose pins, and the
-/// environment is the SDK's `SENTRY_ENVIRONMENT`. Keep the guard alive until exit: dropping it
-/// flushes queued events.
+/// environment is the SDK's `SENTRY_ENVIRONMENT`, suffixed for a restore instance
+/// ([`restore_environment`]). Keep the guard alive until exit: dropping it flushes queued events.
 pub fn init_reporting() -> Result<Option<ClientInitGuard>, ReportingError> {
+    let environment = std::env::var("SENTRY_ENVIRONMENT").ok();
+    let service_mode = std::env::var("TOPUP_SERVICE_ENABLED").ok();
     let options = client_options(
         std::env::var("SENTRY_DSN").ok().as_deref(),
         std::env::var("TOPUP_IMAGE").ok().as_deref(),
+        restore_environment(environment.as_deref(), service_mode.as_deref()),
     )?;
     Ok(options.map(sentry::init))
+}
+
+/// `<environment>-restore` while `TOPUP_SERVICE_ENABLED=read-only` (`deploy/RESTORE.md`), so a
+/// restore or drill instance of the app never reports as the live environment; `None` otherwise,
+/// leaving the SDK's `SENTRY_ENVIRONMENT`.
+fn restore_environment(environment: Option<&str>, service_mode: Option<&str>) -> Option<String> {
+    (service_mode == Some("read-only"))
+        .then(|| format!("{}-restore", environment.unwrap_or("production")))
 }
 
 /// Builds the client options, or `None` when `dsn` is unset or empty.
 fn client_options(
     dsn: Option<&str>,
     image: Option<&str>,
+    environment: Option<String>,
 ) -> Result<Option<ClientOptions>, ReportingError> {
     let Some(dsn) = dsn.map(str::trim).filter(|dsn| !dsn.is_empty()) else {
         return Ok(None);
@@ -82,6 +94,7 @@ fn client_options(
         .before_breadcrumb(|breadcrumb| Some(scrub_breadcrumb(breadcrumb)));
     options.dsn = Some(dsn);
     options.release = image_release(image).map(|release| Cow::Owned(release.to_owned()));
+    options.environment = environment.map(Cow::Owned);
     Ok(Some(options))
 }
 
@@ -346,13 +359,13 @@ mod tests {
     use sentry::protocol::{EnvelopeItem, MonitorCheckInStatus, Value};
     use sentry::test::{with_captured_envelopes_options, with_captured_events_options};
 
-    use super::{CronMonitor, client_options, runbook};
+    use super::{CronMonitor, client_options, restore_environment, runbook};
     use crate::observability::log_subscriber;
 
     const TEST_DSN: &str = "https://public@sentry.invalid/1";
 
     fn options() -> sentry::ClientOptions {
-        client_options(Some(TEST_DSN), None)
+        client_options(Some(TEST_DSN), None, None)
             .expect("test DSN is valid")
             .expect("test DSN enables reporting")
     }
@@ -360,9 +373,9 @@ mod tests {
     #[test]
     fn unset_or_empty_dsn_disables_reporting_and_every_hook() {
         for dsn in [None, Some(""), Some("  ")] {
-            assert!(client_options(dsn, None).expect("disabled").is_none());
+            assert!(client_options(dsn, None, None).expect("disabled").is_none());
         }
-        assert!(client_options(Some("not a dsn"), None).is_err());
+        assert!(client_options(Some("not a dsn"), None, None).is_err());
         assert!(sentry::Hub::current().client().is_none());
         assert!(super::tracing_layer::<tracing_subscriber::Registry>().is_none());
         // Without a client this returns before building a check-in.
@@ -373,14 +386,32 @@ mod tests {
     fn release_is_the_pinned_image_digest() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let image = format!("ghcr.io/phala-network/crypto-topup@{digest}");
-        let options = client_options(Some(TEST_DSN), Some(&image))
+        let options = client_options(Some(TEST_DSN), Some(&image), None)
             .expect("valid")
             .expect("enabled");
         assert_eq!(options.release.as_deref(), Some(digest.as_str()));
-        let local = client_options(Some(TEST_DSN), Some("crypto-topup-service:dev"))
+        let local = client_options(Some(TEST_DSN), Some("crypto-topup-service:dev"), None)
             .expect("valid")
             .expect("enabled");
         assert_eq!(local.release, None);
+    }
+
+    #[test]
+    fn a_read_only_restore_instance_reports_under_its_own_environment() {
+        assert_eq!(
+            restore_environment(Some("staging"), Some("read-only")).as_deref(),
+            Some("staging-restore")
+        );
+        assert_eq!(restore_environment(Some("staging"), Some("on")), None);
+        assert_eq!(restore_environment(Some("staging"), None), None);
+        let options = client_options(
+            Some(TEST_DSN),
+            None,
+            restore_environment(Some("production"), Some("read-only")),
+        )
+        .expect("valid")
+        .expect("enabled");
+        assert_eq!(options.environment.as_deref(), Some("production-restore"));
     }
 
     #[test]
