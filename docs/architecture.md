@@ -587,10 +587,11 @@ flusher operator in ascending `chain_id` order (`chain_id`, `operator_key_versio
 chain's current routes, `keyid = operator/v{n}`, and the address the flusher signs with) and
 record `i` is the 32 bytes `chain_id` (u64 big-endian) ‖ `operator_key_version` (u32 big-endian) ‖
 address. With no operators this is the original `sha256(nonce ‖ settlement_pubkey)`. Verifiers
-run the dstack verification flow (TCB, measurements, allowed compose), check that the quote's
-report data is this hash zero-padded to 64 bytes, and then pin `(keyid, public key)`; the owner grants
-`OPERATOR_ROLE` to, and funds, only an operator address verified this way, since a production
-CVM exposes no logs or shell.
+run the official dstack verifier of the pinned release on it (`deploy/dstack-verifier.sh`: quote
+and TCB, RTMR3 event-log replay, OS image; then the app id and allowed compose hash), check that
+the verified report data is this hash zero-padded to 64 bytes, and then pin
+`(keyid, public key)`; the owner grants `OPERATOR_ROLE` to, and funds, only an operator address
+verified this way, since a production CVM exposes no logs or shell.
 
 ## 15. Operating policies
 

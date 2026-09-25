@@ -251,23 +251,29 @@ steps using Phala Cloud credentials and the Finance Safe.
 
    If the restore is abandoned before this step, run the same `shred -u` and `rm -rf` anyway.
 
-   Fetch `cvm.json` and `attestation.json`, then run the normal compose verification:
+   Fetch `cvm.json`, `attestation.json`, and `info.json` as in the deploy read-back
+   ([README](README.md#a-first-time-provisioning)), then verify the attestation with the original
+   app id:
 
    ```sh
-   deploy/verify-attested-compose.sh \
-     attestation.json cvm.json deploy/docker-compose.yml
+   deploy/verify-attestation.sh \
+     attestation.json info.json "$ORIGINAL_APP_ID" deploy/docker-compose.yml
    ```
 
-5. Request a fresh application-bound quote inside the replacement CVM. Verify the quote, TCB, RTMR
-   event log, KMS chain, and compose through the official dstack verification flow. The CLI includes
-   dstack's reported app id; compare it to the original before using any backup key:
+5. Request a fresh application-bound quote inside the replacement CVM and confirm the KMS chain.
+   Copy `restore-attestation.json` out and verify its versioned attestation with
+   [dstack-verifier.sh](dstack-verifier.sh) (quote, TCB, RTMR3 event log, OS image); the
+   verified app id must be the original before using any backup key:
 
    ```sh
    export NONCE="$(openssl rand -hex 32)"
    dc run --rm --no-deps topup topup attest --nonce "$NONCE" > restore-attestation.json
+   # Outside the CVM:
+   jq '{quote: null, attestation: .quote}' restore-attestation.json |
+     deploy/dstack-verifier.sh > restore-verification.json
    jq -e --arg app "$(printf '%s' "${ORIGINAL_APP_ID#0x}" | tr 'A-F' 'a-f')" \
-     '(.app_id | ascii_downcase | ltrimstr("0x")) == $app and (.quote | length > 0)' \
-     restore-attestation.json
+     '.details.tcb_status == "UpToDate" and .details.app_info.app_id == $app' \
+     restore-verification.json
    ```
 
    A mismatched or unverifiable app id means this instance cannot be trusted to derive the original
