@@ -1,11 +1,15 @@
+# Never deployed as is: deploy/render-compose.sh renders it (deploy/README.md, "Attested
+# settings"). A reference to an owner-sealed secret (staging.env.example) stays a reference to the
+# CVM's encrypted env; every other variable is a public setting written inline from the `staging`
+# Environment variables, and the two mode switches, TOPUP_RESTORE_FROM_BACKUP and
+# TOPUP_SERVICE_ENABLED, come from the rendered variant (the service, or --restore-check).
 x-walg-environment: &walg-environment
-  WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
-  AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-  AWS_REGION: ${AWS_REGION:-}
-  AWS_S3_FORCE_PATH_STYLE: ${AWS_S3_FORCE_PATH_STYLE:-false}
+  WALG_S3_PREFIX: "${WALG_S3_PREFIX:-}"
+  AWS_ENDPOINT: "${AWS_ENDPOINT:-}"
+  AWS_REGION: "${AWS_REGION:-}"
+  AWS_S3_FORCE_PATH_STYLE: "${AWS_S3_FORCE_PATH_STYLE:-}"
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
   WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
@@ -14,6 +18,11 @@ services:
   # database credentials (deploy/README.md, "Database credentials") into three tmpfs volumes, so
   # every other service mounts only the ones it needs.
   keys:
+    # Compose recreates a container only when its service definition changes, not when an inline
+    # config's content does, and a restart keeps the old config file. The renderer sets this label
+    # to the digest of the rendered file, so every rendered change recreates every service.
+    labels: &rendered-labels
+      crypto-topup.rendered-sha256: "${TOPUP_RENDERED_SHA256:-}"
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command:
@@ -26,9 +35,9 @@ services:
       - --app-dir
       - /run/db-app
       - --version
-      - ${TOPUP_BACKUP_KEY_VERSION:-1}
+      - "${TOPUP_BACKUP_KEY_VERSION:-}"
       - --fallback-versions
-      - ${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}
+      - "${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-}"
       - --hold
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
@@ -44,17 +53,18 @@ services:
     restart: unless-stopped
 
   postgres:
+    labels: *rendered-labels
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
       <<: *walg-environment
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/db-owner/postgres.password
-      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
-      TOPUP_WAL_ARCHIVE: ${TOPUP_WAL_ARCHIVE:-on}
-      # `on` only for a replacement CVM (deploy/RESTORE.md): an empty data directory is restored
-      # from the newest base backup and all archived WAL, with archiving forced off.
-      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
+      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
+      # An empty data directory is restored from the newest base backup in WALG_S3_PREFIX, or
+      # initialized when the prefix provably holds none (deploy/RESTORE.md). `on` only in the
+      # restore-check variant: a backup is required and archiving is off.
+      TOPUP_RESTORE_FROM_BACKUP: "${TOPUP_RESTORE_FROM_BACKUP:-}"
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql
@@ -80,6 +90,7 @@ services:
     restart: unless-stopped
 
   migrate:
+    labels: *rendered-labels
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command: ["topup", "migrate"]
@@ -94,6 +105,7 @@ services:
     restart: "no"
 
   topup:
+    labels: *rendered-labels
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     # Database clients run as uid 999, which owns the 0600 credential files; each mounts only its own.
     user: "999:999"
@@ -109,13 +121,12 @@ services:
     environment:
       DATABASE_URL: postgres://topup_service@postgres:5432/topup
       PGPASSFILE: /run/db-app/topup_service.pgpass
-      TOPUP_SERVICE_ENABLED: ${TOPUP_SERVICE_ENABLED:-on}
-      TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
-      TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
-      COINMETRICS_API_KEY: ${COINMETRICS_API_KEY:-}
-      TOPUP_ADMIN_KID: ${TOPUP_ADMIN_KID:-}
-      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
-      TOPUP_PUBLIC_ORIGIN: ${TOPUP_PUBLIC_ORIGIN:-}
+      TOPUP_SERVICE_ENABLED: "${TOPUP_SERVICE_ENABLED:-}"
+      TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
+      TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
+      TOPUP_ADMIN_KID: "${TOPUP_ADMIN_KID:-}"
+      TOPUP_ADMIN_PUBLIC_KEY: "${TOPUP_ADMIN_PUBLIC_KEY:-}"
+      TOPUP_PUBLIC_ORIGIN: "${TOPUP_PUBLIC_ORIGIN:-}"
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       # Served on /healthz while TOPUP_SERVICE_ENABLED=read-only.
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
@@ -147,13 +158,14 @@ services:
     restart: unless-stopped
 
   heartbeat:
+    labels: *rendered-labels
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command: ["topup", "heartbeat", "--interval-s", "60"]
     environment:
       DATABASE_URL: postgres://topup_service@postgres:5432/topup
       PGPASSFILE: /run/db-app/topup_service.pgpass
-      TOPUP_SERVICE_ENABLED: ${TOPUP_SERVICE_ENABLED:-on}
+      TOPUP_SERVICE_ENABLED: "${TOPUP_SERVICE_ENABLED:-}"
     volumes:
       - db_app:/run/db-app:ro
     depends_on:
@@ -162,6 +174,7 @@ services:
     restart: unless-stopped
 
   backup:
+    labels: *rendered-labels
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: postgres
     command: ["walg-cron", "backup-push", "0 3 * * *"]
@@ -173,8 +186,8 @@ services:
       PGUSER: postgres
       PGPASSFILE: /run/db-owner/postgres.pgpass
       WALG_RETENTION_FULL: "7"
-      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
-      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
+      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
+      TOPUP_RESTORE_FROM_BACKUP: "${TOPUP_RESTORE_FROM_BACKUP:-}"
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
       - pgdata:/var/lib/postgresql:ro
@@ -189,6 +202,7 @@ services:
     restart: unless-stopped
 
   restore:
+    labels: *rendered-labels
     image: ${POSTGRES_WALG_IMAGE:-ghcr.io/phala-network/postgres-walg@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     profiles: ["tools"]
     user: postgres
@@ -196,16 +210,17 @@ services:
     environment:
       <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
-      TOPUP_BACKUP_KEY_VERSION: ${TOPUP_BACKUP_KEY_VERSION:-1}
+      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
     volumes:
       - pgdata:/var/lib/postgresql
       - walg_key:/run/wal-g:ro
     restart: "no"
 
-  # Runs on every boot and acts only while TOPUP_RESTORE_FROM_BACKUP=on: after the restored
+  # Runs on every boot and acts only in the restore-check variant: after the restored
   # database is promoted and migrated, it validates it, runs the post-restore reconciliation, and
   # writes the report that the read-only topup serves on /healthz (deploy/RESTORE.md).
   restore-check:
+    labels: *rendered-labels
     image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     entrypoint:
       - topup
@@ -217,9 +232,9 @@ services:
     environment:
       MIGRATE_DATABASE_URL: postgres://postgres@postgres:5432/topup
       PGPASSFILE: /run/db-owner/postgres.pgpass
-      TOPUP_RPC_PROVIDER_A_URL: ${TOPUP_RPC_PROVIDER_A_URL:-}
-      TOPUP_RPC_PROVIDER_B_URL: ${TOPUP_RPC_PROVIDER_B_URL:-}
-      TOPUP_RESTORE_FROM_BACKUP: ${TOPUP_RESTORE_FROM_BACKUP:-off}
+      TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
+      TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
+      TOPUP_RESTORE_FROM_BACKUP: "${TOPUP_RESTORE_FROM_BACKUP:-}"
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock

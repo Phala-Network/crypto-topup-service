@@ -13,8 +13,6 @@ for command in docker forge cast jq python3; do
 done
 # `topup run` refuses to start until the route's contracts are verified on chain, so the smoke
 # runs against the sandbox overlay's Anvil chain with a real factory deployment.
-compose="$root/deploy/docker-compose.yml"
-local_compose="$root/deploy/local/docker-compose.yml"
 sandbox_compose="$root/deploy/sandbox/docker-compose.local.yml"
 project="topup-service-smoke-$$"
 tmp=$(mktemp -d)
@@ -28,7 +26,7 @@ export TOPUP_LOCAL_POSTGRES_IMAGE="$project-postgres"
 export TOPUP_LOCAL_SERVICE_IMAGE="$project-topup"
 
 dc() {
-    docker compose -p "$project" -f "$compose" -f "$local_compose" -f "$sandbox_compose" "$@"
+    "$root/deploy/local/compose.sh" -p "$project" -f "$sandbox_compose" "$@"
 }
 
 cleanup() {

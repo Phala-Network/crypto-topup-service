@@ -16,8 +16,7 @@ done
 
 project="topup-sandbox-$$"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-sandbox.XXXXXX")
-compose=(docker compose -p "$project" -f "$root/deploy/docker-compose.yml"
-    -f "$root/deploy/local/docker-compose.yml" -f "$root/deploy/sandbox/docker-compose.local.yml")
+compose=("$root/deploy/local/compose.sh" -p "$project" -f "$root/deploy/sandbox/docker-compose.local.yml")
 # The product side (example and scenarios) runs in this image on the compose network, so the
 # service reaches its endpoints as http://product:8089 even where a host firewall drops traffic
 # from containers to the host.

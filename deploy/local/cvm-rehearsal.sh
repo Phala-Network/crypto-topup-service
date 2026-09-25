@@ -8,17 +8,20 @@
 #    (deploy/contracts: canonical proxy, mock Safe as admin and treasury, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
-#    committed route lives, and renders the compose.
+#    committed route lives, and renders the compose with the rehearsal's settings and the
+#    provisional origin, as Deploy staging provisions.
 # 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy staging does (exactly
-#    the names of deploy/staging.env.example, owner-sealed S3 keys empty), and runs
-#    `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator, S3,
-#    Anvil), as dstack's app-compose runner does.
+#    the names of deploy/staging.env.example, all empty), and runs `docker compose up` on the
+#    rendered file plus cvm-rehearsal.compose.yml (simulator, S3, Anvil), as dstack's app-compose
+#    runner does. Without storage credentials PostgreSQL must refuse to initialize (the prefix
+#    cannot be listed). Re-rendered with the real origin, every service must be recreated. Then it
+#    seals the secrets (the owner's `envs update`), and PostgreSQL initializes from the provably
+#    empty prefix.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
 #    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
-#    the mock Safe grants it and it is funded, Sentry reporting is off with the empty DSN, and no
-#    backup marker exists yet; then it seals the complete `.env` (the owner's `envs update`) and
-#    requires a fresh backup marker.
+#    the mock Safe grants it and it is funded, Sentry reporting is off with the empty DSN, and WAL
+#    archiving writes a fresh backup marker.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
 #    deploy/product/render-compose.sh with the pushed image and a provisional public URL, an
 #    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
@@ -231,8 +234,11 @@ if grep -Eiq '0x([0-9a-f])\1{39}' "$tmp/route.yaml"; then
     die "the rehearsal route still has a placeholder address"
 fi
 docker run --rm -i "$TOPUP_IMAGE" topup route validate /dev/stdin <"$tmp/route.yaml"
+# The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
+openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
+admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
 # Replace the inline route in a copy of the attested compose, as the operator's route commit
-# does, then render image digests with the production renderer.
+# does, then render it with the production renderer.
 awk -v route="$tmp/route.yaml" '
     /^  topup_route_phala_cloud_sepolia_pha:$/ { print; in_config = 1; next }
     in_config && /^    content: [|]$/ {
@@ -244,7 +250,17 @@ awk -v route="$tmp/route.yaml" '
     skipping && (/^      / || /^$/) { next }
     { skipping = 0; in_config = 0; print }
 ' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
-"$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
+# render_topup ORIGIN: the settings Deploy staging renders from the `staging` Environment
+# variables, for this network.
+render_topup() {
+    AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
+        WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=rehearsal-admin/v1 \
+        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key TOPUP_BACKUP_KEY_VERSION=1 \
+        TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 TOPUP_PUBLIC_ORIGIN=$1 \
+        TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 TOPUP_RPC_PROVIDER_B_URL=http://anvil:8545 \
+        "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
+}
+render_topup https://pending.invalid
 compose_file="$cvm/docker-compose.yaml"
 dc config --format json >"$tmp/stack.json"
 jq -j '.configs.topup_route_phala_cloud_sepolia_pha.content' "$tmp/stack.json" |
@@ -256,50 +272,63 @@ jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$tmp/s
     >/dev/null || die "the rehearsal stack bind-mounts a host path"
 
 echo "== writing the unsealed .env with write-staging-env.sh"
-# The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
-openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
-admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
 product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
     --seed-out /opt/product.seed)
+# The owner-sealed secrets, the only env values.
 declare -A values=(
     [AWS_ACCESS_KEY_ID]=topup-s3
-    [AWS_ENDPOINT]=http://s3:3900
-    [AWS_REGION]=us-east-1
-    [AWS_S3_FORCE_PATH_STYLE]=true
     [AWS_SECRET_ACCESS_KEY]=topup-s3-secret-key
-    [AWS_SESSION_TOKEN]=
-    [COINMETRICS_API_KEY]=
     # Empty: the rehearsal proves the service runs unchanged with Sentry reporting off.
     [SENTRY_DSN]=
-    [TOPUP_ADMIN_KID]=rehearsal-admin/v1
-    [TOPUP_ADMIN_PUBLIC_KEY]=$admin_public_key
-    [TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]=0
-    [TOPUP_BACKUP_KEY_VERSION]=1
-    [TOPUP_PUBLIC_ORIGIN]=http://topup:8080
-    [TOPUP_RESTORE_FROM_BACKUP]=off
-    [TOPUP_RPC_PROVIDER_A_URL]=http://anvil:8545
-    [TOPUP_RPC_PROVIDER_B_URL]=http://anvil:8545
-    [TOPUP_SERVICE_ENABLED]=on
-    [TOPUP_WAL_ARCHIVE]=on
-    [WALG_S3_PREFIX]=s3://topup-backups/postgres
 )
 ((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and staging.env.example differ"
 for name in "${env_names[@]}"; do
     [[ -v "values[$name]" ]] || die "no rehearsal value for $name"
 done
-# Deploy staging's writer: every name from the environment, owner-sealed secrets always empty.
-unsealed=()
-for name in "${env_names[@]}"; do
-    unsealed+=("$name=${values[$name]}")
-done
-env -i PATH="$PATH" "${unsealed[@]}" "$root/deploy/write-staging-env.sh" "$cvm/.env" >/dev/null
+env -i PATH="$PATH" "$root/deploy/write-staging-env.sh" "$cvm/.env" >/dev/null
 grep -qx 'AWS_SECRET_ACCESS_KEY=' "$cvm/.env" || die "the unsealed .env carries the S3 secret"
 docker compose -f "$compose_file" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$tmp/variables"
 printf '%s\n' "${env_names[@]}" | sort | cmp -s - "$tmp/variables" ||
     die "the rendered compose reads other variables than staging.env.example"
 
-echo "== docker compose up (the CVM's app-compose command)"
+echo "== docker compose up unsealed (the CVM's app-compose command)"
+# Without credentials the backup prefix cannot be listed, so PostgreSQL refuses to initialize
+# and never becomes healthy: `up` fails like dstack's boot, and nothing after it starts.
+if dc up -d --remove-orphans >/dev/null 2>&1; then
+    die "the unsealed stack started"
+fi
+refused() {
+    dc logs --no-color postgres 2>&1 |
+        grep -F 'the backup prefix could not be listed; refusing to initialize an empty data directory' \
+            >/dev/null
+}
+wait_for "PostgreSQL to refuse initialization" 90 refused
+if docker run --rm --entrypoint test -v "${project}_pgdata:/var/lib/postgresql" "$POSTGRES_WALG_IMAGE" \
+    -e /var/lib/postgresql/data/PG_VERSION; then
+    die "PostgreSQL initialized a cluster without listing the backup prefix"
+fi
+echo "ok: unsealed, PostgreSQL refuses to initialize without a listed backup prefix"
+
+echo "== re-rendering with the gateway origin (Deploy staging's provisioning upgrade)"
+keys_before=$(dc ps -q keys)
+render_topup http://topup:8080
+dc up -d --remove-orphans >/dev/null 2>&1 || true
+[[ -n "$(dc ps -q keys)" && "$(dc ps -q keys)" != "$keys_before" ]] ||
+    die "a re-rendered setting did not recreate the services"
+docker inspect --format '{{json .Config.Env}}' "$(dc ps -a -q topup)" |
+    jq -e 'index("TOPUP_PUBLIC_ORIGIN=http://topup:8080") != null' >/dev/null ||
+    die "topup does not carry the re-rendered origin"
+echo "ok: the re-rendered origin recreated every service"
+
+echo "== sealing the secrets (the owner's envs update: same names, restart)"
+for name in "${env_names[@]}"; do
+    printf '%s=%s\n' "$name" "${values[$name]}"
+done >"$cvm/.env"
 dc up -d --remove-orphans >/dev/null
+dc logs --no-color postgres 2>&1 |
+    grep -F 'the backup prefix holds no base backup; initializing a new cluster' >/dev/null ||
+    die "PostgreSQL did not initialize from the provably empty backup prefix"
+echo "ok: sealed, PostgreSQL listed an empty backup prefix and initialized a new cluster"
 migrate_exited() {
     [[ "$(dc ps -a --format json migrate | jq -rs 'flatten | .[0].State')" == exited ]]
 }
@@ -367,19 +396,6 @@ cast send "$operator" --value 1ether --rpc-url "$rpc_url" --private-key "$ANVIL_
     >/dev/null
 wait_for "the flusher to hold OPERATOR_ROLE" 30 flusher_logged 'flusher operator holds OPERATOR_ROLE'
 echo "ok: after the grant and gas funding the flusher holds OPERATOR_ROLE"
-
-# Unsealed: WAL archiving cannot reach object storage, so no backup marker has been written.
-if dc exec -T backup test -e /run/topup-observability/last-backup-unix-seconds; then
-    die "a backup marker exists before the S3 keys were sealed"
-fi
-echo "ok: the unsealed CVM serves the API; WAL archiving waits for the sealed S3 keys"
-
-echo "== sealing the complete .env (the owner's envs update: same names, restart)"
-for name in "${env_names[@]}"; do
-    printf '%s=%s\n' "$name" "${values[$name]}"
-done >"$cvm/.env"
-dc up -d --remove-orphans >/dev/null
-wait_for "GET /healthz after sealing" 90 healthy
 
 marker_fresh() {
     local marker

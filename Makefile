@@ -23,8 +23,9 @@ image:
 	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t crypto-topup-service:dev .
 	docker run --rm crypto-topup-service:dev topup --help
 
-# The attested compose with the local overlay (Garage S3, dstack simulator, images built here).
-LOCAL_COMPOSE = docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml
+# The attested compose rendered with local settings, plus the local overlay (Garage S3, dstack
+# simulator, images built here).
+LOCAL_COMPOSE = deploy/local/compose.sh
 
 up:
 	$(LOCAL_COMPOSE) up --build -d postgres dstack-simulator backup

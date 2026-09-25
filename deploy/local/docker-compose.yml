@@ -1,24 +1,17 @@
-# Local overlay for the attested stack:
-#   docker compose -f deploy/docker-compose.yml -f deploy/local/docker-compose.yml ...
-# It adds object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds
-# the images from this checkout, and replaces secrets, ports, and host paths with local values.
-# Everything else, including the PostgreSQL init script (an inline config), comes from
+# Local overlay for the attested stack, applied by deploy/local/compose.sh after the compose
+# rendered with local settings (make up, the smokes, the sandbox, and the restore drill). It adds
+# object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds the
+# images from this checkout, and replaces secrets, ports, and host paths with local values.
+# Everything else, including the PostgreSQL init script (an inline config), comes from the rendered
 # deploy/docker-compose.yml. Database credentials need no local value: `keys` derives them from
 # the simulator exactly as in a CVM.
 #
-# Compose resolves relative paths against the first file's directory, so paths here are relative
-# to deploy/. `!override` and `!reset` need Compose 2.24.4 or newer.
+# Paths here are relative to deploy/ (compose.sh's project directory). `!override` and `!reset`
+# need Compose 2.24.4 or newer.
 x-walg-environment: &walg-environment
-  WALG_S3_PREFIX: s3://topup-backups/postgres
-  AWS_ENDPOINT: http://s3:3900
-  AWS_REGION: us-east-1
-  AWS_S3_FORCE_PATH_STYLE: "true"
   # A restore phase switches to the read-only topup-restore-read key created by s3-init.
   AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-s3}
   AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-s3-secret-key}
-  # The attested file reads AWS_SESSION_TOKEN from the shell; a developer's SSO token must never
-  # reach the local S3 server.
-  AWS_SESSION_TOKEN: ""
 
 x-service-build: &service-build
   context: ..
@@ -99,12 +92,6 @@ services:
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
       # The attested file reads SENTRY_DSN from the shell; local stacks never report to Sentry.
       SENTRY_DSN: ""
-      # Drivers that call the admin API (deploy/sandbox/run-local.sh) supply a key they hold.
-      TOPUP_ADMIN_KID: ${TOPUP_LOCAL_ADMIN_KID:-local-admin/v1}
-      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_LOCAL_ADMIN_PUBLIC_KEY:-11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=}
-      TOPUP_PUBLIC_ORIGIN: http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}
-      TOPUP_RPC_PROVIDER_A_URL: http://127.0.0.1:1
-      TOPUP_RPC_PROVIDER_B_URL: http://127.0.0.1:1
     # Routes come from a directory so the sandbox and the restore drill can supply their own.
     volumes: !override
       - dstack_socket:/var/run
@@ -143,8 +130,6 @@ services:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     environment:
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
-      TOPUP_RPC_PROVIDER_A_URL: http://127.0.0.1:1
-      TOPUP_RPC_PROVIDER_B_URL: http://127.0.0.1:1
     volumes: !override
       - dstack_socket:/var/run
       - db_owner:/run/db-owner:ro
