@@ -6,8 +6,9 @@ set -eu
 # APP_ID and the replayed compose hash the SHA-256 of the attested app-compose, whose
 # docker_compose_file must be EXPECTED_COMPOSE byte for byte. Then the compose policy: without
 # ENV_EXAMPLE, the topup compose (allowed_envs from app-compose.example.json, which are also the only
-# variables the compose reads, credential isolation, the single 8080 ingress; either rendered
-# variant); with ENV_EXAMPLE and SERVICE:PORT (the reference product),
+# variables the compose reads, credential isolation, the single topup ingress: 8080 for the
+# service variant, 8081 for the restore-check variant); with ENV_EXAMPLE and SERVICE:PORT (the
+# reference product),
 # allowed_envs exactly ENV_EXAMPLE's names and SERVICE:PORT the only published port.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
@@ -107,19 +108,21 @@ cmp -s "$tmp/compose-variables" "$tmp/expected-envs" || {
     diff -u "$tmp/expected-envs" "$tmp/compose-variables" >&2 || true
     exit 1
 }
+# The restore-check variant (TOPUP_SERVICE_ENABLED=read-only) publishes 8081 so the gateway never
+# routes the service's 8080 to it (RESTORE.md, "Addressing the restore-check instance").
 jq -e '
+    (if .services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only" then "8081" else "8080" end)
+        as $published |
     (.services.topup.environment | has("MIGRATE_DATABASE_URL") | not) and
-    ((.services.postgres.ports // []) | length == 0) and
-    ((.services.migrate.ports // []) | length == 0) and
-    ((.services.backup.ports // []) | length == 0) and
-    ((.services.topup.ports // []) == [{
+    ([.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["topup"]) and
+    (.services.topup.ports == [{
         "mode": "ingress",
         "target": 8080,
-        "published": "8080",
+        "published": $published,
         "protocol": "tcp"
     }])
 ' "$tmp/docker-compose.json" >/dev/null || {
-    echo "attested compose does not have the expected single 8080 ingress policy" >&2
+    echo "attested compose does not have the expected single topup ingress (8080, or 8081 for restore-check)" >&2
     exit 1
 }
 echo "attested compose, allowed_envs, credential isolation, and ingress passed"

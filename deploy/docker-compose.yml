@@ -142,8 +142,11 @@ services:
     configs:
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
+    # The gateway routes `<app_id>-<port>` to whichever instance of the app accepts the TCP
+    # connection, so the restore-check variant publishes 8081 and never takes the service's 8080
+    # traffic (deploy/RESTORE.md, "Addressing the restore-check instance"). The renderer sets it.
     ports:
-      - "8080:8080"
+      - "${TOPUP_INGRESS_PORT:-}:8080"
     expose:
       - "9464"
     healthcheck:

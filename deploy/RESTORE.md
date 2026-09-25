@@ -8,8 +8,9 @@ newest base backup, replays every archived WAL segment, and promotes
 [restore-check variant](#the-restore-check-variant) of the attested compose, which verifies the
 restore read-only; a real restore then resumes by upgrading that instance to the service compose.
 Production OS images have no SSH or logs, so no step runs inside the CVM: the operator renders the
-compose, creates the instance, and verifies it only through its `/healthz` and read API on its own
-gateway URL.
+compose, creates the instance, and verifies it only through its `/healthz` and read API on port
+8081 of the app's gateway URL, which only a restore-check instance serves
+([Addressing the restore-check instance](#addressing-the-restore-check-instance)).
 
 ## Backup key and metadata
 
@@ -125,7 +126,7 @@ verifies these paths on the image.
 
 ## The restore-check variant
 
-`deploy/render-compose.sh --restore-check` renders the same source as the service with two
+`deploy/render-compose.sh --restore-check` renders the same source as the service with three
 attested differences, so a verification instance is identifiable by its compose hash:
 
 - `TOPUP_RESTORE_FROM_BACKUP=on`. PostgreSQL requires a base backup (an empty prefix fails like a
@@ -140,12 +141,16 @@ attested differences, so a verification instance is identifiable by its compose 
   With `SENTRY_DSN` set, it reports errors under the Sentry environment `<environment>-restore`,
   never as the live environment, and sends no Crons check-in because no loop runs
   ([deploy/README.md, "Sentry"](README.md#sentry)).
+- `topup` is published on port 8081 (`8081:8080`) instead of the service's 8080, so the gateway
+  never sends the live URL's traffic to it
+  ([Addressing the restore-check instance](#addressing-the-restore-check-instance)).
 
 Every other setting is the service's, rendered from the same values (for staging, the `staging`
 Environment variables), including `TOPUP_BACKUP_KEY_VERSION` and
 `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version), except
-`TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation: the instance's own gateway URL is known
-only afterwards ([Verify the restored instance](#verify-the-restored-instance)). Render it from the
+`TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation: the gateway domain of the node that
+runs the instance is known only afterwards
+([Verify the restored instance](#verify-the-restored-instance)). Render it from the
 commit of the live compose, with the live images and every attested setting
 ([README](README.md#attested-settings)) exported:
 
@@ -227,10 +232,59 @@ the full `topup` next to the live instance. Pass `--env-file` on every create: w
 Cloud gives the new instance the encrypted environment of an existing instance of the app, with
 its read-write storage credentials.
 
-Each instance gets its own gateway endpoint, `https://<instance_id>-<port>.<gateway.base_domain>`;
-Phala Cloud does not distribute traffic across the instances of an app. Still, while a
-replacement runs next to a live instance, check that the live URL keeps answering as the live
-instance (an empty `200` on `/healthz`, never the read-only JSON).
+### Addressing the restore-check instance
+
+The dstack gateway routes `https://<id>-<port>.<gateway.base_domain>` to port `<port>` in a CVM,
+where `<id>` is an app id or an instance id ([dstack usage guide][dstack-usage]: "When using the
+app ID, the load balancer will select one of the available instances"). For an app id, the gateway
+(`select_top_n_hosts` in [gateway v0.5.9][gw-select] and [v0.6.0-rc5][gw-select-06]) takes up to
+`connect_top_n` instances of the app (3 in the shipped configuration) with a WireGuard handshake,
+opens a TCP connection to each at once, and proxies to the first that connects; an instance whose
+connection fails is skipped (`connect_multiple_hosts`, [v0.5.9][gw-connect],
+[v0.6.0-rc5][gw-connect-06]). Two instances of the app listening on the same port therefore share
+its traffic. The first staging drill (2026-09-25) observed exactly that: while its restore-check
+instance published 8080 like the service, 8 of 12 `/healthz` requests to the live URL
+`https://<app_id>-8080.<gateway.base_domain>` reached the drill instance. The instance-id form
+routes to one instance, but Phala Cloud reports `instance_id` in `cvms get` only once it has
+recorded it (the SDK's [`refreshCvmInstanceId`][phala-refresh] backfills it from the node or the
+gateway; CLI 1.1.22 has no command for it), and the drill instance's stayed `null` throughout. The
+instance id itself is in the instance's attested event log (the `instance-id` event), so steps
+that need it read it there.
+
+The restore-check variant therefore publishes `topup` on 8081, a port the service never publishes:
+
+- `https://<app_id>-8080.<gateway.base_domain>` reaches only instances running the service: a
+  restore-check instance does not accept a connection on 8080, so the gateway completes the
+  connection to the live instance instead.
+- `https://<app_id>-8081.<gateway.base_domain>` (`RESTORE_URL`) reaches only the restore-check
+  instance, for the same reason. It is fixed by the app id and the gateway domain alone.
+
+This rests on the gateway trying more than one instance per connection. The gateway operator can
+configure `connect_top_n`; if it tried one instance only, requests to the live URL that picked the
+restore-check instance would fail instead. The live isolation check below detects both failures,
+and during a staging drill it is a hard abort:
+
+```sh
+# Every one of 20 requests must reach the service: an empty 200, never the read-only JSON or an error.
+live_isolated() {
+  for _ in $(seq 20); do
+    test "$(curl -sS -o live-healthz.body -w '%{http_code}' "$LIVE_URL/healthz")" = 200 &&
+      test ! -s live-healthz.body || return 1
+  done
+}
+```
+
+In a real restore the failed instance is stopped or deleted, so no live instance shares the app's
+gateway routes; the replacement is verified on 8081 and serves 8080 only after
+[Resume](#resume-real-restore-only) upgrades it to the service compose, and products hold their
+calls until then. The procedure is otherwise unchanged.
+
+[dstack-usage]: https://github.com/Dstack-TEE/dstack/blob/v0.5.9/docs/usage.md#access-the-app
+[gw-select]: https://github.com/Dstack-TEE/dstack/blob/v0.5.9/gateway/src/main_service.rs#L1084-L1144
+[gw-select-06]: https://github.com/Dstack-TEE/dstack/blob/gateway-v0.6.0-rc5/dstack/gateway/src/main_service.rs#L2359-L2434
+[gw-connect]: https://github.com/Dstack-TEE/dstack/blob/v0.5.9/gateway/src/proxy/tls_passthough.rs#L144-L183
+[gw-connect-06]: https://github.com/Dstack-TEE/dstack/blob/gateway-v0.6.0-rc5/dstack/gateway/src/proxy/tls_passthough.rs#L214-L277
+[phala-refresh]: https://github.com/Phala-Network/phala-cloud/blob/cli-v1.1.22/js/src/actions/cvms/refresh_cvm_instance_id.ts
 
 ### Phala Cloud KMS (staging)
 
@@ -329,24 +383,34 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
    ```
 
-   Fetch `attestation.json` (`phala cvms attestation "$RESTORE_CVM_ID" --json`) and the
-   instance's guest-agent `info.json` (`https://<instance_id>-8090.<gateway.base_domain>/prpc/Info`,
-   as in the deploy read-back, [README](README.md#a-first-time-provisioning)), then verify the
-   attestation with the original app id:
+   Fetch `attestation.json` and the instance's guest-agent `info.json` (as in the deploy
+   read-back, [README](README.md#a-first-time-provisioning)), addressed by the instance id from the
+   attested event log, because `cvms get` may report `instance_id` as `null`
+   ([Addressing the restore-check instance](#addressing-the-restore-check-instance)). Then verify
+   the attestation with the original app id; it replays that event log:
 
    ```sh
+   npx --yes phala@1.1.22 cvms attestation "$RESTORE_CVM_ID" --json >attestation.json
+   npx --yes phala@1.1.22 cvms get "$RESTORE_CVM_ID" --json >restore-cvm.json
+   INSTANCE_ID="$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
+     | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
+     attestation.json)"
+   curl -fsS "https://$INSTANCE_ID-8090.$(jq -er '.gateway.base_domain' restore-cvm.json)/prpc/Info" \
+     >info.json
    deploy/verify-attestation.sh \
      attestation.json info.json "$ORIGINAL_APP_ID" restore-check.yml
    ```
 
 ## Verify the restored instance
 
-1. Derive the instance's own URL and wait (at most the one-hour RTO) until `/healthz` serves a
-   report:
+1. Derive the restore-check URL, port 8081 of the app on the gateway of the instance's node
+   ([Addressing the restore-check instance](#addressing-the-restore-check-instance)), and wait (at
+   most the one-hour RTO) until `/healthz` serves a report:
 
    ```sh
    npx --yes phala@1.1.22 cvms get "$RESTORE_CVM_ID" --json >restore-cvm.json
-   export RESTORE_URL="https://$(jq -er '.instance_id' restore-cvm.json)-8080.$(jq -er '.gateway.base_domain' restore-cvm.json)"
+   RESTORE_APP_ID="$(jq -er '.app_id' restore-cvm.json)" || exit 1
+   export RESTORE_URL="https://${RESTORE_APP_ID#0x}-8081.$(jq -er '.gateway.base_domain' restore-cvm.json)"
    curl -fsS "$RESTORE_URL/healthz" | tee healthz.json | jq -e '.mode == "read-only" and .restore_check != null'
    ```
 
@@ -402,7 +466,9 @@ origin products will call, upgrade the instance to it (staging: `phala deploy --
 read-write object-storage credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the
 same three names). Require:
 
-- `/healthz` answers `200` with an empty body (the full service, not the read-only one);
+- `/healthz` on the service URL `https://<app_id>-8080.<gateway.base_domain>` answers `200` with
+  an empty body (the full service, not the read-only one; `RESTORE_URL` on 8081 no longer
+  answers);
 - `backup` finds no base backup on the promoted timeline and takes one at once (`walg-timeline-backup`);
   until it completes the new timeline cannot be restored, so nothing resumes before a
   `base_<timeline>…` backup newer than the switch is listed and new WAL segments of that timeline
@@ -423,18 +489,41 @@ never write to the source WAL prefix: after promotion it is on a new timeline, a
 file, segments, and `key-versions/current.json` would make a later real restore follow
 `recovery_target_timeline=latest` onto the drill's timeline. It must also never run `backup`
 (`wal-g delete retain` on the shared prefix) or the full `topup` (the live application's keys, next
-to the live instance). The restore-check variant guarantees all three.
+to the live instance). The restore-check variant guarantees all three, and it never receives the
+live URL's traffic because it publishes 8081, not 8080
+([Addressing the restore-check instance](#addressing-the-restore-check-instance)).
 
 1. Issue an R2 API token with **Object Read only** on the staging bucket only, build the
    [restore env file](#the-restore-env-file) with it, and render the
    [restore-check variant](#the-restore-check-variant) with the live staging images and settings.
-2. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only.
-3. Record the drill start time (the RPO anchor), then
+   Require that it publishes only `topup` on 8081 (the preflight's fresh render enforces it too):
+
+   ```sh
+   docker compose -f restore-check.yml config --format json |
+     jq -e '[.services[] | .ports[]? | .published] == ["8081"]'
+   ```
+
+2. Derive the live URL and require the [live isolation check](#addressing-the-restore-check-instance)
+   (`live_isolated`) to pass before the drill instance exists:
+
+   ```sh
+   npx --yes phala@1.1.22 cvms get "$SOURCE_CVM_ID" --json >source.json
+   LIVE_APP_ID="$(jq -er '.app_id' source.json)" || exit 1
+   export LIVE_URL="https://${LIVE_APP_ID#0x}-8080.$(jq -er '.gateway.base_domain' source.json)"
+   live_isolated
+   ```
+
+3. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only.
+4. Record the drill start time (the RPO anchor), then
    [create the instance](#phala-cloud-kms-staging) and delete the env file.
-4. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
+5. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
    and RTO in the drill log. Never upgrade the drill instance to the service compose or seal
-   read-write credentials into it.
-5. Delete the drill instance by its own `vm_uuid` (never by app id or name, which also match the
+   read-write credentials into it. **Hard abort:** run `live_isolated` right after the instance is
+   created, then at least every five minutes and before each verification step (including after
+   the upgrade in its step 4) until the instance is deleted. If it fails even once, stop the drill,
+   delete the drill instance at once (next step), and record the drill as aborted with the failing
+   responses.
+6. Delete the drill instance by its own `vm_uuid` (never by app id or name, which also match the
    live instance), revoke the read-only token, and remove the drill silences:
 
    ```sh
@@ -460,3 +549,7 @@ to the live instance). The restore-check variant guarantees all three.
   unsafe reverse transition or failed lookup requires an incident repair and another complete
   check.
 - **RTO over 3600 seconds:** escalate even if the eventual restore passes.
+- **`live_isolated` fails during a staging drill** (the live URL answered with the read-only JSON,
+  an error, or no response): delete the drill instance at once by its `vm_uuid`, confirm
+  `live_isolated` passes again, and do not rerun the drill until the rendered restore-check compose
+  is confirmed to publish only 8081 and the gateway's routing is understood.

@@ -34,6 +34,7 @@ grep -F "image: $postgres" "$tmp/compose.yml" >/dev/null
 grep -F 'TOPUP_PUBLIC_ORIGIN: "https://topup.example"' "$tmp/compose.yml" >/dev/null
 grep -F 'TOPUP_SERVICE_ENABLED: "on"' "$tmp/compose.yml" >/dev/null
 grep -F 'TOPUP_RESTORE_FROM_BACKUP: "off"' "$tmp/compose.yml" >/dev/null
+grep -F -- '- "8080:8080"' "$tmp/compose.yml" >/dev/null
 grep -F -- '- "1,0"' "$tmp/compose.yml" >/dev/null
 # Only the owner-sealed secrets stay env references.
 docker compose -f "$tmp/compose.yml" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' |
@@ -49,8 +50,9 @@ render TOPUP_RPC_PROVIDER_A_URL=https://other.example/sepolia "$root/deploy/rend
     echo "the label digest does not change with TOPUP_RPC_PROVIDER_A_URL" >&2
     exit 1
 }
-# Modes come only from the variant, never from the environment.
-render TOPUP_SERVICE_ENABLED=off TOPUP_RESTORE_FROM_BACKUP=on "$root/deploy/render-compose.sh" |
+# Modes and the published port come only from the variant, never from the environment.
+render TOPUP_SERVICE_ENABLED=off TOPUP_RESTORE_FROM_BACKUP=on TOPUP_INGRESS_PORT=8081 \
+    "$root/deploy/render-compose.sh" |
     cmp -s - "$tmp/compose.yml" || {
     echo "the environment changed a mode switch" >&2
     exit 1
@@ -58,6 +60,7 @@ render TOPUP_SERVICE_ENABLED=off TOPUP_RESTORE_FROM_BACKUP=on "$root/deploy/rend
 render "$root/deploy/render-compose.sh" --restore-check >"$tmp/restore-check.yml"
 grep -F 'TOPUP_SERVICE_ENABLED: "read-only"' "$tmp/restore-check.yml" >/dev/null
 grep -F 'TOPUP_RESTORE_FROM_BACKUP: "on"' "$tmp/restore-check.yml" >/dev/null
+grep -F -- '- "8081:8080"' "$tmp/restore-check.yml" >/dev/null
 [[ "$(label "$tmp/compose.yml")" != "$(label "$tmp/restore-check.yml")" ]]
 if render TOPUP_ADMIN_KID= "$root/deploy/render-compose.sh" >/dev/null 2>"$tmp/empty.err"; then
     echo "render-compose accepted an empty setting" >&2

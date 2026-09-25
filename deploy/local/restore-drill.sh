@@ -619,7 +619,9 @@ wait_for "heartbeat failing closed" failed_closed heartbeat heartbeat
 wait_for "backup idling" backup_idle
 storage_is_read_only
 
-# The operator's only view of the replacement: /healthz and the read API on its gateway URL.
+# The operator's only view of the replacement: /healthz and the read API on its restore URL (in a
+# CVM, port 8081 of the app's gateway URL, which the attested variant publishes instead of 8080;
+# validate-compose.sh checks that; here, topup's container port on the compose network).
 wait_for "restore-check report on /healthz" restore_report_served
 health=$(topup_get /healthz)
 restore_report=$(printf '%s\n' "$health" | jq -ce '.restore_check')

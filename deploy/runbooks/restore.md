@@ -37,8 +37,11 @@ its dedicated tools service with owner credentials and checks the same migration
 - Planned drill and a verified backup exists: proceed only in a throwaway instance of the app,
   following the "Staging restore drill" section of `deploy/RESTORE.md` (the restore-check variant
   of the compose, `deploy/render-compose.sh --restore-check`: restore required, archiving and
-  base backups off, `topup` read-only; read-only object-storage credentials; verify through
-  `/healthz` and signed reads only, then delete the instance).
+  base backups off, `topup` read-only and published on 8081 only, never on the live 8080;
+  read-only object-storage credentials; verify through `/healthz` and signed reads on
+  `https://<app_id>-8081.<gateway domain>` only, then delete the instance). The live isolation
+  check (`live_isolated` in `deploy/RESTORE.md`) is a hard abort: if the live URL ever answers with
+  anything but the service's empty `200`, delete the drill instance at once.
 - Primary database unavailable: declare incident and restore to a new encrypted volume/CVM.
 - Backup list empty, stale, or unverifiable: do not resume; escalate data-loss risk.
 

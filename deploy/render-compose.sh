@@ -9,10 +9,12 @@
 # services that carry it.
 #
 # The topup compose has two variants of the same source. The default is the service:
-# TOPUP_RESTORE_FROM_BACKUP=off and TOPUP_SERVICE_ENABLED=on. --restore-check renders the restore
-# verification instance (deploy/RESTORE.md): TOPUP_RESTORE_FROM_BACKUP=on (PostgreSQL restores and
-# never archives, `backup` idles, `restore-check` runs) and TOPUP_SERVICE_ENABLED=read-only. The
-# renderer sets both; they are never read from the environment.
+# TOPUP_RESTORE_FROM_BACKUP=off, TOPUP_SERVICE_ENABLED=on, and TOPUP_INGRESS_PORT=8080.
+# --restore-check renders the restore verification instance (deploy/RESTORE.md):
+# TOPUP_RESTORE_FROM_BACKUP=on (PostgreSQL restores and never archives, `backup` idles,
+# `restore-check` runs), TOPUP_SERVICE_ENABLED=read-only, and TOPUP_INGRESS_PORT=8081, so the
+# gateway never routes the service's port 8080 to it. The renderer sets all three; they are never
+# read from the environment.
 #
 # --images-only renders the image digests alone (Release images uses it to validate digests).
 # Values are never printed: errors name only the variable.
@@ -86,9 +88,9 @@ fi
 
 sealed=" $(awk '/^[[:space:]]*($|#)/ { next } { sub(/=.*/, ""); printf "%s ", $0 }' "$env_example")"
 if [[ "$variant" == restore-check ]]; then
-    TOPUP_RESTORE_FROM_BACKUP=on TOPUP_SERVICE_ENABLED=read-only
+    TOPUP_RESTORE_FROM_BACKUP=on TOPUP_SERVICE_ENABLED=read-only TOPUP_INGRESS_PORT=8081
 else
-    TOPUP_RESTORE_FROM_BACKUP=off TOPUP_SERVICE_ENABLED=on
+    TOPUP_RESTORE_FROM_BACKUP=off TOPUP_SERVICE_ENABLED=on TOPUP_INGRESS_PORT=8080
 fi
 
 # Values land in double-quoted YAML strings or JSON strings that Compose interpolates: allow
