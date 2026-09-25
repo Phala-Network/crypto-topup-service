@@ -51,7 +51,7 @@ restore_from_backup() {
     staging="$(dirname "$PGDATA")/restore-from-backup.partial"
     rm -rf "$staging"
     backup_name=$(as_postgres "${WALG_BIN:-wal-g}" backup-list --json |
-        jq -er 'max_by(.time) | .backup_name') || {
+        jq -er 'max_by(.time | sub("[.][0-9]+"; "") | fromdateiso8601) | .backup_name') || {
         echo "TOPUP_RESTORE_FROM_BACKUP=on: no base backup could be listed" >&2
         exit 1
     }

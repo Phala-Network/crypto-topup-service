@@ -105,7 +105,7 @@ environment the instance was created with. The replacement therefore always boot
 restore as well as a drill, with a restore-time environment:
 
 - `TOPUP_RESTORE_FROM_BACKUP=on`. The PostgreSQL entrypoint finds the data directory empty,
-  selects the newest base backup (`wal-g backup-list`, greatest `time`), fetches it with
+  selects the newest base backup (`wal-g backup-list`, latest `time`), fetches it with
   `walg-backup-fetch` beside the data directory, and moves it into place only when complete, with
   `recovery.signal`. PostgreSQL then replays every archived segment through `walg-restore-command`
   and promotes at the end of the archive. A data directory that holds anything is started as is
