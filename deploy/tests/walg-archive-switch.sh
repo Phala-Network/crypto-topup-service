@@ -1,8 +1,10 @@
 #!/bin/sh
-# Starts the postgres-walg image and proves TOPUP_WAL_ARCHIVE controls archiving, even against
-# user-supplied flags, so a restore drill cannot write into the production WAL prefix, and that
-# TOPUP_RESTORE_FROM_BACKUP=on forces archiving off and never touches a data directory that holds
-# anything. deploy/local/restore-drill.sh runs the restore itself end to end.
+# Starts the postgres-walg image and proves its bootstrap and archive switch: an empty data
+# directory is initialized only when the backup prefix is listed and holds no base backup, and
+# never after a listing error; the service archives; TOPUP_RESTORE_FROM_BACKUP=on (the
+# restore-check variant) forces archiving off even against user-supplied flags, requires a base
+# backup, and never touches a data directory that holds anything. WAL-G's file storage stands in
+# for object storage. deploy/local/restore-drill.sh runs the restore itself end to end.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -65,67 +67,63 @@ expect() {
     }
 }
 
-start default "$image"
+# An empty prefix: WAL-G lists no base backup, so a new cluster is initialized, and it archives.
+empty_prefix="-e WALG_FILE_PREFIX=/tmp"
+start default $empty_prefix "$image"
 expect default 'SHOW archive_mode' on
 expect default 'SHOW archive_command' 'walg-cron wal-push %p'
+expect default 'SHOW restore_command' 'walg-restore-command %f %p'
 
-# User flags come first; the entrypoint's archive flags are appended and win.
-start off -e TOPUP_WAL_ARCHIVE=off "$image" postgres -c archive_mode=on \
-    -c "archive_command=walg-cron wal-push %p"
-expect off 'SHOW archive_mode' off
-sql off 'CREATE TABLE archive_probe (id int); INSERT INTO archive_probe VALUES (1)' >/dev/null
-sql off 'SELECT pg_switch_wal()' >/dev/null
-sql off 'CHECKPOINT' >/dev/null
-test "$(sql off 'SELECT count(*) FROM pg_ls_archive_statusdir()')" -eq 0 || {
-    echo "archive status files exist although TOPUP_WAL_ARCHIVE=off" >&2
-    exit 1
+# expect_exit STATUS MESSAGE ARGS...: the container exits with STATUS and logs MESSAGE.
+expect_exit() {
+    expected=$1
+    message=$2
+    shift 2
+    set +e
+    output=$(docker run --rm -e POSTGRES_PASSWORD=postgres "$@" 2>&1)
+    status=$?
+    set -e
+    test "$status" -eq "$expected" && printf '%s\n' "$output" | grep -F -- "$message" >/dev/null || {
+        printf '%s\n' "$output" >&2
+        echo "expected exit $expected with '$message', got $status" >&2
+        exit 1
+    }
 }
 
-set +e
-docker run --rm -e POSTGRES_PASSWORD=postgres -e TOPUP_WAL_ARCHIVE=maybe "$image" \
-    >/dev/null 2>&1
-status=$?
-set -e
-test "$status" -eq 64 || {
-    echo "invalid TOPUP_WAL_ARCHIVE returned $status instead of 64" >&2
-    exit 1
-}
+expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" $empty_prefix \
+    -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image"
 
-set +e
-docker run --rm -e POSTGRES_PASSWORD=postgres -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image" \
-    >/dev/null 2>&1
-status=$?
-set -e
-test "$status" -eq 64 || {
-    echo "invalid TOPUP_RESTORE_FROM_BACKUP returned $status instead of 64" >&2
-    exit 1
-}
-
-# An empty data directory without a reachable backup must fail, not fall back to initdb.
-set +e
-docker run --rm -v "$volume:/var/lib/postgresql" -e POSTGRES_PASSWORD=postgres \
-    -e TOPUP_RESTORE_FROM_BACKUP=on "$image" >/dev/null 2>&1
-status=$?
-set -e
-test "$status" -ne 0 || {
-    echo "restore from backup without object storage unexpectedly started PostgreSQL" >&2
-    exit 1
-}
+# A listing error (here: a prefix that does not exist) must fail, not fall back to initdb, in
+# either variant; so must the restore-check variant with nothing to restore.
+expect_exit 1 "refusing to initialize an empty data directory" \
+    -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/nonexistent "$image"
+expect_exit 1 "refusing to initialize an empty data directory" \
+    -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/nonexistent \
+    -e TOPUP_RESTORE_FROM_BACKUP=on "$image"
+expect_exit 1 "the backup prefix holds no base backup" \
+    -v "$volume:/var/lib/postgresql" $empty_prefix -e TOPUP_RESTORE_FROM_BACKUP=on "$image"
 test -z "$(docker run --rm -v "$volume:/var/lib/postgresql" --entrypoint ls "$image" \
     -A /var/lib/postgresql/data)" || {
-    echo "a failed restore from backup left files in the data directory" >&2
+    echo "a failed bootstrap left files in the data directory" >&2
     exit 1
 }
 
-# A data directory that holds a cluster is started as is: no fetch, archiving off even when
-# TOPUP_WAL_ARCHIVE=on and a user flag asks for it, and the restore command set for recovery.
-start existing -v "$volume:/var/lib/postgresql" "$image"
+# A data directory that holds a cluster is started as is, without listing the prefix: no fetch,
+# and with TOPUP_RESTORE_FROM_BACKUP=on archiving off even when a user flag asks for it.
+start existing -v "$volume:/var/lib/postgresql" $empty_prefix "$image"
 sql existing 'CREATE TABLE existing_probe (id int); INSERT INTO existing_probe VALUES (1)' >/dev/null
 docker rm -f "$prefix-existing" >/dev/null
-start restored -v "$volume:/var/lib/postgresql" -e TOPUP_RESTORE_FROM_BACKUP=on \
-    -e TOPUP_WAL_ARCHIVE=on "$image" postgres -c archive_mode=on
+start restored -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/nonexistent \
+    -e TOPUP_RESTORE_FROM_BACKUP=on "$image" postgres -c archive_mode=on \
+    -c "archive_command=walg-cron wal-push %p"
 expect restored 'SHOW archive_mode' off
 expect restored 'SHOW restore_command' 'walg-restore-command %f %p'
 expect restored 'SELECT count(*) FROM existing_probe' 1
+sql restored 'SELECT pg_switch_wal()' >/dev/null
+sql restored 'CHECKPOINT' >/dev/null
+test "$(sql restored 'SELECT count(*) FROM pg_ls_archive_statusdir()')" -eq 0 || {
+    echo "archive status files exist although TOPUP_RESTORE_FROM_BACKUP=on" >&2
+    exit 1
+}
 
-echo "TOPUP_WAL_ARCHIVE and TOPUP_RESTORE_FROM_BACKUP switch tests passed"
+echo "postgres-walg bootstrap and archive switch tests passed"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local (offline) preflight checks: the example env file, a zero-address route, a stale render,
-# and an OS image other than the approved one must be refused, and a complete env file with a
-# filled route must pass.
+# the wrong variant, invalid settings, and an OS image other than the approved one must be
+# refused, and a complete env file with a filled route must pass.
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -11,6 +11,13 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 export TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111
 export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222
+# The public settings, as Deploy staging passes them from the `staging` Environment variables.
+export AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
+export AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres
+export TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+export TOPUP_BACKUP_KEY_VERSION=1 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0
+export TOPUP_PUBLIC_ORIGIN=https://pending.invalid
+export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
 # A source compose whose inline route still has zero-address placeholders, as before the route PR.
 sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
     "$root/deploy/docker-compose.yml" >"$tmp/zero-source.yml"
@@ -21,12 +28,6 @@ cp "$root/deploy/docker-compose.yml" "$tmp/filled-source.yml"
 
 awk -F= '
     /^[[:space:]]*($|#)/ { next }
-    $1 == "TOPUP_ADMIN_PUBLIC_KEY" { print $1 "=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="; next }
-    $1 == "TOPUP_PUBLIC_ORIGIN" { print $1 "=https://pending.invalid"; next }
-    $1 == "TOPUP_RPC_PROVIDER_A_URL" { print $1 "=https://rpc-a.example/sepolia"; next }
-    $1 == "TOPUP_RPC_PROVIDER_B_URL" { print $1 "=https://rpc-b.example/sepolia"; next }
-    $1 == "WALG_S3_PREFIX" { print $1 "=s3://topup-staging/postgres"; next }
-    $1 == "AWS_SESSION_TOKEN" || $1 == "COINMETRICS_API_KEY" || $1 == "SENTRY_DSN" { print $1 "="; next }
     $2 == "replace-me" { print $1 "=staging-value"; next }
     { print }
 ' "$root/deploy/staging.env.example" >"$tmp/complete.env"
@@ -46,7 +47,7 @@ expect_failure() {
     }
 }
 
-expect_failure example-env "TOPUP_PUBLIC_ORIGIN still contains replace-me" \
+expect_failure example-env "AWS_ACCESS_KEY_ID still contains replace-me" \
     --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml" \
     --source "$tmp/zero-source.yml"
 expect_failure zero-route \
@@ -67,6 +68,25 @@ expect_failure stale-render "differs from a fresh render" \
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
+
+# The restore-check variant passes only with --restore-check, and the service variant only without.
+"$root/deploy/render-compose.sh" --restore-check "$tmp/filled-source.yml" >"$tmp/restore-check.yml"
+expect_failure restore-check-as-service "the compose is not the service variant" \
+    --env "$tmp/complete.env" --compose "$tmp/restore-check.yml" --source "$tmp/filled-source.yml"
+"$preflight" --env "$tmp/complete.env" --compose "$tmp/restore-check.yml" \
+    --source "$tmp/filled-source.yml" --restore-check --offline >/dev/null
+expect_failure service-as-restore-check "the compose is not the --restore-check variant" \
+    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml" \
+    --restore-check
+
+# Settings are checked in the rendered compose; a hand-edited value is also a stale render.
+TOPUP_RPC_PROVIDER_B_URL=$TOPUP_RPC_PROVIDER_A_URL "$root/deploy/render-compose.sh" \
+    "$tmp/filled-source.yml" >"$tmp/same-rpc.yml"
+expect_failure same-rpc "the two RPC provider URLs must be different providers" \
+    --env "$tmp/complete.env" --compose "$tmp/same-rpc.yml" --source "$tmp/filled-source.yml"
+sed 's|s3://topup-staging/postgres|s3://other/postgres|' "$tmp/filled-route.yml" >"$tmp/edited.yml"
+expect_failure edited "differs from a fresh render" \
+    --env "$tmp/complete.env" --compose "$tmp/edited.yml" --source "$tmp/filled-source.yml"
 
 # Only the approved production image passes; no Phala Cloud node offers dstack 0.6.0.
 for image in dstack-0.6.0-rc5 dstack-dev-0.5.9 dstack-nvidia-0.5.9 dstack-0.5.8; do
@@ -90,8 +110,9 @@ if grep -q sentry-secret "$tmp/bad-sentry.out" "$tmp/bad-sentry.err"; then
     exit 1
 fi
 
-# The CI-written env file has the owner-sealed S3 keys empty: accepted only with --unsealed.
-sed -E 's/^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.*/\1=/' "$tmp/complete.env" >"$tmp/unsealed.env"
+# The CI-written env file has every owner-sealed secret empty: accepted only with --unsealed.
+: >"$tmp/unsealed.env"
+"$root/deploy/write-staging-env.sh" "$tmp/unsealed.env" >/dev/null
 expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
     --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
 "$preflight" --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" \

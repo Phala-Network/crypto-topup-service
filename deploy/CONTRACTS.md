@@ -185,6 +185,8 @@ Create a new route version; never mutate the contract tuple of an enabled versio
 
 ```sh
 deploy/validate-compose.sh
+# Export the attested settings first: the `staging` Environment variables
+# (deploy/README.md, "Attested settings").
 deploy/render-compose.sh > deploy/docker-compose.staging.yml
 docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```

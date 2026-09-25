@@ -5,8 +5,9 @@ set -eu
 # and TCB, the RTMR3 event-log replay, and the OS image measurements. The replayed app id must be
 # APP_ID and the replayed compose hash the SHA-256 of the attested app-compose, whose
 # docker_compose_file must be EXPECTED_COMPOSE byte for byte. Then the compose policy: without
-# ENV_EXAMPLE, the topup compose (allowed_envs from app-compose.example.json, credential isolation,
-# the single 8080 ingress); with ENV_EXAMPLE and SERVICE:PORT (the reference product),
+# ENV_EXAMPLE, the topup compose (allowed_envs from app-compose.example.json, which are also the only
+# variables the compose reads, credential isolation, the single 8080 ingress; either rendered
+# variant); with ENV_EXAMPLE and SERVICE:PORT (the reference product),
 # allowed_envs exactly ENV_EXAMPLE's names and SERVICE:PORT the only published port.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
@@ -98,6 +99,14 @@ if [ "$#" -eq 6 ]; then
     echo "attested compose, allowed_envs, and ingress passed"
     exit 0
 fi
+# Every setting is attested: the compose reads nothing from the env but the sealed secrets.
+docker compose -f "$tmp/docker-compose.yml" config --variables |
+    awk 'NR > 1 && NF > 0 { print $1 }' | sort -u >"$tmp/compose-variables"
+cmp -s "$tmp/compose-variables" "$tmp/expected-envs" || {
+    echo "attested compose reads other env variables than the reviewed allow-list" >&2
+    diff -u "$tmp/expected-envs" "$tmp/compose-variables" >&2 || true
+    exit 1
+}
 jq -e '
     (.services.topup.environment | has("MIGRATE_DATABASE_URL") | not) and
     ((.services.postgres.ports // []) | length == 0) and

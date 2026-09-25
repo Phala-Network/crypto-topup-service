@@ -24,7 +24,6 @@ pub struct CoinMetrics {
     client: reqwest::Client,
     endpoint: Redacted,
     asset: String,
-    api_key: Option<String>,
 }
 
 impl Debug for CoinMetrics {
@@ -33,27 +32,22 @@ impl Debug for CoinMetrics {
             .debug_struct("CoinMetrics")
             .field("endpoint", &self.endpoint)
             .field("asset", &self.asset)
-            .field("api_key_configured", &self.api_key.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl CoinMetrics {
-    /// Creates a source using the public endpoint and optional `COINMETRICS_API_KEY`.
+    /// Creates a source using the keyless community endpoint.
     pub fn new(asset: String) -> Result<Self, PriceError> {
         Self::with_endpoint(asset, ENDPOINT)
     }
 
     fn with_endpoint(asset: String, endpoint: &str) -> Result<Self, PriceError> {
         let endpoint = Redacted::parse(endpoint).map_err(|_| PriceError::InvalidUrl)?;
-        let api_key = std::env::var("COINMETRICS_API_KEY")
-            .ok()
-            .filter(|value| !value.is_empty());
         Ok(Self {
             client: http_client()?,
             endpoint,
             asset,
-            api_key,
         })
     }
 
@@ -90,16 +84,13 @@ impl CoinMetrics {
 #[async_trait]
 impl PriceSource for CoinMetrics {
     async fn observe(&self) -> Result<Observation, PriceError> {
-        let mut request = self.client.get(self.endpoint.expose().clone()).query(&[
+        let request = self.client.get(self.endpoint.expose().clone()).query(&[
             ("assets", self.asset.as_str()),
             ("metrics", METRIC),
             ("frequency", FREQUENCY),
             ("limit_per_asset", "1"),
             ("paging_from", "end"),
         ]);
-        if let Some(api_key) = &self.api_key {
-            request = request.query(&[("api_key", api_key)]);
-        }
         let response = request.send().await.map_err(|error| {
             PriceError::Request(self.endpoint.request_error("coinmetrics fetch", &error))
         })?;
@@ -152,20 +143,5 @@ mod tests {
                 ))
                 .is_err()
         );
-    }
-
-    #[test]
-    fn debug_does_not_expose_api_key() {
-        let secret = "coinmetrics-secret-token";
-        let source = CoinMetrics {
-            client: http_client().expect("HTTP client"),
-            endpoint: Redacted::parse(ENDPOINT).expect("endpoint URL"),
-            asset: "pha".to_owned(),
-            api_key: Some(secret.to_owned()),
-        };
-
-        let debug = format!("{source:?}");
-        assert!(debug.contains("api_key_configured: true"));
-        assert!(!debug.contains(secret));
     }
 }

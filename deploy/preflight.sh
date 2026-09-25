@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Preflight for a staging deploy (deploy/README.md, "First staging deploy checklist"). It is
 # read-only against remote systems: it never pushes, deploys, updates, or sends a transaction. It
-# reads the env file, the rendered compose, the images in their registry, the asset chain through
-# the env file's two RPC providers, and the Phala Cloud account the CLI is logged in to. Locally
-# it renders the compose, builds the contracts (verify-deployment.sh), and pulls both images.
+# reads the env file (the owner-sealed secrets), the rendered compose (which holds the public
+# settings, deploy/README.md "Attested settings"), the images in their registry, the asset chain
+# through the compose's two RPC providers, and the Phala Cloud account the CLI is logged in to.
+# Locally it renders the compose, builds the contracts (verify-deployment.sh), and pulls both
+# images.
 #
 # Usage: deploy/preflight.sh --env .env.staging --compose deploy/docker-compose.staging.yml \
 #          --workspace NAME --os-image NAME [--kms base|phala] [--kms-contract ADDRESS] \
-#          [--source COMPOSE] [--offline] [--unsealed]
+#          [--source COMPOSE] [--restore-check] [--offline] [--unsealed]
 #
 # --os-image must be the owner-approved OS image, dstack-0.5.9 (deploy/README.md): the pinned dstack
 # SDK speaks the dstack 0.5 guest API. Online, the image must be a listed production image and a
@@ -20,16 +22,15 @@
 # private image fails here.
 #
 # --source is the unrendered compose the rendered file must come from (default
-# deploy/docker-compose.yml of this checkout). --offline runs only the local checks (env file,
-# compose, route). --unsealed accepts empty owner-sealed secrets (the S3 keys, the Coin Metrics
-# key, and the Sentry DSN): Deploy staging provisions with them empty and the owner seals the complete env file from
-# their own machine; check that file without --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure
-# is reported; the exit status is 1 if any.
+# deploy/docker-compose.yml of this checkout). --restore-check expects the compose rendered with
+# render-compose.sh --restore-check (deploy/RESTORE.md). --offline runs only the local checks (env
+# file, compose, route). --unsealed accepts empty owner-sealed secrets: Deploy staging provisions
+# with them empty and the owner seals them from their own machine; check that file without
+# --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure is
+# reported; the exit status is 1 if any.
 #
-# RPC URLs may carry provider API keys. Cast reads them from ETH_RPC_URL here, but
-# verify-deployment.sh takes them as arguments, so they are visible in the process list while it
-# runs; run preflight on a single-user machine. Output never prints them: tool errors are
-# redacted to "provider a" and "provider b".
+# The RPC URLs are attested and published with the compose, so they must be keyless public URLs.
+# Output still never prints them: tool errors are redacted to "provider a" and "provider b".
 set -euo pipefail
 source "$(dirname -- "$0")/contracts/common.sh"
 source "$(dirname -- "$0")/preflight-phala.sh"
@@ -38,20 +39,18 @@ root="$REPO_ROOT"
 example="$root/deploy/staging.env.example"
 expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
 route_config=topup_route_phala_cloud_sepolia_pha
-# May stay empty: a static S3 key has no session token, AWS S3 needs no endpoint, and an empty
-# Coin Metrics key selects the community endpoint.
-optional_empty=" AWS_SESSION_TOKEN AWS_ENDPOINT COINMETRICS_API_KEY SENTRY_DSN "
+# May stay empty: an empty DSN turns Sentry reporting off.
+optional_empty=" SENTRY_DSN "
 # The owner-approved OS image (deploy/README.md, "OS image"): production, dstack 0.5.9.
 approved_os_image=dstack-0.5.9
-# The only secrets of the env file. GitHub never holds them; the owner seals them (README).
-owner_sealed=" AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN COINMETRICS_API_KEY SENTRY_DSN "
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME" \
-        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--offline] [--unsealed]" >&2
+        "[--kms base|phala] [--kms-contract ADDRESS] [--source COMPOSE] [--restore-check]" \
+        "[--offline] [--unsealed]" >&2
     exit 64
 }
-env_file="" compose="" workspace="" os_image="" kms=base offline=0 unsealed=0
+env_file="" compose="" workspace="" os_image="" kms=base offline=0 unsealed=0 variant=()
 source_compose="$REPO_ROOT/deploy/docker-compose.yml"
 kms_contract=0x2f83172A49584C017F2B256F0FB2Dca14126Ba9C
 while (($#)); do
@@ -63,6 +62,7 @@ while (($#)); do
         --kms) kms="${2:-}"; shift 2 ;;
         --kms-contract) kms_contract="${2:-}"; shift 2 ;;
         --source) source_compose="${2:-}"; shift 2 ;;
+        --restore-check) variant=(--restore-check); shift ;;
         --offline) offline=1; shift ;;
         --unsealed) unsealed=1; shift ;;
         *) usage ;;
@@ -112,40 +112,18 @@ while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
     env[${line%%=*}]=${line#*=}
 done <"$env_file"
-allowed_empty=$optional_empty
-((unsealed)) && allowed_empty+=$owner_sealed
 for name in $(cat "$tmp/expected"); do
     value=${env[$name]-}
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
-    elif [[ -z "$value" && "$allowed_empty" != *" $name "* ]]; then
+    elif [[ -z "$value" ]] && ((unsealed == 0)) && [[ "$optional_empty" != *" $name "* ]]; then
         fail "$name is empty"
     fi
 done
-origin=${env[TOPUP_PUBLIC_ORIGIN]-}
-if [[ "$origin" =~ ^https://[a-z0-9.-]+(:[0-9]+)?$ ]]; then
-    if [[ "$origin" == *.invalid || "$origin" == *.invalid:* ]]; then
-        echo "note: TOPUP_PUBLIC_ORIGIN is provisional; replace it with the gateway URL after" \
-            "provisioning (deploy/README.md) before issuing product credentials"
-    fi
-else
-    fail "TOPUP_PUBLIC_ORIGIN must be https://HOST[:PORT] in lowercase with no path"
-fi
-rpc_a=${env[TOPUP_RPC_PROVIDER_A_URL]-} rpc_b=${env[TOPUP_RPC_PROVIDER_B_URL]-}
-[[ "$rpc_a" == https://* && "$rpc_b" == https://* ]] ||
-    fail "both RPC provider URLs must use https"
-[[ "$rpc_a" != "$rpc_b" ]] || fail "the two RPC provider URLs must be different providers"
-admin_key_bytes=$(base64 -d 2>/dev/null <<<"${env[TOPUP_ADMIN_PUBLIC_KEY]-}" | wc -c) || admin_key_bytes=0
-[[ "$admin_key_bytes" == 32 ]] || fail "TOPUP_ADMIN_PUBLIC_KEY must be standard base64 of 32 bytes"
-[[ "${env[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
 # Empty turns Sentry reporting off; the service refuses to start with a malformed DSN.
 sentry_dsn=${env[SENTRY_DSN]-}
 [[ -z "$sentry_dsn" || "$sentry_dsn" =~ ^https://[0-9a-f]{32}@[a-z0-9.-]+/[0-9]+$ ]] ||
     fail "SENTRY_DSN must be empty or the project's DSN, https://KEY@HOST/PROJECT_ID"
-[[ "${env[TOPUP_WAL_ARCHIVE]-}" == on ]] || fail "TOPUP_WAL_ARCHIVE must be on for staging"
-[[ "${env[TOPUP_SERVICE_ENABLED]-}" == on ]] || fail "TOPUP_SERVICE_ENABLED must be on for staging"
-[[ "${env[TOPUP_RESTORE_FROM_BACKUP]-}" == off ]] ||
-    fail "TOPUP_RESTORE_FROM_BACKUP must be off for staging (deploy/RESTORE.md sets it only in a restore env)"
 
 if [[ -n "$os_image" && "$os_image" != "$approved_os_image" ]]; then
     fail "OS image $os_image is not the approved $approved_os_image (deploy/README.md)"
@@ -168,16 +146,66 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
             "$(diff "$tmp/expected" "$tmp/compose-variables" | grep '^[<>]' | tr '\n' ' ')"
     jq -j --arg name "$route_config" '.configs[$name].content // empty' "$tmp/compose.json" \
         >"$tmp/route.yaml"
+    # The public settings, from the attested compose.
+    declare -A setting=()
+    while IFS=$'\t' read -r name value; do
+        setting[$name]=$value
+    done < <(jq -r '.services as $s | ($s.topup.environment + $s.postgres.environment) as $e
+        | ($s.keys.command | index("--fallback-versions")) as $i
+        | (["TOPUP_ADMIN_KID", "TOPUP_ADMIN_PUBLIC_KEY", "TOPUP_PUBLIC_ORIGIN",
+            "TOPUP_RPC_PROVIDER_A_URL", "TOPUP_RPC_PROVIDER_B_URL", "TOPUP_SERVICE_ENABLED",
+            "WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION", "AWS_S3_FORCE_PATH_STYLE",
+            "TOPUP_BACKUP_KEY_VERSION", "TOPUP_RESTORE_FROM_BACKUP"][]
+            | [., ($e[.] // "" | strings)]),
+          ["TOPUP_BACKUP_KEY_FALLBACK_VERSIONS", (if $i then $s.keys.command[$i + 1] else "" end)]
+        | @tsv' \
+        "$tmp/compose.json")
+    origin=${setting[TOPUP_PUBLIC_ORIGIN]-}
+    if [[ "$origin" =~ ^https://[a-z0-9.-]+(:[0-9]+)?$ ]]; then
+        if [[ "$origin" == *.invalid || "$origin" == *.invalid:* ]]; then
+            echo "note: TOPUP_PUBLIC_ORIGIN is provisional; Deploy staging replaces it with the" \
+                "gateway URL after provisioning (deploy/README.md)"
+        fi
+    else
+        fail "TOPUP_PUBLIC_ORIGIN must be https://HOST[:PORT] in lowercase with no path"
+    fi
+    rpc_a=${setting[TOPUP_RPC_PROVIDER_A_URL]-} rpc_b=${setting[TOPUP_RPC_PROVIDER_B_URL]-}
+    [[ "$rpc_a" == https://* && "$rpc_b" == https://* ]] ||
+        fail "both RPC provider URLs must use https"
+    [[ "$rpc_a" != "$rpc_b" ]] || fail "the two RPC provider URLs must be different providers"
+    admin_key_bytes=$(base64 -d 2>/dev/null <<<"${setting[TOPUP_ADMIN_PUBLIC_KEY]-}" | wc -c) ||
+        admin_key_bytes=0
+    [[ "$admin_key_bytes" == 32 ]] || fail "TOPUP_ADMIN_PUBLIC_KEY must be standard base64 of 32 bytes"
+    [[ "${setting[WALG_S3_PREFIX]-}" == s3://?* ]] || fail "WALG_S3_PREFIX must be s3://BUCKET/PATH"
+    [[ "${setting[AWS_ENDPOINT]-}" == https://?* ]] || fail "AWS_ENDPOINT must be an https:// URL"
+    [[ "${setting[AWS_S3_FORCE_PATH_STYLE]-}" =~ ^(true|false)$ ]] ||
+        fail "AWS_S3_FORCE_PATH_STYLE must be true or false"
+    [[ "${setting[TOPUP_BACKUP_KEY_VERSION]-}" =~ ^[0-9]+$ ]] ||
+        fail "TOPUP_BACKUP_KEY_VERSION must be a decimal integer"
+    [[ "${setting[TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]-}" =~ ^[0-9]+(,[0-9]+)*$ ]] ||
+        fail "TOPUP_BACKUP_KEY_FALLBACK_VERSIONS must be comma-separated decimal integers"
+    if ((${#variant[@]})); then
+        expected_modes="on read-only"
+    else
+        expected_modes="off on"
+    fi
+    [[ "${setting[TOPUP_RESTORE_FROM_BACKUP]-} ${setting[TOPUP_SERVICE_ENABLED]-}" == "$expected_modes" ]] ||
+        fail "the compose is not the ${variant[*]:-service} variant (TOPUP_RESTORE_FROM_BACKUP" \
+            "${setting[TOPUP_RESTORE_FROM_BACKUP]-}, TOPUP_SERVICE_ENABLED ${setting[TOPUP_SERVICE_ENABLED]-})"
     # A stale render (older checkout, hand edits) must not reach the CLI: re-render the source
-    # with the same image references and compare byte for byte.
-    if TOPUP_IMAGE=$(jq -r '.services.topup.image' "$tmp/compose.json") \
-        POSTGRES_WALG_IMAGE=$(jq -r '.services.postgres.image' "$tmp/compose.json") \
-        "$root/deploy/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>/dev/null &&
+    # with the same images and settings and compare byte for byte.
+    render_env=()
+    for name in "${!setting[@]}"; do
+        render_env+=("$name=${setting[$name]}")
+    done
+    if env "${render_env[@]}" TOPUP_IMAGE="$(jq -r '.services.topup.image' "$tmp/compose.json")" \
+        POSTGRES_WALG_IMAGE="$(jq -r '.services.postgres.image' "$tmp/compose.json")" \
+        "$root/deploy/render-compose.sh" "${variant[@]}" "$source_compose" >"$tmp/fresh.yml" 2>/dev/null &&
         cmp -s "$tmp/fresh.yml" "$compose"; then
         :
     else
-        fail "$compose differs from a fresh render of $source_compose with the same images;" \
-            "re-run render-compose.sh from the commit being deployed"
+        fail "$compose differs from a fresh render of $source_compose with the same images and" \
+            "settings; re-run render-compose.sh from the commit being deployed"
     fi
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"

@@ -109,7 +109,11 @@ gas from a public faucet.
      topup route validate /route.yaml
    ```
 
-3. Render the sandbox compose with literal image digests and the inlined route:
+3. Render the sandbox compose with literal image digests, the sandbox's attested settings (the
+   names of the `staging` Environment variables in `deploy/README.md`, "Attested settings",
+   exported with the sandbox's values: its keyless Sepolia RPC URLs, its own backup prefix and
+   admin key, and `TOPUP_PUBLIC_ORIGIN`, the sandbox's public gateway URL, for example
+   `https://sandbox.topup.example`, no path), and the inlined route:
 
    ```sh
    TOPUP_IMAGE=...@sha256:... POSTGRES_WALG_IMAGE=...@sha256:... \
@@ -118,11 +122,10 @@ gas from a public faucet.
    ```
 
 4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
-   staging procedure in `deploy/README.md` describes, with a separate encrypted environment whose
-   RPC providers point at Sepolia and whose `TOPUP_PUBLIC_ORIGIN` is the sandbox's public gateway
-   URL (for example `https://sandbox.topup.example`, no path). Integrators sign the URL they
-   call and the service verifies `@target-uri` against this origin, so a wrong value makes every
-   signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
+   staging procedure in `deploy/README.md` describes, with a separate encrypted environment that
+   holds only the sandbox's own secrets (the `staging.env.example` names). Integrators sign the
+   URL they call and the service verifies `@target-uri` against the rendered
+   `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
    deployed sandbox URL before opening it to integrators.
 5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
    against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
