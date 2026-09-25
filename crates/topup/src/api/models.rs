@@ -456,6 +456,64 @@ pub struct RouteDailyReport {
     pub refunds_by_status: std::collections::BTreeMap<String, u64>,
     /// Maximum age in seconds keyed by current deposit state.
     pub age_in_state_max_seconds: std::collections::BTreeMap<String, u64>,
+    /// Latest scheduled flush planning run of this route in the serving process; absent for
+    /// unrouted assets and until the first run after a restart.
+    pub flush_planning: Option<FlushPlanningReport>,
+}
+
+/// Outcome of one scheduled flush planning run.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FlushPlanningReport {
+    /// When the run finished.
+    pub at: DateTime<Utc>,
+    /// `planned`; `idle` when no address met the flush policy, a flush was already in flight, or
+    /// reconciliation froze the chain; `operator_not_authorized` when the operator was not known
+    /// to hold `OPERATOR_ROLE`; `failed`; or `send_failed` when planning succeeded but sending or
+    /// maintaining a flush afterwards failed.
+    pub outcome: String,
+    /// Error of a failed run, without provider URLs.
+    pub error: Option<String>,
+}
+
+impl From<crate::observability::FlushPlanningStatus> for FlushPlanningReport {
+    fn from(status: crate::observability::FlushPlanningStatus) -> Self {
+        Self {
+            at: status.at,
+            outcome: status.outcome.code().to_owned(),
+            error: status.error,
+        }
+    }
+}
+
+/// Latest reconciliation round of the serving process.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ReconciliationRoundReport {
+    /// When the round finished.
+    pub at: DateTime<Utc>,
+    /// Checks that could not complete; empty after a complete round.
+    pub failed_checks: Vec<FailedCheckReport>,
+}
+
+/// One reconciliation check that could not complete.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FailedCheckReport {
+    /// Check code, such as `custody_balance`.
+    pub check: String,
+    /// Error that stopped the check, without provider URLs.
+    pub error: String,
+}
+
+impl From<crate::observability::ReconciliationStatus> for ReconciliationRoundReport {
+    fn from(status: crate::observability::ReconciliationStatus) -> Self {
+        Self {
+            at: status.at,
+            failed_checks: status
+                .failed_checks
+                .into_iter()
+                .map(|(check, error)| FailedCheckReport { check, error })
+                .collect(),
+        }
+    }
 }
 
 /// Daily finance report produced by C12.
@@ -469,6 +527,9 @@ pub struct DailyReportResponse {
     pub exposure_minor: Option<String>,
     /// SQL-computed metrics for each configured route.
     pub routes: Vec<RouteDailyReport>,
+    /// Latest reconciliation round of the serving process; absent until the first round after a
+    /// restart.
+    pub reconciliation: Option<ReconciliationRoundReport>,
 }
 
 /// Administrative route pause response.

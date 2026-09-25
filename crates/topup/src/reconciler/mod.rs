@@ -333,6 +333,7 @@ impl Reconciler {
             if let Err(error) = result {
                 tracing::error!(check = check.code(), %error, "reconciliation check failed");
                 report.failed_checks.push(check);
+                report.check_errors.push(error.to_string());
             }
             report.findings.extend(findings);
         }
@@ -393,7 +394,17 @@ impl Reconciler {
                     crate::observability::execution_deadline(LOOP_NAME, LOOP_INSTANCE, every);
                     tokio::select! {
                         () = cancellation.cancelled() => return,
-                        report = self.run_checks(false) => monitor.check_in(report.succeeded()),
+                        report = self.run_checks(false) => {
+                            monitor.check_in(report.succeeded());
+                            crate::observability::record_reconciliation(
+                                report
+                                    .failed_checks
+                                    .iter()
+                                    .map(|check| check.code().to_owned())
+                                    .zip(report.check_errors)
+                                    .collect(),
+                            );
+                        }
                     }
                     crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, every);
                 }

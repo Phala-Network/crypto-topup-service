@@ -13,6 +13,7 @@ from typing import cast
 import datetime
 
 if TYPE_CHECKING:
+    from ..models.reconciliation_round_report import ReconciliationRoundReport
     from ..models.route_daily_report import RouteDailyReport
 
 
@@ -30,14 +31,17 @@ class DailyReportResponse:
             the global
             exposure counter the global cap is enforced against. This service always sends it; it is
             optional in the schema so clients also parse reports from servers that predate it.
+        reconciliation (None | ReconciliationRoundReport | Unset):
     """
 
     generated_at: datetime.datetime
     routes: list[RouteDailyReport]
     exposure_minor: None | str | Unset = UNSET
+    reconciliation: None | ReconciliationRoundReport | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.reconciliation_round_report import ReconciliationRoundReport  # noqa: PLC0415
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
         generated_at = self.generated_at.isoformat()
@@ -53,6 +57,14 @@ class DailyReportResponse:
         else:
             exposure_minor = self.exposure_minor
 
+        reconciliation: dict[str, Any] | None | Unset
+        if isinstance(self.reconciliation, Unset):
+            reconciliation = UNSET
+        elif isinstance(self.reconciliation, ReconciliationRoundReport):
+            reconciliation = self.reconciliation.to_dict()
+        else:
+            reconciliation = self.reconciliation
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -63,11 +75,14 @@ class DailyReportResponse:
         )
         if exposure_minor is not UNSET:
             field_dict["exposure_minor"] = exposure_minor
+        if reconciliation is not UNSET:
+            field_dict["reconciliation"] = reconciliation
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.reconciliation_round_report import ReconciliationRoundReport  # noqa: PLC0415
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -89,10 +104,28 @@ class DailyReportResponse:
 
         exposure_minor = _parse_exposure_minor(d.pop("exposure_minor", UNSET))
 
+        def _parse_reconciliation(data: object) -> None | ReconciliationRoundReport | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                reconciliation_type_0 = ReconciliationRoundReport.from_dict(data)
+
+                return reconciliation_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | ReconciliationRoundReport | Unset, data)
+
+        reconciliation = _parse_reconciliation(d.pop("reconciliation", UNSET))
+
         daily_report_response = cls(
             generated_at=generated_at,
             routes=routes,
             exposure_minor=exposure_minor,
+            reconciliation=reconciliation,
         )
 
         daily_report_response.additional_properties = d

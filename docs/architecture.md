@@ -554,9 +554,12 @@ The route's attested `chain.flush` settings own the flush policy: the planning c
 `max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, and replacement fee bump.
 Gas policy compares gas-token value and token balance value in USD using separate reference
 rates. Changing any of these fields requires a new attested configuration version. Engineering
-limits that do not decide money are code constants: RPC timeout, balance batch size, replacement
-delay (3 blocks), gas-limit buffer, nonce-recovery window, estimation exclusion retry delay, and
-maintenance interval. The price scale (8) and the Coin Metrics metric (`ReferenceRateUSD`, 1m)
+limits that do not decide money are code constants: RPC timeout, replacement delay (3 blocks),
+gas-limit buffer, nonce-recovery window, estimation exclusion retry delay, and maintenance
+interval. Balance and `addressOf` reads send one JSON-RPC request per address and never batch:
+public providers throttle batches far below their single-request limits (Tenderly's public
+gateway refuses a batch of more than five `eth_call`s), which would fail every planning run and
+reconciliation round once a chain has more addresses than the batch cap. The price scale (8) and the Coin Metrics metric (`ReferenceRateUSD`, 1m)
 are fixed by §8 and §11, not configured.
 
 ```yaml

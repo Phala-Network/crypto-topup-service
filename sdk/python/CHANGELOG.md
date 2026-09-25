@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `DailyReportResponse.reconciliation` (`ReconciliationRoundReport`, `FailedCheckReport`) and
+  `RouteDailyReport.flush_planning` (`FlushPlanningReport`): the latest reconciliation round and
+  scheduled flush planning run of the serving process. Optional, so the models also parse
+  reports from servers that predate them.
 - `AttestationResponse.operators` (`OperatorIdentity`): the flusher operator of each configured
   chain, bound into `report_data`. Optional, so the model also parses responses from servers
   that predate it.

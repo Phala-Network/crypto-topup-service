@@ -24,6 +24,7 @@ use super::{
     AlertSink, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner, PriceError, PriceSource,
     RunResult,
 };
+use crate::observability::FlushPlanningOutcome;
 use crate::routes::RouteSet;
 
 /// Interval between confirmation, replacement, and operator-role maintenance iterations.
@@ -158,6 +159,7 @@ impl FlusherTask {
                     crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
                     let mut planned = false;
+                    let mut outcome = (FlushPlanningOutcome::OperatorNotAuthorized, None);
                     if authorized {
                         let plan_span = crate::observability::flush_action_span(
                             self.route.chain.chain_id,
@@ -168,7 +170,9 @@ impl FlusherTask {
                         match self.planner.plan(&self.route).instrument(plan_span).await {
                             Ok(flush_id) => {
                                 planned = true;
+                                outcome = (FlushPlanningOutcome::Idle, None);
                                 if flush_id.is_some() {
+                                    outcome.0 = FlushPlanningOutcome::Planned;
                                     crate::observability::progress("flusher", instance.clone());
                                 }
                                 tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
@@ -183,14 +187,17 @@ impl FlusherTask {
                                     Ok(_) => crate::observability::progress("flusher", instance.clone()),
                                     Err(error) => {
                                         tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                        outcome = (FlushPlanningOutcome::SendFailed, Some(error.to_string()));
                                     }
                                 }
                             }
                             Err(error) => {
                                 tracing::error!(%error, route = %self.route.route, "flush planning failed");
+                                outcome = (FlushPlanningOutcome::Failed, Some(error.to_string()));
                             }
                         }
                     }
+                    crate::observability::record_flush_planning(&self.route.route, outcome.0, outcome.1);
                     if let Some(monitor) = &monitor {
                         monitor.check_in(planned);
                     }

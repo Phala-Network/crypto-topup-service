@@ -24,6 +24,13 @@ webhook receivers must ignore unknown fields.
   The same values return the same product with `200`; different values for an issued slug are
   `409 conflict`.
 
+- `GET /v1/admin/report/daily` reports why sweeping or reconciliation stopped, which
+  production otherwise shows only in logs: each route's `flush_planning` (`at`, `outcome`
+  `planned`, `idle`, `operator_not_authorized`, `failed`, or `send_failed`, and the redacted
+  `error`) from its latest scheduled planning run, and the report-level `reconciliation` (`at`
+  and `failed_checks`, each with `check` and `error`) from the latest round. Both describe the
+  serving process and are absent until its first run; both are optional in the schema.
+
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
   destination minor units (#94). The field is optional in the schema so clients also parse reports
   from servers that predate it.

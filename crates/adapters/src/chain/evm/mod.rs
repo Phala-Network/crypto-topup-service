@@ -18,7 +18,6 @@ use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::client::BatchRequest;
 use alloy::rpc::types::{
     Filter, Log, Topic, TransactionInput, TransactionReceipt, TransactionRequest,
 };
@@ -243,8 +242,6 @@ impl BlockTimes {
 
 /// Timeout for one bounded RPC request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum calls in one JSON-RPC batch.
-const BATCH_SIZE: usize = 500;
 
 /// Alloy HTTP client for one RPC provider of one chain, shared by every consumer.
 ///
@@ -328,68 +325,38 @@ impl EvmClient {
             .map_err(|error| self.transport(operation, &error))
     }
 
-    async fn batch_calls(
+    /// Runs one `eth_call` per item, each as its own request, and decodes each result.
+    ///
+    /// These reads never use JSON-RPC batches: public providers throttle batches far below their
+    /// single-request limits. Tenderly's public Sepolia gateway refuses any batch of more than
+    /// five `eth_call`s with `429 rate limit exceeded`, which stalled flush planning and failed
+    /// reconciliation once a chain had six addresses.
+    async fn calls<I, T>(
         &self,
-        method: &'static str,
-        params: Vec<Value>,
-    ) -> Result<Vec<Value>, ChainError> {
-        let mut batch = BatchRequest::new(self.provider.client());
-        let mut waiters = Vec::with_capacity(params.len());
-        for value in &params {
-            waiters.push(
-                batch
-                    .add_call::<_, Value>(method, value)
-                    .map_err(|error| self.transport("RPC batch construction", &error))?,
-            );
-        }
-        self.bounded("RPC batch send", batch.send()).await?;
-        let mut responses = Vec::with_capacity(waiters.len());
-        for waiter in waiters {
-            responses.push(self.bounded("RPC batch response", waiter).await?);
-        }
-        Ok(responses)
-    }
-
-    /// Runs one `eth_call` per item in bounded JSON-RPC batches and decodes each result.
-    async fn batched_calls<I, T>(
-        &self,
+        operation: &'static str,
         items: &[I],
         call: impl Fn(&I) -> (Address, Bytes),
         block: BlockNumberOrTag,
         decode: impl Fn(&[u8]) -> Result<T, String>,
     ) -> Result<Vec<T>, ChainError> {
         let mut result = Vec::with_capacity(items.len());
-        for chunk in items.chunks(BATCH_SIZE) {
-            let params = chunk
-                .iter()
-                .map(|item| {
-                    let (to, input) = call(item);
-                    let tx = TransactionRequest::default()
-                        .to(to)
-                        .input(TransactionInput::new(input));
-                    serde_json::to_value((tx, block)).map_err(|error| {
-                        ChainError::InvalidResponse(format!("serialize eth_call: {error}"))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for value in self.batch_calls("eth_call", params).await? {
-                let encoded: Bytes = serde_json::from_value(value).map_err(|error| {
-                    ChainError::InvalidResponse(format!("decode eth_call bytes: {error}"))
-                })?;
-                result.push(decode(&encoded).map_err(ChainError::InvalidResponse)?);
-            }
+        for item in items {
+            let (to, input) = call(item);
+            let output = self.call(operation, to, input, Some(block.into())).await?;
+            result.push(decode(&output).map_err(ChainError::InvalidResponse)?);
         }
         Ok(result)
     }
 
-    /// Reads ERC-20 balances at one block in bounded JSON-RPC batches.
+    /// Reads ERC-20 balances at one block, one request per address.
     pub async fn token_balances(
         &self,
         token: Address,
         addresses: &[Address],
         block: BlockNumberOrTag,
     ) -> Result<Vec<U256>, ChainError> {
-        self.batched_calls(
+        self.calls(
+            "balanceOf call",
             addresses,
             |address| (token, encode_balance_of(*address)),
             block,
@@ -401,34 +368,29 @@ impl EvmClient {
         .await
     }
 
-    /// Reads latest native balances in bounded JSON-RPC batches.
+    /// Reads latest native balances, one request per address.
     pub async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
         let mut result = Vec::with_capacity(addresses.len());
-        for chunk in addresses.chunks(BATCH_SIZE) {
-            let params = chunk
-                .iter()
-                .map(|address| {
-                    serde_json::to_value((*address, BlockNumberOrTag::Latest)).map_err(|error| {
-                        ChainError::InvalidResponse(format!("serialize eth_getBalance: {error}"))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for value in self.batch_calls("eth_getBalance", params).await? {
-                result.push(serde_json::from_value(value).map_err(|error| {
-                    ChainError::InvalidResponse(format!("decode native balance: {error}"))
-                })?);
-            }
+        for address in addresses {
+            result.push(
+                self.bounded(
+                    "eth_getBalance",
+                    self.provider.get_balance(*address).latest(),
+                )
+                .await?,
+            );
         }
         Ok(result)
     }
 
-    /// Reads deterministic forwarder addresses at the latest block in bounded batches.
+    /// Reads deterministic forwarder addresses at the latest block, one request per salt.
     pub async fn factory_addresses(
         &self,
         factory: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ChainError> {
-        self.batched_calls(
+        self.calls(
+            "addressOf call",
             salts,
             |salt| (factory, encode_address_of(*salt)),
             BlockNumberOrTag::Latest,
@@ -1047,6 +1009,72 @@ mod tests {
         .expect("production adapter accepts URL")
         .with_provider("provider-a");
         (client, server)
+    }
+
+    /// Answers like Tenderly's public Sepolia gateway (staging's provider A): a JSON-RPC batch
+    /// carrying more than five `eth_call`s is refused with `429` and one `-32005` object, while
+    /// the same calls sent one by one are served. Every call returns the word `1`.
+    async fn batch_capped_node() -> (EvmClient, tokio::task::JoinHandle<std::io::Result<()>>) {
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        fn answer(request: &Value) -> Value {
+            let result = match request["method"].as_str() {
+                Some("eth_call") => format!("0x{:064x}", 1),
+                _ => "0x1".to_owned(),
+            };
+            serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let node = Router::new().route(
+            "/rpc",
+            post(|Json(body): Json<Value>| async move {
+                let Some(batch) = body.as_array() else {
+                    return (StatusCode::OK, Json(answer(&body)));
+                };
+                let calls = batch
+                    .iter()
+                    .filter(|request| request["method"] == "eth_call")
+                    .count();
+                if calls > 5 {
+                    let refusal = serde_json::json!({"jsonrpc": "2.0", "id": 0, "error": {
+                        "code": -32005, "message": "rate limit exceeded"}});
+                    return (StatusCode::TOO_MANY_REQUESTS, Json(refusal));
+                }
+                (StatusCode::OK, Json(batch.iter().map(answer).collect()))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, node).await });
+        let client = EvmClient::new(&format!("http://{address}/rpc"))
+            .expect("production adapter accepts URL")
+            .with_provider("provider-a");
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn balance_and_address_reads_never_depend_on_provider_batch_limits() {
+        let (client, server) = batch_capped_node().await;
+        let addresses = (1..=6).map(Address::repeat_byte).collect::<Vec<_>>();
+        let salts = (1..=6).map(B256::repeat_byte).collect::<Vec<_>>();
+
+        let tokens = client
+            .token_balances(Address::ZERO, &addresses, BlockNumberOrTag::Latest)
+            .await;
+        let natives = client.native_balances(&addresses).await;
+        let derived = client.factory_addresses(Address::ZERO, &salts).await;
+        server.abort();
+
+        assert_eq!(tokens.expect("token balances"), vec![U256::from(1); 6]);
+        assert_eq!(natives.expect("native balances"), vec![U256::from(1); 6]);
+        assert_eq!(
+            derived.expect("derived addresses"),
+            vec![Address::with_last_byte(1); 6]
+        );
     }
 
     fn assert_redacted(error: &ChainError, client: &EvmClient) {

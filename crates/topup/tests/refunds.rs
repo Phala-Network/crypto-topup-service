@@ -1036,6 +1036,12 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         .await?;
         ensure!(audit_count == 1);
 
+        // Production has no logs: the report says why the route's last planning run stopped.
+        topup::observability::record_flush_planning(
+            "phala-cloud-ethereum-pha-usd",
+            topup::observability::FlushPlanningOutcome::Failed,
+            Some("chain operation failed: rate limit exceeded".to_owned()),
+        );
         let response = app
             .oneshot(signed_request(
                 Method::GET,
@@ -1068,6 +1074,8 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(route["settlements_by_status"]["accepted"] == 1);
         ensure!(route["refunds_by_status"]["requested"] == 1);
         ensure!(route["age_in_state_max_seconds"]["credited"].as_u64().context("credited age")? >= 7_000);
+        ensure!(route["flush_planning"]["outcome"] == "failed");
+        ensure!(route["flush_planning"]["error"] == "chain operation failed: rate limit exceeded");
         let unrouted = routes
             .iter()
             .find(|route| {
@@ -1078,6 +1086,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(unrouted["unflushed_balance_atomic"] == "25");
         ensure!(unrouted["rejected_holds_atomic"] == "25");
         ensure!(unrouted["deposits_by_state"]["rejected"] == 1);
+        ensure!(unrouted["flush_planning"].is_null());
         Ok(())
     }
     .await;

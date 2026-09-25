@@ -1212,6 +1212,7 @@ pub async fn daily_report(
         generated_at,
         exposure_minor,
         routes: reports.into_values().collect(),
+        reconciliation: None,
     })
 }
 
@@ -1243,6 +1244,7 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
             "swept",
             "rejected",
         ]),
+        flush_planning: None,
     }
 }
 
@@ -1274,6 +1276,7 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
             "swept",
             "rejected",
         ]),
+        flush_planning: None,
     }
 }
 

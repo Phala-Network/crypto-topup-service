@@ -510,6 +510,11 @@ pub(crate) async fn daily_report(
     let mut report =
         repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
     populate_treasury_balances(&state.routes, &mut report).await;
+    for route_report in &mut report.routes {
+        route_report.flush_planning =
+            crate::observability::flush_planning(&route_report.route).map(Into::into);
+    }
+    report.reconciliation = crate::observability::reconciliation().map(Into::into);
     Ok(Json(report))
 }
 
