@@ -15,8 +15,8 @@ use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
 use topup::db::{
-    self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct, OutboxEvent,
-    SettlementIntent, StoredValuation, TransitionEffects,
+    self, AddressKind, NewDeposit, OutboxEvent, SettlementIntent, StoredValuation,
+    TransitionEffects,
 };
 use topup::jitter::JitterSource;
 use topup::pump::{
@@ -32,6 +32,7 @@ use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
 #[tokio::test]
@@ -1296,14 +1297,14 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
         pubkey: format!("public-key-{number}"),
         paused_scopes: Vec::new(),
     };
-    db::create_product(pool, &product).await?;
+    seed::create_product(pool, &product).await?;
     let account = NewAccount {
         id: Uuid::new_v4(),
         product_id: product.id,
         external_id: format!("workspace-{number}"),
         paused_scopes: Vec::new(),
     };
-    db::create_account(pool, &account).await?;
+    seed::create_account(pool, &account).await?;
     let address = NewAddress {
         id: Uuid::new_v4(),
         account_id: account.id,
@@ -1315,7 +1316,7 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
         address: evm_address(number),
         retired_at: None,
     };
-    db::insert_address(pool, &address).await?;
+    seed::insert_address(pool, &address).await?;
     Ok(Seed {
         product_id: product.id,
         account_id: account.id,

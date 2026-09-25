@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
-use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::db::{AddressKind, NewDeposit};
 use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
     AlertSink, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote, FlushAlert, Flusher,
@@ -35,6 +35,7 @@ use topup_core::{
 use uuid::Uuid;
 
 use support::chain::{Anvil, forge_create};
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
 const ADMIN_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
@@ -1628,7 +1629,7 @@ async fn seed_addresses(
         pubkey: "test-key".to_owned(),
         paused_scopes: Vec::new(),
     };
-    topup::db::create_product(pool, &product).await?;
+    seed::create_product(pool, &product).await?;
     let mut result = Vec::new();
     for number in 1_u8..=2 {
         let account = NewAccount {
@@ -1637,7 +1638,7 @@ async fn seed_addresses(
             external_id: format!("account-{number}"),
             paused_scopes: Vec::new(),
         };
-        topup::db::create_account(pool, &account).await?;
+        seed::create_account(pool, &account).await?;
         let salt = B256::from([number; 32]);
         let physical = forwarder_address(factory, implementation, salt);
         let address = NewAddress {
@@ -1651,7 +1652,7 @@ async fn seed_addresses(
             address: physical,
             retired_at: (number == 2).then(Utc::now),
         };
-        topup::db::insert_address(pool, &address).await?;
+        seed::insert_address(pool, &address).await?;
         result.push(SeededAddress {
             id: address.id,
             account_id: account.id,
@@ -1694,7 +1695,7 @@ async fn set_product_flush_pause(pool: &PgPool, product_id: Uuid, paused: bool) 
     } else {
         Vec::new()
     };
-    topup::db::set_product_paused_scopes(pool, product_id, &scopes).await?;
+    seed::set_product_paused_scopes(pool, product_id, &scopes).await?;
     Ok(())
 }
 
@@ -1704,7 +1705,7 @@ async fn set_account_flush_pause(pool: &PgPool, account_id: Uuid, paused: bool) 
     } else {
         Vec::new()
     };
-    topup::db::set_account_paused_scopes(pool, account_id, &scopes).await?;
+    seed::set_account_paused_scopes(pool, account_id, &scopes).await?;
     Ok(())
 }
 

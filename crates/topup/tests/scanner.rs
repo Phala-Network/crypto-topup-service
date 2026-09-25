@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
-use topup::db::{self, AddressKind, NewAccount, NewAddress, NewProduct};
+use topup::db::{self, AddressKind};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
@@ -32,6 +32,7 @@ use support::TestDatabase;
 use support::chain::{
     ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, contracts_dir, forge_create, run_checked,
 };
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 
 /// One slot per epoch keeps anvil's finalized block close to the head for the finalized scanner.
 const ANVIL_ARGS: &[&str] = &["--slots-in-an-epoch", "1"];
@@ -761,7 +762,7 @@ fn current_block(rpc_url: &str) -> Result<u64> {
 
 async fn seed_account(pool: &PgPool) -> Result<Uuid> {
     let product_id = Uuid::new_v4();
-    db::create_product(
+    seed::create_product(
         pool,
         &NewProduct {
             id: product_id,
@@ -773,7 +774,7 @@ async fn seed_account(pool: &PgPool) -> Result<Uuid> {
     )
     .await?;
     let account_id = Uuid::new_v4();
-    db::create_account(
+    seed::create_account(
         pool,
         &NewAccount {
             id: account_id,
@@ -793,7 +794,7 @@ async fn insert_address(
     version: u64,
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
-    db::insert_address(
+    seed::insert_address(
         pool,
         &NewAddress {
             id,
@@ -821,7 +822,7 @@ async fn insert_lock_address(
     index: u64,
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
-    db::insert_address(
+    seed::insert_address(
         pool,
         &NewAddress {
             id,

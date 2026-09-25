@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
-use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::db::{self, AddressKind, NewDeposit};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup_adapters::chain::evm::EvmClient;
@@ -24,6 +24,7 @@ use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, forge_create};
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
 struct MockSanctionsSource {
@@ -273,14 +274,14 @@ async fn seed_account(pool: &PgPool) -> Result<Seed> {
         pubkey: "public-key-c5".to_owned(),
         paused_scopes: Vec::new(),
     };
-    db::create_product(pool, &product).await?;
+    seed::create_product(pool, &product).await?;
     let account = NewAccount {
         id: Uuid::new_v4(),
         product_id: product.id,
         external_id: "workspace-c5".to_owned(),
         paused_scopes: Vec::new(),
     };
-    db::create_account(pool, &account).await?;
+    seed::create_account(pool, &account).await?;
     let address = NewAddress {
         id: Uuid::new_v4(),
         account_id: account.id,
@@ -292,7 +293,7 @@ async fn seed_account(pool: &PgPool) -> Result<Seed> {
         address: Address::repeat_byte(0x44),
         retired_at: None,
     };
-    db::insert_address(pool, &address).await?;
+    seed::insert_address(pool, &address).await?;
     Ok(Seed {
         product_id: product.id,
         account_id: account.id,

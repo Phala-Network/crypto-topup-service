@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod chain;
+pub mod seed;
 
 use std::env;
 use std::future::{Future, poll_fn};

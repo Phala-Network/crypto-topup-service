@@ -133,8 +133,8 @@ restore as well as a drill, with a restore-time environment:
 
 After PostgreSQL has promoted (its health check passes only once it is out of recovery; the start
 period allows the one-hour RTO) and `migrate` has confirmed the schema, the `restore-check` service
-runs once. It verifies migration checksums, WAL state, and table counts, then runs the same
-post-restore round as `topup reconcile --post-restore` (architecture section 13): every deposit in
+runs once. It verifies migration checksums, WAL state, and table counts, then runs the
+post-restore round (architecture section 13): every deposit in
 `cleared`, `credited`, or `swept`, plus deposits rejected by the product after reaching `cleared`,
 is queried by signed product GET and the product's answer is adopted into the restored database.
 It writes its report to the `observability` volume, and the read-only `topup` serves it on

@@ -1257,13 +1257,6 @@ impl Reconciler {
     }
 }
 
-/// Runs the library post-restore gate for callers such as the D3 restore check.
-pub async fn post_restore_once(
-    reconciler: &Reconciler,
-) -> Result<ReconciliationReport, ReconciliationError> {
-    reconciler.post_restore_once().await
-}
-
 fn log_finding(finding: &Finding, inserted: bool) {
     if !inserted {
         tracing::debug!(

@@ -52,6 +52,10 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${head
 
 - Same finalized height, different hash or log: the step retries and the age alert fires; keep
   settlement paused. Never pick a provider's answer by hand.
+- Latest evidence `error = log_absent_at_finality`: both providers are final past the row and
+  neither has the log the scanner recorded as final. This is a finality violation or a scanner
+  provider fault, not a disagreement; keep settlement paused, open incidents with both providers,
+  and escalate. Never delete or reject the row by hand.
 - One chain provider behind but internally consistent: retry within provider SLA, then
   escalate/replace.
 - Any sanctions provider returns `Sanctioned`: the deposit is `rejected(sanctioned)` immediately,

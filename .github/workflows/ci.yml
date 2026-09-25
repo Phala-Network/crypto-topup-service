@@ -194,20 +194,16 @@ jobs:
         with:
           submodules: recursive
       - name: Install Foundry
-        if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.8.3
       - name: Check formatting
-        if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         working-directory: contracts
         run: forge fmt --check
       - name: Build contracts
-        if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         working-directory: contracts
         run: forge build
       - name: Test contracts
-        if: ${{ hashFiles('contracts/foundry.toml') != '' }}
         working-directory: contracts
         run: forge test
       - name: Check deterministic deployment

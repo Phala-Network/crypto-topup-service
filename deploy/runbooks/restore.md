@@ -63,12 +63,8 @@ logging `waiting for the lease-owner lock`, instead of exiting:
 docker compose -f deploy/docker-compose.staging.yml run --rm --no-deps restore-check --expected-heartbeat-at "$EXPECTED_HEARTBEAT_AT" --expected-lsn "$EXPECTED_LSN"
 ```
 
-To repeat only the gate after an incident repair, still with the service stopped, run it until it
-exits `0`; never resume traffic on a failing gate:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml run --rm topup topup reconcile --post-restore --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
-```
+After an incident repair, still with the service stopped, rerun the same restore check with the
+same expected values until it reports `"status":"ok"`; never resume traffic on a failing gate.
 
 Then review the restored state read-only:
 
@@ -78,8 +74,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT
 
 ## Verification
 
-Require `topup restore-check` to report `"status":"ok"` (or a repeated
-`topup reconcile --post-restore` to exit `0`), no open `post_restore_settlement` finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
+Require `topup restore-check` to report `"status":"ok"`, no open `post_restore_settlement` finding, the expected migration version with no failed migration, no duplicate credit, RPO and RTO
 evidence, attestation verification, and a human review before traffic resumes.
 
 ## Rollback

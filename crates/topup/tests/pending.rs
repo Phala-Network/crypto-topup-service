@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
-use topup::db::{NewAccount, NewPendingTransfer, NewProduct};
+use topup::db::NewPendingTransfer;
 use topup::locks::QuoteProvider;
 use topup::locks::pricing::ValidatedQuote;
 use topup::routes::RouteSet;
@@ -29,6 +29,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
+use support::seed::{self, NewAccount, NewProduct};
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, with_database};
 
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -585,7 +586,7 @@ fn parse_time(value: &str) -> Result<DateTime<Utc>> {
 }
 
 async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<()> {
-    let product = topup::db::create_product(
+    let product = seed::create_product(
         pool,
         &NewProduct {
             id: Uuid::new_v4(),
@@ -596,7 +597,7 @@ async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<()> {
         },
     )
     .await?;
-    topup::db::create_account(
+    seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),

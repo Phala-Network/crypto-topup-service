@@ -57,12 +57,14 @@ enum TopupCommand {
         #[command(subcommand)]
         command: OutboxCommand,
     },
-    /// Run one reconciliation pass and exit; with --post-restore, only while the service is stopped.
+    /// Run one reconciliation pass and exit.
     Reconcile(ReconcileArgs),
     Attest(AttestArgs),
     /// Derive the backup key and database credentials from dstack into a shared tmpfs.
     Keys(KeysArgs),
     Heartbeat(HeartbeatArgs),
+    /// Exit zero only when the local API answers `GET /healthz` with 200, for container health.
+    Healthcheck(HealthcheckArgs),
     /// Validate a restored database and run post-restore reconciliation.
     ///
     /// Run only while the service, heartbeat, and backup processes are stopped: the post-restore
@@ -104,11 +106,6 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Args)]
 struct ReconcileArgs {
-    /// Run the restore gate and fail while any deposit is incomplete. Run it only while the
-    /// service, heartbeat, and backup processes are stopped; it refuses to start while a service
-    /// or reconcile process holds deposit leases.
-    #[arg(long)]
-    post_restore: bool,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
@@ -178,6 +175,13 @@ struct HeartbeatArgs {
     interval_s: u64,
 }
 
+#[derive(Args)]
+struct HealthcheckArgs {
+    /// Health endpoint of the API listener in this container.
+    #[arg(long, default_value = "http://127.0.0.1:8080/healthz")]
+    url: reqwest::Url,
+}
+
 #[derive(Subcommand)]
 enum OutboxCommand {
     Replay {
@@ -245,6 +249,7 @@ async fn main() -> ExitCode {
         TopupCommand::Attest(args) => attest(&args).await,
         TopupCommand::Keys(args) => return keys(&args).await,
         TopupCommand::Heartbeat(args) => return heartbeat(&args).await,
+        TopupCommand::Healthcheck(args) => return healthcheck(&args).await,
         TopupCommand::RestoreCheck(args) => return restore_check(&args).await,
     };
 
@@ -361,6 +366,8 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
         Err(code) => return code,
     };
     let mut interval = tokio::time::interval(Duration::from_secs(args.interval_s));
+    let shutdown = wait_for_shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -381,7 +388,7 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
                     }
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
+            signal = &mut shutdown => {
                 if signal.is_err() {
                     tracing::error!("failed to listen for heartbeat shutdown signal");
                     return ExitCode::FAILURE;
@@ -389,6 +396,32 @@ async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
                 tracing::info!("heartbeat stopped");
                 return ExitCode::SUCCESS;
             }
+        }
+    }
+}
+
+// The exit status is the health signal; failures are logged below error level so a probe every
+// 30 s during an outage does not duplicate the service's own error reports.
+async fn healthcheck(args: &HealthcheckArgs) -> ExitCode {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "failed to build the health check client");
+            return ExitCode::FAILURE;
+        }
+    };
+    match client.get(args.url.clone()).send().await {
+        Ok(response) if response.status() == reqwest::StatusCode::OK => ExitCode::SUCCESS,
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "health check failed");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            tracing::warn!(%error, "health check request failed");
+            ExitCode::FAILURE
         }
     }
 }
@@ -1036,30 +1069,19 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let result = if args.post_restore {
-        topup::reconciler::post_restore_once(&reconciler).await
-    } else {
-        match topup::reconciler::hold_lease_owner_lock(&pool).await {
-            Ok(lease_owner) => {
-                let result = reconciler.run_once().await;
-                if let Err(error) = lease_owner.release().await {
-                    tracing::warn!(%error, "failed to release the lease-owner lock");
-                }
-                result
+    let result = match topup::reconciler::hold_lease_owner_lock(&pool).await {
+        Ok(lease_owner) => {
+            let result = reconciler.run_once().await;
+            if let Err(error) = lease_owner.release().await {
+                tracing::warn!(%error, "failed to release the lease-owner lock");
             }
-            Err(error) => Err(error),
+            result
         }
+        Err(error) => Err(error),
     };
     pool.close().await;
     match result {
-        Ok(report) if args.post_restore && report.incomplete => {
-            tracing::error!(
-                findings = report.findings.len(),
-                "post-restore reconciliation is incomplete"
-            );
-            ExitCode::FAILURE
-        }
-        Ok(report) if !args.post_restore && !report.succeeded() => {
+        Ok(report) if !report.succeeded() => {
             tracing::error!(
                 findings = report.findings.len(),
                 failed_checks = report.failed_checks.len(),

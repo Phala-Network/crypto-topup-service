@@ -21,7 +21,7 @@ use sqlx::Row;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
-use topup::db::{AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::db::{AddressKind, NewDeposit};
 use topup::refunds::{
     EvmRefundChainReader, RefundChainReader, RefundCheck, RefundConfirmationConfig,
     RefundConfirmationWorker, RefundObservation, RefundReadError, RefundTransfer,
@@ -35,6 +35,7 @@ use topup_core::route::RouteFile;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
@@ -84,7 +85,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
 
-        topup::db::set_account_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
             &["refunds".to_owned()],
@@ -106,14 +107,14 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::LOCKED);
-        topup::db::set_account_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
             &[],
         )
         .await?;
 
-        topup::db::set_product_paused_scopes(
+        seed::set_product_paused_scopes(
             &database.app_pool,
             product.id,
             &["refunds".to_owned()],
@@ -131,7 +132,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::LOCKED);
-        topup::db::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
+        seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
             "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['refunds']) ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes",
@@ -208,7 +209,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         ensure!(response.status() == StatusCode::CONFLICT);
 
         let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
-        topup::db::set_account_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
             &["refunds".to_owned()],
@@ -226,14 +227,14 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::LOCKED);
-        topup::db::set_account_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
             &[],
         )
         .await?;
 
-        topup::db::set_product_paused_scopes(
+        seed::set_product_paused_scopes(
             &database.app_pool,
             product.id,
             &["refunds".to_owned()],
@@ -251,7 +252,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::LOCKED);
-        topup::db::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
+        seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
             "UPDATE route_pauses SET paused_scopes = ARRAY['refunds'] WHERE route = $1",
@@ -1300,7 +1301,7 @@ async fn seed_product(
     slug: &str,
     key: &SigningKey,
 ) -> Result<topup::db::Product> {
-    Ok(topup::db::create_product(
+    Ok(seed::create_product(
         pool,
         &NewProduct {
             id: Uuid::new_v4(),
@@ -1338,7 +1339,7 @@ async fn seed_deposit(
     state: DepositState,
     reason: Option<RejectReason>,
 ) -> Result<Uuid> {
-    let account = topup::db::create_account(
+    let account = seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),
@@ -1349,7 +1350,7 @@ async fn seed_deposit(
     )
     .await?;
     let index = Uuid::new_v4().as_u128();
-    let address = topup::db::insert_address(
+    let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),
@@ -1441,7 +1442,7 @@ async fn seed_lock(
     amount: u64,
     expiry: &str,
 ) -> Result<()> {
-    let account = topup::db::create_account(
+    let account = seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),
@@ -1535,7 +1536,7 @@ async fn seed_same_address_deposits(
     product_id: Uuid,
     count: u64,
 ) -> Result<String> {
-    let account = topup::db::create_account(
+    let account = seed::create_account(
         pool,
         &NewAccount {
             id: Uuid::new_v4(),
@@ -1546,7 +1547,7 @@ async fn seed_same_address_deposits(
     )
     .await?;
     let receiving = Address::from_str("0x5656565656565656565656565656565656565656")?;
-    let address = topup::db::insert_address(
+    let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),

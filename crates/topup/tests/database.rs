@@ -16,8 +16,8 @@ use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use tokio::sync::Mutex;
 use topup::db::{
-    self, AddressKind, ApplyTransitionResult, FlushedEvent, NewAccount, NewAddress, NewDeposit,
-    NewFlush, NewProduct, OutboxEvent, SettlementIntent, TransitionUpdate,
+    self, AddressKind, ApplyTransitionResult, FlushedEvent, NewDeposit, NewFlush, OutboxEvent,
+    SettlementIntent, TransitionUpdate,
 };
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, SettlementLookup,
@@ -31,6 +31,7 @@ use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
 #[tokio::test]
@@ -351,7 +352,7 @@ async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> 
             .execute(&context.app_pool)
             .await?;
             let audit_id = Uuid::new_v4();
-            db::insert_audit(
+            seed::insert_audit(
                 &context.app_pool,
                 audit_id,
                 "admin:test",
@@ -536,7 +537,7 @@ async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() 
             .execute(&context.app_pool)
             .await?;
             let audit_id = Uuid::new_v4();
-            db::insert_audit(
+            seed::insert_audit(
                 &context.app_pool,
                 audit_id,
                 "admin:test",
@@ -573,16 +574,15 @@ async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutate
         Box::pin(async move {
             let first_product = new_product(10, "product-a");
             let second_product = new_product(11, "product-b");
-            db::create_product(&context.app_pool, &first_product).await?;
-            db::create_product(&context.app_pool, &second_product).await?;
+            seed::create_product(&context.app_pool, &first_product).await?;
+            seed::create_product(&context.app_pool, &second_product).await?;
 
-            db::set_product_paused_scopes(
+            seed::set_product_paused_scopes(
                 &context.app_pool,
                 first_product.id,
                 &["quotes".to_owned()],
             )
-            .await?
-            .context("product must exist")?;
+            .await?;
             let stored_product = db::get_product(&context.app_pool, first_product.id)
                 .await?
                 .context("product must exist")?;
@@ -595,9 +595,9 @@ async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutate
                 external_id: "workspace".to_owned(),
                 paused_scopes: Vec::new(),
             };
-            db::create_account(&context.app_pool, &first_account).await?;
+            seed::create_account(&context.app_pool, &first_account).await?;
             assert_unique(
-                db::create_account(
+                seed::create_account(
                     &context.app_pool,
                     &NewAccount {
                         id: Uuid::new_v4(),
@@ -607,7 +607,7 @@ async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutate
                 .await
                 .err(),
             )?;
-            db::create_account(
+            seed::create_account(
                 &context.app_pool,
                 &NewAccount {
                     id: Uuid::new_v4(),
@@ -616,13 +616,12 @@ async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutate
                 },
             )
             .await?;
-            db::set_account_paused_scopes(
+            seed::set_account_paused_scopes(
                 &context.app_pool,
                 first_account.id,
                 &["settlement".to_owned()],
             )
-            .await?
-            .context("account must exist")?;
+            .await?;
             let stored_account = db::get_account(&context.app_pool, first_account.id)
                 .await?
                 .context("account must exist")?;
@@ -645,9 +644,9 @@ async fn addresses_are_canonical_and_enforce_both_unique_keys() -> Result<()> {
             let lowercase = Address::from_str("0x52908400098527886e0f7030069857d2e4169ee7")?;
             ensure!(checksum == lowercase);
             let first = new_address(first_account.account_id, 1, 1, checksum, 20);
-            db::insert_address(&context.app_pool, &first).await?;
+            seed::insert_address(&context.app_pool, &first).await?;
             assert_unique(
-                db::insert_address(
+                seed::insert_address(
                     &context.app_pool,
                     &new_address(second.account_id, 1, 1, lowercase, 22),
                 )
@@ -656,7 +655,7 @@ async fn addresses_are_canonical_and_enforce_both_unique_keys() -> Result<()> {
             )?;
 
             assert_unique(
-                db::insert_address(
+                seed::insert_address(
                     &context.app_pool,
                     &new_address(first_account.account_id, 1, 2, evm_address(23), 23),
                 )
@@ -668,12 +667,12 @@ async fn addresses_are_canonical_and_enforce_both_unique_keys() -> Result<()> {
                 .bind(first.id)
                 .execute(&context.app_pool)
                 .await?;
-            db::insert_address(
+            seed::insert_address(
                 &context.app_pool,
                 &new_address(first_account.account_id, 1, 2, evm_address(23), 23),
             )
             .await?;
-            db::insert_address(
+            seed::insert_address(
                 &context.app_pool,
                 &new_address(second.account_id, 2, 1, lowercase, 24),
             )
@@ -1050,7 +1049,7 @@ struct AccountSeed {
 async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
     let account = seed_account_without_address(pool, number).await?;
     let address = new_address(account.account_id, 1, 1, evm_address(number), number);
-    db::insert_address(pool, &address).await?;
+    seed::insert_address(pool, &address).await?;
     Ok(Seed {
         product_id: account.product_id,
         account_id: account.account_id,
@@ -1060,14 +1059,14 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
 
 async fn seed_account_without_address(pool: &PgPool, number: u8) -> Result<AccountSeed> {
     let product = new_product(number, &format!("product-{number}"));
-    db::create_product(pool, &product).await?;
+    seed::create_product(pool, &product).await?;
     let account = NewAccount {
         id: Uuid::new_v4(),
         product_id: product.id,
         external_id: format!("workspace-{number}"),
         paused_scopes: Vec::new(),
     };
-    db::create_account(pool, &account).await?;
+    seed::create_account(pool, &account).await?;
     Ok(AccountSeed {
         product_id: product.id,
         account_id: account.id,
@@ -1207,7 +1206,7 @@ fn restore_expectations(heartbeat: &heartbeat::Heartbeat) -> restore::RestoreExp
 
 async fn insert_lock_address(pool: &PgPool, account_id: Uuid, number: u8) -> Result<Uuid> {
     let id = Uuid::new_v4();
-    db::insert_address(
+    seed::insert_address(
         pool,
         &NewAddress {
             id,

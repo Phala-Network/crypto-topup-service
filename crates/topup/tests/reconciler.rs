@@ -15,10 +15,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::db::{
-    self, AddressKind, Deposit, FlushedEvent, NewAccount, NewAddress, NewDeposit, NewFlush,
-    NewProduct, SettlementIntent,
-};
+use topup::db::{self, AddressKind, Deposit, FlushedEvent, NewDeposit, NewFlush, SettlementIntent};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
@@ -33,6 +30,7 @@ use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use support::TestDatabase;
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 
 const CHAIN_ID: u64 = 31_337;
 
@@ -1251,7 +1249,7 @@ async fn seed_product(pool: &PgPool, slug: &str) -> Result<Uuid> {
         return Ok(id);
     }
     let id = Uuid::new_v4();
-    db::create_product(
+    seed::create_product(
         pool,
         &NewProduct {
             id,
@@ -1268,7 +1266,7 @@ async fn seed_product(pool: &PgPool, slug: &str) -> Result<Uuid> {
 async fn seed_identity(pool: &PgPool, route: &RouteFile, number: u8) -> Result<Seed> {
     let product_id = seed_product(pool, &route.destination.product).await?;
     let account_id = Uuid::new_v4();
-    db::create_account(
+    seed::create_account(
         pool,
         &NewAccount {
             id: account_id,
@@ -1281,7 +1279,7 @@ async fn seed_identity(pool: &PgPool, route: &RouteFile, number: u8) -> Result<S
     let address_id = Uuid::new_v4();
     let salt = B256::from([number; 32]);
     let address = Address::from([number; 20]);
-    db::insert_address(
+    seed::insert_address(
         pool,
         &NewAddress {
             id: address_id,

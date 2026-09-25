@@ -22,7 +22,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tokio::sync::{Mutex, Semaphore};
-use topup::db::{self, AddressKind, NewAccount, NewAddress, NewDeposit, NewProduct};
+use topup::db::{self, AddressKind, NewDeposit};
 use topup::jitter::JitterSource;
 use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
@@ -39,6 +39,7 @@ use topup_core::{
 };
 use uuid::Uuid;
 
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
 #[derive(Clone)]
@@ -598,7 +599,7 @@ async fn payload_mismatch_is_alert_retry_and_is_never_resent() -> Result<()> {
             ensure!(api.posts.lock().await.len() == 1);
             ensure!(settlement(&context.app_pool, id).await?.0 == "sent");
             ensure!(
-                db::get_settlement(&context.app_pool, id)
+                seed::get_settlement(&context.app_pool, id)
                     .await?
                     .context("settlement must exist")?
                     .resend_forbidden
@@ -639,7 +640,7 @@ async fn payload_mismatch_guard_survives_unknown_and_missing_gets() -> Result<()
             worker.run_once().await?;
             ensure!(api.posts.lock().await.len() == 1);
             ensure!(api.gets.load(Ordering::SeqCst) == 1);
-            let stored = db::get_settlement(&context.app_pool, id)
+            let stored = seed::get_settlement(&context.app_pool, id)
                 .await?
                 .context("settlement must exist")?;
             ensure!(stored.resend_forbidden);
@@ -664,7 +665,7 @@ async fn payload_mismatch_guard_survives_unknown_and_missing_gets() -> Result<()
                 ensure!(evidence["alert_level"] == "alert");
             }
             ensure!(
-                db::get_settlement(&context.app_pool, id)
+                seed::get_settlement(&context.app_pool, id)
                     .await?
                     .context("settlement must exist")?
                     .resend_forbidden
@@ -747,7 +748,7 @@ fn pump(pool: &PgPool, api: MockSettlementApi) -> Result<Pump> {
 
 async fn seed_cleared(pool: &PgPool, number: u8) -> Result<Uuid> {
     let product_id = Uuid::new_v4();
-    db::create_product(
+    seed::create_product(
         pool,
         &NewProduct {
             id: product_id,
@@ -759,7 +760,7 @@ async fn seed_cleared(pool: &PgPool, number: u8) -> Result<Uuid> {
     )
     .await?;
     let account_id = Uuid::new_v4();
-    db::create_account(
+    seed::create_account(
         pool,
         &NewAccount {
             id: account_id,
@@ -770,7 +771,7 @@ async fn seed_cleared(pool: &PgPool, number: u8) -> Result<Uuid> {
     )
     .await?;
     let address_id = Uuid::new_v4();
-    db::insert_address(
+    seed::insert_address(
         pool,
         &NewAddress {
             id: address_id,
@@ -887,10 +888,10 @@ async fn pause_settlement(pool: &PgPool, id: Uuid, level: &str) -> Result<()> {
         .context("account must exist")?;
     match level {
         "account" => {
-            db::set_account_paused_scopes(pool, account.id, &["settlement".to_owned()]).await?;
+            seed::set_account_paused_scopes(pool, account.id, &["settlement".to_owned()]).await?;
         }
         "product" => {
-            db::set_product_paused_scopes(pool, account.product_id, &["settlement".to_owned()])
+            seed::set_product_paused_scopes(pool, account.product_id, &["settlement".to_owned()])
                 .await?;
         }
         "route" => {
