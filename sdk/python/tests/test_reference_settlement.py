@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -223,3 +225,35 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     assert _account_call(api, "GET", f"/accounts/{TEAM}", b"").status == 404
     # Signed and valid, but the product key is not sealed yet: unavailable, nothing recorded.
     assert _account_call(api, "POST", "/accounts", register).status == 503
+
+
+def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
+    own, other = uuid.uuid4(), uuid.uuid4()
+    requested: list[tuple[uuid.UUID, str, int]] = []
+
+    class Service:
+        def list_deposits(self, team: str) -> list[SimpleNamespace]:
+            return [SimpleNamespace(id=own)] if team == TEAM else []
+
+        def request_refund(self, deposit: uuid.UUID, to: str, amount: int) -> SimpleNamespace:
+            requested.append((deposit, to, amount))
+            return SimpleNamespace(to_dict=lambda: {"id": "refund-1", "status": "requested"})
+
+    ledger = reference.ProductLedger()
+    ledger.add_team(TEAM)
+    api = reference.AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    api._client = Service()  # type: ignore[assignment]
+    to = "0x" + "66" * 20
+
+    def refund(deposit: uuid.UUID | str, body: dict[str, Any]) -> reference.Answer:
+        path = f"/accounts/{TEAM}/deposits/{deposit}/refunds"
+        return _account_call(api, "POST", path, json.dumps(body).encode())
+
+    assert refund(other, {"to_address": to, "amount_atomic": "5"}).status == 404
+    assert refund("not-a-uuid", {"to_address": to, "amount_atomic": "5"}).status == 400
+    assert refund(own, {"to_address": "0x12", "amount_atomic": "5"}).status == 400
+    assert refund(own, {"to_address": to, "amount_atomic": "0"}).status == 400
+    assert requested == []
+    answer = refund(own, {"to_address": to, "amount_atomic": "5"})
+    assert (answer.status, answer.body) == (200, {"id": "refund-1", "status": "requested"})
+    assert requested == [(own, to, 5)]

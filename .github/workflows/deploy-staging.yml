@@ -23,8 +23,8 @@ name: Deploy staging
 #   `--wait` there; this workflow waits by polling `cvms get`.
 #
 # Runner constraints (org self-hosted runner): a container that drives the host Docker daemon
-# through its socket, so nothing bind-mounts a workspace path (preflight and the attestation check
-# pass files on stdin or parse them client-side); `ss` and `envsubst` are not installed.
+# through its socket, so nothing bind-mounts a workspace path (preflight and the dstack verifier
+# take their input on stdin, or files are parsed client-side); `ss` and `envsubst` are not installed.
 
 on:
   workflow_dispatch:
@@ -314,9 +314,8 @@ jobs:
           attested=""
           for _ in $(seq 40); do
             if npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json >"$WORK/attestation.json" 2>/dev/null &&
-              jq -jer '.compose_file | select(type == "string" and length > 0)' \
-                "$WORK/attestation.json" >"$WORK/app-compose.json" 2>/dev/null; then
-              attested=$(deploy/compose-hash.sh "$WORK/app-compose.json" 2>/dev/null) || attested=""
+              attested=$(jq -r '[.tcb_info.event_log[]? | select(.event == "compose-hash")
+                  | .event_payload][0] // ""' "$WORK/attestation.json" 2>/dev/null); then
               [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] && break
             fi
             sleep 15
@@ -326,7 +325,11 @@ jobs:
             exit 1
           }
           npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json"
-          deploy/verify-attested-compose.sh "$WORK/attestation.json" "$WORK/cvm.json" \
+          # The guest agent's public info (port 8090, public tcbinfo) carries the vm_config.
+          domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
+          curl -fsS --max-time 30 --retry 5 --retry-all-errors \
+            "https://${APP_ID#0x}-8090.$domain/prpc/Info" >"$WORK/info.json"
+          deploy/verify-attestation.sh "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
             "$WORK/docker-compose.staging.yml" 2>&1 | tee "$WORK/verification.txt"
           {
             echo "| | |"
@@ -374,6 +377,7 @@ jobs:
             ${{ runner.temp }}/deploy-staging/deploy.json
             ${{ runner.temp }}/deploy-staging/cvm.json
             ${{ runner.temp }}/deploy-staging/attestation.json
+            ${{ runner.temp }}/deploy-staging/info.json
             ${{ runner.temp }}/deploy-staging/verification.txt
 
       - name: Delete the env file and CLI state

@@ -154,7 +154,7 @@ reviewed route PR (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and the i
    re-run `provision`, which would create a second CVM. If the run failed before the CVM was
    created (no CVM id in the summary), fix the cause and re-run `provision`.
 6. **HUMAN-ONLY, verifier:** complete [Attestation, ingress, and egress](#attestation-ingress-and-egress)
-   (Trust Center quote verification, the nonce-bound settlement key, the egress restriction) before
+   (the dstack verifier on the nonce-bound settlement key, the egress restriction) before
    issuing product credentials ([Product credentials](#product-credentials)).
 
 Deploy staging, in order; any failure stops the run:
@@ -184,12 +184,13 @@ Deploy staging, in order; any failure stops the run:
    `phala envs update` with the same name set (the compose hash is unchanged). That command
    returns before the restart, so the workflow first waits (at most 5 minutes) to see the restart
    begin, then (at most 15 minutes) for `running` and `/healthz`. An upgrade skips this step;
-9. polls `cvms attestation` (at most 10 minutes) until the attested app-compose hashes to the
-   recorded compose hash, so an upgrade never checks the previous compose, then runs
-   [verify-attested-compose.sh](verify-attested-compose.sh) against the rendered compose;
+9. polls `cvms attestation` (at most 10 minutes) until its event log records the deployed compose
+   hash, so an upgrade never checks the previous compose, reads the guest agent's public info
+   (port 8090) for the CVM's vm_config, and runs [verify-attestation.sh](verify-attestation.sh)
+   against the rendered compose (see [Deployment artifacts](#deployment-artifacts));
 10. records the CVM id, app id, compose hash, images, and origin in the job summary (for a new
-    CVM also the owner's sealing commands of step 5 above); uploads the
-    rendered compose, `deploy.json`, `cvm.json`, `attestation.json`, and the verification output
+    CVM also the owner's sealing commands of step 5 above); uploads the rendered compose,
+    `deploy.json`, `cvm.json`, `attestation.json`, `info.json`, and the verification output
     (no secrets); deletes the env file even when a step failed.
 
 `make cvm-rehearsal` runs the same artifact locally against Anvil, Garage (S3), and the dstack simulator
@@ -202,8 +203,19 @@ Deploy staging, in order; any failure stops the run:
 - `staging.env.example` lists every encrypted environment variable; none is a database credential.
 - `app-compose.example.json` and `render-app-compose.sh` are review previews of the fields CLI
   1.1.22 constructs. They are not authoritative deployment manifests or authorization artifacts.
-- `verify-attested-compose.sh` compares a deployed attestation manifest with the exact rendered
-  compose and the compose hash reported for the CVM.
+- `dstack-verifier.sh` runs the official dstack verifier of dstack v0.5.9
+  (`dstacktee/dstack-verifier:0.5.9`, pinned by digest; built from the same dstack commit as the
+  `dstack-0.5.9` guest agent) on a request on stdin: it verifies the TDX quote and its TCB with
+  Intel's collateral, replays the event log against RTMR3, and recomputes the OS image
+  measurements from the vm_config's `os_image_hash`. It needs Docker and network access to Intel's
+  PCS and `download.dstack.org`; nothing is bind-mounted.
+- `verify-attestation.sh ATTESTATION_JSON INFO_JSON APP_ID COMPOSE` feeds it a CVM's quote and
+  event log (`phala cvms attestation --json`) and vm_config (the guest agent's public
+  `GET /prpc/Info` on port 8090), then requires TCB `UpToDate`, the replayed app id `APP_ID`, and
+  the replayed compose hash equal to the SHA-256 of the attested app-compose, whose
+  `docker_compose_file` must be `COMPOSE` byte for byte. Finally it checks the compose policy:
+  `allowed_envs`, no `MIGRATE_DATABASE_URL` in `topup`, and the single 8080 ingress (for the
+  reference product, `ENV_EXAMPLE SERVICE:PORT`).
 - `Dockerfile.postgres-walg` supplies PostgreSQL 18 plus WAL-G and the D3 wrappers for encrypted,
   key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
 - `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
@@ -359,9 +371,6 @@ Therefore:
   deploys its app authorization contract, registers the initial hash, and commits the CVM. Treat the
   first CVM as staging, read back its attested `compose_file`, and verify it before enabling a route.
 
-`compose-hash.sh APP_COMPOSE_JSON` canonicalizes a read-back manifest for independent comparison; it
-must not be used to guess the CLI's pre-deployment manifest.
-
 ## A. First-time provisioning
 
 Staging is provisioned by the Deploy staging workflow with Phala Cloud's KMS (see the checklist).
@@ -448,8 +457,11 @@ Read back and verify the artifact that was actually deployed:
 ```sh
 npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
-deploy/verify-attested-compose.sh \
-  attestation.json cvm.json deploy/docker-compose.production.yml
+APP_ID=$(jq -er '.app_id' cvm.json) || exit 1
+GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
+curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
+deploy/verify-attestation.sh \
+  attestation.json info.json "$APP_ID" deploy/docker-compose.production.yml
 ```
 
 If the attestation is unavailable or its `compose_file` cannot be read back, stop. Do not enable the
@@ -553,8 +565,11 @@ npx --yes phala@1.1.22 deploy --json \
   --wait > commit.json
 npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
-deploy/verify-attested-compose.sh \
-  attestation.json cvm.json deploy/docker-compose.production.yml
+APP_ID=$(jq -er '.app_id' cvm.json) || exit 1
+GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json) || exit 1
+curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
+deploy/verify-attestation.sh \
+  attestation.json info.json "$APP_ID" deploy/docker-compose.production.yml
 ```
 
 After the observation window, **HUMAN-ONLY, Finance Safe required:** remove the old hash with
@@ -574,11 +589,27 @@ curl -fsS "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestatio
 Production images have no logs or SSH, so this public endpoint is the only source of the
 settlement key and the flusher operator addresses.
 
-**HUMAN-ONLY, verifier approval required:** verify the platform certificate/quote and TCB in the
-Phala Trust Center or official dstack verification flow, replay the RTMR event log, confirm the
-attested compose hash, and confirm that the quote's 64-byte report data field starts with the
-32-byte `report_data`. Then check that `report_data` binds the fresh
-nonce, the returned `settlement/v1` public key, and every returned operator:
+**HUMAN-ONLY, verifier approval required:** `quote` is the guest agent's versioned attestation
+(quote, event log, and vm_config), so [dstack-verifier.sh](dstack-verifier.sh) verifies it as is:
+quote and TCB, the RTMR3 replay, and the OS image. Its app id and compose hash must be the CVM's
+(`cvm.json` and the `attestation.json` read back above) and its 64-byte report data the 32-byte
+`report_data` zero-padded:
+
+```sh
+jq '{quote: null, attestation: .quote}' public-attestation.json |
+  deploy/dstack-verifier.sh > public-verification.json
+jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" \
+  --arg compose "$(jq -j '.compose_file' attestation.json | sha256sum | cut -d' ' -f1)" \
+  --arg report_data "$(jq -r '.report_data' public-attestation.json)" '
+  .details.tcb_status == "UpToDate"
+  and .details.app_info.app_id == $app
+  and .details.app_info.compose_hash == $compose
+  and .details.report_data == $report_data + ("0" * 64)
+' public-verification.json
+```
+
+Then check that `report_data` binds the fresh nonce, the returned `settlement/v1` public key, and
+every returned operator:
 
 ```sh
 python3 - "$NONCE" public-attestation.json <<'PY'
@@ -735,7 +766,7 @@ requests.
 | Image | `ghcr.io/phala-network/crypto-topup-reference-product` ([Dockerfile.reference-product](Dockerfile.reference-product)), published by Release images |
 | Compose | [product/docker-compose.yml](product/docker-compose.yml): one service, port 8089, the staging route's addresses inline, no capabilities; rendered by [product/render-compose.sh](product/render-compose.sh) |
 | Env names | [product/staging.env.example](product/staging.env.example): only `PRODUCT_SEED`, the secret |
-| Workflow | [Deploy staging product](../.github/workflows/deploy-staging-product.yml): same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attested-compose read-back |
+| Workflow | [Deploy staging product](../.github/workflows/deploy-staging-product.yml): same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attestation verified with [verify-attestation.sh](verify-attestation.sh) |
 
 The product's public configuration is attested: the workflow renders it into the product
 config inside the compose, so it is part of the compose hash. `TOPUP_ORIGIN` is read by the
@@ -856,6 +887,75 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
 env, a re-rendered public URL (which must recreate the container), the sealed env, and one deposit
 driven by `deposit` mode.
 
+### Abnormal paths
+
+The deposit driver also plays the sandbox scenarios' abnormal payments
+([sandbox/README.md](sandbox/README.md#scenarios)) against staging, through the product CVM, and
+checks the outcome from the product's view: the deposit state, the verified webhooks, and the
+product ledger. The scenarios themselves (`scenarios/run.py`) cannot run here: they serve their
+own product endpoint and need the product key, while staging settles with the product CVM. Each
+run registers a fresh workspace, so runs are independent. Every step is **HUMAN-ONLY**, with
+`driver.json`, `ETH_KEYSTORE`, and `ETH_PASSWORD` exactly as in step 7 of
+[End-to-end order](#end-to-end-order).
+
+| Path | Options | Pays | Expected final state (docs/architecture.md §7, §9, §15) |
+|---|---|---|---|
+| (a) underpayment | `--pay-bps 9700` | 97% of a fresh quote, outside the 1% `lock_tolerance_bps` | `credited`, then `swept`: valued at spot for what arrived (`deposit.confirmed` `price_source` `spot`), about 3% below the quoted credit; the lock is not consumed and later expires (`rate_lock.expired`); one product credit of the deposit's credit |
+| (b) after the quote window | `--pay-after-expiry` | the quoted amount, 60 s after `expires_at` | `rate_lock.expired`, then `credited` at spot and `swept`; the deposit keeps its `lock_ref` and the lock stays `expired` |
+| (c) persistent address | `--persistent ATOMIC` | `ATOMIC` to the workspace's persistent address, no quote | `credited` at spot, then `swept` |
+| (e) unsupported token | `--persistent ATOMIC --token T --until rejected` | an unrouted token `T` | only after finality (the head scan ignores unrouted tokens): `rejected`, `deposit.rejected` reason `unsupported_asset`; the product is never asked to settle; the flusher sweeps only the route asset, so the tokens stay in the forwarder; `TopupUnsupportedInflows` fires where metrics are scraped |
+| (d) refund | `--persistent ATOMIC --until refunded --refund-to A` | more than the route's `max_deposit_atomic` (200000 test PHA) | `rejected` reason `out_of_bounds` (refundable, §15), swept to the treasury with other funds; the driver files a refund request for the whole deposit (`requested`) and waits while finance runs [refund-execution.md](runbooks/refund-execution.md): `approved`, `sent`, then `confirmed` and one `deposit.refunded` webhook |
+
+Credited runs pay at least the route's `min_flush_atomic` (20000 test PHA) so the flusher sweeps
+them; a smaller credited deposit is never swept and raises `TopupDepositStateAgeExceeded` after
+48 hours. `--min-atomic` applies to the amount actually paid. As in step 7, the credited rows
+need PHA below about $0.24, or the product refuses them with `per_deposit_cap`. A refund is
+exercised on an out-of-bounds deposit because its funds reach the treasury by the regular flush
+and the Safe refunds them with one token transfer; refunding an unsupported token first needs a
+separately reviewed Safe flush of that token (refund-execution.md, decision tree), which this
+plan does not run.
+
+The refund request and the `rate_lock.expired` events in the account view need a product CVM
+running this driver's release: run Release images and Deploy staging product in mode `upgrade`
+with the new `product_image` first. The other rows also work with the earlier product image.
+Each run costs the payer two Sepolia transactions (`mint`, `transfer`, about 120000 gas; under
+0.001 ETH at 5 gwei) and mints its test tokens for free; the sweeps cost the flusher operator its
+usual flush gas, and the refund costs the Safe one ERC-20 transfer.
+
+```sh
+export ETH_KEYSTORE=~/.foundry/keystores/staging-payer
+export ETH_PASSWORD=~/staging/payer.password
+rpc=$(jq -er .rpc_url driver.json)
+driver=(uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py
+  deposit --config driver.json --driver-seed-file ~/staging/driver.seed --timeout 3600)
+# (a) underpayment: prints the --amount-minor needed if 97% of the quote is below 20000 PHA
+"${driver[@]}" --amount-minor <cents> --min-atomic 20000000000000000000000 --pay-bps 9700
+# (b) payment after the quote window: about 35 minutes
+"${driver[@]}" --amount-minor <cents> --min-atomic 20000000000000000000000 --pay-after-expiry
+# (c) persistent address, no quote
+"${driver[@]}" --persistent 20000000000000000000000
+# (e) unsupported token: the Sepolia unsupported test token, expected to be a MockERC20
+unsupported=0x287E3577c66866a3F5Cb7a8Dac6761EB43608392
+cast call "$unsupported" 'decimals()(uint8)' --rpc-url "$rpc"
+cast call --from 0x000000000000000000000000000000000000dEaD "$unsupported" \
+  'mint(address,uint256)' "$(cast wallet address)" 1 --rpc-url "$rpc"
+"${driver[@]}" --persistent 1000000000000000000000 --token "$unsupported" --until rejected
+# (d) refund: back to the payer, an address the operator controls; waits up to 12 hours
+"${driver[@]}" --persistent 200001000000000000000000 --until refunded \
+  --refund-to "$(cast wallet address)" --timeout 43200
+```
+
+For (e), `decimals` must print 18 and the `mint` call must succeed (an `eth_call`, nothing is
+sent); otherwise skip the row. For (d), once the driver logs `REFUND_ID=...` the admin key holder
+approves it with the signed `POST /v1/admin/refunds/$REFUND_ID/approve` (require
+`status=approved`). The Safe owner waits for the out-of-bounds deposit's sweep (the treasury's
+`balanceOf` of the test token grows by the deposit amount), then submits
+`transfer(<refund destination>, <amount>)` on the test token from the treasury Safe, and the
+admin key holder records the transaction hash with `POST /v1/admin/refunds/$REFUND_ID/record`,
+all exactly as [refund-execution.md](runbooks/refund-execution.md) shows. After the transfer is
+final the driver logs `refund ... is confirmed` and exits 0. Any driver failure exits non-zero
+with the reason; a rejection where a credit was expected, or the reverse, is a failure.
+
 ## Local verification
 
 The local stack is the attested `deploy/docker-compose.yml` with the `deploy/local/docker-compose.yml`
@@ -925,6 +1025,8 @@ sources; it bind-mounts nothing.
   <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/docs/usage.md>
 - dstack verification:
   <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/docs/verification.md>
+- dstack verifier (request, result, and checks):
+  <https://github.com/Dstack-TEE/dstack/blob/282eeb27d22d8f091ad0fa5a90e638f85cf68751/verifier/README.md>
 - Phala CLI 1.1.22 deploy implementation:
   <https://github.com/Phala-Network/phala-cloud/blob/c22252e4afb82051a8008aa41ac72fa0a731aa26/cli/src/commands/deploy/handler.ts>
 - Phala CLI 1.1.22 flags:

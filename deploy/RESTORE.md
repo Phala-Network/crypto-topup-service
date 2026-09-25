@@ -311,11 +311,14 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
    ```
 
-   Fetch `cvm.json` and `attestation.json`, then run the normal compose verification:
+   Fetch `attestation.json` (`phala cvms attestation "$RESTORE_CVM_ID" --json`) and the
+   instance's guest-agent `info.json` (`https://<instance_id>-8090.<gateway.base_domain>/prpc/Info`,
+   as in the deploy read-back, [README](README.md#a-first-time-provisioning)), then verify the
+   attestation with the original app id:
 
    ```sh
-   deploy/verify-attested-compose.sh \
-     attestation.json cvm.json deploy/docker-compose.yml
+   deploy/verify-attestation.sh \
+     attestation.json info.json "$ORIGINAL_APP_ID" deploy/docker-compose.yml
    ```
 
 ## Verify the restored instance
@@ -335,15 +338,19 @@ These are **HUMAN-ONLY** steps using Phala Cloud credentials and the Finance Saf
    instance was created), `restored_heartbeat_at` at most 120 seconds older (RPO 60 seconds plus
    one heartbeat interval).
 
-3. Request an application-bound quote with a fresh nonce and verify it as in
-   [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress), requiring the
-   original app id; a mismatch means this instance does not hold the application identity. Stop.
+3. Request an application-bound quote with a fresh nonce and verify it with the official dstack
+   verifier, as in [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress)
+   (quote and TCB, RTMR3 replay, OS image). The verified app id must be the original; a mismatch
+   or an invalid result means this instance does not hold the application identity. Stop.
 
    ```sh
    export NONCE="$(openssl rand -hex 32)"
    curl -fsS "$RESTORE_URL/v1/attestation?nonce=$NONCE" > restore-attestation.json
+   jq '{quote: null, attestation: .quote}' restore-attestation.json |
+     deploy/dstack-verifier.sh > restore-verification.json
    jq -e --arg app "$(printf '%s' "${APP_ID#0x}" | tr 'A-F' 'a-f')" \
-     '(.app_id | ascii_downcase | ltrimstr("0x")) == $app' restore-attestation.json
+     '.details.tcb_status == "UpToDate" and .details.app_info.app_id == $app' \
+     restore-verification.json
    ```
 
 4. Signed product requests carry the URL they were sent to in `@target-uri`, so set the instance's

@@ -50,8 +50,9 @@ Webhooks use the Standard Webhooks asymmetric `v1a` scheme with the same settlem
 `topup_sdk.verify_webhook` verifies them. Pin the settlement key only after verifying the
 attestation (`GET /v1/attestation`, section 14 of the architecture). `TopupClient.attestation`
 checks that `report_data` binds the nonce, the settlement key, and the listed flusher operators
-(`topup_sdk.verify_attestation_binding`); the quote itself still needs the dstack verification
-flow.
+(`topup_sdk.verify_attestation_binding`); the quote itself still needs the official dstack
+verifier (`deploy/dstack-verifier.sh`, deploy/README.md "Attestation, ingress, and egress"), whose
+verified report data must be `report_data` zero-padded to 64 bytes.
 
 ## Versioning
 

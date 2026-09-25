@@ -40,8 +40,9 @@ def attestation_report_data(
 def verify_attestation_binding(response: AttestationResponse, nonce: bytes) -> None:
     """Checks that `report_data` binds `nonce`, the settlement key, and every listed operator.
 
-    This does not verify the quote itself: run the dstack verification flow and confirm that
-    the quote's report data equals `response.report_data` before trusting any of these values.
+    This does not verify the quote itself: run the dstack verifier (`deploy/dstack-verifier.sh`)
+    and confirm that the verified report data is `response.report_data` zero-padded to 64 bytes
+    before trusting any of these values.
     """
     operators = [] if isinstance(response.operators, Unset) else response.operators
     try:
