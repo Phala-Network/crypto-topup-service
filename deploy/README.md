@@ -246,7 +246,9 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
 - **Events.** Every `ERROR` log line and every panic (the panic hook flushes before the release
   profile aborts) is an event, grouped by its constant message. `WARN` lines tagged `tags.alert`
   are events too; other `INFO` and `WARN` lines are only breadcrumbs of the next event. At most one
-  event per issue is sent every 10 minutes, since failing loops retry every few seconds.
+  event per issue is sent every 10 minutes, since failing loops retry every few seconds. The
+  service filters these itself: the organization's Sentry plan ignores per-key rate limits (the
+  client key's `rateLimit` stays `null`), and its event quota is shared with other Phala projects.
 - **Alerts.** A line tagged `tags.alert` carries the Prometheus alert name
   ([runbooks index](runbooks/README.md#alert-and-symptom-index)), is fingerprinted by that name
   and its other `tags.*` (route, state, check, chain, scope; never a deposit id), and gets a

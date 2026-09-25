@@ -178,6 +178,7 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
 ///
 /// A failing loop logs the same error every few seconds; the first event opens or reopens the
 /// issue, and the repeats would only spend the project's quota.
+/// This plan ignores per-key rate limits and the org quota is shared, so the SDK must filter here.
 #[derive(Default)]
 struct EventThrottle(Mutex<BTreeMap<String, Instant>>);
 
