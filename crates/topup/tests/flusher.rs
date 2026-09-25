@@ -810,7 +810,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 signer.clone(),
                 alerts.clone(),
                 FlusherPolicy {
-                    replacement_after_blocks: 0,
+                    replacement_after_blocks: 1,
                     ..FlusherPolicy::default()
                 },
             );
@@ -823,15 +823,35 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                         flush_id: replacement_flush
                     }
             );
+            // The original leaves the mempool unmined and a block passes, so it is stale while a
+            // replacement signed now is not: a racing call that reads the replacement rebroadcasts
+            // it, and one that read the original loses the compare-and-set.
+            let original_hash: String =
+                sqlx::query_scalar("SELECT tx_hash FROM flushes WHERE id = $1")
+                    .bind(replacement_flush)
+                    .fetch_one(&database.app_pool)
+                    .await?;
+            cast_rpc(&anvil.rpc_url, "anvil_dropTransaction", &[&original_hash])?;
+            cast_rpc(&anvil.rpc_url, "anvil_mine", &["1"])?;
             let (replacement_a, replacement_b) = tokio::join!(
                 replacement_flusher.maintain_sent(&route),
                 replacement_flusher.maintain_sent(&route)
             );
             let replacement_a = replacement_a.context("first concurrent replacement")?;
             let replacement_b = replacement_b.context("second concurrent replacement")?;
+            let replaced = Some(RunResult::Replaced {
+                flush_id: replacement_flush,
+            });
+            let lost = [
+                Some(RunResult::Idle),
+                Some(RunResult::Rebroadcast {
+                    flush_id: replacement_flush,
+                }),
+            ];
             ensure!(
-                matches!(replacement_a, Some(RunResult::Replaced { flush_id }) if flush_id == replacement_flush)
-                    || matches!(replacement_b, Some(RunResult::Replaced { flush_id }) if flush_id == replacement_flush)
+                (replacement_a == replaced && lost.contains(&replacement_b))
+                    || (replacement_b == replaced && lost.contains(&replacement_a)),
+                "concurrent replacement results: {replacement_a:?}, {replacement_b:?}"
             );
             let signed_versions: i32 = sqlx::query(
                 "SELECT jsonb_array_length(receipt->'signed') FROM flushes WHERE id = $1",
