@@ -17,9 +17,11 @@
 #    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
 #    the mock Safe grants it and it is funded, and no backup marker exists yet; then it
 #    seals the complete `.env` (the owner's `envs update`) and requires a fresh backup marker.
-# 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered with
-#    the pushed image, an unsealed env from `write-staging-env.sh --product`, then the sealed
-#    product seed. One quote-first deposit, driven from another container with the deposit
+# 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
+#    deploy/product/render-compose.sh with the pushed image and a provisional public URL, an
+#    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
+#    public URL (the container must be recreated with the new config), then the sealed product
+#    seed. One quote-first deposit, driven from another container with the deposit
 #    driver (sdk/examples/phala_cloud_integration.py deposit), is credited end to end and recorded
 #    once in the product's ledger. Then it removes everything and asserts that no container,
 #    volume, network, or image of the run is left.
@@ -405,14 +407,20 @@ PY
     die "POST /v1/admin/products did not issue the product"
 echo "ok: POST /v1/admin/products issued the product"
 
-echo "== the reference-product CVM: rendered compose, unsealed env, then the sealed seed"
+echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed seed"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
 # The committed product compose with this chain's addresses, as for the route above.
 sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
-"$root/deploy/render-compose.sh" "$tmp/product-source.yml" >"$tmp/product.yml"
+# render_product PUBLIC_URL: the settings Deploy staging product renders, for this network.
+render_product() {
+    TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 PRODUCT_RPC_URL=http://anvil:8545 \
+        PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
+        "$root/deploy/product/render-compose.sh" "$tmp/product-source.yml" >"$tmp/product.yml"
+}
+render_product https://pending.invalid
 grep -Fq "\"factory\": \"$factory\"," "$tmp/product.yml" || die "the product compose lacks the rehearsal factory"
 cat >"$tmp/product-overlay.yml" <<YAML
 services:
@@ -427,17 +435,24 @@ networks:
     external: true
 YAML
 : >"$tmp/product.env"
-env -i PATH="$PATH" TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=http://product:8089 \
-    PRODUCT_RPC_URL=http://anvil:8545 \
-    PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
-    "$root/deploy/write-staging-env.sh" --product "$tmp/product.env" >/dev/null
-grep -qx 'PRODUCT_SEED=' "$tmp/product.env" || die "the unsealed product env carries the seed"
+env -i PATH="$PATH" "$root/deploy/write-staging-env.sh" --product "$tmp/product.env" >/dev/null
+[[ "$(<"$tmp/product.env")" == PRODUCT_SEED= ]] || die "the unsealed product env is not only an empty seed"
 pc up -d >/dev/null
 product_healthy() {
     [[ "$(http_status http://product:8089/healthz)" == 200 ]]
 }
 wait_for "the product's /healthz" 90 product_healthy
 echo "ok: the unsealed product pinned the settlement key and serves /healthz"
+# Like the provisioning run's public-URL upgrade: a compose that differs only in the config content
+# must recreate the container with the new config.
+provisional=$(pc ps -q product)
+render_product http://product:8089
+pc up -d >/dev/null
+[[ "$(pc ps -q product)" != "$provisional" ]] || die "a changed product setting did not recreate the container"
+pc exec -T product cat /etc/product/config.json | jq -e '.public_url == "http://product:8089"' >/dev/null ||
+    die "the recreated product does not read the re-rendered public URL"
+wait_for "the product's /healthz after the public URL" 90 product_healthy
+echo "ok: a re-rendered setting recreated the product with the new config"
 seed=$(docker exec "$client" cat /opt/product.seed)
 sed -i "s/^PRODUCT_SEED=\$/PRODUCT_SEED=$seed/" "$tmp/product.env"
 unset seed

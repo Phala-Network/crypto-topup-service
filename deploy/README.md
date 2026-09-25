@@ -733,17 +733,36 @@ requests.
 | Piece | Where |
 |---|---|
 | Image | `ghcr.io/phala-network/crypto-topup-reference-product` ([Dockerfile.reference-product](Dockerfile.reference-product)), published by Release images |
-| Compose | [product/docker-compose.yml](product/docker-compose.yml): one service, port 8089, the staging route's addresses inline, no capabilities |
-| Env names | [product/staging.env.example](product/staging.env.example); `PRODUCT_SEED` is the only secret |
+| Compose | [product/docker-compose.yml](product/docker-compose.yml): one service, port 8089, the staging route's addresses inline, no capabilities; rendered by [product/render-compose.sh](product/render-compose.sh) |
+| Env names | [product/staging.env.example](product/staging.env.example): only `PRODUCT_SEED`, the secret |
 | Workflow | [Deploy staging product](../.github/workflows/deploy-staging-product.yml): same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attested-compose read-back |
 
-The product's configuration: `TOPUP_ORIGIN` is read by the workflow from the topup CVM
-(`vars.STAGING_CVM_ID`); `PRODUCT_RPC_URL` (the product's own Sepolia RPC, preferably a provider
-topup does not use) and `PRODUCT_DRIVER_PUBLIC_KEY` are `staging` Environment variables;
-`PRODUCT_PUBLIC_URL` is the CVM's gateway URL, set by the workflow after provisioning. At
-startup the product fetches `TOPUP_ORIGIN/v1/attestation` with a fresh nonce, checks it with
-`topup_sdk.verify_attestation_binding`, and pins the `settlement/v1` key. GitHub holds only
-`PHALA_CLOUD_API_KEY`.
+The product's public configuration is attested: the workflow renders it into the product
+config inside the compose, so it is part of the compose hash. `TOPUP_ORIGIN` is read by the
+workflow from the topup CVM (`vars.STAGING_CVM_ID`) and `PRODUCT_PUBLIC_URL` is the product CVM's
+own gateway URL; `PRODUCT_RPC_URL` (the product's own Sepolia RPC, preferably a provider topup does
+not use) and `PRODUCT_DRIVER_PUBLIC_KEY` are `staging` Environment variables. The sealed env holds
+only `PRODUCT_SEED`. At startup the product fetches `TOPUP_ORIGIN/v1/attestation` with a fresh
+nonce, checks it with `topup_sdk.verify_attestation_binding`, and pins the `settlement/v1` key.
+GitHub holds only `PHALA_CLOUD_API_KEY`.
+
+`PRODUCT_RPC_URL` is public in the attested compose (and the run's artifact): use a keyless public
+Sepolia RPC. A keyed URL would publish its key. The preflight requires the RPC's `finalized` block
+to be within 64 blocks of topup's providers (`TOPUP_RPC_PROVIDER_A_URL` and `_B_URL`): the product
+defers (503) every settlement until its own RPC has finalized the deposit's block, so a lagging
+RPC stalls all of them.
+
+**Changing a setting** (the RPC, the driver key, or topup's origin): set the `staging` Environment
+variable if it is one, then run Deploy staging product in mode `upgrade` with the current
+`product_image`. Never change these with `phala envs update`: Compose recreates a container only
+when its service definition changes, and a restart keeps the old config file. The renderer labels
+the service with the digest of the rendered compose, so every rendered change recreates the
+container.
+
+A product CVM provisioned before the settings were attested has all five names in its
+`allowed_envs`. Once: seal `.env.product` holding only `PRODUCT_SEED` (step 4; this sets
+`allowed_envs` to that name), then run Deploy staging product in mode `upgrade`. Until the upgrade
+the old compose can read empty settings.
 
 ### End-to-end order
 
@@ -758,20 +777,20 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
    ```
 
    Set the `staging` Environment variables `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed
-   `public_key`) and `PRODUCT_RPC_URL`.
+   `public_key`) and `PRODUCT_RPC_URL` (a keyless public Sepolia RPC).
 2. **Release** (workflow): run Release images on `main`; make the new
    `crypto-topup-reference-product` package public once
    ([Build and publish images](#build-and-publish-images)).
 3. **Provision the product CVM** (workflow): Deploy staging product, mode `provision`,
    `product_image` = `PRODUCT_IMAGE` from the Release images summary. Then set the `staging`
-   Environment variable `STAGING_PRODUCT_CVM_ID` to the printed CVM id. The summary lists the
-   public, settlement, and webhook URLs (`https://<app-id>-8089.<gateway domain>`); later runs
-   use mode `upgrade`, which keeps the sealed env.
-4. **Seal the product seed:** write `.env.product` with exactly the
-   `product/staging.env.example` names, the values from the run summary, and `PRODUCT_SEED` from
-   `~/staging/product.seed`, then run the two commands the summary prints
-   (`deploy/product/preflight.sh ... --offline` and `phala envs update <cvm-id> -e .env.product`).
-   Until then the account API answers 503.
+   Environment variable `STAGING_PRODUCT_CVM_ID` to the printed CVM id. The run upgrades the new
+   CVM once more to a compose rendered with its gateway URL. The summary lists the public,
+   settlement, and webhook URLs (`https://<app-id>-8089.<gateway domain>`); later runs use mode
+   `upgrade`, which keeps the sealed env.
+4. **Seal the product seed:** write `.env.product` (mode 0600) with the single line
+   `PRODUCT_SEED=<the hex seed in ~/staging/product.seed>`, then run the two commands the summary
+   prints (`deploy/product/preflight.sh ... --offline` and
+   `phala envs update <cvm-id> -e .env.product`). Until then the account API answers 503.
 5. **Register the product in topup** with the admin-signed `POST /v1/admin/products`, exactly as
    [Product credentials](#product-credentials) shows: slug `phala-cloud`, `public_key` the
    `phala-cloud/v1` keygen output, and `webhook_url` `<product URL>/webhooks`. The committed
@@ -833,8 +852,9 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
    hours); otherwise check the treasury's token balance with `cast call` after the next
    scheduled run.
 
-`make cvm-rehearsal` runs this product CVM locally: the rendered product compose, the unsealed and
-then sealed env, and one deposit driven by `deposit` mode.
+`make cvm-rehearsal` runs this product CVM locally: the rendered product compose, the unsealed
+env, a re-rendered public URL (which must recreate the container), the sealed env, and one deposit
+driven by `deposit` mode.
 
 ## Local verification
 

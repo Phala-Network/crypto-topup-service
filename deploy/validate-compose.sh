@@ -10,9 +10,11 @@ compose_envs=$(mktemp)
 allowed_envs=$(mktemp)
 escaped_config=$(mktemp)
 staging_envs=$(mktemp)
+product_compose=$(mktemp)
 
 cleanup() {
-    rm -f "$rendered" "$rendered_tools" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs"
+    rm -f "$rendered" "$rendered_tools" "$compose_envs" "$allowed_envs" "$escaped_config" "$staging_envs" \
+        "$product_compose"
 }
 trap cleanup EXIT INT TERM
 
@@ -165,15 +167,19 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
     exit 1
 }
 
-# The reference-product CVM (deploy/product): it reads exactly the names of its env example, which
-# become its allowed_envs, mounts no host path, and publishes only 8089.
-product_compose="$root/deploy/product/docker-compose.yml"
+# The reference-product CVM (deploy/product), rendered as Deploy staging product does: it reads
+# exactly the names of its env example, which become its allowed_envs, carries its settings in the
+# attested config, mounts no host path, and publishes only 8089.
+PRODUCT_IMAGE=ghcr.io/phala-network/crypto-topup-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
+    TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
+    PRODUCT_RPC_URL=https://rpc.example PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
+    "$root/deploy/product/render-compose.sh" >"$product_compose"
 docker compose -f "$product_compose" config --variables |
-    awk 'NR > 1 && NF > 0 && $1 != "PRODUCT_IMAGE" { print $1 }' | sort >"$compose_envs"
+    awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$compose_envs"
 awk '/^[[:space:]]*($|#)/ { next } { sub(/=.*/, ""); print }' \
     "$root/deploy/product/staging.env.example" | sort -u >"$staging_envs"
 cmp -s "$compose_envs" "$staging_envs" || {
-    echo "the product compose reads other variables than deploy/product/staging.env.example" >&2
+    echo "the rendered product compose reads other variables than deploy/product/staging.env.example" >&2
     diff -u "$staging_envs" "$compose_envs" >&2 || true
     exit 1
 }
@@ -181,8 +187,10 @@ docker compose -f "$product_compose" config --format json >"$rendered"
 jq -e '([.services[].volumes[]? | select(.type == "bind")] | length == 0)
     and ([.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["product"])
     and ([.services.product.ports[].target] == [8089])
-    and (.configs.product_config.content | test("[$]") | not)' "$rendered" >/dev/null || {
-    echo "the product compose must mount no host path and publish only product:8089" >&2
+    and (.configs.product_config.content | fromjson
+        | .service_url == "https://topup.example" and .rpc_url == "https://rpc.example")' \
+    "$rendered" >/dev/null || {
+    echo "the product compose must mount no host path, publish only product:8089, and carry its settings" >&2
     exit 1
 }
 

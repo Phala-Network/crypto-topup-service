@@ -78,7 +78,7 @@ for bad in 'a#b' 'a"b' "a'b" 'a`b' $'a\nb'; do
     fi
 done
 
-# --product: the product's names, its signing seed always empty.
+# --product: the product's only name, its signing seed, always empty.
 names_of "$root/deploy/product/staging.env.example" >"$tmp/product-expected"
 product=()
 while IFS= read -r name; do
