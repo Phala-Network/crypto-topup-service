@@ -251,14 +251,16 @@ awk -v route="$tmp/route.yaml" '
     { skipping = 0; in_config = 0; print }
 ' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
 # render_topup ADMIN_KID: the settings Deploy renders from the `staging` Environment
-# variables, for this network.
+# variables, for this network. Provider A is keyless, as staging's; provider B is attested with a
+# `{key}` placeholder, as a paid provider is, and Anvil ignores the query that carries the key.
 render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
         WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=$1 \
         TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key SENTRY_ENVIRONMENT=staging \
         TOPUP_DOMAIN=crypto-topup-api-staging.phala.com \
         TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
-        TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 TOPUP_RPC_PROVIDER_B_URL=http://anvil:8545 \
+        TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 \
+        TOPUP_RPC_PROVIDER_B_URL='http://anvil:8545/?key={key}' \
         "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
 }
 render_topup rehearsal-admin/v0
@@ -281,6 +283,9 @@ declare -A values=(
     [AWS_SECRET_ACCESS_KEY]=topup-s3-secret-key
     # Empty: the rehearsal proves the service runs unchanged with Sentry reporting off.
     [SENTRY_DSN]=''
+    # Provider A's URL is keyless; topup reaches provider B only with its key in place of `{key}`.
+    [TOPUP_RPC_PROVIDER_A_KEY]=''
+    [TOPUP_RPC_PROVIDER_B_KEY]=rehearsal-rpc-key
 )
 ((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and staging.env.example differ"
 for name in "${env_names[@]}"; do

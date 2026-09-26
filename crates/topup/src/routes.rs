@@ -8,7 +8,7 @@ use topup_adapters::attestation::OperatorKey;
 use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::{ChainConfig, DestinationConfig, RouteFile, product_destination};
 
-use crate::rpc_provider::{configured_provider_url, provider_label};
+use crate::rpc_provider::{UnresolvedProvider, configured_provider_url, provider_label};
 
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
@@ -40,6 +40,16 @@ pub enum ProviderError {
         label: String,
         /// Environment variable that must hold the URL.
         environment: String,
+    },
+    /// The provider id's key does not fit its URL (`crate::rpc_provider`).
+    #[error("{environment} {problem} for `{label}`")]
+    InvalidKey {
+        /// Log-safe provider label.
+        label: String,
+        /// Environment variable that holds the key.
+        environment: String,
+        /// Log-safe reason, never the value.
+        problem: &'static str,
     },
     /// The resolved value is not a URL.
     #[error("provider `{label}` has an invalid URL")]
@@ -231,7 +241,17 @@ fn resolve_provider(provider: &str, index: usize) -> Result<Arc<EvmClient>, Prov
         Ok(url) => EvmClient::new(&url)
             .map(|client| Arc::new(client.with_provider(label.clone())))
             .map_err(|_| ProviderError::InvalidUrl { label }),
-        Err(environment) => Err(ProviderError::MissingUrl { label, environment }),
+        Err(UnresolvedProvider::MissingUrl(environment)) => {
+            Err(ProviderError::MissingUrl { label, environment })
+        }
+        Err(UnresolvedProvider::Key {
+            environment,
+            problem,
+        }) => Err(ProviderError::InvalidKey {
+            label,
+            environment,
+            problem,
+        }),
     }
 }
 

@@ -627,6 +627,11 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
                     "treasury balance unavailable: route has no RPC provider".to_owned();
                 continue;
             }
+            Err(ProviderError::InvalidKey { environment, .. }) => {
+                route_report.treasury_balance_note =
+                    format!("treasury balance unavailable: {environment} does not fit its URL");
+                continue;
+            }
             Err(ProviderError::InvalidUrl { .. }) => {
                 route_report.treasury_balance_note =
                     "treasury balance unavailable: RPC client configuration is invalid".to_owned();

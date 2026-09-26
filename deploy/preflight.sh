@@ -27,8 +27,12 @@
 # --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure is
 # reported; the exit status is 1 if any.
 #
-# The RPC URLs are attested and published with the compose, so they must be keyless public URLs.
-# Output still never prints them: tool errors are redacted to "provider a" and "provider b".
+# The RPC URLs are attested and published with the compose, so they must not embed an API key: a
+# keyed provider's URL has `{key}` where the key goes, and the key is the owner-sealed
+# TOPUP_RPC_PROVIDER_<A|B>_KEY (empty for a keyless URL), filled in here for the online checks.
+# Without it (--unsealed) the asset chain checks are skipped: run preflight online with the sealed
+# env file for them. Output never prints a URL or key: tool errors are redacted to "provider a"
+# and "provider b".
 set -euo pipefail
 source "$(dirname -- "$0")/contracts/common.sh"
 source "$(dirname -- "$0")/preflight-phala.sh"
@@ -37,8 +41,8 @@ root="$REPO_ROOT"
 example="$root/deploy/staging.env.example"
 expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
 route_config=topup_route_phala_cloud_sepolia_pha
-# May stay empty: an empty DSN turns Sentry reporting off.
-optional_empty=" SENTRY_DSN "
+# May stay empty: an empty DSN turns Sentry reporting off, an empty RPC key means a keyless URL.
+optional_empty=" SENTRY_DSN TOPUP_RPC_PROVIDER_A_KEY TOPUP_RPC_PROVIDER_B_KEY "
 # The owner-approved OS image (deploy/README.md, "OS image"): production, dstack 0.5.9.
 approved_os_image=dstack-0.5.9
 
@@ -180,6 +184,23 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     [[ "$rpc_a" == https://* && "$rpc_b" == https://* ]] ||
         fail "both RPC provider URLs must use https"
     [[ "$rpc_a" != "$rpc_b" ]] || fail "the two RPC provider URLs must be different providers"
+    # The same rules as topup's (crates/topup/src/rpc_provider.rs), then the URL with its key.
+    for label in A B; do
+        url_name=TOPUP_RPC_PROVIDER_${label}_URL key_name=TOPUP_RPC_PROVIDER_${label}_KEY
+        url=${setting[$url_name]-} key=${env[$key_name]-}
+        embeds_key "$url" &&
+            fail "$url_name seems to embed an API key, which the compose publishes; attest it with" \
+                "{key} in the key's place and seal the key as $key_name"
+        if [[ "$url" != *"{key}"* ]]; then
+            [[ -z "$key" ]] || fail "$key_name is set, but $url_name has no {key} placeholder"
+        elif [[ -z "$key" ]]; then
+            ((unsealed)) || fail "$key_name is required by the {key} placeholder of $url_name"
+        elif ! [[ "$key" =~ ^[A-Za-z0-9._~-]{8,}$ ]]; then
+            fail "$key_name must be at least 8 characters of A-Z, a-z, 0-9, and -._~"
+        fi
+        [[ -z "$key" ]] || url=${url//"{key}"/"$key"}
+        [[ "$label" == A ]] && rpc_a=$url || rpc_b=$url
+    done
     admin_key_bytes=$(base64 -d 2>/dev/null <<<"${setting[TOPUP_ADMIN_PUBLIC_KEY]-}" | wc -c) ||
         admin_key_bytes=0
     [[ "$admin_key_bytes" == 32 ]] || fail "TOPUP_ADMIN_PUBLIC_KEY must be standard base64 of 32 bytes"
@@ -262,66 +283,75 @@ else
 fi
 
 echo "== asset chain (RPC URLs are not printed)"
-for command in cast forge; do
-    require_command "$command"
-done
-redact() {
-    local text=$1
-    text=${text//"$rpc_a"/provider a}
-    printf '%s' "${text//"$rpc_b"/provider b}"
-}
-# rpc URL CAST_ARGS...: cast's answer from the provider at URL, or "error: " and its redacted error.
-rpc() {
-    local url=$1
-    shift
-    ETH_RPC_URL=$url cast "$@" 2>"$tmp/cast.err" ||
-        printf 'error: %s' "$(redact "$(tool_error "$tmp/cast.err")")"
-}
-chain_ok=1
-for label in a b; do
-    [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
-    id=$(rpc "$url" chain-id)
-    if [[ "$id" == "${route[chain_id]}" ]]; then
-        ok "provider $label reports chain id $id"
-    else
-        fail "provider $label reports chain id $id, the route needs ${route[chain_id]}"
-        chain_ok=0
-    fi
-done
-network=$(jq -r --argjson id "${route[chain_id]}" \
-    '.networks | to_entries[] | select(.value.chain_id == $id) | .key' "$expectations")
-if ((chain_ok)) && [[ -n "$network" ]]; then
-    if ADMIN=$(jq -r .admin "$expectations") TREASURY=$(jq -r .treasury "$expectations") \
-        "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" --rpc "$network/a=$rpc_a" \
-        --rpc "$network/b=$rpc_b" >"$tmp/verification.json" 2>"$tmp/verification.err"; then
-        ok "verify-deployment.sh passed on both providers"
-    else
-        fail "verify-deployment.sh failed: $(redact "$(tail -n 3 "$tmp/verification.err")")"
-    fi
-    if jq -e --arg factory "${route[forwarder_factory]}" \
-        --arg implementation "${route[implementation]}" --arg treasury "${route[treasury]}" \
-        '(.chains | length) == 2 and all(.chains[];
-            (.factory | ascii_downcase) == ($factory | ascii_downcase) and
-            (.implementation | ascii_downcase) == ($implementation | ascii_downcase) and
-            (.treasury | ascii_downcase) == ($treasury | ascii_downcase))' \
-        "$tmp/verification.json" >/dev/null 2>&1; then
-        ok "route factory, implementation, and treasury match the verified deployment"
-    else
-        fail "route contract addresses differ from the verified deployment"
-    fi
+if [[ "$rpc_a$rpc_b" == *"{key}"* ]]; then
+    echo "note: skipped: a keyed RPC provider has no key here (--unsealed); run preflight online" \
+        "with the sealed env file to check the asset chain"
+else
+    for command in cast forge; do
+        require_command "$command"
+    done
+    redact() {
+        local text=$1 key
+        text=${text//"$rpc_a"/provider a}
+        text=${text//"$rpc_b"/provider b}
+        for key in "${env[TOPUP_RPC_PROVIDER_A_KEY]-}" "${env[TOPUP_RPC_PROVIDER_B_KEY]-}"; do
+            [[ -z "$key" ]] || text=${text//"$key"/[key]}
+        done
+        printf '%s' "$text"
+    }
+    # rpc URL CAST_ARGS...: cast's answer from the provider at URL, or "error: " and its redacted error.
+    rpc() {
+        local url=$1
+        shift
+        ETH_RPC_URL=$url cast "$@" 2>"$tmp/cast.err" ||
+            printf 'error: %s' "$(redact "$(tool_error "$tmp/cast.err")")"
+    }
+    chain_ok=1
     for label in a b; do
         [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
-        for key in contract sanctions_oracle; do
-            code=$(rpc "$url" code "${route[$key]}")
-            [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
-                fail "route $key ${route[$key]} has no code on provider $label (${code:0:300})"
-        done
+        id=$(rpc "$url" chain-id)
+        if [[ "$id" == "${route[chain_id]}" ]]; then
+            ok "provider $label reports chain id $id"
+        else
+            fail "provider $label reports chain id $id, the route needs ${route[chain_id]}"
+            chain_ok=0
+        fi
     done
-    decimals=$(rpc "$rpc_a" call "${route[contract]}" 'decimals()(uint8)')
-    [[ "$decimals" == "${route[decimals]}" ]] ||
-        fail "asset decimals() is $decimals, the route says ${route[decimals]}"
-elif ((chain_ok)); then
-    fail "$expectations names no network with chain id ${route[chain_id]}"
+    network=$(jq -r --argjson id "${route[chain_id]}" \
+        '.networks | to_entries[] | select(.value.chain_id == $id) | .key' "$expectations")
+    if ((chain_ok)) && [[ -n "$network" ]]; then
+        if ADMIN=$(jq -r .admin "$expectations") TREASURY=$(jq -r .treasury "$expectations") \
+            "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" --rpc "$network/a=$rpc_a" \
+            --rpc "$network/b=$rpc_b" >"$tmp/verification.json" 2>"$tmp/verification.err"; then
+            ok "verify-deployment.sh passed on both providers"
+        else
+            fail "verify-deployment.sh failed: $(redact "$(tail -n 3 "$tmp/verification.err")")"
+        fi
+        if jq -e --arg factory "${route[forwarder_factory]}" \
+            --arg implementation "${route[implementation]}" --arg treasury "${route[treasury]}" \
+            '(.chains | length) == 2 and all(.chains[];
+                (.factory | ascii_downcase) == ($factory | ascii_downcase) and
+                (.implementation | ascii_downcase) == ($implementation | ascii_downcase) and
+                (.treasury | ascii_downcase) == ($treasury | ascii_downcase))' \
+            "$tmp/verification.json" >/dev/null 2>&1; then
+            ok "route factory, implementation, and treasury match the verified deployment"
+        else
+            fail "route contract addresses differ from the verified deployment"
+        fi
+        for label in a b; do
+            [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
+            for key in contract sanctions_oracle; do
+                code=$(rpc "$url" code "${route[$key]}")
+                [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
+                    fail "route $key ${route[$key]} has no code on provider $label (${code:0:300})"
+            done
+        done
+        decimals=$(rpc "$rpc_a" call "${route[contract]}" 'decimals()(uint8)')
+        [[ "$decimals" == "${route[decimals]}" ]] ||
+            fail "asset decimals() is $decimals, the route says ${route[decimals]}"
+    elif ((chain_ok)); then
+        fail "$expectations names no network with chain id ${route[chain_id]}"
+    fi
 fi
 
 check_phala_cloud "$workspace" "$os_image"

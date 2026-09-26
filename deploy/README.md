@@ -62,7 +62,7 @@ passwords: that is a key migration, not an image bump.
    | `AWS_S3_FORCE_PATH_STYLE` | `false` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen`, a separate key per Environment; the seed stays with the admin |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | keyless public HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_RPC_URL`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
 
    All but the first three are [attested settings](#attested-settings). `TOPUP_PUBLIC_ORIGIN` is
@@ -123,8 +123,12 @@ product](#product-credentials); and have Finance, Risk, and Operations approve t
 ### Sealing the secrets
 
 The CVM's encrypted env holds exactly the names of [staging.env.example](staging.env.example),
-the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the R2 token), and
-`SENTRY_DSN` (empty turns Sentry off). A new CVM waits for them: PostgreSQL initializes a cluster
+the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the R2 token),
+`SENTRY_DSN` (empty turns Sentry off), and `TOPUP_RPC_PROVIDER_A_KEY`, `TOPUP_RPC_PROVIDER_B_KEY`:
+the API key topup puts in place of `{key}` in the provider's attested URL, empty for a keyless URL
+(staging's). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
+URL and key disagree (a `{key}` without a key, or a key without a `{key}`). Redaction keeps the URL
+and the key out of every log line and error. A new CVM waits for them: PostgreSQL initializes a cluster
 only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-from-backup)).
 
 **HUMAN-ONLY, owner, from their own machine**, in a checkout of the deployed commit with the
@@ -134,6 +138,9 @@ rendered compose from the run's artifact (the provision summary prints these com
 deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml --offline   # .env.ENV: mode 0600
 npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.ENV
 ```
+
+Deploy's preflight has no keys, so with a keyed provider it skips the asset chain checks; run
+preflight without `--offline` (with `--workspace` and `--os-image`) to run them with the keys.
 
 The CVM restarts, `/healthz` answers, and backups have started once a WAL segment younger than two
 minutes is listed (`aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1`).
@@ -145,7 +152,9 @@ A value in the encrypted env is outside the attestation: whoever can run `phala 
 change it without changing the compose hash. So the env holds only the secrets above, and
 [render-compose.sh](render-compose.sh) writes every other `${NAME:-}` of the compose inline from
 the Environment variables, refusing a value that is not 1-512 printable ASCII characters without
-spaces, quotes, backslashes, or `$`:
+spaces, quotes, backslashes, or `$`. The settings are public (the compose is in the attestation), so
+an RPC provider's API key is not one: its URL has `{key}` where the key goes, and the key is sealed
+([Sealing the secrets](#sealing-the-secrets)):
 
 | Setting | Source |
 |---|---|
@@ -378,8 +387,8 @@ with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_SEE
 for its API calls), `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and
 `PRODUCT_DRIVER_PUBLIC_KEY` are attested. At startup it pins topup's `settlement/v1` key, which
 verifies the webhooks, from a verified attestation at `TOPUP_ORIGIN`. Its preflight
-([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a Sepolia RPC; the
-deposit driver pays through it. Switching staging to Phala Cloud's backend is a
+([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a keyless Sepolia
+RPC (it is published and the product seals no RPC key); the deposit driver pays through it. Switching staging to Phala Cloud's backend is a
 `PUT /v1/admin/products/phala-cloud` with their key and webhook URL
 ([Product credentials](#product-credentials)); the route stays as it is. A product
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`

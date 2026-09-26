@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed seed,
-# a stale render, and a malformed rendered setting are refused; an unsealed env file is accepted
-# only with --unsealed.
+# a stale render, a malformed rendered setting, and an RPC URL with an API key are refused; an
+# unsealed env file is accepted only with --unsealed.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -18,6 +18,8 @@ export TOPUP_ORIGIN=https://topup.example
 # A hand edit that keeps the label digest, e.g. of a setting, is stale.
 sed 's|https://rpc.example/sepolia|https://rpc.example/other|' "$tmp/compose.yml" >"$tmp/stale.yml"
 PRODUCT_RPC_URL=http://rpc.example/sepolia "$root/deploy/product/render-compose.sh" >"$tmp/http-rpc.yml"
+PRODUCT_RPC_URL=https://sepolia.infura.io/v3/0123456789abcdef0123456789abcdef \
+    "$root/deploy/product/render-compose.sh" >"$tmp/keyed-rpc.yml"
 printf 'PRODUCT_SEED=\n' >"$tmp/unsealed.env"
 sed 's/^PRODUCT_SEED=$/PRODUCT_SEED=nothex/' "$tmp/unsealed.env" >"$tmp/bad-seed.env"
 
@@ -44,6 +46,12 @@ expect_failure stale "differs from a fresh render" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/stale.yml"
 expect_failure http-rpc "PRODUCT_RPC_URL must use https" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/http-rpc.yml"
+expect_failure keyed-rpc "PRODUCT_RPC_URL seems to embed an API key" --unsealed \
+    --env "$tmp/unsealed.env" --compose "$tmp/keyed-rpc.yml"
+if grep -q 0123456789abcdef "$tmp/keyed-rpc.out" "$tmp/keyed-rpc.err"; then
+    echo "product preflight printed the RPC key" >&2
+    exit 1
+fi
 expect_failure source "the compose reads other variables" --unsealed \
     --env "$tmp/unsealed.env" --compose "$root/deploy/product/docker-compose.yml"
 "$preflight" --env "$tmp/unsealed.env" --compose "$tmp/compose.yml" --offline --unsealed >/dev/null

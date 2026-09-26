@@ -563,8 +563,9 @@ that names one product must agree on the key id or startup fails. Bumping
 `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
 new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
 other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
-is rendered into the compose, so it is attested too. The only dstack encrypted environment
-variables are the object-storage credentials and the Sentry DSN. The in-CVM database's passwords
+is rendered into the compose, so it is attested too; a keyed RPC URL is attested with a `{key}`
+placeholder. The only dstack encrypted environment variables are the object-storage credentials,
+the Sentry DSN, and the RPC providers' API keys that fill those placeholders. The in-CVM database's passwords
 are the hex of `get_key("db/owner/v1")` and `get_key("db/app/v1")`, handed to PostgreSQL and its
 clients as tmpfs files (`POSTGRES_PASSWORD_FILE`, `PGPASSFILE`), identical on every CVM of the app
 id. Startup refuses to run without the dstack

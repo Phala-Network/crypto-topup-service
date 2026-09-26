@@ -10,7 +10,8 @@
 #
 # --offline runs only the local checks (env file and compose). --unsealed accepts an empty
 # PRODUCT_SEED: Deploy (target `product`) provisions without it and the owner seals it from their own
-# machine. Output never prints an RPC URL. Every failure is reported; the exit status is 1 if any.
+# machine. PRODUCT_RPC_URL is published with the compose, so it must be keyless. Output never prints
+# an RPC URL. Every failure is reported; the exit status is 1 if any.
 set -euo pipefail
 source "$(dirname -- "$0")/../contracts/common.sh"
 source "$(dirname -- "$0")/../preflight-phala.sh"
@@ -119,6 +120,9 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     fi
     rpc=${setting[PRODUCT_RPC_URL]-}
     [[ "$rpc" == https://* ]] || fail "PRODUCT_RPC_URL must use https"
+    # The staging-only product has no sealed RPC key: its URL is published and must be keyless.
+    ! embeds_key "$rpc" ||
+        fail "PRODUCT_RPC_URL seems to embed an API key, which the compose publishes; use a keyless URL"
     driver_key_bytes=$(base64 -d 2>/dev/null <<<"${setting[PRODUCT_DRIVER_PUBLIC_KEY]-}" | wc -c) ||
         driver_key_bytes=0
     [[ "$driver_key_bytes" == 32 ]] || fail "PRODUCT_DRIVER_PUBLIC_KEY must be standard base64 of 32 bytes"

@@ -91,7 +91,8 @@ jobs:
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
       # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN and
       # PRODUCT_PUBLIC_URL come from step "Resolve the public URLs". The RPC URLs are published
-      # with the compose, so they must be keyless public URLs.
+      # with the compose: a keyed provider's URL has `{key}` in place of the key, which the owner
+      # seals as TOPUP_RPC_PROVIDER_<A|B>_KEY.
       AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
@@ -444,8 +445,9 @@ jobs:
               echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
               echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
               echo "write \`$env_file\` (mode 0600) with exactly the staging.env.example names:"
-              echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, and \`SENTRY_DSN\` (may be empty). The"
-              echo "same name set keeps the compose hash."
+              echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, \`SENTRY_DSN\` (may be empty), and"
+              echo "\`TOPUP_RPC_PROVIDER_A_KEY\`, \`TOPUP_RPC_PROVIDER_B_KEY\` (the key for a \`{key}\` in the"
+              echo "provider's URL; empty for a keyless URL). The same name set keeps the compose hash."
             else
               env_file=.env.product
               echo "### Owner: seal the product seed"
