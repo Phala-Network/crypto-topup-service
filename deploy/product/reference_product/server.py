@@ -15,7 +15,6 @@ import secrets
 import signal
 import threading
 import time
-import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from http import HTTPStatus
@@ -37,6 +36,7 @@ from topup_sdk import (
     verify_request,
 )
 from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
+from topup_sdk.ids import DEPOSIT, object_id, parse_id
 
 from .config import (
     DRIVER_KEYID,
@@ -125,8 +125,8 @@ class AccountApi:
     - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
     - `POST /accounts/{id}/quotes` `{"amount_minor"}` creates a quote (`create_quote`) and returns
       the service's quote;
-    - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"to_address", "amount_atomic"}`
-      files a refund request for one of the workspace's deposits (`request_refund`);
+    - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"destination_address",
+      "amount_atomic"}` requests a refund of one of the workspace's deposits (`create_refund`);
     - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
       (from the ledger), and the verified webhook events for those deposits and its quotes.
 
@@ -188,19 +188,19 @@ class AccountApi:
                 and method == "POST"
             ):
                 team = _account_ref(parts[0])
-                deposit = uuid.UUID(parts[2])
+                deposit = object_id(DEPOSIT, parse_id(DEPOSIT, parts[2]))
                 request = _json_object(body)
-                to_address = request.get("to_address")
+                destination = request.get("destination_address")
                 amount = parse_decimal(request.get("amount_atomic"))
-                if not isinstance(to_address, str) or not EVM_ADDRESS.fullmatch(to_address):
-                    raise ValueError("to_address must be a 0x-prefixed 20-byte address")
+                if not isinstance(destination, str) or not EVM_ADDRESS.fullmatch(destination):
+                    raise ValueError("destination_address must be a 0x-prefixed 20-byte address")
                 if amount is None or amount <= 0:
                     raise ValueError("amount_atomic must be a positive decimal string")
                 if self.ledger.team_suspended(team) is None or not any(
-                    item.id == deposit for item in self._service().list_deposits(team)
+                    item.id == deposit for item in self._service().list_deposits(account_id=team)
                 ):
                     return Answer(HTTPStatus.NOT_FOUND)
-                refund = self._service().request_refund(deposit, to_address, amount)
+                refund = self._service().create_refund(deposit, destination, amount)
                 return Answer(HTTPStatus.OK, refund.to_dict())
             if len(parts) == 1 and method == "GET":
                 team = _account_ref(parts[0])
@@ -228,8 +228,9 @@ class AccountApi:
         return Answer(HTTPStatus.NOT_FOUND)
 
     def _account_view(self, team: str) -> dict[str, Any]:
-        deposits = list(self._service().list_deposits(team))
-        ids = {str(deposit.id) for deposit in deposits}
+        deposits = list(self._service().list_deposits(account_id=team))
+        # Webhook events name deposits by their UUID.
+        ids = {str(parse_id(DEPOSIT, deposit.id)) for deposit in deposits}
         return {
             "account_id": team,
             "deposits": [deposit.to_dict() for deposit in deposits],

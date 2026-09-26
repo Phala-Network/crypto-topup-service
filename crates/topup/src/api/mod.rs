@@ -3,6 +3,7 @@
 mod attestation;
 mod auth;
 mod client_limit;
+mod deposits;
 mod error;
 mod extract;
 mod handlers;
@@ -90,13 +91,11 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             handlers::create_deposit_address
         ))
         .routes(routes!(handlers::rotate_deposit_address))
-        .routes(routes!(handlers::list_deposits))
+        .routes(routes!(deposits::list_deposits))
+        .routes(routes!(deposits::get_deposit))
+        .routes(routes!(deposits::create_refund))
+        .routes(routes!(deposits::get_refund))
         .routes(routes!(pending::list_pending_deposits))
-        .routes(routes!(handlers::get_deposit))
-        .routes(routes!(handlers::lookup_deposits))
-        .routes(routes!(handlers::pause_account))
-        .routes(routes!(handlers::resume_account))
-        .routes(routes!(handlers::request_refund))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_product,
@@ -105,6 +104,9 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let admin = OpenApiRouter::new()
         .routes(routes!(handlers::register_product))
         .routes(routes!(handlers::update_product))
+        .routes(routes!(handlers::admin_get_deposit))
+        .routes(routes!(handlers::pause_account))
+        .routes(routes!(handlers::resume_account))
         .routes(routes!(handlers::pause_route))
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))

@@ -16,12 +16,18 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Removed
 
+- **Breaking**: `lookup_deposits` and `request_refund`; `list_deposits(external_id, state=…,
+  created_from=…, created_to=…)` becomes `list_deposits(account_id=…, quote=…, status=…,
+  tx_hash=…, created_gte=…, created_lte=…, expand=…)` over Stripe's cursors, and `get_deposit`
+  takes a `dep_` id. Use `create_refund` and `get_refund`.
 - **Breaking**: `register_account`, `create_rate_lock`, `get_rate_lock`, `cancel_rate_lock`, and
   `get_limits`, with their generated `topup_client` operations and models. Use `create_quote`,
   `get_quote`, `cancel_quote`, and `get_config`.
 
 ### Added
 
+- `TopupClient.create_refund` (sends an `Idempotency-Key`) and `get_refund`; `topup_sdk.ids`
+  (`object_id`, `parse_id`, and the `qt_`/`dep_`/`re_`/`evt_` prefixes).
 - `TopupClient.get_config`, `create_quote` (sends an `Idempotency-Key`, generated unless given,
   and reuses it on retries), `get_quote`, and `cancel_quote`; `topup_sdk.signing.sf_string`.
 - `Quote.client_secret`, returned by `create_quote` only, and the generated `ClientQuote` model:

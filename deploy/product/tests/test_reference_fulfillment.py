@@ -191,16 +191,16 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
 
 
 def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
-    own, other = uuid.uuid4(), uuid.uuid4()
-    requested: list[tuple[uuid.UUID, str, int]] = []
+    own, other = "dep_" + uuid.uuid4().hex, "dep_" + uuid.uuid4().hex
+    requested: list[tuple[str, str, int]] = []
 
     class Service:
-        def list_deposits(self, team: str) -> list[SimpleNamespace]:
-            return [SimpleNamespace(id=own)] if team == TEAM else []
+        def list_deposits(self, *, account_id: str) -> list[SimpleNamespace]:
+            return [SimpleNamespace(id=own)] if account_id == TEAM else []
 
-        def request_refund(self, deposit: uuid.UUID, to: str, amount: int) -> SimpleNamespace:
+        def create_refund(self, deposit: str, to: str, amount: int) -> SimpleNamespace:
             requested.append((deposit, to, amount))
-            return SimpleNamespace(to_dict=lambda: {"id": "refund-1", "status": "requested"})
+            return SimpleNamespace(to_dict=lambda: {"id": "re_1", "status": "pending"})
 
     ledger = ProductLedger()
     ledger.add_team(TEAM)
@@ -208,15 +208,16 @@ def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     api._client = Service()  # type: ignore[assignment]
     to = "0x" + "66" * 20
 
-    def refund(deposit: uuid.UUID | str, body: dict[str, Any]) -> Answer:
+    def refund(deposit: str, body: dict[str, Any]) -> Answer:
         path = f"/accounts/{TEAM}/deposits/{deposit}/refunds"
         return _account_call(api, "POST", path, json.dumps(body).encode())
 
-    assert refund(other, {"to_address": to, "amount_atomic": "5"}).status == 404
-    assert refund("not-a-uuid", {"to_address": to, "amount_atomic": "5"}).status == 400
-    assert refund(own, {"to_address": "0x12", "amount_atomic": "5"}).status == 400
-    assert refund(own, {"to_address": to, "amount_atomic": "0"}).status == 400
+    body = {"destination_address": to, "amount_atomic": "5"}
+    assert refund(other, body).status == 404
+    assert refund("not-a-deposit-id", body).status == 400
+    assert refund(own, {**body, "destination_address": "0x12"}).status == 400
+    assert refund(own, {**body, "amount_atomic": "0"}).status == 400
     assert requested == []
-    answer = refund(own, {"to_address": to, "amount_atomic": "5"})
-    assert (answer.status, answer.body) == (200, {"id": "refund-1", "status": "requested"})
+    answer = refund(own, body)
+    assert (answer.status, answer.body) == (200, {"id": "re_1", "status": "pending"})
     assert requested == [(own, to, 5)]

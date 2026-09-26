@@ -8,49 +8,40 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
+from ...models.create_refund_request import CreateRefundRequest
 from ...models.error_response import ErrorResponse
-from ...models.support_deposits_response import SupportDepositsResponse
+from ...models.refund import Refund
 from ...types import UNSET, Unset
 from typing import cast
 
 
 def _get_kwargs(
-    p: str,
     *,
-    tx_hash: str | Unset = UNSET,
-    address: str | Unset = UNSET,
-    lock_ref: str | Unset = UNSET,
-    cursor: str | Unset = UNSET,
+    body: CreateRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
-
-    params: dict[str, Any] = {}
-
-    params["tx_hash"] = tx_hash
-
-    params["address"] = address
-
-    params["lock_ref"] = lock_ref
-
-    params["cursor"] = cursor
-
-    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+    headers: dict[str, Any] = {}
+    if not isinstance(idempotency_key, Unset):
+        headers["Idempotency-Key"] = idempotency_key
 
     _kwargs: dict[str, Any] = {
-        "method": "get",
-        "url": "/v1/products/{p}/deposits".format(
-            p=quote(str(p), safe=""),
-        ),
-        "params": params,
+        "method": "post",
+        "url": "/v1/refunds",
     }
 
+    _kwargs["json"] = body.to_dict()
+
+    headers["Content-Type"] = "application/json"
+
+    _kwargs["headers"] = headers
     return _kwargs
 
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | SupportDepositsResponse | None:
+) -> ErrorResponse | Refund | None:
     if response.status_code == 200:
-        response_200 = SupportDepositsResponse.from_dict(response.json())
+        response_200 = Refund.from_dict(response.json())
 
         return response_200
 
@@ -58,6 +49,16 @@ def _parse_response(
         response_400 = ErrorResponse.from_dict(response.json())
 
         return response_400
+
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
+
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -67,7 +68,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | SupportDepositsResponse]:
+) -> Response[ErrorResponse | Refund]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -77,36 +78,29 @@ def _build_response(
 
 
 def sync_detailed(
-    p: str,
     *,
     client: AuthenticatedClient,
-    tx_hash: str | Unset = UNSET,
-    address: str | Unset = UNSET,
-    lock_ref: str | Unset = UNSET,
-    cursor: str | Unset = UNSET,
-) -> Response[ErrorResponse | SupportDepositsResponse]:
-    """
+    body: CreateRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
+) -> Response[ErrorResponse | Refund]:
+    """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
+    other than a sanctioned or dust one, or a credited one the product did not apply.
+
     Args:
-        p (str):
-        tx_hash (str | Unset):
-        address (str | Unset):
-        lock_ref (str | Unset):
-        cursor (str | Unset):
+        idempotency_key (None | str | Unset):
+        body (CreateRefundRequest): `POST /v1/refunds` body.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | SupportDepositsResponse]
+        Response[ErrorResponse | Refund]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        tx_hash=tx_hash,
-        address=address,
-        lock_ref=lock_ref,
-        cursor=cursor,
+        body=body,
+        idempotency_key=idempotency_key,
     )
 
     response = client.get_httpx_client().request(
@@ -117,71 +111,57 @@ def sync_detailed(
 
 
 def sync(
-    p: str,
     *,
     client: AuthenticatedClient,
-    tx_hash: str | Unset = UNSET,
-    address: str | Unset = UNSET,
-    lock_ref: str | Unset = UNSET,
-    cursor: str | Unset = UNSET,
-) -> ErrorResponse | SupportDepositsResponse | None:
-    """
+    body: CreateRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
+) -> ErrorResponse | Refund | None:
+    """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
+    other than a sanctioned or dust one, or a credited one the product did not apply.
+
     Args:
-        p (str):
-        tx_hash (str | Unset):
-        address (str | Unset):
-        lock_ref (str | Unset):
-        cursor (str | Unset):
+        idempotency_key (None | str | Unset):
+        body (CreateRefundRequest): `POST /v1/refunds` body.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | SupportDepositsResponse
+        ErrorResponse | Refund
     """
 
     return sync_detailed(
-        p=p,
         client=client,
-        tx_hash=tx_hash,
-        address=address,
-        lock_ref=lock_ref,
-        cursor=cursor,
+        body=body,
+        idempotency_key=idempotency_key,
     ).parsed
 
 
 async def asyncio_detailed(
-    p: str,
     *,
     client: AuthenticatedClient,
-    tx_hash: str | Unset = UNSET,
-    address: str | Unset = UNSET,
-    lock_ref: str | Unset = UNSET,
-    cursor: str | Unset = UNSET,
-) -> Response[ErrorResponse | SupportDepositsResponse]:
-    """
+    body: CreateRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
+) -> Response[ErrorResponse | Refund]:
+    """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
+    other than a sanctioned or dust one, or a credited one the product did not apply.
+
     Args:
-        p (str):
-        tx_hash (str | Unset):
-        address (str | Unset):
-        lock_ref (str | Unset):
-        cursor (str | Unset):
+        idempotency_key (None | str | Unset):
+        body (CreateRefundRequest): `POST /v1/refunds` body.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | SupportDepositsResponse]
+        Response[ErrorResponse | Refund]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        tx_hash=tx_hash,
-        address=address,
-        lock_ref=lock_ref,
-        cursor=cursor,
+        body=body,
+        idempotency_key=idempotency_key,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -190,37 +170,30 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    p: str,
     *,
     client: AuthenticatedClient,
-    tx_hash: str | Unset = UNSET,
-    address: str | Unset = UNSET,
-    lock_ref: str | Unset = UNSET,
-    cursor: str | Unset = UNSET,
-) -> ErrorResponse | SupportDepositsResponse | None:
-    """
+    body: CreateRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
+) -> ErrorResponse | Refund | None:
+    """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
+    other than a sanctioned or dust one, or a credited one the product did not apply.
+
     Args:
-        p (str):
-        tx_hash (str | Unset):
-        address (str | Unset):
-        lock_ref (str | Unset):
-        cursor (str | Unset):
+        idempotency_key (None | str | Unset):
+        body (CreateRefundRequest): `POST /v1/refunds` body.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | SupportDepositsResponse
+        ErrorResponse | Refund
     """
 
     return (
         await asyncio_detailed(
-            p=p,
             client=client,
-            tx_hash=tx_hash,
-            address=address,
-            lock_ref=lock_ref,
-            cursor=cursor,
+            body=body,
+            idempotency_key=idempotency_key,
         )
     ).parsed

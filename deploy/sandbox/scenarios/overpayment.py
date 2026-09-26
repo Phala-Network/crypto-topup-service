@@ -15,7 +15,7 @@ def run(ctx: Context) -> None:
     ctx.pay(within.address, int(within.amount_atomic) * 1005 // 1000)
     deposit, confirmed = ctx.credited(team, within.address, within)
     check(confirmed["price_source"] == "lock", "in-tolerance payment was not valued at the lock")
-    check(deposit.credit_minor == str(within.amount), "in-tolerance credit differs from quote")
+    check(deposit.amount == within.amount, "in-tolerance credit differs from quote")
     check(ctx.client.get_quote(within_ref).status == "complete", "lock not completed")
 
     beyond_ref, beyond = ctx.lock(team, amount_minor=2500)

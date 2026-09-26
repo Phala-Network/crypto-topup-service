@@ -50,7 +50,7 @@ sequenceDiagram
     S->>ETH: factory.flush(salts, token) → treasury (swept)
     opt Phala Cloud refuses (closed or suspended workspace, its own caps)
         PC->>PC: record the credit as held, do not apply it
-        PC->>S: POST /deposits/{id}/refund-requests {to_address, amount}
+        PC->>S: POST /v1/refunds {deposit, destination_address}
         S-->>PC: webhook deposit.refunded, once finance's transfer is final
     end
 ```
@@ -223,12 +223,11 @@ your workspace id (1 to 255 bytes). A request for another product's resources is
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
 | `POST /accounts/{ext}/deposit-address`, `GET` same | The persistent address (created at version 1 on first `POST`). | `create_deposit_address`, `get_deposit_address` |
 | `POST /accounts/{ext}/deposit-address/rotate` | New version; older addresses stay valid and watched. | `rotate_deposit_address` |
-| `GET /accounts/{ext}/deposits` | Final deposits, newest first, paged (`state`, `from`, `to`, `cursor`). | `list_deposits` |
+| `GET /v1/deposits` | Final deposits, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
+| `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
+| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§7); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
+| `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
 | `GET /accounts/{ext}/pending-deposits` | Transfers to persistent addresses seen above `finalized`; display only. | `list_pending_deposits` |
-| `GET /deposits/{id}` | One deposit. | `get_deposit` |
-| `GET /deposits?tx_hash= \| address= \| lock_ref=` | Support lookup with each deposit's transition `timeline` and webhook `events`. | `lookup_deposits` |
-| `POST /accounts/{ext}/pause`, `/resume` `{scopes}` | Account kill switch (`quotes`, `addresses`, `settlement`, `flush`, `refunds`). | — |
-| `POST /deposits/{id}/refund-requests` `{to_address, amount}` | Refund request for finance (§7). | `request_refund` |
 | `GET /v1/attestation?nonce=` | Settlement key evidence (§3.3); unauthenticated. | `attestation` |
 
 A quote's `amount` is an integer in US cents with `currency: "usd"`; `amount_atomic` is a decimal
@@ -356,10 +355,11 @@ events, and the event follows the `credited` commit within a second.
 
 The service never asks whether you accept a deposit. To refuse one (a closed or suspended
 workspace, your own caps), record it as held and answer `2xx`; when support has a destination
-address from the user, request its refund with `POST /deposits/{id}/refund-requests` (§7).
+address from the user, request its refund with `POST /v1/refunds` (§7).
 Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
 stop crediting an account before deposits arrive, pause its `settlement` scope
-(`POST /accounts/{ext}/pause`): its deposits then wait in `confirmed` until you resume.
+(the operator's `POST /v1/admin/products/phala-cloud/accounts/{account_id}/pause`): its deposits
+then wait in `confirmed` until you resume.
 
 ### 5.5 Phala Cloud ledger mapping
 
@@ -408,8 +408,8 @@ def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
   and UI refresh.
 - Ignore unknown event types and unknown fields.
 - A lost event can be replayed by the operator with the admin-signed
-  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same payload. The support lookup
-  (`GET /deposits?tx_hash=…`) lists each deposit's `events` with `delivered_at`.
+  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same payload. The operator's
+  deposit view (`GET /v1/admin/deposits/{id}`) lists each deposit's `events` with `delivered_at`.
 
 | Type | When | `data` |
 |---|---|---|
@@ -453,10 +453,10 @@ below the route's `min_refund_atomic`. A credited deposit is refunded only when 
 credit you did not apply or have reversed
 ([architecture §15](architecture.md#15-operating-policies)). Ask the user for a destination
 address they control (never default to `from_address`, which may be an exchange), then
-`POST /deposits/{id}/refund-requests {to_address, amount}` (`amount` in atomic units; at most the
-unrefunded remainder). The request is `requested`; finance approves and executes it from the
+`POST /v1/refunds {deposit, destination_address, amount_atomic}` (`amount_atomic` in base units, at
+most and by default the unrefunded remainder). The request is `requested`; finance approves and executes it from the
 treasury Safe; the service confirms the transaction on chain and sends `deposit.refunded`.
-Ineligible deposits get `409`, a paused `refunds` scope `409 paused`.
+Ineligible deposits get `409 deposit_not_refundable`, a paused `refunds` scope `409 paused`.
 
 ## 8. Testing and go-live
 

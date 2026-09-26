@@ -29,9 +29,10 @@ from reference_product.driver import Payer  # noqa: E402
 from reference_product.fulfillment import Answer, Fulfillment  # noqa: E402
 from reference_product.ledger import ProductLedger  # noqa: E402
 from reference_product.server import create_quote, register_team  # noqa: E402
-from topup_client.models import DepositResponse, Quote  # noqa: E402
+from topup_client.models import Deposit, Quote  # noqa: E402
 from topup_sdk import TopupClient  # noqa: E402
 from topup_sdk.addresses import same_address  # noqa: E402
+from topup_sdk.ids import DEPOSIT, parse_id  # noqa: E402
 
 LOG = logging.getLogger("sandbox")
 TOKEN_UNIT = 10**18
@@ -53,10 +54,15 @@ def check(condition: bool, message: str) -> None:
         raise ScenarioFailure(message)
 
 
-def credit(deposit: DepositResponse) -> int:
-    """The deposit's credit in minor units; fails if the service has not valued it."""
-    check(isinstance(deposit.credit_minor, str), f"deposit {deposit.id} has no credit")
-    return int(str(deposit.credit_minor))
+def credit(deposit: Deposit) -> int:
+    """The deposit's credit in cents; fails if the service has not valued it."""
+    check(isinstance(deposit.amount, int), f"deposit {deposit.id} has no credit")
+    return int(str(deposit.amount))
+
+
+def deposit_uuid(deposit: Deposit) -> str:
+    """The deposit's UUID, as webhook events and the ledger's order keys name it."""
+    return str(parse_id(DEPOSIT, deposit.id))
 
 
 class ScenarioFulfillment(Fulfillment):
@@ -114,17 +120,17 @@ class Context:
         LOG.info("sent %s atomic to %s in %s", amount_atomic, to, tx_hash)
         return tx_hash
 
-    def deposit(self, team: str, address: str, states: set[str] = FINAL_STATES) -> DepositResponse:
+    def deposit(self, team: str, address: str, states: set[str] = FINAL_STATES) -> Deposit:
         """Polls the account's deposits until one to `address` reaches one of `states`."""
         deadline = time.monotonic() + DEPOSIT_TIMEOUT_S
         last_state = None
         while time.monotonic() < deadline:
-            for deposit in self.client.list_deposits(team):
+            for deposit in self.client.list_deposits(account_id=team):
                 if same_address(deposit.address, address):
-                    if deposit.state != last_state:
-                        LOG.info("deposit %s is %s", deposit.id, deposit.state)
-                        last_state = deposit.state
-                    if deposit.state in states:
+                    if deposit.status != last_state:
+                        LOG.info("deposit %s is %s", deposit.id, deposit.status)
+                        last_state = deposit.status
+                    if deposit.status in states:
                         return deposit
             time.sleep(2)
         raise TimeoutError(
@@ -134,25 +140,25 @@ class Context:
     def event(self, event_type: str, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
         return self.ledger.wait_for_event(event_type, matches, EVENT_TIMEOUT_S)
 
-    def deposit_event(self, event_type: str, deposit: DepositResponse) -> dict[str, Any]:
-        return self.event(event_type, lambda data: data.get("deposit_id") == str(deposit.id))
+    def deposit_event(self, event_type: str, deposit: Deposit) -> dict[str, Any]:
+        return self.event(event_type, lambda data: data.get("deposit_id") == deposit_uuid(deposit))
 
     def credited(
         self, team: str, address: str, lock: Quote | None = None
-    ) -> tuple[DepositResponse, dict[str, Any]]:
+    ) -> tuple[Deposit, dict[str, Any]]:
         """Waits for credit and checks the webhook and product ledger agree with the service."""
         deposit = self.deposit(team, address)
-        check(deposit.state in {"credited", "swept"}, f"deposit is {deposit.state}, not credited")
+        check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
         confirmed = self.deposit_event("deposit.confirmed", deposit)
         credited = self.deposit_event("deposit.credited", deposit)
         check(
-            credited["amount_minor"] == deposit.credit_minor,
+            credited["amount_minor"] == str(deposit.amount),
             "deposit.credited amount differs from the deposit's credit",
         )
         credits = [
             amount
             for key, amount in self.ledger.credits_for(team)
-            if key == f"deposit:{deposit.id}"
+            if key == f"deposit:{deposit_uuid(deposit)}"
         ]
         check(credits == [credit(deposit)], f"product ledger holds {credits}")
         if lock is not None:

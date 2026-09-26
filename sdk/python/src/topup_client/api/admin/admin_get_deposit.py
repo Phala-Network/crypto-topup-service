@@ -9,47 +9,36 @@ from ...types import Response, UNSET
 from ... import errors
 
 from ...models.error_response import ErrorResponse
-from ...models.pause_request import PauseRequest
-from ...models.pause_response import PauseResponse
+from ...models.support_deposit_response import SupportDepositResponse
 from typing import cast
 
 
 def _get_kwargs(
-    p: str,
-    ext: str,
-    *,
-    body: PauseRequest,
+    id: str,
 ) -> dict[str, Any]:
-    headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "post",
-        "url": "/v1/products/{p}/accounts/{ext}/pause".format(
-            p=quote(str(p), safe=""),
-            ext=quote(str(ext), safe=""),
+        "method": "get",
+        "url": "/v1/admin/deposits/{id}".format(
+            id=quote(str(id), safe=""),
         ),
     }
 
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
-
-    _kwargs["headers"] = headers
     return _kwargs
 
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | PauseResponse | None:
+) -> ErrorResponse | SupportDepositResponse | None:
     if response.status_code == 200:
-        response_200 = PauseResponse.from_dict(response.json())
+        response_200 = SupportDepositResponse.from_dict(response.json())
 
         return response_200
 
-    if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
 
-        return response_400
+        return response_404
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -59,7 +48,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | PauseResponse]:
+) -> Response[ErrorResponse | SupportDepositResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -69,30 +58,25 @@ def _build_response(
 
 
 def sync_detailed(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> Response[ErrorResponse | PauseResponse]:
-    """
+) -> Response[ErrorResponse | SupportDepositResponse]:
+    """One deposit of any product with its stored facts, transitions, and webhook events.
+
     Args:
-        p (str):
-        ext (str):
-        body (PauseRequest): Pause or resume request.
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | PauseResponse]
+        Response[ErrorResponse | SupportDepositResponse]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
-        body=body,
+        id=id,
     )
 
     response = client.get_httpx_client().request(
@@ -103,59 +87,49 @@ def sync_detailed(
 
 
 def sync(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> ErrorResponse | PauseResponse | None:
-    """
+) -> ErrorResponse | SupportDepositResponse | None:
+    """One deposit of any product with its stored facts, transitions, and webhook events.
+
     Args:
-        p (str):
-        ext (str):
-        body (PauseRequest): Pause or resume request.
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | PauseResponse
+        ErrorResponse | SupportDepositResponse
     """
 
     return sync_detailed(
-        p=p,
-        ext=ext,
+        id=id,
         client=client,
-        body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> Response[ErrorResponse | PauseResponse]:
-    """
+) -> Response[ErrorResponse | SupportDepositResponse]:
+    """One deposit of any product with its stored facts, transitions, and webhook events.
+
     Args:
-        p (str):
-        ext (str):
-        body (PauseRequest): Pause or resume request.
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | PauseResponse]
+        Response[ErrorResponse | SupportDepositResponse]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
-        body=body,
+        id=id,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -164,31 +138,26 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> ErrorResponse | PauseResponse | None:
-    """
+) -> ErrorResponse | SupportDepositResponse | None:
+    """One deposit of any product with its stored facts, transitions, and webhook events.
+
     Args:
-        p (str):
-        ext (str):
-        body (PauseRequest): Pause or resume request.
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | PauseResponse
+        ErrorResponse | SupportDepositResponse
     """
 
     return (
         await asyncio_detailed(
-            p=p,
-            ext=ext,
+            id=id,
             client=client,
-            body=body,
         )
     ).parsed

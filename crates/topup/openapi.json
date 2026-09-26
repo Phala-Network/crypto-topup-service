@@ -6,6 +6,53 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/admin/deposits/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "One deposit of any product with its stored facts, transitions, and webhook events.",
+        "operationId": "admin_get_deposit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit id, `dep_…` or the UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportDepositResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/deposits/{id}/nudge": {
       "post": {
         "tags": [
@@ -244,6 +291,154 @@
           },
           "404": {
             "description": "Not Found: no product is issued with this slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/products/{slug}/accounts/{account_id}/pause": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Pauses scopes of one product account, for example `settlement` to stop crediting it.",
+        "operationId": "pause_account",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/products/{slug}/accounts/{account_id}/resume": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Resumes scopes of one product account.",
+        "operationId": "resume_account",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -670,6 +865,219 @@
         ]
       }
     },
+    "/v1/deposits": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "summary": "The product's deposits, newest first, with Stripe's cursor pagination.",
+        "operationId": "list_deposits",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "Only this account's deposits",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "quote",
+            "in": "query",
+            "description": "Only deposits to this quote's address",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only deposits in this status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tx_hash",
+            "in": "query",
+            "description": "Only deposits in this transaction",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "description": "Created at or after, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "description": "Created at or before, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`dep_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`dep_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expand[]",
+            "in": "query",
+            "description": "`data.quote`",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/deposits/{id}": {
+      "get": {
+        "tags": [
+          "deposits"
+        ],
+        "summary": "One deposit.",
+        "operationId": "get_deposit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit id, `dep_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expand[]",
+            "in": "query",
+            "description": "`quote`",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deposit"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/products/{p}/accounts/{ext}/deposit-address": {
       "get": {
         "tags": [
@@ -913,171 +1321,6 @@
         ]
       }
     },
-    "/v1/products/{p}/accounts/{ext}/deposits": {
-      "get": {
-        "tags": [
-          "deposits"
-        ],
-        "operationId": "list_deposits",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "state",
-            "in": "query",
-            "description": "Filter by state.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Include deposits created at or after this time.",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Include deposits created before this time.",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque cursor returned by the previous page.",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DepositsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/accounts/{ext}/pause": {
-      "post": {
-        "tags": [
-          "pauses"
-        ],
-        "operationId": "pause_account",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
     "/v1/products/{p}/accounts/{ext}/pending-deposits": {
       "get": {
         "tags": [
@@ -1128,298 +1371,6 @@
           },
           "404": {
             "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/accounts/{ext}/resume": {
-      "post": {
-        "tags": [
-          "pauses"
-        ],
-        "operationId": "resume_account",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/deposits": {
-      "get": {
-        "tags": [
-          "deposits"
-        ],
-        "operationId": "lookup_deposits",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "tx_hash",
-            "in": "query",
-            "description": "Canonical transaction hash.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "address",
-            "in": "query",
-            "description": "Canonical receiving address.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "lock_ref",
-            "in": "query",
-            "description": "Product lock reference.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque `(created_at, id)` cursor returned by the previous support page.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SupportDepositsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/deposits/{id}": {
-      "get": {
-        "tags": [
-          "deposits"
-        ],
-        "operationId": "get_deposit",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DepositResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/deposits/{id}/refund-requests": {
-      "post": {
-        "tags": [
-          "refunds"
-        ],
-        "operationId": "request_refund",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RefundRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RefundResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "423": {
-            "description": "Locked",
             "content": {
               "application/json": {
                 "schema": {
@@ -1554,9 +1505,21 @@
             }
           },
           {
+            "name": "expand[]",
+            "in": "query",
+            "description": "`deposit`; signed requests only",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
             "name": "client_secret",
             "in": "query",
-            "description": "The quote's `client_secret`, to read its public view without a signature. Send the request\nwithout `Signature` headers; the response then allows any origin.",
+            "description": "The quote's `client_secret`, to read its public view without a signature. Send the request without `Signature` headers; the response then allows any origin.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1664,6 +1627,155 @@
           },
           "409": {
             "description": "`quote_payment_received`: the address already received a payment; `quote_window_closed`: past `expires_at`; `quote_unexpected_state`: complete or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/refunds": {
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the product did not apply.",
+        "operationId": "create_refund",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; a repeat with the same parameters returns the same refund, and with other parameters is `409 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`deposit_not_refundable`, `paused`, `signature_replayed`, or `idempotency_error`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/refunds/{id}": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "One refund.",
+        "operationId": "get_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Refund id, `re_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expand[]",
+            "in": "query",
+            "description": "`deposit`",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2002,6 +2114,32 @@
         },
         "additionalProperties": false
       },
+      "CreateRefundRequest": {
+        "type": "object",
+        "description": "`POST /v1/refunds` body.",
+        "required": [
+          "deposit",
+          "destination_address"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Amount in base units, as a decimal string; the unrefunded remainder when absent."
+          },
+          "deposit": {
+            "type": "string",
+            "description": "`dep_` id of the deposit to refund."
+          },
+          "destination_address": {
+            "type": "string",
+            "description": "Address the customer controls; never default it to the sender, which may be an exchange."
+          }
+        },
+        "additionalProperties": false
+      },
       "DailyReportResponse": {
         "type": "object",
         "description": "Daily finance report produced by C12.",
@@ -2046,6 +2184,157 @@
               "$ref": "#/components/schemas/RouteDailyReport"
             },
             "description": "SQL-computed metrics for each configured route."
+          }
+        }
+      },
+      "Deposit": {
+        "type": "object",
+        "description": "A final transfer to a quote's address: valued, screened, and credited, or rejected.",
+        "required": [
+          "id",
+          "object",
+          "account_id",
+          "status",
+          "chain_id",
+          "asset_contract",
+          "amount_atomic",
+          "currency",
+          "address",
+          "from_address",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "amount_refunded_atomic",
+          "refunded",
+          "created"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "description": "Your account identifier."
+          },
+          "address": {
+            "type": "string",
+            "description": "Receiving forwarder address."
+          },
+          "amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Credit in the currency's minor unit (cents), once valued.",
+            "minimum": 0
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "Token amount in base units, as a decimal string."
+          },
+          "amount_refunded_atomic": {
+            "type": "string",
+            "description": "Refunded token amount in base units, as a decimal string: the sum of succeeded refunds."
+          },
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Asset code; `null` for a token without a route."
+          },
+          "asset_contract": {
+            "type": "string",
+            "description": "Token contract address."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Finalized block number.",
+            "minimum": 0
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Detection time, Unix seconds."
+          },
+          "currency": {
+            "type": "string",
+            "description": "`usd`."
+          },
+          "exchange_rate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "USD per token, a decimal string with 8 places, once valued."
+          },
+          "from_address": {
+            "type": "string",
+            "description": "Sender of the transfer."
+          },
+          "id": {
+            "type": "string",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{log_index}\")`."
+          },
+          "log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Log index of the transfer.",
+            "minimum": 0
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `deposit`."
+          },
+          "price_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`quote` (the quoted price) or `spot`, once valued."
+          },
+          "quote": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpandableQuote",
+                "description": "The quote whose address received the transfer; `null` for a persistent address."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refunded": {
+            "type": "boolean",
+            "description": "Whether the deposit is fully refunded."
+          },
+          "rejection_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, `sanctioned`, or `product_refused` (historical)."
+          },
+          "status": {
+            "type": "string",
+            "description": "`detected`, `confirmed`, `credited`, `swept`, or `rejected`. New values may be added."
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Transaction hash."
+          },
+          "valued_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Valuation time, Unix seconds."
           }
         }
       },
@@ -2117,9 +2406,40 @@
           }
         }
       },
+      "DepositList": {
+        "type": "object",
+        "description": "A page of a list, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Deposit"
+            },
+            "description": "The deposits."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more deposits follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/deposits`."
+          }
+        }
+      },
       "DepositResponse": {
         "type": "object",
-        "description": "Product-visible deposit facts.",
+        "description": "A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).",
         "required": [
           "id",
           "chain_id",
@@ -2296,30 +2616,6 @@
           }
         }
       },
-      "DepositsResponse": {
-        "type": "object",
-        "description": "A page of deposits.",
-        "required": [
-          "deposits"
-        ],
-        "properties": {
-          "deposits": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DepositResponse"
-            },
-            "description": "Deposits in descending creation order."
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Cursor for the next page, or `null` when exhausted."
-          }
-        }
-      },
       "ErrorDetail": {
         "type": "object",
         "description": "Stable error fields safe to expose to callers.",
@@ -2371,6 +2667,32 @@
           "idempotency_error",
           "api_error"
         ]
+      },
+      "ExpandableDeposit": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "`dep_` id."
+          },
+          {
+            "$ref": "#/components/schemas/Deposit",
+            "description": "The expanded deposit."
+          }
+        ],
+        "description": "A deposit id, or the deposit with `expand[]`."
+      },
+      "ExpandableQuote": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "`qt_` id."
+          },
+          {
+            "$ref": "#/components/schemas/Quote",
+            "description": "The expanded quote."
+          }
+        ],
+        "description": "A quote id, or the quote with `expand[]`."
       },
       "FailedCheckReport": {
         "type": "object",
@@ -2758,11 +3080,15 @@
             "description": "`usd`."
           },
           "deposit": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`dep_` id of the deposit that completed the quote."
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpandableDeposit",
+                "description": "The deposit that completed the quote: its `dep_` id, or the object with `expand[]=deposit`."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "exchange_rate": {
             "type": "string",
@@ -2968,56 +3294,54 @@
           }
         }
       },
-      "RefundRequest": {
+      "Refund": {
         "type": "object",
-        "description": "Refund request body owned by C12.",
-        "required": [
-          "to_address",
-          "amount"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Atomic refund amount."
-          },
-          "to_address": {
-            "type": "string",
-            "description": "Customer-controlled destination address."
-          }
-        }
-      },
-      "RefundResponse": {
-        "type": "object",
-        "description": "Customer refund request accepted for finance review.",
+        "description": "A refund of (part of) a deposit to the customer, executed by finance from the treasury.",
         "required": [
           "id",
-          "deposit_id",
+          "object",
+          "deposit",
           "amount_atomic",
-          "to_address",
-          "status"
+          "destination_address",
+          "status",
+          "created"
         ],
         "properties": {
           "amount_atomic": {
             "type": "string",
-            "description": "Atomic token amount."
+            "description": "Token amount in base units, as a decimal string."
           },
-          "deposit_id": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Request time, Unix seconds."
+          },
+          "deposit": {
+            "$ref": "#/components/schemas/ExpandableDeposit",
+            "description": "The refunded deposit: its `dep_` id, or the object with `expand[]=deposit`."
+          },
+          "destination_address": {
             "type": "string",
-            "format": "uuid",
-            "description": "Related deposit identifier."
+            "description": "Destination address."
           },
           "id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Refund request identifier."
+            "description": "`re_` id."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `refund`."
           },
           "status": {
             "type": "string",
-            "description": "Stable workflow status."
+            "description": "`pending` (requested, approved, or sent) or `succeeded` (the transfer is final)."
           },
-          "to_address": {
-            "type": "string",
-            "description": "Customer-controlled destination address."
+          "tx_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Refund transaction hash, once sent."
           }
         }
       },
@@ -3226,29 +3550,6 @@
           }
         ],
         "description": "Deposit facts with the full immutable transition timeline."
-      },
-      "SupportDepositsResponse": {
-        "type": "object",
-        "description": "A support lookup page with timelines.",
-        "required": [
-          "deposits"
-        ],
-        "properties": {
-          "deposits": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SupportDepositResponse"
-            },
-            "description": "Matching deposits in descending creation order."
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Cursor for the next page, or `null` when exhausted."
-          }
-        }
       },
       "UpdateProductRequest": {
         "type": "object",

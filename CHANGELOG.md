@@ -16,6 +16,17 @@ webhook receivers must ignore unknown fields.
   Quoting by token amount is removed. `GET /v1/config` lists the payable assets, limits, and
   quote terms; `POST …/accounts` and `GET …/accounts/{ext}/limits` are removed (the first quote or
   address creates the account).
+- **Breaking**: deposits and refunds are top-level resources. `GET /v1/deposits` (a Stripe list
+  object with `starting_after`/`ending_before`/`limit` and filters `account_id`, `quote`, `status`,
+  `tx_hash`, `created[gte|lte]`) and `GET /v1/deposits/{id}` return `Deposit` objects (`dep_` ids,
+  `status`, `amount` in cents, `exchange_rate`, `price_source` `quote` or `spot`, `quote`,
+  `amount_refunded_atomic`, `refunded`, Unix timestamps); `POST /v1/refunds {deposit,
+  destination_address, amount_atomic?}` with `Idempotency-Key` and `GET /v1/refunds/{id}` return
+  `Refund` objects (`re_` ids, status `pending` or `succeeded`). `expand[]` expands a deposit's
+  `quote`, a quote's `deposit`, and a refund's `deposit`. The old deposit list, deposit, support
+  lookup, and refund-request paths are removed; the operator's `GET /v1/admin/deposits/{id}` shows
+  a deposit's transitions and webhook events, and account pause and resume move to
+  `POST /v1/admin/products/{slug}/accounts/{account_id}/pause|resume`.
 - `POST /v1/quotes` returns a `client_secret`, like Stripe's PaymentIntent. The payer's browser
   reads the quote's public view, `ClientQuote`, from `GET /v1/quotes/{id}?client_secret=…` without
   a signature (any origin; rate-limited). Only the secret's hash is stored: `GET` returns `null`,

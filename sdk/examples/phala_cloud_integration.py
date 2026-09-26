@@ -149,7 +149,7 @@ def main() -> int:
             f"quote {lock.id}: pay {lock.amount_atomic} atomic to {lock.address} before "
             f"Unix time {lock.expires_at} for {lock.amount} cents ({lock.payment_uri})"
         )
-        deposits = [(str(item.id), item.state) for item in client.list_deposits(account)]
+        deposits = [(item.id, item.status) for item in client.list_deposits(account_id=account)]
         print(f"deposits: {deposits}")
     print("phala_cloud_integration: OK")
     return 0

@@ -282,6 +282,33 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
             && payment["deposit"] == topup::ids::format(topup::ids::DEPOSIT, underpayment),
         "consumed lock does not show its consuming deposit: {payment}"
     );
+    // Each side expands the other.
+    let deposit_id = topup::ids::format(topup::ids::DEPOSIT, underpayment);
+    let quote_id = api.id("checkout-2")?;
+    let quote = api
+        .call(
+            Method::GET,
+            &format!("/v1/quotes/{quote_id}?expand[]=deposit"),
+            Value::Null,
+        )
+        .await?;
+    ensure!(quote["status"] == "complete", "{quote}");
+    ensure!(
+        quote["deposit"]["id"] == deposit_id && quote["deposit"]["quote"] == quote_id,
+        "{quote}"
+    );
+    let deposit = api
+        .call(
+            Method::GET,
+            &format!("/v1/deposits/{deposit_id}?expand[]=quote"),
+            Value::Null,
+        )
+        .await?;
+    ensure!(
+        deposit["quote"]["id"] == quote_id && deposit["quote"]["deposit"] == deposit_id,
+        "{deposit}"
+    );
+    ensure!(deposit["account_id"] == "ws-pending" && deposit["asset"] == "pha");
 
     // A cancelled lock credits every payment at spot, so none is in time or within tolerance.
     let cancelled = api.lock("checkout-4").await?;

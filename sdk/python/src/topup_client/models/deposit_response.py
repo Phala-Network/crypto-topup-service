@@ -19,7 +19,7 @@ T = TypeVar("T", bound="DepositResponse")
 
 @_attrs_define
 class DepositResponse:
-    """Product-visible deposit facts.
+    """A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).
 
     Attributes:
         address (str): Receiving forwarder address.

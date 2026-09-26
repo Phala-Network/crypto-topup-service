@@ -8,51 +8,48 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.deposit import Deposit
 from ...models.error_response import ErrorResponse
-from ...types import UNSET, Unset
+from ...models.pause_request import PauseRequest
+from ...models.pause_response import PauseResponse
 from typing import cast
 
 
 def _get_kwargs(
-    id: str,
+    slug: str,
+    account_id: str,
     *,
-    expand: list[str] | Unset = UNSET,
+    body: PauseRequest,
 ) -> dict[str, Any]:
-
-    params: dict[str, Any] = {}
-
-    json_expand: list[str] | Unset = UNSET
-    if not isinstance(expand, Unset):
-        json_expand = expand
-
-    params["expand[]"] = json_expand
-
-    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+    headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "get",
-        "url": "/v1/deposits/{id}".format(
-            id=quote(str(id), safe=""),
+        "method": "post",
+        "url": "/v1/admin/products/{slug}/accounts/{account_id}/resume".format(
+            slug=quote(str(slug), safe=""),
+            account_id=quote(str(account_id), safe=""),
         ),
-        "params": params,
     }
 
+    _kwargs["json"] = body.to_dict()
+
+    headers["Content-Type"] = "application/json"
+
+    _kwargs["headers"] = headers
     return _kwargs
 
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Deposit | ErrorResponse | None:
+) -> ErrorResponse | PauseResponse | None:
     if response.status_code == 200:
-        response_200 = Deposit.from_dict(response.json())
+        response_200 = PauseResponse.from_dict(response.json())
 
         return response_200
 
-    if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 400:
+        response_400 = ErrorResponse.from_dict(response.json())
 
-        return response_401
+        return response_400
 
     if response.status_code == 404:
         response_404 = ErrorResponse.from_dict(response.json())
@@ -67,7 +64,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Deposit | ErrorResponse]:
+) -> Response[ErrorResponse | PauseResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -77,28 +74,31 @@ def _build_response(
 
 
 def sync_detailed(
-    id: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
-    expand: list[str] | Unset = UNSET,
-) -> Response[Deposit | ErrorResponse]:
-    """One deposit.
+    body: PauseRequest,
+) -> Response[ErrorResponse | PauseResponse]:
+    """Resumes scopes of one product account.
 
     Args:
-        id (str):
-        expand (list[str] | Unset):
+        slug (str):
+        account_id (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Deposit | ErrorResponse]
+        Response[ErrorResponse | PauseResponse]
     """
 
     kwargs = _get_kwargs(
-        id=id,
-        expand=expand,
+        slug=slug,
+        account_id=account_id,
+        body=body,
     )
 
     response = client.get_httpx_client().request(
@@ -109,55 +109,61 @@ def sync_detailed(
 
 
 def sync(
-    id: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
-    expand: list[str] | Unset = UNSET,
-) -> Deposit | ErrorResponse | None:
-    """One deposit.
+    body: PauseRequest,
+) -> ErrorResponse | PauseResponse | None:
+    """Resumes scopes of one product account.
 
     Args:
-        id (str):
-        expand (list[str] | Unset):
+        slug (str):
+        account_id (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Deposit | ErrorResponse
+        ErrorResponse | PauseResponse
     """
 
     return sync_detailed(
-        id=id,
+        slug=slug,
+        account_id=account_id,
         client=client,
-        expand=expand,
+        body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    id: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
-    expand: list[str] | Unset = UNSET,
-) -> Response[Deposit | ErrorResponse]:
-    """One deposit.
+    body: PauseRequest,
+) -> Response[ErrorResponse | PauseResponse]:
+    """Resumes scopes of one product account.
 
     Args:
-        id (str):
-        expand (list[str] | Unset):
+        slug (str):
+        account_id (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Deposit | ErrorResponse]
+        Response[ErrorResponse | PauseResponse]
     """
 
     kwargs = _get_kwargs(
-        id=id,
-        expand=expand,
+        slug=slug,
+        account_id=account_id,
+        body=body,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -166,29 +172,32 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    id: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
-    expand: list[str] | Unset = UNSET,
-) -> Deposit | ErrorResponse | None:
-    """One deposit.
+    body: PauseRequest,
+) -> ErrorResponse | PauseResponse | None:
+    """Resumes scopes of one product account.
 
     Args:
-        id (str):
-        expand (list[str] | Unset):
+        slug (str):
+        account_id (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Deposit | ErrorResponse
+        ErrorResponse | PauseResponse
     """
 
     return (
         await asyncio_detailed(
-            id=id,
+            slug=slug,
+            account_id=account_id,
             client=client,
-            expand=expand,
+            body=body,
         )
     ).parsed

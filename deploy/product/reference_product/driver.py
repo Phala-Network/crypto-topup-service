@@ -28,9 +28,10 @@ from web3 import Web3
 from web3.contract.contract import ContractFunction
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 
-from topup_client.models import DepositResponse, Quote
+from topup_client.models import Deposit, Quote
 from topup_sdk import RequestSigner, SigningAuth
 from topup_sdk.addresses import same_address
+from topup_sdk.ids import DEPOSIT, parse_id
 
 from .config import ProductConfig
 from .server import quote_address
@@ -127,9 +128,9 @@ class ProductApi:
         return self._call("GET", f"/accounts/{quote(team)}")
 
     def refund(
-        self, team: str, deposit_id: str, to_address: str, amount_atomic: str
+        self, team: str, deposit_id: str, destination_address: str, amount_atomic: str
     ) -> dict[str, Any]:
-        body = {"to_address": to_address, "amount_atomic": amount_atomic}
+        body = {"destination_address": destination_address, "amount_atomic": amount_atomic}
         return self._call(
             "POST", f"/accounts/{quote(team)}/deposits/{quote(deposit_id)}/refunds", body
         )
@@ -221,26 +222,26 @@ def run_deposit(
         deposit, view = _wait_for_account(
             api, team, timeout, lambda view: _credited(view, address, states, expired_ref)
         )
-        credited = _event(view, "deposit.credited", deposit_id=str(deposit.id))
+        credited = _event(view, "deposit.credited", deposit_id=_uuid(deposit))
         if credited["price_source"] != ("lock" if at_lock_price else "spot"):
             raise RuntimeError(f"deposit was valued at the {credited['price_source']} price")
         if credited["external_id"] != team or credited["product_lock_ref"] != lock_ref:
             raise RuntimeError(f"deposit.credited names another account or quote: {credited}")
-        expected_minor = deposit.credit_minor
+        expected_minor = str(deposit.amount)
         if lock is not None and at_lock_price:
             expected_minor = str(lock.amount)
         if credited["amount_minor"] != expected_minor:
             raise RuntimeError("credited amount differs from the expected credit")
-        if lock is not None and deposit.lock_ref != lock_ref:
+        if lock is not None and deposit.quote != lock_ref:
             raise RuntimeError("deposit does not reference its quote")
         credits = [(c["provider_order_id"], c["amount_minor"]) for c in view["credits"]]
-        if credits != [(f"deposit:{deposit.id}", int(credited["amount_minor"]))]:
+        if credits != [(f"deposit:{_uuid(deposit)}", int(credited["amount_minor"]))]:
             raise RuntimeError(f"unexpected product ledger credits: {credits}")
         LOG.info(
             "deposit %s is %s: credited %s minor at the %s price (quoted %s); "
             "the ledger holds one credit",
             deposit.id,
-            deposit.state,
+            deposit.status,
             credited["amount_minor"],
             credited["price_source"],
             None if lock is None else lock.amount,
@@ -252,20 +253,20 @@ def _check_rejection(
 ) -> None:
     """Waits for the deposit's rejection; with `refund_to`, requests and awaits its refund."""
     deposit, view = _wait_for_account(api, team, timeout, lambda view: _rejected(view, address))
-    rejected = _event(view, "deposit.rejected", deposit_id=str(deposit.id))
+    rejected = _event(view, "deposit.rejected", deposit_id=_uuid(deposit))
     if view["credits"]:
         raise RuntimeError(f"a rejected deposit was credited: {view['credits']}")
     LOG.info("deposit %s is rejected (%s); nothing was credited", deposit.id, rejected["reason"])
     if refund_to is None:
         return
-    refund = api.refund(team, str(deposit.id), refund_to, deposit.amount_atomic)
+    refund = api.refund(team, deposit.id, refund_to, deposit.amount_atomic)
     LOG.info(
         "refund %s is %s: %s atomic to %s; approve and execute it with "
         "deploy/runbooks/refund-execution.md (REFUND_ID=%s)",
         refund["id"],
         refund["status"],
         refund["amount_atomic"],
-        refund["to_address"],
+        refund["destination_address"],
         refund["id"],
     )
     _, view = _wait_for_account(
@@ -280,15 +281,20 @@ def _check_rejection(
     )
     refunded = _event(view, "deposit.refunded", refund_id=refund["id"])
     if refunded["amount_atomic"] != refund["amount_atomic"] or not same_address(
-        refunded["to_address"], refund["to_address"]
+        refunded["to_address"], refund["destination_address"]
     ):
         raise RuntimeError(f"deposit.refunded differs from the request: {refunded}")
     LOG.info("refund %s is confirmed in %s", refund["id"], refunded["tx_hash"])
 
 
-def _deposit_at(view: dict[str, Any], address: str) -> DepositResponse | None:
+def _uuid(deposit: Deposit) -> str:
+    """The deposit's UUID, as webhook events and the ledger's order keys name it."""
+    return str(parse_id(DEPOSIT, deposit.id))
+
+
+def _deposit_at(view: dict[str, Any], address: str) -> Deposit | None:
     for item in view["deposits"]:
-        deposit = DepositResponse.from_dict(item)
+        deposit = Deposit.from_dict(item)
         if same_address(deposit.address, address):
             return deposit
     return None
@@ -311,14 +317,14 @@ def _event(view: dict[str, Any], event_type: str, **fields: str) -> dict[str, An
 
 def _credited(
     view: dict[str, Any], address: str, states: set[str], expired_lock_ref: str | None
-) -> tuple[DepositResponse, dict[str, Any]] | None:
+) -> tuple[Deposit, dict[str, Any]] | None:
     """Ready once the deposit is in `states` with its `deposit.confirmed` and
     `deposit.credited` webhooks (and `rate_lock.expired` for a late payment) recorded."""
     deposit = _deposit_at(view, address)
-    if deposit is None or deposit.state not in states:
+    if deposit is None or deposit.status not in states:
         return None
     for event_type in ("deposit.confirmed", "deposit.credited"):
-        if _find_event(view, event_type, deposit_id=str(deposit.id)) is None:
+        if _find_event(view, event_type, deposit_id=_uuid(deposit)) is None:
             return None
     if expired_lock_ref is not None and (
         _find_event(view, "rate_lock.expired", product_lock_ref=expired_lock_ref) is None
@@ -327,13 +333,13 @@ def _credited(
     return deposit, view
 
 
-def _rejected(view: dict[str, Any], address: str) -> tuple[DepositResponse, dict[str, Any]] | None:
+def _rejected(view: dict[str, Any], address: str) -> tuple[Deposit, dict[str, Any]] | None:
     deposit = _deposit_at(view, address)
-    if deposit is not None and deposit.state in {"credited", "swept"}:
-        raise RuntimeError(f"deposit {deposit.id} is {deposit.state}, not rejected")
-    if deposit is None or deposit.state != "rejected":
+    if deposit is not None and deposit.status in {"credited", "swept"}:
+        raise RuntimeError(f"deposit {deposit.id} is {deposit.status}, not rejected")
+    if deposit is None or deposit.status != "rejected":
         return None
-    if _find_event(view, "deposit.rejected", deposit_id=str(deposit.id)) is None:
+    if _find_event(view, "deposit.rejected", deposit_id=_uuid(deposit)) is None:
         return None
     return deposit, view
 
@@ -342,8 +348,8 @@ def _wait_for_account(
     api: ProductApi,
     team: str,
     timeout: float,
-    ready: Callable[[dict[str, Any]], tuple[DepositResponse, dict[str, Any]] | None],
-) -> tuple[DepositResponse, dict[str, Any]]:
+    ready: Callable[[dict[str, Any]], tuple[Deposit, dict[str, Any]] | None],
+) -> tuple[Deposit, dict[str, Any]]:
     """Polls the product's view of the workspace until `ready` returns a result."""
     deadline = time.monotonic() + timeout
     states: dict[str, str] = {}

@@ -3,10 +3,9 @@
 use std::str::FromStr;
 
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address as EvmAddress, B256, U256};
+use alloy_primitives::B256;
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
@@ -20,11 +19,10 @@ use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
     AdminReasonRequest, AdminRefundResponse, AttestationQuery, AttestationResponse,
-    DailyReportResponse, DepositAddressResponse, DepositListQuery, DepositLookupQuery,
-    DepositResponse, DepositsResponse, NudgeResponse, OutboxReplayResponse, PauseRequest,
+    DailyReportResponse, DepositAddressResponse, NudgeResponse, OutboxReplayResponse, PauseRequest,
     PauseResponse, PersistentSaltInputs, ProductResponse, ReconciliationBlockLiftResponse,
-    RecordRefundRequest, RefundRequest, RefundResponse, RegisterProductRequest,
-    RotateDepositAddressRequest, RoutePauseResponse, SupportDepositsResponse, UpdateProductRequest,
+    RecordRefundRequest, RegisterProductRequest, RotateDepositAddressRequest, RoutePauseResponse,
+    SupportDepositResponse, UpdateProductRequest,
 };
 use super::repository;
 
@@ -106,161 +104,6 @@ pub(crate) async fn rotate_deposit_address(
 ) -> ApiResult<Json<DepositAddressResponse>> {
     let account = require_account(&state, product.id, &external_id).await?;
     deposit_address(&state, &product, account, Some(request.from_version)).await
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/accounts/{ext}/deposits",
-    params(
-        ("p" = String, Path),
-        ("ext" = String, Path),
-        DepositListQuery
-    ),
-    responses(
-        (status = 200, description = "OK", body = DepositsResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "deposits"
-)]
-pub(crate) async fn list_deposits(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-    Query(filters): Query<DepositListQuery>,
-) -> ApiResult<Json<DepositsResponse>> {
-    validate_state(filters.state.as_deref())?;
-    let account = require_account(&state, product.id, &external_id).await?;
-    Ok(Json(
-        repository::list_account_deposits(&state.pool, product.id, account.id, &filters).await?,
-    ))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/deposits/{id}",
-    params(("p" = String, Path), ("id" = Uuid, Path)),
-    responses(
-        (status = 200, description = "OK", body = DepositResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "deposits"
-)]
-pub(crate) async fn get_deposit(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, deposit_id)): Path<(String, Uuid)>,
-) -> ApiResult<Json<DepositResponse>> {
-    let deposit = repository::get_product_deposit(&state.pool, product.id, deposit_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    Ok(Json(deposit))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/deposits",
-    params(("p" = String, Path), DepositLookupQuery),
-    responses(
-        (status = 200, description = "OK", body = SupportDepositsResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "deposits"
-)]
-pub(crate) async fn lookup_deposits(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path(_product_slug): Path<String>,
-    Query(filters): Query<DepositLookupQuery>,
-) -> ApiResult<Json<SupportDepositsResponse>> {
-    Ok(Json(
-        repository::lookup_product_deposits(&state.pool, product.id, &filters).await?,
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts/{ext}/pause",
-    params(("p" = String, Path), ("ext" = String, Path)),
-    request_body = PauseRequest,
-    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse)),
-    security(("http_message_signature" = [])),
-    tag = "pauses"
-)]
-pub(crate) async fn pause_account(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-    Json(request): Json<PauseRequest>,
-) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &product, &external_id, request, true).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts/{ext}/resume",
-    params(("p" = String, Path), ("ext" = String, Path)),
-    request_body = PauseRequest,
-    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse)),
-    security(("http_message_signature" = [])),
-    tag = "pauses"
-)]
-pub(crate) async fn resume_account(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-    Json(request): Json<PauseRequest>,
-) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &product, &external_id, request, false).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/deposits/{id}/refund-requests",
-    params(("p" = String, Path), ("id" = Uuid, Path)),
-    request_body = RefundRequest,
-    responses(
-        (status = 200, description = "OK", body = RefundResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 409, description = "Conflict", body = ErrorResponse),
-        (status = 423, description = "Locked", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "refunds"
-)]
-pub(crate) async fn request_refund(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, deposit_id)): Path<(String, Uuid)>,
-    Json(request): Json<RefundRequest>,
-) -> ApiResult<Json<RefundResponse>> {
-    let to_address = EvmAddress::from_str(&request.to_address)
-        .map_err(|_| ApiError::bad_request("to_address must be a 20-byte hexadecimal address"))?;
-    if to_address.is_zero() {
-        return Err(ApiError::bad_request(
-            "to_address must not be the zero address",
-        ));
-    }
-    let amount = U256::from_str(&request.amount)
-        .map(AtomicAmount::new)
-        .map_err(|_| ApiError::bad_request("amount must be an unsigned atomic integer"))?;
-    let route = state.route_for_product(&product)?;
-    Ok(Json(
-        repository::request_refund(
-            &state.pool,
-            product.id,
-            deposit_id,
-            route,
-            to_address,
-            amount,
-            &format!("product:{}", product.id),
-        )
-        .await?,
-    ))
 }
 
 #[utoipa::path(
@@ -357,6 +200,67 @@ pub(crate) async fn update_product(
     )
     .await?;
     Ok(Json(product_response(product)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/deposits/{id}",
+    params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
+    responses(
+        (status = 200, description = "OK", body = SupportDepositResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// One deposit of any product with its stored facts, transitions, and webhook events.
+pub(crate) async fn admin_get_deposit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<SupportDepositResponse>> {
+    let id = crate::ids::parse(crate::ids::DEPOSIT, &id)
+        .or_else(|| Uuid::parse_str(&id).ok())
+        .ok_or_else(ApiError::not_found)?;
+    repository::admin_deposit(&state.pool, id)
+        .await?
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/products/{slug}/accounts/{account_id}/pause",
+    params(("slug" = String, Path), ("account_id" = String, Path)),
+    request_body = PauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Pauses scopes of one product account, for example `settlement` to stop crediting it.
+pub(crate) async fn pause_account(
+    State(state): State<AppState>,
+    Path((slug, account_id)): Path<(String, String)>,
+    Json(request): Json<PauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &slug, &account_id, request, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/products/{slug}/accounts/{account_id}/resume",
+    params(("slug" = String, Path), ("account_id" = String, Path)),
+    request_body = PauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Resumes scopes of one product account.
+pub(crate) async fn resume_account(
+    State(state): State<AppState>,
+    Path((slug, account_id)): Path<(String, String)>,
+    Json(request): Json<PauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &slug, &account_id, request, false).await
 }
 
 #[utoipa::path(
@@ -697,12 +601,15 @@ pub(super) async fn require_account(
 
 async fn mutate_account_scopes(
     state: &AppState,
-    product: &Product,
+    slug: &str,
     external_id: &str,
     request: PauseRequest,
     pause: bool,
 ) -> ApiResult<Json<PauseResponse>> {
     let scopes = validate_scopes(request.scopes)?;
+    let product = repository::find_product_by_slug(&state.pool, slug)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let account = require_account(state, product.id, external_id).await?;
     let updated = repository::mutate_account_scopes(
         &state.pool,
@@ -710,7 +617,7 @@ async fn mutate_account_scopes(
         account.id,
         &scopes,
         pause,
-        &format!("product:{}", product.id),
+        &admin_actor(state),
     )
     .await?;
     Ok(Json(PauseResponse {
@@ -834,18 +741,6 @@ fn validate_scopes(scopes: Vec<String>) -> ApiResult<Vec<String>> {
     validated.sort();
     validated.dedup();
     Ok(validated)
-}
-
-fn validate_state(state: Option<&str>) -> ApiResult<()> {
-    if let Some(state) = state
-        && !matches!(
-            state,
-            "detected" | "confirmed" | "credited" | "swept" | "rejected"
-        )
-    {
-        return Err(ApiError::bad_request("unknown deposit state"));
-    }
-    Ok(())
 }
 
 fn decode_nonce(value: &str) -> ApiResult<Vec<u8>> {

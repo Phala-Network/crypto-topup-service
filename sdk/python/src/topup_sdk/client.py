@@ -9,7 +9,7 @@ the service side, so the wrapper retries transport failures, transient statuses,
 - `cancel_quote`: canceling a canceled quote returns it unchanged.
 - `create_deposit_address` / `get_deposit_address`: return the current persistent address.
 - `rotate_deposit_address`: idempotent on `from_version`; a replay returns the same new version.
-- `request_refund`: idempotent on `(deposit, to_address, amount)`.
+- `create_refund`: sends an `Idempotency-Key` like `create_quote`.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
 the factory, the implementation, and the quote id, and raise `AddressMismatchError` rather than
@@ -25,7 +25,6 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from datetime import datetime
 from functools import partial
 from typing import Any, TypeVar
 
@@ -39,32 +38,25 @@ from topup_client.api.addresses import (
 )
 from topup_client.api.attestation import get_attestation
 from topup_client.api.config import get_config
-from topup_client.api.deposits import (
-    get_deposit,
-    list_deposits,
-    list_pending_deposits,
-    lookup_deposits,
-)
+from topup_client.api.deposits import get_deposit, list_deposits, list_pending_deposits
 from topup_client.api.quotes import cancel_quote, create_quote, get_quote
-from topup_client.api.refunds import request_refund
+from topup_client.api.refunds import create_refund, get_refund
 from topup_client.models import (
     AttestationResponse,
     Config,
     CreateQuoteRequest,
+    CreateRefundRequest,
+    Deposit,
     DepositAddressResponse,
-    DepositResponse,
-    DepositsResponse,
+    DepositList,
     ErrorResponse,
     PendingDepositResponse,
     PendingDepositsResponse,
     Quote,
-    RefundRequest,
-    RefundResponse,
+    Refund,
     RotateDepositAddressRequest,
-    SupportDepositResponse,
-    SupportDepositsResponse,
 )
-from topup_client.types import UNSET, Response
+from topup_client.types import UNSET, Response, Unset
 
 from .addresses import forwarder_address, lock_salt, same_address
 from .attestation import verify_attestation_binding
@@ -205,32 +197,40 @@ class TopupClient:
 
     def list_deposits(
         self,
-        external_id: str,
         *,
-        state: str | None = None,
-        created_from: datetime | None = None,
-        created_to: datetime | None = None,
-    ) -> Iterator[DepositResponse]:
-        """Yields the account's deposits, newest first, following every page."""
-        cursor: uuid.UUID | None = None
+        account_id: str | None = None,
+        quote: str | None = None,
+        status: str | None = None,
+        tx_hash: str | None = None,
+        created_gte: int | None = None,
+        created_lte: int | None = None,
+        expand: list[str] | None = None,
+        page_size: int = 100,
+    ) -> Iterator[Deposit]:
+        """Yields the product's deposits matching the filters, newest first, following every page
+        (Stripe's auto-pagination). `created_*` are Unix seconds; `expand` may name `data.quote`."""
+        starting_after: str | None = None
         while True:
             page = self._call(
                 partial(
                     list_deposits.sync_detailed,
-                    self.product_slug,
-                    external_id,
                     client=self._client,
-                    state=UNSET if state is None else state,
-                    from_=UNSET if created_from is None else created_from,
-                    to=UNSET if created_to is None else created_to,
-                    cursor=UNSET if cursor is None else cursor,
+                    account_id=_unset(account_id),
+                    quote=_unset(quote),
+                    status=_unset(status),
+                    tx_hash=_unset(tx_hash),
+                    createdgte=_unset(created_gte),
+                    createdlte=_unset(created_lte),
+                    limit=page_size,
+                    starting_after=_unset(starting_after),
+                    expand=_unset(expand),
                 ),
-                DepositsResponse,
+                DepositList,
             )
-            yield from page.deposits
-            if not isinstance(page.next_cursor, uuid.UUID):
+            yield from page.data
+            if not page.has_more or not page.data:
                 return
-            cursor = page.next_cursor
+            starting_after = page.data[-1].id
 
     def list_pending_deposits(self, external_id: str) -> list[PendingDepositResponse]:
         """Returns transfers to the account's persistent addresses seen before finality.
@@ -245,52 +245,46 @@ class TopupClient:
             PendingDepositsResponse,
         ).pending_deposits
 
-    def get_deposit(self, deposit_id: uuid.UUID) -> DepositResponse:
-        """Returns one deposit owned by this product."""
+    def get_deposit(self, deposit_id: str, *, expand: list[str] | None = None) -> Deposit:
+        """Returns one of the product's deposits; `expand` may name `quote`."""
         return self._call(
-            lambda: get_deposit.sync_detailed(self.product_slug, deposit_id, client=self._client),
-            DepositResponse,
+            lambda: get_deposit.sync_detailed(
+                deposit_id, client=self._client, expand=_unset(expand)
+            ),
+            Deposit,
         )
 
-    def lookup_deposits(
+    def create_refund(
         self,
+        deposit: str,
+        destination_address: str,
+        amount_atomic: int | None = None,
         *,
-        tx_hash: str | None = None,
-        address: str | None = None,
-        lock_ref: str | None = None,
-    ) -> Iterator[SupportDepositResponse]:
-        """Yields support-lookup matches with their full transition timelines."""
-        cursor: str | None = None
-        while True:
-            page = self._call(
-                partial(
-                    lookup_deposits.sync_detailed,
-                    self.product_slug,
-                    client=self._client,
-                    tx_hash=UNSET if tx_hash is None else tx_hash,
-                    address=UNSET if address is None else address,
-                    lock_ref=UNSET if lock_ref is None else lock_ref,
-                    cursor=UNSET if cursor is None else cursor,
-                ),
-                SupportDepositsResponse,
-            )
-            yield from page.deposits
-            if not isinstance(page.next_cursor, str):
-                return
-            cursor = page.next_cursor
+        idempotency_key: str | None = None,
+    ) -> Refund:
+        """Requests a refund of `deposit` (the unrefunded remainder unless `amount_atomic` is
+        given) to an address the customer controls; finance approves and executes it.
 
-    def request_refund(
-        self, deposit_id: uuid.UUID, to_address: str, amount_atomic: int
-    ) -> RefundResponse:
-        """Files a refund request for finance review; replays return the same request."""
+        Retries reuse one `Idempotency-Key`, as `create_quote` does.
+        """
+        key = sf_string(idempotency_key or str(uuid.uuid4()))
+        body = CreateRefundRequest(
+            deposit=deposit,
+            destination_address=destination_address,
+            amount_atomic=UNSET if amount_atomic is None else str(amount_atomic),
+        )
         return self._call(
-            lambda: request_refund.sync_detailed(
-                self.product_slug,
-                deposit_id,
-                client=self._client,
-                body=RefundRequest(to_address=to_address, amount=str(amount_atomic)),
+            lambda: create_refund.sync_detailed(
+                client=self._client, body=body, idempotency_key=key
             ),
-            RefundResponse,
+            Refund,
+        )
+
+    def get_refund(self, refund_id: str, *, expand: list[str] | None = None) -> Refund:
+        """Returns one refund; `expand` may name `deposit`."""
+        return self._call(
+            lambda: get_refund.sync_detailed(refund_id, client=self._client, expand=_unset(expand)),
+            Refund,
         )
 
     def attestation(self, nonce: bytes) -> AttestationResponse:
@@ -338,6 +332,10 @@ class TopupClient:
                     raise error
             self._sleep(self._initial_backoff * 2 ** (attempt - 1))
             attempt += 1
+
+
+def _unset[V](value: V | None) -> V | Unset:
+    return UNSET if value is None else value
 
 
 def _api_error(response: Response[Any]) -> ApiError:

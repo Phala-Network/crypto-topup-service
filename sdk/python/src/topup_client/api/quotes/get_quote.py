@@ -18,10 +18,17 @@ from typing import cast
 def _get_kwargs(
     id: str,
     *,
+    expand: list[str] | Unset = UNSET,
     client_secret: str | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
+
+    json_expand: list[str] | Unset = UNSET
+    if not isinstance(expand, Unset):
+        json_expand = expand
+
+    params["expand[]"] = json_expand
 
     params["client_secret"] = client_secret
 
@@ -98,6 +105,7 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
+    expand: list[str] | Unset = UNSET,
     client_secret: str | Unset = UNSET,
 ) -> Response[ClientQuote | Quote | ErrorResponse]:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
@@ -105,6 +113,7 @@ def sync_detailed(
 
     Args:
         id (str):
+        expand (list[str] | Unset):
         client_secret (str | Unset):
 
     Raises:
@@ -117,6 +126,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         id=id,
+        expand=expand,
         client_secret=client_secret,
     )
 
@@ -131,6 +141,7 @@ def sync(
     id: str,
     *,
     client: AuthenticatedClient,
+    expand: list[str] | Unset = UNSET,
     client_secret: str | Unset = UNSET,
 ) -> ClientQuote | Quote | ErrorResponse | None:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
@@ -138,6 +149,7 @@ def sync(
 
     Args:
         id (str):
+        expand (list[str] | Unset):
         client_secret (str | Unset):
 
     Raises:
@@ -151,6 +163,7 @@ def sync(
     return sync_detailed(
         id=id,
         client=client,
+        expand=expand,
         client_secret=client_secret,
     ).parsed
 
@@ -159,6 +172,7 @@ async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
+    expand: list[str] | Unset = UNSET,
     client_secret: str | Unset = UNSET,
 ) -> Response[ClientQuote | Quote | ErrorResponse]:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
@@ -166,6 +180,7 @@ async def asyncio_detailed(
 
     Args:
         id (str):
+        expand (list[str] | Unset):
         client_secret (str | Unset):
 
     Raises:
@@ -178,6 +193,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         id=id,
+        expand=expand,
         client_secret=client_secret,
     )
 
@@ -190,6 +206,7 @@ async def asyncio(
     id: str,
     *,
     client: AuthenticatedClient,
+    expand: list[str] | Unset = UNSET,
     client_secret: str | Unset = UNSET,
 ) -> ClientQuote | Quote | ErrorResponse | None:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
@@ -197,6 +214,7 @@ async def asyncio(
 
     Args:
         id (str):
+        expand (list[str] | Unset):
         client_secret (str | Unset):
 
     Raises:
@@ -211,6 +229,7 @@ async def asyncio(
         await asyncio_detailed(
             id=id,
             client=client,
+            expand=expand,
             client_secret=client_secret,
         )
     ).parsed

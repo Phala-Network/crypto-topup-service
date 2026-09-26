@@ -151,6 +151,16 @@ impl ApiError {
         )
     }
 
+    /// Returns a refund refused because the deposit is not refundable (architecture §15).
+    #[must_use]
+    pub fn deposit_not_refundable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "deposit_not_refundable",
+            "the deposit is not eligible for a refund",
+        )
+    }
+
     /// Returns an `Idempotency-Key` reused with different parameters.
     #[must_use]
     pub fn idempotency_key_reused() -> Self {

@@ -10,8 +10,6 @@ credit each.
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from harness import TOKEN_UNIT, Context, check
 from topup_client.models import QuotePayment
 
@@ -30,12 +28,12 @@ def run(ctx: Context) -> None:
     check(pending["product_lock_ref"] == lock_ref, "deposit.pending does not name the lock")
     deposit, confirmed = ctx.credited(team, lock.address, lock)
     check(confirmed["price_source"] == "lock", "lock payment was not valued at the lock price")
-    check(deposit.credit_minor == str(lock.amount), "credit differs from the quoted credit")
+    check(deposit.amount == lock.amount, "credit differs from the quoted credit")
     check(
-        Decimal(str(deposit.price_scaled)).scaleb(-8) == Decimal(lock.exchange_rate),
+        deposit.exchange_rate == lock.exchange_rate,
         "price differs from the locked price",
     )
-    check(deposit.lock_ref == lock_ref, "deposit does not reference its lock")
+    check(deposit.quote == lock_ref, "deposit does not reference its quote")
     check(ctx.client.get_quote(lock_ref).status == "complete", "lock not completed")
 
     tx_hash = ctx.pay(persistent, 1000 * TOKEN_UNIT)

@@ -7,12 +7,14 @@ from .client_quote import ClientQuote
 from .config import Config
 from .config_asset import ConfigAsset
 from .create_quote_request import CreateQuoteRequest
+from .create_refund_request import CreateRefundRequest
 from .daily_report_response import DailyReportResponse
+from .deposit import Deposit
 from .deposit_address_response import DepositAddressResponse
 from .deposit_event_response import DepositEventResponse
+from .deposit_list import DepositList
 from .deposit_response import DepositResponse
 from .deposit_transition_response import DepositTransitionResponse
-from .deposits_response import DepositsResponse
 from .error_detail import ErrorDetail
 from .error_response import ErrorResponse
 from .error_type import ErrorType
@@ -33,8 +35,7 @@ from .reconciliation_block_lift_response import ReconciliationBlockLiftResponse
 from .reconciliation_block_report import ReconciliationBlockReport
 from .reconciliation_round_report import ReconciliationRoundReport
 from .record_refund_request import RecordRefundRequest
-from .refund_request import RefundRequest
-from .refund_response import RefundResponse
+from .refund import Refund
 from .register_product_request import RegisterProductRequest
 from .rotate_deposit_address_request import RotateDepositAddressRequest
 from .route_daily_report import RouteDailyReport
@@ -43,7 +44,6 @@ from .route_daily_report_deposits_by_state import RouteDailyReportDepositsByStat
 from .route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatus
 from .route_pause_response import RoutePauseResponse
 from .support_deposit_response import SupportDepositResponse
-from .support_deposits_response import SupportDepositsResponse
 from .update_product_request import UpdateProductRequest
 
 __all__ = (
@@ -54,11 +54,13 @@ __all__ = (
     "Config",
     "ConfigAsset",
     "CreateQuoteRequest",
+    "CreateRefundRequest",
     "DailyReportResponse",
+    "Deposit",
     "DepositAddressResponse",
     "DepositEventResponse",
+    "DepositList",
     "DepositResponse",
-    "DepositsResponse",
     "DepositTransitionResponse",
     "ErrorDetail",
     "ErrorResponse",
@@ -80,8 +82,7 @@ __all__ = (
     "ReconciliationBlockReport",
     "ReconciliationRoundReport",
     "RecordRefundRequest",
-    "RefundRequest",
-    "RefundResponse",
+    "Refund",
     "RegisterProductRequest",
     "RotateDepositAddressRequest",
     "RouteDailyReport",
@@ -90,6 +91,5 @@ __all__ = (
     "RouteDailyReportRefundsByStatus",
     "RoutePauseResponse",
     "SupportDepositResponse",
-    "SupportDepositsResponse",
     "UpdateProductRequest",
 )

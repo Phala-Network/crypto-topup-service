@@ -21,4 +21,4 @@ def run(ctx: Context) -> None:
     deposit, confirmed = ctx.credited(team, lock.address, lock)
     check(confirmed["price_source"] == "spot", "late payment was valued at the lock price")
     check(ctx.client.get_quote(lock_ref).status == "expired", "lock is not expired")
-    check(deposit.lock_ref == lock_ref, "deposit does not reference its lock")
+    check(deposit.quote == lock_ref, "deposit does not reference its quote")
