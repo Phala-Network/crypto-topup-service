@@ -23,8 +23,8 @@ send only the printed public key to the operator.
 signed test `deposit.credited` to a webhook receiver whose test instance pins that seed's public
 key, then a duplicate and a forged copy, and reports whether the answers were `2xx`, `2xx`, and
 `4xx`. See `docs/integration.md` for the integration guide, the signing profile, and the versioning and deprecation policy,
-`sdk/examples/phala_cloud_integration.py` for an integration including settlement and webhook
-verification, `deploy/product/reference_product` for a complete product, and
+`sdk/examples/phala_cloud_integration.py` for an integration including webhook
+fulfillment, `deploy/product/reference_product` for a complete product, and
 `deploy/sandbox/README.md` for the sandbox.
 
 ```sh

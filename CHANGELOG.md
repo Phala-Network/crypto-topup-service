@@ -65,7 +65,7 @@ webhook receivers must ignore unknown fields.
 ### Changed
 
 - **Breaking: webhook fulfillment replaces the settlement protocol**
-  (docs/design/stripe-style-integration.md). A deposit that passes screening is `credited`
+  (architecture §7, §11; integration guide §5). A deposit that passes screening is `credited`
   directly (`confirmed → credited`; the `cleared` state is gone), and `deposit.credited` is the
   fulfillment event: the product credits `amount_minor` to `external_id` once per deposit id and
   answers `2xx`. Its payload is now `product_id`, `external_id`, `deposit_id`, `state`, `unit`,
@@ -90,7 +90,7 @@ webhook receivers must ignore unknown fields.
 - `POST /v1/products/{p}/deposits/{id}/refund-requests` accepts `credited` and `swept` deposits
   too (still not `sanctioned`, still at least the route's `min_refund_atomic`): a product asks to
   refund a credit it did not apply or has reversed, for example for a closed workspace; finance
-  approves every request (docs/design/stripe-style-integration.md §2.4).
+  approves every request (integration guide §5.4).
 
 - **Settlement conformance:** the `unknown_get` case now requires `404` for `GET` of an unknown
   settlement key and fails `200 {"status":"unknown"}`, which it used to accept. The service
@@ -103,7 +103,7 @@ webhook receivers must ignore unknown fields.
 - **Settlement conformance suite** (`topup-conformance`, `topup-conformance-reference`,
   `docs/conformance.md`, `make product-conformance`) and the reference product's conformance mode
   (test accounts and the `_conformance/ledger` hook). The settlement endpoint it tested is being
-  replaced by webhook fulfillment (docs/design/stripe-style-integration.md); webhook receivers are
+  replaced by webhook fulfillment (integration guide §5); webhook receivers are
   tested with `topup-sdk send-test-event`.
 
 - **Breaking (administrative API):** `GET /v1/admin/report/daily` route entries no longer carry

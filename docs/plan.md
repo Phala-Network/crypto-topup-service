@@ -62,7 +62,7 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 | C3 Scanner | Per-chain `finalized` scan with windowing, address batching, `ON CONFLICT DO NOTHING`, backfill for new addresses, route selection by `(chain, asset)` `after: C1` | `anvil` tests: duplicate logs, unsupported asset → rejected row, backfill, cursor advance after commit | §8 |
 | C4 Confirm step | `GET`-by-key first, two-provider finality, provisional evidence correction, quote fetch (Coin Metrics, Binance, Kraken adapters), credit computation `after: C2, B4` | Provider disagreement; corrected evidence; stale/divergent/depeg prices; below minimum; restore adoption via `GET` | §7, §8, §11 |
 | C5 Screen step | Sanctions oracle `eth_call` on both providers, bounds, pauses `after: C2, B5` | Sanctions hit; provider outage → retry | §8 |
-| C6 Settle step | RFC 9421 signer, `Idempotency-Key`, typed outcomes, `GET` before resend, payload retention `after: C2` | Mock product: accepted, processing, rejected, `409`, `422`, timeout then `GET` | §11 |
+| C6 Credit and fulfillment event | Screening pass credits the deposit and writes `deposit.credited` with an id derived from the deposit id, in one transaction; replaces the retired settle step `after: C2` | Exact payload and id; a repeated id is stored once; migration of in-flight `cleared` deposits | §7, §11 |
 | C7 Flusher | Planning by on-chain balance and gas ratio, batch `flush`, operator nonce lock, replacement, reverted handling, `Flushed` rows, log-position linkage; isolates persistently failing addresses by splitting the batch (bisect) and alerting `after: C1, A1` | `anvil`: flush carrying pending and rejected deposits; deposit backfilled after flush; same-block flush-then-deposit; replacement; reverted; operator rotation | §10 |
 | C8 Reconciler | Every check in §13 with the two safe repairs and post-restore mode `after: C3, C6, C7` | Each check exercised with a seeded mismatch | §13 |
 | C9 API | `axum` routes of §12 (accounts, addresses, rotate, rate locks, deposits, limits, pause scopes, refund requests, attestation, admin), product signature verification, tenant checks, `utoipa` OpenAPI `after: C1` | Route tests incl. cross-tenant denial; OpenAPI snapshot | §12 |
@@ -85,8 +85,8 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 
 | WP | Deliverable | Tests / done when | Spec |
 |---|---|---|---|
-| E1 Conformance suite | Runnable suite exercising the six product obligations and every response type `after: C6` | Passes against the mock product; fails against a deliberately broken one | §11 |
-| E2 Phala Cloud settlement endpoint (monorepo) | Signature verification, order find-or-create with partial unique index, `complete_order_payment` in one transaction, `GET` by key, own caps, log verification, deposit id recomputation `after: E1` | Conformance suite green in monorepo CI; concurrency test | §11 |
+| E1 Receiver test tool | `topup-sdk send-test-event`: a signed event, its duplicate, and a forged copy against any webhook receiver (replaces the retired conformance suite) `after: C6` | Passes against the reference product; fails against a receiver that skips verification | §11 |
+| E2 Phala Cloud fulfillment (monorepo) | Webhook receiver: `v1a` verification, `deposit.credited` credited once by `deposit:<id>` with order find-or-create, credit, and `complete_order_payment` in one transaction; holds and refund requests for refusals `after: E1` | `send-test-event` green against the production code path; concurrency test | §11 |
 | E3 Phala Cloud UI (monorepo) | Quote-first checkout, persistent address option, waiting screen, history, limits, refund request, notifications, pause and compliance messaging `after: C9, C10` | Browser verification of every row in the §12 UX checklist | §12 |
 | E4 SDK and sandbox | Generated client from OpenAPI, signing helper, idempotent operations, Python example; sandbox on Sepolia with scripted scenarios `after: C9, D2` | Example runs end to end against the sandbox | §12 |
 | E5 Finance and compliance procedures | Refund workflow with the Safe, daily report consumers, compliance case handling for rejected deposits `after: C12` | One refund executed in staging; report reviewed by finance | §15 |
@@ -97,7 +97,7 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 |---|---|
 | G0 Foundations | A1, B1, B2, B3, C1 merged; CI green |
 | G1 Sepolia end to end | A2, C2–C7, C9–C11, D2 merged; a quote-first and a persistent-address deposit credited on Sepolia through the mock product; flush confirmed; restore drill passed (D3) |
-| G2 Mainnet pilot go/no-go | Contracts reviewed internally (no external audit, architecture §4); E2, E3, E5 merged; conformance green against Phala Cloud; all §1 decisions recorded; every runbook exercised once; §17 Phase 1 acceptance list checked by a human |
+| G2 Mainnet pilot go/no-go | Contracts reviewed internally (no external audit, architecture §4); E2, E3, E5 merged; `send-test-event` green against Phala Cloud; all §1 decisions recorded; every runbook exercised once; §17 Phase 1 acceptance list checked by a human |
 | G3 GA | Phase 2 items of §17 and the GA column of §18 delivered; caps raised by finance |
 
 ## 5. Ordering summary

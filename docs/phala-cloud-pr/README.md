@@ -1,11 +1,11 @@
 # Prepared pull request for the Phala Cloud repository
 
-Not opened. The root orchestrator opens it after the owner approves. It adds one file to the
-Phala Cloud repository; the path below is a proposal, to be adjusted to that repository's docs
-layout.
+Opened as [phala-cloud-monorepo#2196](https://github.com/Phala-Network/phala-cloud-monorepo/pull/2196)
+(`docs/integrations/crypto-topup.md`); the root orchestrator keeps it in sync with the file below,
+which follows the webhook fulfillment contract (docs/integration.md §5).
 
 - **Title:** `docs: crypto top-up integration checklist`
-- **File:** `docs/crypto-topup-integration.md`
+- **File:** `docs/integrations/crypto-topup.md`
 
 Note: `Phala-Network/crypto-topup-service` is private; reviewers need read access to follow the
 links.
@@ -23,16 +23,17 @@ No code changes in this PR. Each unchecked item becomes its own issue or PR.
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-## File: `docs/crypto-topup-integration.md`
+## File: `docs/integrations/crypto-topup.md`
 
 ```markdown
 # Crypto top-up integration
 
 Phala Cloud credits USD for PHA deposits handled by the crypto top-up service. The service owns
-addresses, chain evidence, pricing, and sweeps; Phala Cloud owns the balance and decides every
-credit through a settlement endpoint it implements.
+addresses, chain evidence, pricing, screening, and sweeps, and tells Phala Cloud what to credit
+with a signed `deposit.credited` webhook; Phala Cloud owns the balance and credits each deposit
+once, like Stripe Checkout fulfillment.
 
-The authoritative integration guide, including the settlement contract, the webhook format, and
+The authoritative integration guide, including the fulfillment contract, the webhook format, and
 the go-live checklist, is
 [crypto-topup-service/docs/integration.md](https://github.com/Phala-Network/crypto-topup-service/blob/main/docs/integration.md).
 Section numbers below refer to it.
@@ -49,54 +50,41 @@ exactly.
 
 ## Changes on our side
 
-### Settlement endpoint (guide §5)
+### Fulfillment (guide §5)
 
-- [ ] `POST {settlement_url}` and `GET {settlement_url}/{key}`, reachable over public HTTPS from
-      the service.
-- [ ] Verify the RFC 9421 signature against the pinned `(settlement/v1, public key)`, with the
-      target URI built from our configured public URL, never from `Host`.
-- [ ] Recompute `deposit_id` from the evidence; require
-      `idempotency_key == "deposit:" + deposit_id`.
-- [ ] Verify the cited Transfer log on our own Ethereum RPC at finality: emitter is the approved
-      token, `to` is an address we computed for the workspace, amount matches. RPC failure or
-      not-yet-final → `503`, nothing stored.
-- [ ] Per-deposit and per-period caps, checked in the same transaction as the credit.
-- [ ] In one transaction: find-or-create the `Order` (`provider = crypto_topup`,
-      `order_flow_code = 'crypto-top-up'`, `provider_order_id` = key, unique for that flow), the
-      credit transaction (`funding_source = crypto:<asset>:<chain>`), and
-      `complete_order_payment`; answer `accepted` with `destination_tx_id` =
-      credit transaction id.
-- [ ] Idempotency records never expire; replay returns the stored answer; same key with a
-      different payload → `422`; unknown key on `GET` → `404`; `GET` returns the original
-      payload.
-- [ ] Durable business refusals (closed or unknown workspace, cap) → `200 rejected` with a
-      reason.
-- [ ] Test-environment-only conformance hooks (ledger observation endpoint, five test accounts),
-      never enabled in production.
-
-### Webhook receiver (guide §6)
-
-- [ ] `POST {webhook_url}`: verify Standard Webhooks `v1a` with the same pinned key over the raw
-      body; store by `webhook-id` once; answer `2xx` only after the store commits.
-- [ ] Never change balances from events; refresh deposit or quote state and notify the user
-      (`deposit.credited`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`;
-      optionally `deposit.pending`).
-- [ ] Ignore unknown event types and fields; do not rely on event order.
+- [ ] `POST {webhook_url}` reachable over public HTTPS from the service.
+- [ ] Verify Standard Webhooks `v1a` with the pinned `(settlement/v1, public key)` over the raw
+      body; answer `400` on failure.
+- [ ] On `deposit.credited`, in one transaction: find-or-create the `Order` (`provider =
+      crypto_topup`, `order_flow_code = 'crypto-top-up'`, `provider_order_id =
+      "deposit:<deposit_id>"`, unique for that flow), the credit transaction for `external_id`
+      and `amount_minor` (`funding_source = crypto:<asset>:<chain>`), and
+      `complete_order_payment`; answer `2xx` after the commit. A repeat is a no-op.
+- [ ] Refusals (closed or suspended workspace, our caps) are recorded as held and answered
+      `2xx`, never `5xx`; support requests the refund with a user-supplied address.
+- [ ] A repeated `deposit.credited` with a different `amount_minor` keeps the first credit and
+      alerts (only possible after a service restore).
+- [ ] Every other event type is stored once by `webhook-id` for notifications and history
+      (`deposit.pending`, `deposit.rejected`, `deposit.refunded`, `rate_lock.expired`); ignore
+      unknown types and fields; do not rely on event order.
+- [ ] Optional hardening, decided with finance: per-deposit and per-period caps as holds, a
+      `GET /deposits/{id}` check, own-node log verification.
 
 ### Account and quote flow (guide §4, §7; architecture §12 "Customer experience obligations")
 
-- [ ] Register each workspace (`external_id` = team id) before its first quote or address.
-- [ ] Quote page: record the lock address computed from `(phala-cloud, team id, lock_ref)` before
-      calling `rate-locks`, check the returned address equals it, then show the exact amount,
+- [ ] Workspaces (`external_id` = team id) are created by their first quote or address; no
+      separate registration is needed.
+- [ ] Quote page: check the returned address equals the one computed from `(phala-cloud, team id,
+      lock_ref)`, then show the exact amount,
       EIP-681 QR, countdown, spread, and the late / under / over-payment rules; resume by
       `lock_ref`; cancel and re-quote.
 - [ ] Waiting screen from the lock's `payment` (`seen`, confirmations, `estimated_final_at`) and
       `pending-deposits`; never shown as credited.
 - [ ] Persistent address as an advanced option; recompute it (and every rotated version) before
-      display and record it.
+      display.
 - [ ] Deposit history from `deposits`; "needs attention" copy by rejection reason without showing
       the reason code.
-- [ ] Refund request flow with a user-supplied destination address.
+- [ ] Refund request flow with a user-supplied destination address, also for held credits.
 - [ ] Support lookup by transaction hash, address, or lock reference (`GET /deposits?…`).
 
 ### Key management
@@ -116,22 +104,22 @@ exactly.
 | `CRYPTO_TOPUP_PRODUCT_SEED` | secret: 32-byte hex seed |
 | `CRYPTO_TOPUP_SETTLEMENT_KEYID` | `settlement/v1` |
 | `CRYPTO_TOPUP_SETTLEMENT_PUBKEY` | pinned from verified attestation |
-| `CRYPTO_TOPUP_PUBLIC_URL` | our public base URL for settlement and webhooks |
-| `CRYPTO_TOPUP_RPC_URL` | our own Ethereum RPC for log verification |
-| `CRYPTO_TOPUP_CHAIN_ID`, `…_TOKEN`, `…_FACTORY`, `…_IMPLEMENTATION` | from the service's route |
-| `CRYPTO_TOPUP_PER_DEPOSIT_CAP_MINOR`, `…_PER_PERIOD_CAP_MINOR`, `…_PERIOD_SECONDS` | agreed with finance |
+| `CRYPTO_TOPUP_WEBHOOK_URL` | our public webhook URL |
+| `CRYPTO_TOPUP_CHAIN_ID`, `…_TOKEN`, `…_FACTORY`, `…_IMPLEMENTATION` | from the service's route, to recompute addresses |
+| `CRYPTO_TOPUP_PER_DEPOSIT_CAP_MINOR`, `…_PER_PERIOD_CAP_MINOR`, `…_PERIOD_SECONDS` | optional holds, agreed with finance |
 
 ### Monitoring
 
-- [ ] Alert on settlement `401` (key or URL drift), sustained `503` answers (RPC lag), `422`
-      answers, and webhook verification failures.
+- [ ] Alert on webhook verification failures, a repeated `deposit.credited` with a different
+      amount, and held credits waiting for a refund.
 - [ ] Reconcile credited orders with the service's `deposits` for our workspaces.
 
 ### Verification before go-live (guide §8)
 
-- [ ] The service's conformance suite (`topup-conformance`) passes against our endpoint, with a
-      restart, and reports no warnings.
+- [ ] `topup-sdk send-test-event` passes against our production code path, and the ledger holds
+      one credit.
 - [ ] One quote-first deposit credited end to end on staging, plus the abnormal payments.
-- [ ] Settlement and webhook URLs and the product public key sent to the service operator for
-      registration.
+- [ ] Webhook URL and the product public key sent to the service operator: on staging the admin
+      replaces the reference product's key and webhook URL with ours
+      (`PUT /v1/admin/products/phala-cloud`).
 ```
