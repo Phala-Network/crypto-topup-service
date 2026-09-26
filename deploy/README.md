@@ -334,8 +334,8 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
   ([runbooks index](runbooks/README.md#alert-and-symptom-index)), is fingerprinted by that name
   and its other `tags.*` (route, state, check, chain, scope; never a deposit id), and gets a
   `runbook` tag linking the runbook: `TopupDepositStateAgeExceeded`,
-  `TopupReconciliationMismatch`, `TopupLockExpiryFailing`, `TopupLockExposureDrift`,
-  `TopupLockExposureNearCap`, `TopupUnsupportedInflows`, `OperatorRoleMissing`, and the other
+  `TopupReconciliationMismatch`, `TopupLockExpiryFailing`, `TopupLockExposureNearCap`,
+  `TopupUnsupportedInflows`, `OperatorRoleMissing`, and the other
   flusher alerts by variant name (`Reverted`, `IsolatedAddress`, `MissingConsumedReceipt`,
   `PlanningExcluded`, `FeeCapReached`, `NativeBalance`).
 - **Data.** An event holds what the production JSON log line holds, behind the same INFO ceiling

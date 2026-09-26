@@ -10,17 +10,17 @@ lock exposure.
 
 ## Impact and blast radius
 
-C10 reserves each lock's `credit_minor` atomically against three counters in `lock_exposure`:
+C10 checks each new lock's `credit_minor` against the open reserved locks of three scopes:
 `account:<account_id>`, `product:<product_id>`, and `global`. A creation that would exceed any cap
 answers `409 exposure_cap_exceeded`; existing locks keep their terms until they are consumed,
-cancelled, or expired. The `global` counter spans every quote-first route. Persistent-address
+cancelled, or expired. The `global` scope spans every quote-first route. Persistent-address
 deposits are unaffected.
 
 ## First 5 minutes
 
 Read the caps from the attested route file (`rate_lock.max_open_minor`); when several enabled
-quote-first routes differ, use the smallest value for each scope. Then read the ledger and the
-recomputed reservations with the application role:
+quote-first routes differ, use the smallest value for each scope. Then read the open reservations
+with the application role:
 
 ```sh
 grep -E '^[[:space:]]+max_open_minor:' "$ROUTE_FILE"
@@ -44,27 +44,23 @@ WITH caps(scope, cap_minor) AS (
   LEFT JOIN cursors c ON c.chain_id = ad.chain_id
   CROSS JOIN LATERAL (VALUES ('account:' || a.id), ('product:' || a.product_id), ('global'))
     AS k(scope_key)
-  WHERE rl.status = 'open' AND rl.consumed_by IS NULL AND rl.exposure_reserved
+  WHERE rl.status = 'open' AND rl.exposure_reserved
   GROUP BY k.scope_key
 )
-SELECT scope_key,
-       coalesce(l.open_minor, 0)::text AS ledger_open_minor,
-       coalesce(r.reserved_minor, 0)::text AS open_reserved_minor,
+SELECT r.scope_key,
+       r.reserved_minor::text AS open_reserved_minor,
        coalesce(r.unexpired_minor, 0)::text AS unexpired_minor,
-       coalesce(r.overdue_locks, 0) AS overdue_locks,
+       r.overdue_locks,
        c.cap_minor::text AS cap_minor,
-       (coalesce(l.open_minor, 0) * 10000 / c.cap_minor)::bigint AS ledger_bps_of_cap
-FROM lock_exposure l
-FULL JOIN reserved r USING (scope_key)
-JOIN caps c ON c.scope = split_part(scope_key, ':', 1)
-WHERE coalesce(l.open_minor, 0) > 0 OR r.scope_key IS NOT NULL
-ORDER BY ledger_bps_of_cap DESC, scope_key;
+       (r.reserved_minor * 10000 / c.cap_minor)::bigint AS bps_of_cap
+FROM reserved r
+JOIN caps c ON c.scope = split_part(r.scope_key, ':', 1)
+ORDER BY bps_of_cap DESC, r.scope_key;
 COMMIT;
 SQL
 ```
 
-`ledger_open_minor` is what C10 enforces. `open_reserved_minor` recomputes it from open, unconsumed,
-reserved locks and must be equal. `unexpired_minor` excludes locks whose payment window has closed;
+`open_reserved_minor` is what C10 enforces each cap against. `unexpired_minor` excludes locks whose payment window has closed;
 those keep their reservation until the finalized chain passes `expires_at`, about 15 minutes later
 (architecture §9). `overdue_locks` counts locks the expiry worker could already expire; a non-zero
 count older than a few expiry scans means exposure is not being released.
@@ -79,30 +75,23 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${head
 
 ## Decision tree
 
-- Ledger equals recomputation, legitimate demand: C10 already rejects over-cap quotes; leave quotes
-  running, tell the product, and ask Finance/Risk whether to raise caps.
+- Legitimate demand: C10 already rejects over-cap quotes; leave quotes running, tell the product,
+  and ask Finance/Risk whether to raise caps.
 - One account concentrates exposure unexpectedly: ask the product to pause `quotes` for that
   account (`POST /v1/products/{p}/accounts/{ext}/pause`, product-signed), or pause the route as
   above, and investigate the tenant.
 - `overdue_locks > 0` persists: follow [Lock expiry worker failure](lock-expiry-worker-failure.md).
-- Ledger differs from recomputation: treat it as a reconciliation incident and do not raise caps.
-  The reconciler's `lock_exposure` check repairs the counter every round, records a
-  `repair_lock_exposure` audit row, and (from the service loop) fires `TopupLockExposureDrift`; to
-  repair now, run the in-service repair in
-  [Lock expiry worker failure](lock-expiry-worker-failure.md).
 
 ## Remediation
 
 Exposure drains as locks are consumed, cancelled by the product, or expired by the worker. The
-service never needs a manual write to `lock_exposure` or `rate_locks` for a legitimate near-cap
-condition. A cap change is attested route configuration:
-create a new route version, run `topup route validate`, render a new compose hash, and run Deploy
-in mode `upgrade` ([deploy/README.md, "Deploy"](../README.md#deploy)).
+service never needs a manual write to `rate_locks` for a legitimate near-cap condition. A cap change
+is attested route configuration: create a new route version, run `topup route validate`, render a
+new compose hash, and run Deploy in mode `upgrade` ([deploy/README.md, "Deploy"](../README.md#deploy)).
 
 ## Verification
 
-Re-run the query: every scope is below 90% of its cap, `ledger_open_minor` equals
-`open_reserved_minor`, `overdue_locks` is zero, and `TopupLockExposureNearCap` has resolved. Existing
+Re-run the query: every scope is below 90% of its cap, `overdue_locks` is zero, and `TopupLockExposureNearCap` has resolved. Existing
 locks retain their original terms. Resume `quotes` only after Finance/Risk approval.
 
 ## Rollback

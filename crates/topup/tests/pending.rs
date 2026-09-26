@@ -469,7 +469,6 @@ struct Ledger {
     deposits: i64,
     transitions: i64,
     locks: Vec<(String, Option<Uuid>, bool)>,
-    exposure: Vec<(String, String)>,
 }
 
 impl Ledger {
@@ -483,11 +482,6 @@ impl Ledger {
                 .await?,
             locks: sqlx::query_as(
                 "SELECT status, consumed_by, exposure_reserved FROM rate_locks ORDER BY address_id",
-            )
-            .fetch_all(pool)
-            .await?,
-            exposure: sqlx::query_as(
-                "SELECT scope_key, open_minor::text FROM lock_exposure ORDER BY scope_key",
             )
             .fetch_all(pool)
             .await?,

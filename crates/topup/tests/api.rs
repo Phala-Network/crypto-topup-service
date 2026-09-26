@@ -970,13 +970,9 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::LOCKED);
         ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
-        // A refused creation leaves no lock, lock address, or exposure reservation behind.
+        // A refused creation leaves no lock or lock address behind.
         let leftovers: i64 = sqlx::query_scalar(
-            r#"
-            SELECT (SELECT count(*) FROM rate_locks)
-                 + (SELECT count(*) FROM addresses)
-                 + (SELECT count(*) FROM lock_exposure WHERE open_minor > 0)
-            "#,
+            "SELECT (SELECT count(*) FROM rate_locks) + (SELECT count(*) FROM addresses)",
         )
         .fetch_one(&database.app_pool)
         .await?;

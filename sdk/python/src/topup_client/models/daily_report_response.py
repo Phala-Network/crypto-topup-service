@@ -27,10 +27,10 @@ class DailyReportResponse:
     Attributes:
         generated_at (datetime.datetime): Report snapshot time.
         routes (list[RouteDailyReport]): SQL-computed metrics for each configured route.
-        exposure_minor (None | str | Unset): Open rate-lock credit across all products in destination minor units, from
-            the global
-            exposure counter the global cap is enforced against. This service always sends it; it is
-            optional in the schema so clients also parse reports from servers that predate it.
+        exposure_minor (None | str | Unset): Open rate-lock credit across all products in destination minor units: the
+            sum the global
+            exposure cap is enforced against. This service always sends it; it is optional in the
+            schema so clients also parse reports from servers that predate it.
         reconciliation (None | ReconciliationRoundReport | Unset):
     """
 

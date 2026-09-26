@@ -58,7 +58,7 @@ stale backup are Sentry Crons monitors, and `/healthz` is a Sentry Uptime monito
 | `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `TopupLockExpiryFailing`, `TopupLockExposureDrift`, `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupLockExpiryFailing`, `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
 | `TopupBackupTooOld` | [Backup age](backup-age.md) |
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
@@ -104,7 +104,7 @@ for any runbook.
 | Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
 | Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
 | Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
-| Lock expiry worker failure | Partial: running service, injected ledger drift, owner repair while running; the in-service `topup reconcile` repair that replaced it is covered by the PostgreSQL integration tests only | [ ] |
+| Lock expiry worker failure | Partial: running service, injected drift of the since-removed `lock_exposure` counter, owner repair while running | [ ] |
 | Reconciliation mismatch | Complete: `topup reconcile` findings, blocks, owner-only lift | [x] |
 | Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
 | Backup age | Partial: D3 archiving and local restore drills available | [ ] |

@@ -16,10 +16,8 @@ use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::locks::pricing::ValidatedQuote;
 use topup::locks::{self, QuoteProvider, RateLockError, RequestedAmount};
-use topup::reconciler::{CheckName, Reconciler, ReconciliationError, SettlementLookup};
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::pricing::Observation;
-use topup_adapters::settlement::http::SettlementAnswer;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
@@ -585,12 +583,7 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
         ensure!(event["chain_id"] == 1);
         ensure!(event["amount_atomic"] == "100");
         ensure!(event["credit_minor"] == "100");
-        let global_open: String = sqlx::query_scalar(
-            "SELECT open_minor::text FROM lock_exposure WHERE scope_key = 'global'",
-        )
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(global_open == "0");
+        ensure!(exposure(&database.app_pool, "global").await? == 0);
         let first_status: String =
             sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
                 .bind(first_lock.address_id)
@@ -878,7 +871,7 @@ async fn database_collector_exports_product_and_global_lock_exposure() -> Result
     result.and(cleanup)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
@@ -932,8 +925,6 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
         .await?;
         let open = open.parse::<u64>()?;
         ensure!(open == successes * 100);
-        ensure!(exposure(&database.app_pool, &format!("product:{}", product.id)).await? == open);
-        ensure!(exposure(&database.app_pool, "global").await? == open);
         Ok(())
     }
     .await;
@@ -954,58 +945,24 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         let first_lock = create_lock(&database, &quotes, &product, &first, &route, "a-1").await?;
         let second_lock = create_lock(&database, &quotes, &product, &second, &route, "b-1").await?;
-        for (address_id, seconds) in [(first_lock.address_id, 20), (second_lock.address_id, 10)] {
-            sqlx::query(
-                "UPDATE rate_locks SET expires_at = now() - make_interval(secs => $2) WHERE address_id = $1",
-            )
-            .bind(address_id)
-            .bind(f64::from(seconds))
-            .execute(&database.app_pool)
-            .await?;
-        }
-        finalize_chain_past_now(&database.app_pool).await?;
-
-        // Hold the second account's scope row and then request `global`, exactly as a creation
-        // for that account does, while the expiry batch releases both accounts.
-        let second_key = format!("account:{}", second.id);
-        let mut creation = database.app_pool.begin().await?;
-        sqlx::query("SELECT open_minor FROM lock_exposure WHERE scope_key = $1 FOR UPDATE")
-            .bind(&second_key)
-            .execute(&mut *creation)
-            .await?;
-        let pool = database.app_pool.clone();
-        let expiry = tokio::spawn(async move { locks::expire_once(&pool).await });
-        wait_for_lock_waiter(&database.app_pool).await?;
-        sqlx::query("SELECT open_minor FROM lock_exposure WHERE scope_key = 'global' FOR UPDATE")
-            .execute(&mut *creation)
-            .await
-            .context("creation-ordered lock must not deadlock with expiry")?;
-        creation.commit().await?;
-        ensure!(expiry.await?? == 2);
-
-        // A real creation racing a second expiry batch also completes.
-        let third_lock = create_lock(&database, &quotes, &product, &first, &route, "a-2").await?;
-        sqlx::query("UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = $1")
-            .bind(third_lock.address_id)
-            .execute(&database.app_pool)
-            .await?;
+        sqlx::query(
+            "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = ANY($1)",
+        )
+        .bind([first_lock.address_id, second_lock.address_id])
+        .execute(&database.app_pool)
+        .await?;
         finalize_chain_past_now(&database.app_pool).await?;
         let (expired, created) = tokio::join!(
             locks::expire_once(&database.app_pool),
             create_lock(&database, &quotes, &product, &second, &route, "b-2"),
         );
-        ensure!(expired? == 1);
+        ensure!(expired? == 2);
         created?;
 
-        for key in [
-            format!("account:{}", first.id),
-            "global".to_owned(),
-            format!("product:{}", product.id),
-        ] {
-            let expected = if key == format!("account:{}", first.id) { 0 } else { 100 };
-            ensure!(exposure(&database.app_pool, &key).await? == expected);
-        }
-        ensure!(exposure(&database.app_pool, &second_key).await? == 100);
+        ensure!(exposure(&database.app_pool, &format!("account:{}", first.id)).await? == 0);
+        ensure!(exposure(&database.app_pool, &format!("account:{}", second.id)).await? == 100);
+        ensure!(exposure(&database.app_pool, &format!("product:{}", product.id)).await? == 100);
+        ensure!(exposure(&database.app_pool, "global").await? == 100);
         Ok(())
     }
     .await;
@@ -1076,7 +1033,7 @@ async fn cancel_waits_for_an_uncommitted_deposit_to_the_lock_address() -> Result
 }
 
 #[tokio::test]
-async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() -> Result<()> {
+async fn failing_expiry_scans_are_counted_and_recover() -> Result<()> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     // The current-thread test runtime polls the spawned worker on this thread.
@@ -1086,18 +1043,19 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
     };
     let result = async {
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
-        let account = seed_account(&database.app_pool, product.id, "drifted").await?;
+        let account = seed_account(&database.app_pool, product.id, "failing").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(&database, &quotes, &product, &account, &route, "drift-1").await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &route, "fail-1").await?;
         sqlx::query(
             "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = $1",
         )
         .bind(lock.address_id)
         .execute(&database.app_pool)
         .await?;
-        sqlx::query("UPDATE lock_exposure SET open_minor = 40 WHERE scope_key = 'global'")
-            .execute(&database.app_pool)
+        // The batch fails at its `rate_lock.expired` event and rolls back.
+        sqlx::query("REVOKE INSERT ON outbox FROM topup_app")
+            .execute(&database.owner_pool)
             .await?;
         finalize_chain_past_now(&database.app_pool).await?;
 
@@ -1126,37 +1084,22 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        ensure!(
-            failures() >= 2,
-            "expiry never failed on the drifted counter"
-        );
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "open");
+        ensure!(failures() >= 2, "expiry never failed");
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "open");
 
-        let repairs = locks::repair_exposure(&database.app_pool).await?;
-        ensure!(
-            repairs
-                .iter()
-                .map(|repair| (
-                    repair.scope_key.as_str(),
-                    repair.before_minor,
-                    repair.after_minor
-                ))
-                .eq([("global", 40, 100)]),
-            "{repairs:?}"
-        );
+        sqlx::query("GRANT INSERT ON outbox TO topup_app")
+            .execute(&database.owner_pool)
+            .await?;
         for _ in 0..400 {
-            if lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "expired" {
+            if lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "expired" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         cancellation.cancel();
         running.await?;
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "drift-1").await? == "expired");
+        ensure!(lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "expired");
         ensure!(exposure(&database.app_pool, "global").await? == 0);
-        ensure!(handle.render().contains(
-            "topup_lock_exposure_drift_total{scope=\"global\",producer_enabled=\"true\"} 1"
-        ));
         Ok(())
     }
     .await;
@@ -1165,8 +1108,7 @@ async fn failing_expiry_scans_are_counted_and_recover_after_exposure_repair() ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_expire() -> Result<()>
-{
+async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -1195,38 +1137,8 @@ async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_ex
             }
             accounts.push(account);
         }
-
-        // Drift in every direction: too low, too high, and a missing row.
-        sqlx::query("UPDATE lock_exposure SET open_minor = 50 WHERE scope_key = 'global'")
-            .execute(&database.app_pool)
-            .await?;
-        sqlx::query("UPDATE lock_exposure SET open_minor = open_minor + 700 WHERE scope_key = $1")
-            .bind(format!("product:{}", product.id))
-            .execute(&database.app_pool)
-            .await?;
-        sqlx::query("UPDATE lock_exposure SET open_minor = 0 WHERE scope_key = $1")
-            .bind(format!("account:{}", accounts[1].id))
-            .execute(&database.app_pool)
-            .await?;
-        sqlx::query("DELETE FROM lock_exposure WHERE scope_key = $1")
-            .bind(format!("account:{}", accounts[2].id))
-            .execute(&database.app_pool)
-            .await?;
-        ensure!(!drifted_scopes(&database.app_pool).await?.is_empty());
         finalize_chain_past_now(&database.app_pool).await?;
 
-        let done = tokio_util::sync::CancellationToken::new();
-        let repairer = {
-            let (pool, done) = (database.app_pool.clone(), done.clone());
-            tokio::spawn(async move {
-                let mut repaired = 0_usize;
-                while !done.is_cancelled() {
-                    repaired += locks::repair_exposure(&pool).await?.len();
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-                anyhow::Ok(repaired)
-            })
-        };
         let mut tasks = tokio::task::JoinSet::new();
         for (index, account) in accounts.iter().cloned().enumerate() {
             let (pool, quotes, product, route) = (
@@ -1238,20 +1150,18 @@ async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_ex
             tasks.spawn(async move {
                 for round in 0..3 {
                     let lock_ref = format!("new-{round}");
-                    retry_invariant(|| {
-                        locks::create(
-                            &pool,
-                            &quotes,
-                            &product,
-                            &account,
-                            &route,
-                            &lock_ref,
-                            RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
-                        )
-                    })
+                    locks::create(
+                        &pool,
+                        &quotes,
+                        &product,
+                        &account,
+                        &route,
+                        &lock_ref,
+                        RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+                    )
                     .await?;
                 }
-                retry_invariant(|| locks::cancel(&pool, &product, &account, "cancel")).await?;
+                locks::cancel(&pool, &product, &account, "cancel").await?;
                 consume_lock(&pool, account.id, "consume", u8::try_from(index)?).await?;
                 anyhow::Ok(())
             });
@@ -1261,111 +1171,27 @@ async fn exposure_repair_converges_under_concurrent_create_consume_cancel_and_ex
             tasks.spawn(async move {
                 let mut expired = 0;
                 while expired < ACCOUNTS as u64 {
-                    expired += retry_invariant(|| locks::expire_once(&pool)).await?;
+                    expired += locks::expire_once(&pool).await?;
                 }
                 anyhow::Ok(())
             });
         }
-        let joined = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             while let Some(task) = tasks.join_next().await {
                 task??;
             }
             anyhow::Ok(())
         })
-        .await;
-        done.cancel();
-        let repaired = repairer.await??;
-        joined.context("lifecycle operations never converged")??;
+        .await
+        .context("lifecycle operations never completed")??;
 
-        ensure!(repaired > 0);
-        ensure!(drifted_scopes(&database.app_pool).await?.is_empty());
-        ensure!(locks::repair_exposure(&database.app_pool).await?.is_empty());
-        let open = open_reserved(&database.app_pool).await?;
         // Per account: "keep" plus three new locks remain reserved.
+        let open = exposure(&database.app_pool, "global").await?;
         ensure!(open == 4 * 100 * ACCOUNTS as u64, "{open}");
-        ensure!(exposure(&database.app_pool, "global").await? == open);
         ensure!(exposure(&database.app_pool, &format!("product:{}", product.id)).await? == open);
         for account in &accounts {
             ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 400);
         }
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn every_lock_exposure_repair_leaves_a_finding_and_an_audit_row() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        struct NoSettlement;
-
-        #[async_trait]
-        impl SettlementLookup for NoSettlement {
-            async fn get_by_key(
-                &self,
-                _settlement_url: &str,
-                _key: &str,
-            ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-                Ok(None)
-            }
-        }
-
-        let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
-        let account = seed_account(&database.app_pool, product.id, "reconciled").await?;
-        let route = test_route();
-        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        create_lock(&database, &quotes, &product, &account, &route, "r-1").await?;
-        let product_key = format!("product:{}", product.id);
-
-        let reconciler = Reconciler::with_dependencies(
-            database.app_pool.clone(),
-            Arc::new(topup::routes::RouteSet::new(vec![route]).map_err(anyhow::Error::msg)?),
-            std::collections::BTreeMap::new(),
-            Arc::new(NoSettlement),
-        );
-        // The same drift twice: every repair must leave its own finding and audit row.
-        for _ in 0..2 {
-            sqlx::query("UPDATE lock_exposure SET open_minor = 350 WHERE scope_key = $1")
-                .bind(&product_key)
-                .execute(&database.app_pool)
-                .await?;
-            let report = reconciler.run_once().await?;
-            ensure!(!report.failed_checks.contains(&CheckName::LockExposure));
-            let repaired = report
-                .findings
-                .iter()
-                .filter(|finding| finding.check == CheckName::LockExposure)
-                .collect::<Vec<_>>();
-            ensure!(repaired.len() == 1, "{repaired:?}");
-            ensure!(repaired[0].repair_applied);
-            ensure!(repaired[0].subjects.get("scope_key") == Some(&product_key));
-            ensure!(repaired[0].observed == json!({"open_minor": "350"}));
-            ensure!(repaired[0].expected == json!({"open_minor": "100"}));
-            ensure!(exposure(&database.app_pool, &product_key).await? == 100);
-        }
-        let findings: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM reconciliation_findings WHERE check_name = 'lock_exposure'",
-        )
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(findings == 2);
-        let audits: Vec<String> = sqlx::query_scalar(
-            "SELECT reason FROM audit WHERE action = 'repair_lock_exposure' AND subject = $1",
-        )
-        .bind(format!("lock_exposure:{product_key}"))
-        .fetch_all(&database.app_pool)
-        .await?;
-        ensure!(audits.len() == 2, "{audits:?}");
-        for audit in audits {
-            let audit: Value = serde_json::from_str(&audit)?;
-            ensure!(audit["before_minor"] == "350");
-            ensure!(audit["after_minor"] == "100");
-        }
-        ensure!(reconciler.check(CheckName::LockExposure).await?.is_empty());
         Ok(())
     }
     .await;
@@ -1391,23 +1217,6 @@ async fn set_finalized_time(pool: &sqlx::PgPool, time: chrono::DateTime<Utc>) ->
     .execute(pool)
     .await?;
     Ok(())
-}
-
-async fn retry_invariant<T, F, Fut>(mut operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, RateLockError>>,
-{
-    // A drifted counter fails a release with the invariant error until the repair runs.
-    for _ in 0..2_000 {
-        match operation().await {
-            Err(RateLockError::DatabaseInvariant) => {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            other => return Ok(other?),
-        }
-    }
-    anyhow::bail!("operation kept failing on a drifted exposure counter")
 }
 
 /// Consumes a lock the way the confirm step does: a leased deposit transition with consumption.
@@ -1445,46 +1254,36 @@ async fn consume_lock(
         }),
         ..topup::db::TransitionEffects::default()
     };
-    for _ in 0..2_000 {
-        let mut transaction = pool.begin().await?;
-        let applied = topup::db::apply_transition(
-            &mut transaction,
-            deposit_id,
-            DepositState::Detected,
-            lease_token,
-            topup::db::TransitionUpdate {
-                transition: advance,
-                rejection_reason: None,
-                attempt: 0,
-                next_attempt_at: Utc::now(),
-            },
-            topup::db::TransitionWrites {
-                evidence: &json!({"test": "consume"}),
-                effects: &effects,
-                outbox_events: &[],
-            },
-        )
-        .await;
-        match applied {
-            Ok(topup::db::ApplyTransitionResult::Applied) => {
-                transaction.commit().await?;
-                let status: String =
-                    sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
-                        .bind(address_id)
-                        .fetch_one(pool)
-                        .await?;
-                ensure!(status == "consumed");
-                return Ok(());
-            }
-            Ok(other) => anyhow::bail!("consumption was not applied: {other:?}"),
-            // A drifted counter fails the release until the repair runs.
-            Err(_) => {
-                transaction.rollback().await?;
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }
-    }
-    anyhow::bail!("consumption kept failing on a drifted exposure counter")
+    let mut transaction = pool.begin().await?;
+    let applied = topup::db::apply_transition(
+        &mut transaction,
+        deposit_id,
+        DepositState::Detected,
+        lease_token,
+        topup::db::TransitionUpdate {
+            transition: advance,
+            rejection_reason: None,
+            attempt: 0,
+            next_attempt_at: Utc::now(),
+        },
+        topup::db::TransitionWrites {
+            evidence: &json!({"test": "consume"}),
+            effects: &effects,
+            outbox_events: &[],
+        },
+    )
+    .await?;
+    ensure!(
+        applied == topup::db::ApplyTransitionResult::Applied,
+        "consumption was not applied: {applied:?}"
+    );
+    transaction.commit().await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
+        .bind(address_id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(status == "consumed");
+    Ok(())
 }
 
 async fn insert_deposit_in(
@@ -1531,46 +1330,6 @@ async fn lock_waiters(pool: &sqlx::PgPool) -> Result<i64> {
     .await?)
 }
 
-async fn open_reserved(pool: &sqlx::PgPool) -> Result<u64> {
-    let open: String = sqlx::query_scalar(
-        r#"
-        SELECT coalesce(sum(credit_minor), 0)::text
-        FROM rate_locks
-        WHERE status = 'open' AND consumed_by IS NULL AND exposure_reserved
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
-    Ok(open.parse()?)
-}
-
-/// Scope keys whose counter differs from the per-scope sum of open reserved lock credit.
-async fn drifted_scopes(pool: &sqlx::PgPool) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        r#"
-        WITH expected AS (
-            SELECT scope.scope_key, sum(rate_lock.credit_minor) AS open_minor
-            FROM rate_locks AS rate_lock
-            JOIN addresses AS address ON address.id = rate_lock.address_id
-            JOIN accounts AS account ON account.id = address.account_id
-            CROSS JOIN LATERAL (
-                VALUES ('account:' || account.id::text), ('product:' || account.product_id::text),
-                       ('global')
-            ) AS scope (scope_key)
-            WHERE rate_lock.status = 'open' AND rate_lock.consumed_by IS NULL
-              AND rate_lock.exposure_reserved
-            GROUP BY scope.scope_key
-        )
-        SELECT coalesce(expected.scope_key, counter.scope_key)
-        FROM expected
-        FULL JOIN lock_exposure AS counter ON counter.scope_key = expected.scope_key
-        WHERE coalesce(expected.open_minor, 0) <> coalesce(counter.open_minor, 0)
-        "#,
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
 async fn create_lock(
     database: &TestDatabase,
     quotes: &Arc<dyn QuoteProvider>,
@@ -1591,34 +1350,22 @@ async fn create_lock(
     .await?)
 }
 
-async fn wait_for_lock_waiter(pool: &sqlx::PgPool) -> Result<()> {
-    for _ in 0..200 {
-        let waiting: i64 = sqlx::query_scalar(
-            r#"
-            SELECT count(*)
-            FROM pg_stat_activity
-            WHERE datname = current_database()
-              AND wait_event_type = 'Lock'
-              AND pid <> pg_backend_pid()
-            "#,
-        )
-        .fetch_one(pool)
-        .await?;
-        if waiting > 0 {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    anyhow::bail!("expiry never waited for the held scope row")
-}
-
-async fn exposure(pool: &sqlx::PgPool, key: &str) -> Result<u64> {
-    let open: Option<String> =
-        sqlx::query_scalar("SELECT open_minor::text FROM lock_exposure WHERE scope_key = $1")
-            .bind(key)
-            .fetch_optional(pool)
-            .await?;
-    Ok(open.as_deref().unwrap_or("0").parse()?)
+/// Sum of open reserved lock credit in one scope: `account:<id>`, `product:<id>`, or `global`.
+async fn exposure(pool: &sqlx::PgPool, scope: &str) -> Result<u64> {
+    let open: String = sqlx::query_scalar(
+        r#"
+        SELECT coalesce(sum(rate_lock.credit_minor), 0)::text
+        FROM rate_locks AS rate_lock
+        JOIN addresses AS address ON address.id = rate_lock.address_id
+        JOIN accounts AS account ON account.id = address.account_id
+        WHERE rate_lock.status = 'open' AND rate_lock.exposure_reserved
+          AND $1 IN ('global', 'account:' || account.id::text, 'product:' || account.product_id::text)
+        "#,
+    )
+    .bind(scope)
+    .fetch_one(pool)
+    .await?;
+    Ok(open.parse()?)
 }
 
 async fn lock_status_by_ref(
