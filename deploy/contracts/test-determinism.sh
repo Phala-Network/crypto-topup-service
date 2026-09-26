@@ -88,14 +88,16 @@ for index in 0 1; do
             "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
             --rpc "anvil-31337=$rpc_url" \
             --dry-run \
-            --safe-expectations "$safe_expectations" >/dev/null 2>&1
+            --safe-expectations "$safe_expectations" >/dev/null 2>"$tmp_dir/deploy-dry-run.err" || \
+            die "deploy-factory.sh --dry-run failed: $(cat "$tmp_dir/deploy-dry-run.err")"
         [[ "$(cast code "$factory" --rpc-url "$rpc_url")" == "0x" ]] || \
             die "dry-run wrote factory code to the target chain"
         ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
             "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
             --rpc "anvil-31337=$rpc_url" \
             --broadcast \
-            --safe-expectations "$safe_expectations" >/dev/null 2>&1
+            --safe-expectations "$safe_expectations" >/dev/null 2>"$tmp_dir/deploy-broadcast.err" || \
+            die "deploy-factory.sh --broadcast failed: $(cat "$tmp_dir/deploy-broadcast.err")"
     else
         (
             cd "$CONTRACTS_DIR"

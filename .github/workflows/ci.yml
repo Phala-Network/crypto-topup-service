@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# One self-hosted runner executes jobs serially; a new push to a PR supersedes its previous run.
+# Jobs run in parallel on the self-hosted runners; a new push to a PR supersedes its previous run.
 # Pushes to main queue instead, so every merge keeps a complete CI result.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

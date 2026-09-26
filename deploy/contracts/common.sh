@@ -80,7 +80,10 @@ start_anvil() {
     local address
     shift
 
-    anvil --host 127.0.0.1 --port 0 "$@" >"$log" 2>&1 &
+    # Created here, not only by the background redirection: the child opens it when it is next
+    # scheduled, which on a loaded host can be after the first read below.
+    : >"$log"
+    anvil --host 127.0.0.1 --port 0 "$@" >>"$log" 2>&1 &
     ANVIL_PID=$!
     ANVIL_RPC_URL=""
     for _ in $(seq 1 100); do
