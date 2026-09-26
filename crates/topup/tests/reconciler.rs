@@ -2,16 +2,20 @@
 
 mod support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
-use alloy_primitives::{Address, B256, U256};
+use alloy::providers::MULTICALL3_ADDRESS;
+use alloy::providers::bindings::IMulticall3::{Result as Call3Result, aggregate3Call};
+use alloy::sol_types::SolCall as _;
+use alloy_primitives::{Address, B256, Bloom, Bytes, U256, keccak256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use chrono::{Duration, Utc};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +26,7 @@ use topup::reconciler::{
     frozen_chains, hold_lease_owner_lock,
 };
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
+use topup_adapters::chain::flush::{addressOfCall, balanceOfCall};
 use topup_core::deposit::{DepositState, StepOutcome};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -39,6 +44,7 @@ struct MockChain {
     finalized_delay: StdDuration,
     finalized_started: Notify,
     fail_derivation: AtomicBool,
+    fail_logs_from: Mutex<Option<u64>>,
     logs: Mutex<Vec<TransferLog>>,
     log_requests: Mutex<Vec<(u64, u64)>>,
     balances: Mutex<BTreeMap<Address, U256>>,
@@ -81,6 +87,16 @@ impl ReconciliationChain for MockChain {
             .lock()
             .unwrap()
             .push((from_block, to_block));
+        if self
+            .fail_logs_from
+            .lock()
+            .unwrap()
+            .is_some_and(|block| from_block >= block)
+        {
+            return Err(ReconciliationError::Chain(
+                "transfer logs unavailable".to_owned(),
+            ));
+        }
         Ok(self
             .logs
             .lock()
@@ -564,6 +580,330 @@ async fn custody_balances_use_the_finalized_block_and_incremental_totals() -> Re
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+async fn custody_progress_survives_a_round_that_stops_mid_range() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        let seed = seed_identity(&pool, &route, 81).await?;
+        let chain = Arc::new(MockChain::at(2_500));
+        chain.derive(&[&seed]);
+        *chain.fail_logs_from.lock().unwrap() = Some(2_000);
+        let reconciler = reconciler(&pool, route, chain.clone())?;
+
+        ensure!(reconciler.check(CheckName::CustodyBalance).await.is_err());
+        ensure!(chain.log_requests.lock().unwrap().as_slice() == [(0, 1_999), (2_000, 2_500)]);
+
+        // The next round resumes after the window the failed round stored.
+        *chain.fail_logs_from.lock().unwrap() = None;
+        chain.log_requests.lock().unwrap().clear();
+        ensure!(
+            reconciler
+                .check(CheckName::CustodyBalance)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.log_requests.lock().unwrap().as_slice() == [(2_000, 2_500)]);
+        Ok(())
+    })
+    .await
+}
+
+/// Staging's provider A is Tenderly's public Sepolia gateway, and every task of the service starts
+/// at once on it, so the first round after a restart meets refusals (`429`, `-32005`) that later
+/// rounds do not. The round backs off within itself: it completes, still repairs and reports,
+/// and resumes from the cursors the rounds before the restart stored.
+#[tokio::test]
+async fn first_round_after_restart_completes_against_a_rate_limiting_provider() -> Result<()> {
+    with_database(|pool| async move {
+        let (node, port, server) = RpcNode::serve().await?;
+        let mut route = route()?;
+        // Provider A is the node; the reconciler never reads provider B.
+        route.chain.rpc_providers = vec![
+            format!("http://127.0.0.1:{port}/"),
+            format!("http://localhost:{port}/"),
+        ];
+        let token = route.asset.contract;
+        let seed = seed_identity(&pool, &route, 91).await?;
+        node.derived.lock().unwrap().insert(seed.salt, seed.address);
+        let recorded = transfer(
+            91,
+            91,
+            100,
+            token,
+            Address::from([201; 20]),
+            seed.address,
+            1_000,
+        );
+        seed_deposit(
+            &pool,
+            &route,
+            &seed,
+            DepositSeed::new(91, DepositState::Detected)
+                .block(100)
+                .amount(1_000),
+        )
+        .await?;
+        let missed = transfer(
+            92,
+            0,
+            120,
+            token,
+            Address::from([202; 20]),
+            seed.address,
+            500,
+        );
+        node.logs.lock().unwrap().extend([recorded, missed]);
+        node.balances
+            .lock()
+            .unwrap()
+            .insert(seed.address, U256::from(1_500_u64));
+        node.finalized.store(150, Ordering::SeqCst);
+        scanned_through(&pool, 150).await?;
+
+        let before_restart = Reconciler::from_routes(pool.clone(), route_set(route.clone())?)?;
+        let report = before_restart.run_once().await?;
+        ensure!(report.succeeded(), "{:?}", report.check_errors);
+        drop(before_restart);
+
+        // While the service was down the chain moved on: one more transfer the scanner missed, and
+        // a balance that no longer matches the ledger.
+        let later = transfer(
+            93,
+            0,
+            250,
+            token,
+            Address::from([203; 20]),
+            seed.address,
+            200,
+        );
+        node.logs.lock().unwrap().push(later);
+        node.balances
+            .lock()
+            .unwrap()
+            .insert(seed.address, U256::from(1_701_u64));
+        node.finalized.store(300, Ordering::SeqCst);
+        scanned_through(&pool, 300).await?;
+        node.limit.store(3, Ordering::SeqCst);
+
+        let restarted = Reconciler::from_routes(pool.clone(), route_set(route)?)?;
+        let report = restarted.run_once().await?;
+        server.abort();
+
+        ensure!(report.succeeded(), "{:?}", report.check_errors);
+        ensure!(
+            node.refused.load(Ordering::SeqCst) > 0,
+            "the provider never refused"
+        );
+        ensure!(report.findings.iter().any(|finding| {
+            finding.check == CheckName::MissingDeposit
+                && finding.repair_applied
+                && finding.subjects.get("tx_hash") == Some(&format!("{:#x}", B256::from([93; 32])))
+        }));
+        ensure!(report.findings.iter().any(|finding| {
+            finding.check == CheckName::CustodyBalance
+                && finding.observed["balance_atomic"] == json!("1701")
+        }));
+        let deposit_cursor: i64 = sqlx::query_scalar(
+            "SELECT next_block FROM reconciliation_deposit_cursors WHERE chain_id = $1",
+        )
+        .bind(i64::try_from(CHAIN_ID)?)
+        .fetch_one(&pool)
+        .await?;
+        let custody_cursor: i64 = sqlx::query_scalar(
+            "SELECT next_block FROM reconciliation_custody_cursors WHERE chain_id = $1",
+        )
+        .bind(i64::try_from(CHAIN_ID)?)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(deposit_cursor == 301 && custody_cursor == 301);
+        Ok(())
+    })
+    .await
+}
+
+/// One JSON-RPC provider serving a reconciliation round's reads from a fixed chain: finalized
+/// head, `Transfer` logs with their blocks, no `Flushed` events, and Multicall3 `addressOf` and
+/// `balanceOf`. Past `limit` requests in one second it answers like Tenderly's public gateway:
+/// HTTP 429 with JSON-RPC `-32005 rate limit exceeded`.
+struct RpcNode {
+    finalized: AtomicU64,
+    limit: AtomicUsize,
+    admitted: Mutex<VecDeque<Instant>>,
+    refused: AtomicUsize,
+    logs: Mutex<Vec<TransferLog>>,
+    derived: Mutex<BTreeMap<B256, Address>>,
+    balances: Mutex<BTreeMap<Address, U256>>,
+}
+
+impl RpcNode {
+    async fn serve() -> Result<(Arc<Self>, u16, tokio::task::JoinHandle<std::io::Result<()>>)> {
+        let node = Arc::new(Self {
+            finalized: AtomicU64::new(0),
+            limit: AtomicUsize::new(usize::MAX),
+            admitted: Mutex::new(VecDeque::new()),
+            refused: AtomicUsize::new(0),
+            logs: Mutex::new(Vec::new()),
+            derived: Mutex::new(BTreeMap::new()),
+            balances: Mutex::new(BTreeMap::new()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post({
+                let node = Arc::clone(&node);
+                move |axum::Json(request): axum::Json<Value>| async move {
+                    let id = request["id"].clone();
+                    if !node.admit() {
+                        let refusal = json!({"jsonrpc": "2.0", "id": id, "error": {
+                            "code": -32005, "message": "rate limit exceeded"}});
+                        return (StatusCode::TOO_MANY_REQUESTS, axum::Json(refusal));
+                    }
+                    let answer = match node.answer(&request) {
+                        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                        Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": {
+                            "code": -32000, "message": error.to_string()}}),
+                    };
+                    (StatusCode::OK, axum::Json(answer))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok((node, port, server))
+    }
+
+    fn admit(&self) -> bool {
+        let now = Instant::now();
+        let mut admitted = self.admitted.lock().unwrap();
+        while admitted
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= StdDuration::from_secs(1))
+        {
+            admitted.pop_front();
+        }
+        if admitted.len() >= self.limit.load(Ordering::SeqCst) {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+            return false;
+        }
+        admitted.push_back(now);
+        true
+    }
+
+    fn answer(&self, request: &Value) -> Result<Value> {
+        let params = &request["params"];
+        match request["method"].as_str().unwrap_or_default() {
+            "eth_getBlockByNumber" => {
+                let number = self.finalized.load(Ordering::SeqCst);
+                Ok(rpc_block(B256::from(U256::from(number)), number))
+            }
+            "eth_getBlockByHash" => Ok(rpc_block(serde_json::from_value(params[0].clone())?, 0)),
+            "eth_getLogs" => {
+                let filter = &params[0];
+                let from = quantity(&filter["fromBlock"])?;
+                let to = quantity(&filter["toBlock"])?;
+                let transfers = filter["topics"][0] == json!(transfer_topic());
+                let recipients = match &filter["topics"][2] {
+                    Value::Array(topics) => topics.clone(),
+                    topic => vec![topic.clone()],
+                };
+                Ok(Value::Array(
+                    self.logs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|log| {
+                            transfers
+                                && (from..=to).contains(&log.block_number)
+                                && recipients.contains(&json!(log.to.into_word()))
+                        })
+                        .map(rpc_log)
+                        .collect(),
+                ))
+            }
+            "eth_call" => {
+                let call = &params[0];
+                let to: Address = serde_json::from_value(call["to"].clone())?;
+                ensure!(to == MULTICALL3_ADDRESS, "only Multicall3 is served");
+                let input: Bytes =
+                    serde_json::from_value(call.get("input").unwrap_or(&call["data"]).clone())?;
+                let results = aggregate3Call::abi_decode(&input)?
+                    .calls
+                    .iter()
+                    .map(|call| {
+                        let data = &call.callData;
+                        let returned = if let Ok(call) = addressOfCall::abi_decode(data) {
+                            let derived = self.derived.lock().unwrap();
+                            addressOfCall::abi_encode_returns(
+                                derived.get(&call.salt).context("unknown salt")?,
+                            )
+                        } else {
+                            let account = balanceOfCall::abi_decode(data)?.account;
+                            let balances = self.balances.lock().unwrap();
+                            balanceOfCall::abi_encode_returns(
+                                &balances.get(&account).copied().unwrap_or_default(),
+                            )
+                        };
+                        Ok(Call3Result {
+                            success: true,
+                            returnData: returned.into(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(json!(Bytes::from(aggregate3Call::abi_encode_returns(
+                    &results
+                ))))
+            }
+            method => anyhow::bail!("{method} is not served"),
+        }
+    }
+}
+
+fn transfer_topic() -> B256 {
+    keccak256("Transfer(address,address,uint256)")
+}
+
+fn quantity(value: &Value) -> Result<u64> {
+    let hex = value.as_str().context("quantity is a string")?;
+    Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
+}
+
+fn rpc_block(hash: B256, number: u64) -> Value {
+    json!({
+        "hash": hash,
+        "parentHash": B256::ZERO,
+        "sha3Uncles": B256::ZERO,
+        "miner": Address::ZERO,
+        "stateRoot": B256::ZERO,
+        "transactionsRoot": B256::ZERO,
+        "receiptsRoot": B256::ZERO,
+        "logsBloom": Bloom::ZERO,
+        "difficulty": "0x0",
+        "number": format!("{number:#x}"),
+        "gasLimit": "0x0",
+        "gasUsed": "0x0",
+        "timestamp": "0x6553f100",
+        "extraData": "0x",
+        "mixHash": B256::ZERO,
+        "nonce": "0x0000000000000000",
+        "transactions": [],
+        "uncles": [],
+    })
+}
+
+fn rpc_log(log: &TransferLog) -> Value {
+    json!({
+        "address": log.token,
+        "topics": [transfer_topic(), log.from.into_word(), log.to.into_word()],
+        "data": B256::from(log.amount.value().to_be_bytes::<32>()),
+        "blockHash": log.block_hash,
+        "blockNumber": format!("{:#x}", log.block_number),
+        "transactionHash": log.tx_hash,
+        "transactionIndex": "0x0",
+        "logIndex": format!("{:#x}", log.log_index),
+        "removed": false,
+    })
 }
 
 #[tokio::test]

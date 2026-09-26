@@ -129,6 +129,13 @@ impl ChainError {
     pub const fn is_estimation_revert(&self) -> bool {
         matches!(self, Self::EstimationRevert(_))
     }
+
+    /// Returns whether the provider refused the request for now, so it may be retried after a
+    /// backoff; see [`RedactedTransportError::is_rate_limited`].
+    #[must_use]
+    pub const fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_rate_limited())
+    }
 }
 
 /// One fee suggestion for an EIP-1559 transaction.
@@ -1185,6 +1192,7 @@ mod tests {
         )
         .await;
         assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
+        assert!(!error.is_rate_limited(), "{error:?}");
         assert!(
             error.to_string().contains(
                 "eth_estimateGas failed for provider `provider-a` \
@@ -1199,6 +1207,8 @@ mod tests {
         )
         .await;
         assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
+        // Tenderly's public gateway refuses excess requests this way; callers may back off.
+        assert!(error.is_rate_limited(), "{error:?}");
         assert!(
             error.to_string().contains(
                 "eth_estimateGas failed for provider `provider-a` \

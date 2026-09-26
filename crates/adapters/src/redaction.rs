@@ -2,7 +2,7 @@
 
 use std::fmt::{self, Debug, Display, Formatter};
 
-use alloy::transports::{RpcError, TransportError, TransportErrorKind};
+use alloy::transports::{RpcError, TransportError};
 use url::Url;
 
 /// Maximum characters of a node-supplied JSON-RPC error message kept in an error.
@@ -54,7 +54,9 @@ impl Redacted {
     /// Maps a JSON-RPC client failure, keeping the node's answer but never the request URL.
     ///
     /// JSON-RPC error responses keep their code and a length-capped message, HTTP failures keep
-    /// only the status code, and every other failure is reported as `transport`.
+    /// only the status code, and every other failure is reported as `transport`. Whether the
+    /// provider asked to be retried later (a rate limit or overload, as alloy's retry layer
+    /// classifies it) is kept too.
     #[must_use]
     pub fn rpc_error(
         &self,
@@ -66,12 +68,22 @@ impl Redacted {
                 code: payload.code,
                 message: node_message(&self.scrub(&payload.message)),
             },
-            RpcError::Transport(TransportErrorKind::HttpError(http)) => {
-                Failure::HttpStatus(http.status)
-            }
+            RpcError::Transport(kind) => kind
+                .as_http_error()
+                .map_or(Failure::Transport("transport"), |http| {
+                    Failure::HttpStatus(http.status)
+                }),
             _ => Failure::Transport("transport"),
         };
-        RedactedTransportError::new(operation, self, failure)
+        let rate_limited = match error {
+            RpcError::ErrorResp(payload) => payload.is_retry_err(),
+            RpcError::Transport(kind) => kind.is_retry_err(),
+            _ => false,
+        };
+        RedactedTransportError {
+            rate_limited,
+            ..RedactedTransportError::new(operation, self, failure)
+        }
     }
 
     /// Replaces this URL's credentials, query values, and long path segments in a
@@ -185,6 +197,7 @@ pub struct RedactedTransportError {
     operation: &'static str,
     endpoint: String,
     failure: Failure,
+    rate_limited: bool,
 }
 
 impl RedactedTransportError {
@@ -193,7 +206,15 @@ impl RedactedTransportError {
             operation,
             endpoint: endpoint.to_string(),
             failure,
+            rate_limited: false,
         }
+    }
+
+    /// Returns whether the provider refused the request for now (a rate limit or overload such
+    /// as HTTP 429 or JSON-RPC `-32005`), so the same request may succeed after a backoff.
+    #[must_use]
+    pub const fn is_rate_limited(&self) -> bool {
+        self.rate_limited
     }
 }
 
@@ -229,7 +250,7 @@ mod tests {
     use axum::http::{StatusCode, header};
     use tokio::net::TcpListener;
 
-    use super::{MAX_NODE_MESSAGE_CHARS, Redacted, node_message};
+    use super::{MAX_NODE_MESSAGE_CHARS, Redacted, RedactedTransportError, node_message};
 
     const SECRET: &str = "rpc-secret-token";
     const PROJECT_ID: &str = "0123456789abcdef";
@@ -247,7 +268,7 @@ mod tests {
         format!("http://user:{SECRET}@{address}/rpc/{PROJECT_ID}?api_key={SECRET}")
     }
 
-    async fn failed_block_number(url: &str, provider: &str) -> String {
+    async fn failed_block_number(url: &str, provider: &str) -> RedactedTransportError {
         let endpoint = Redacted::parse(url)
             .expect("valid provider URL")
             .with_provider(provider);
@@ -266,7 +287,7 @@ mod tests {
             assert!(!rendered.contains("/rpc"), "{rendered}");
             assert!(!rendered.contains(PROJECT_ID), "{rendered}");
         }
-        display
+        redacted
     }
 
     #[test]
@@ -293,12 +314,13 @@ mod tests {
         )
         .await;
 
-        let display = failed_block_number(&url, "provider-a").await;
+        let error = failed_block_number(&url, "provider-a").await;
 
         assert_eq!(
-            display,
+            error.to_string(),
             "block number fetch failed for provider `provider-a` (JSON-RPC error -32000: nonce too low)"
         );
+        assert!(!error.is_rate_limited());
     }
 
     #[tokio::test]
@@ -309,7 +331,7 @@ mod tests {
         )
         .await;
 
-        let display = failed_block_number(&url, "provider-a").await;
+        let display = failed_block_number(&url, "provider-a").await.to_string();
 
         assert_eq!(
             display,
@@ -322,12 +344,13 @@ mod tests {
     async fn http_error_keeps_only_the_status_code() {
         let url = mock_node(StatusCode::TOO_MANY_REQUESTS, r#"{"error":"rate limited"}"#).await;
 
-        let display = failed_block_number(&url, "provider-b").await;
+        let error = failed_block_number(&url, "provider-b").await;
 
         assert_eq!(
-            display,
+            error.to_string(),
             "block number fetch failed for provider `provider-b` (HTTP 429)"
         );
+        assert!(error.is_rate_limited());
     }
 
     #[test]

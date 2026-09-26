@@ -677,6 +677,9 @@ impl Reconciler {
             .iter()
             .map(|address| address.address)
             .collect::<BTreeSet<_>>();
+        // Each window's totals are stored before the next is read, so a round that stops early
+        // keeps its progress and the next round resumes after the last stored window.
+        let mut cursor = cursor;
         let mut totals = cursor.unwrap_or(CustodyCursor {
             next_block: start,
             flushed_event_total: U256::ZERO,
@@ -693,13 +696,13 @@ impl Reconciler {
                 flushed_event_total: checked_add(totals.flushed_event_total, flushed)?,
                 treasury_inflow_total: checked_add(totals.treasury_inflow_total, inflow)?,
             };
-        }
-        if cursor != Some(totals)
-            && !store::advance_custody_cursor(&self.pool, chain_id, factory, token, cursor, totals)
+            if !store::advance_custody_cursor(&self.pool, chain_id, factory, token, cursor, totals)
                 .await?
-        {
-            tracing::debug!(chain_id, "custody cursor advanced concurrently");
-            return Ok(());
+            {
+                tracing::debug!(chain_id, "custody cursor advanced concurrently");
+                return Ok(());
+            }
+            cursor = Some(totals);
         }
         if totals.treasury_inflow_total != totals.flushed_event_total {
             findings.push(Finding::new(
