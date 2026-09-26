@@ -8,7 +8,7 @@
 # factory is not deployed here; on Sepolia it comes from deploy/CONTRACTS.md.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 usage() {
     echo "usage: $0 --rpc-url URL (--account NAME | --anvil-unlocked ADDRESS)" >&2
     exit 2

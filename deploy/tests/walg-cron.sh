@@ -65,7 +65,7 @@ fi
 : >"$tmp/wal-g.call"
 if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
-    AWS_ACCESS_KEY_ID= \
+    AWS_ACCESS_KEY_ID='' \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
     echo "WAL archiving without S3 credentials unexpectedly succeeded" >&2
@@ -132,10 +132,10 @@ timeline_backup 1 "$listed" test
     exit 1
 }
 timeline_backup 2 "$listed" test
-[ "$timeline_status" -eq 0 ] && grep -Fx /var/lib/postgresql/data "$tmp/base-backup.call" >/dev/null || {
+if [ "$timeline_status" -ne 0 ] || ! grep -Fx /var/lib/postgresql/data "$tmp/base-backup.call" >/dev/null; then
     echo "walg-timeline-backup did not back up the uncovered timeline 2" >&2
     exit 1
-}
+fi
 timeline_backup 1 '[]' test
 [ "$timeline_status" -eq 0 ] && [ -s "$tmp/base-backup.call" ] || {
     echo "walg-timeline-backup did not back up a prefix without base backups" >&2

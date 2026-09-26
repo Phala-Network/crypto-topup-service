@@ -9,7 +9,7 @@
 #          [--offline] [--unsealed]
 #
 # --offline runs only the local checks (env file and compose). --unsealed accepts an empty
-# PRODUCT_SEED: Deploy staging product provisions without it and the owner seals it from their own
+# PRODUCT_SEED: Deploy (target `product`) provisions without it and the owner seals it from their own
 # machine. The online checks compare the product RPC's finalized block with topup's providers,
 # TOPUP_RPC_PROVIDER_A_URL and TOPUP_RPC_PROVIDER_B_URL from the environment. Output never prints
 # an RPC URL. Every failure is reported; the exit status is 1 if any.
@@ -77,14 +77,14 @@ while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
     env[${line%%=*}]=${line#*=}
 done <"$env_file"
-for name in $(cat "$tmp/expected"); do
+while IFS= read -r name; do
     value=${env[$name]-}
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
     elif [[ -z "$value" && ! ("$name" == PRODUCT_SEED && $unsealed == 1) ]]; then
         fail "$name is empty"
     fi
-done
+done <"$tmp/expected"
 seed=${env[PRODUCT_SEED]-}
 [[ -z "$seed" || "$seed" =~ ^[0-9a-f]{64}$ ]] ||
     fail "PRODUCT_SEED must be 64 lowercase hex characters (topup-sdk keygen --seed-out)"

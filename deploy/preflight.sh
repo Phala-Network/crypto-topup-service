@@ -106,14 +106,14 @@ while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
     env[${line%%=*}]=${line#*=}
 done <"$env_file"
-for name in $(cat "$tmp/expected"); do
+while IFS= read -r name; do
     value=${env[$name]-}
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
     elif [[ -z "$value" ]] && ((unsealed == 0)) && [[ "$optional_empty" != *" $name "* ]]; then
         fail "$name is empty"
     fi
-done
+done <"$tmp/expected"
 # Empty turns Sentry reporting off; the service refuses to start with a malformed DSN.
 sentry_dsn=${env[SENTRY_DSN]-}
 [[ -z "$sentry_dsn" || "$sentry_dsn" =~ ^https://[0-9a-f]{32}@[a-z0-9.-]+/[0-9]+$ ]] ||

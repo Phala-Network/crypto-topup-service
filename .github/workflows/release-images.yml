@@ -12,8 +12,7 @@ name: Release images
 #   product): the same two-build, push, and read-back discipline as crypto-topup, and the digest,
 #   pulled from the registry, must run `--help`.
 # The job summary and the `images.json` artifact carry the manifest references
-# (`repository@sha256:...`) for Deploy, Deploy staging product, and
-# deploy/render-compose.sh.
+# (`repository@sha256:...`) for Deploy and deploy/render-compose.sh.
 #
 # No build provenance attestation: actions/attest-build-provenance supports private repositories
 # only on GitHub Enterprise Cloud, and this private repository's organization is on the Free plan.

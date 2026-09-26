@@ -1,5 +1,5 @@
 # Local overlay for the attested stack, applied by deploy/local/compose.sh after the compose
-# rendered with local settings (make up, the smokes, the sandbox, and the restore drill). It adds
+# rendered with local settings (make up, the sandbox, and the restore drill). It adds
 # object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds the
 # images from this checkout, and replaces secrets, ports, and host paths with local values.
 # Everything else, including the PostgreSQL init script (an inline config), comes from the rendered

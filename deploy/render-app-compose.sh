@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 env_file=${1:-"$root/deploy/staging.env.example"}
 compose=${2:-"$root/deploy/docker-compose.yml"}
 template=${3:-"$root/deploy/app-compose.example.json"}

@@ -1,8 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-local_compose="$root/deploy/local/docker-compose.yml"
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 compose=$(mktemp)
 restore_check_compose=$(mktemp)
 rendered=$(mktemp)
@@ -215,7 +214,7 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
     exit 1
 }
 
-# The reference-product CVM (deploy/product), rendered as Deploy staging product does: it reads
+# The reference-product CVM (deploy/product), rendered as Deploy (target `product`) does: it reads
 # exactly the names of its env example, which become its allowed_envs, carries its settings in the
 # attested config, mounts no host path, and publishes only 8089.
 PRODUCT_IMAGE=ghcr.io/phala-network/crypto-topup-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \

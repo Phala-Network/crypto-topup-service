@@ -20,8 +20,7 @@ Release images publishes the images; Deploy runs against the GitHub Environment 
 | Workflow | Trigger | Does |
 |---|---|---|
 | Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup`, `postgres-walg`, and `crypto-topup-reference-product` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
-| Deploy ([deploy.yml](../.github/workflows/deploy.yml)) | manual, `main` only | provisions or upgrades the topup CVM of the chosen Environment with the images of a Release images run (below) |
-| Deploy staging product ([deploy-staging-product.yml](../.github/workflows/deploy-staging-product.yml)) | manual, `main` only | provisions or upgrades the staging reference-product CVM ([Staging reference product](#staging-reference-product)) |
+| Deploy ([deploy.yml](../.github/workflows/deploy.yml)) | manual, `main` only | provisions or upgrades, with the images of a Release images run, target `topup`: the topup CVM of the chosen Environment (below), or target `product`: the staging reference-product CVM ([Staging reference product](#staging-reference-product)) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
 
 ### Controls
@@ -107,7 +106,7 @@ not an OS image bump.
    | `WALG_S3_PREFIX` | variable, attested | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)), and production a bucket or prefix staging's keys cannot reach |
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable, attested | from `topup-sdk keygen`, a separate key per Environment; the private key stays with the admin |
    | `SENTRY_ENVIRONMENT` | variable, attested | the Environment's name, `staging` or `production` ([Sentry](#sentry)); Deploy refuses any other value |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public HTTPS RPC URLs of the route's chain (Sepolia for staging, Ethereum mainnet for production) from two different providers (staging's are also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public HTTPS RPC URLs of the route's chain (Sepolia for staging, Ethereum mainnet for production) from two different providers (staging's are also used by Verify contracts and Deploy's target `product`); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
    | `PHALA_WORKSPACE` | variable | display name of the API key's Phala Cloud workspace (`staging`: `kingsley's projects`) |
    | `DSTACK_OS_IMAGE` | variable | the owner-approved OS image, `dstack-0.5.9` ([OS image](#os-image)) |
    | `TOPUP_CVM_ID` | variable | empty until the first provisioning; then the CVM id it reports (`staging`: the value of the former `STAGING_CVM_ID`, which can then be deleted) |
@@ -162,8 +161,8 @@ The same steps deploy `staging` and `production`; `ENV` below is the Environment
 
 1. Merge the change to `main`.
 2. Run **Release images** on `main` (the only ref it publishes from) and note its run id.
-3. Run **Deploy** on `main` with `environment`, `mode: provision`, and `release_run_id`. The run
-   refuses `provision` while `TOPUP_CVM_ID` is set.
+3. Run **Deploy** on `main` with `environment`, `target: topup`, `mode: provision`, and
+   `release_run_id`. The run refuses `provision` while `TOPUP_CVM_ID` is set.
 4. Set the Environment variable `TOPUP_CVM_ID` to the CVM id in the run summary. From then on use
    `mode: upgrade` with a newer release; an upgrade sends only the compose, never an env file, so
    the sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back
@@ -467,9 +466,8 @@ suffix, and `SOURCE_DATE_EPOCH` is the commit time:
 
 Run the workflow on `main` from the Actions tab, or with
 `gh workflow run release-images.yml --ref main`. The job summary and the `images.json` artifact
-hold the manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`, `PRODUCT_IMAGE`): pass the
-first two are what Deploy takes from the run given as `release_run_id`, and `PRODUCT_IMAGE` goes
-to Deploy staging product as `product_image`. For a local render or preflight:
+hold the manifest references (`TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`, `PRODUCT_IMAGE`); Deploy
+takes the target's images from the run given as `release_run_id`. For a local render or preflight:
 
 ```sh
 images=$(mktemp -d)
@@ -492,7 +490,7 @@ option is unavailable. After the first publish, for `crypto-topup`, `postgres-wa
 `crypto-topup-reference-product`: open
 the package under the organization's Packages tab, then Package settings, Danger Zone, Change
 visibility, Public, and confirm with the package name. Deploy's preflight pulls both
-digests anonymously (Deploy staging product's preflight its own) and fails while a package is
+digests anonymously (target `product`: its own) and fails while a package is
 still private.
 
 Developer check, no push and no credentials: the same two-build comparison runs locally with
@@ -731,7 +729,7 @@ requests.
 | Image | `ghcr.io/phala-network/crypto-topup-reference-product` ([Dockerfile.reference-product](Dockerfile.reference-product)), published by Release images |
 | Compose | [product/docker-compose.yml](product/docker-compose.yml): one service, port 8089, the staging route's addresses inline, no capabilities; rendered by [product/render-compose.sh](product/render-compose.sh) |
 | Env names | [product/staging.env.example](product/staging.env.example): only `PRODUCT_SEED`, the secret |
-| Workflow | [Deploy staging product](../.github/workflows/deploy-staging-product.yml): same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attestation verified with [verify-attestation.sh](verify-attestation.sh) |
+| Workflow | [Deploy](../.github/workflows/deploy.yml), target `product`: same CLI (1.1.22), `--kms phala`, the approved production OS image, `tdx.small`, no public logs or sysinfo, preflight ([product/preflight.sh](product/preflight.sh)), attestation verified with [verify-attestation.sh](verify-attestation.sh) |
 
 The product's public configuration is attested: the workflow renders it into the product
 config inside the compose, so it is part of the compose hash. `TOPUP_ORIGIN` is read by the
@@ -749,15 +747,15 @@ defers (503) every settlement until its own RPC has finalized the deposit's bloc
 RPC stalls all of them.
 
 **Changing a setting** (the RPC, the driver key, or topup's origin): set the `staging` Environment
-variable if it is one, then run Deploy staging product in mode `upgrade` with the current
-`product_image`. Never change these with `phala envs update`: Compose recreates a container only
+variable if it is one, then run Deploy (target `product`) in mode `upgrade` with the current
+Release images run. Never change these with `phala envs update`: Compose recreates a container only
 when its service definition changes, and a restart keeps the old config file. The renderer labels
 the service with the digest of the rendered compose, so every rendered change recreates the
 container.
 
 A product CVM provisioned before the settings were attested has all five names in its
 `allowed_envs`. Once: seal `.env.product` holding only `PRODUCT_SEED` (step 4; this sets
-`allowed_envs` to that name), then run Deploy staging product in mode `upgrade`. Until the upgrade
+`allowed_envs` to that name), then run Deploy (target `product`) in mode `upgrade`. Until the upgrade
 the old compose can read empty settings.
 
 ### End-to-end order
@@ -777,8 +775,8 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
 2. **Release** (workflow): run Release images on `main`; make the new
    `crypto-topup-reference-product` package public once
    ([Build and publish images](#build-and-publish-images)).
-3. **Provision the product CVM** (workflow): Deploy staging product, mode `provision`,
-   `product_image` = `PRODUCT_IMAGE` from the Release images summary. Then set the `staging`
+3. **Provision the product CVM** (workflow): Deploy, Environment `staging`, target
+   `product`, mode `provision`, `release_run_id` = that Release images run. Then set the `staging`
    Environment variable `STAGING_PRODUCT_CVM_ID` to the printed CVM id. The run upgrades the new
    CVM once more to a compose rendered with its gateway URL. The summary lists the public,
    settlement, and webhook URLs (`https://<app-id>-8089.<gateway domain>`); later runs use mode
@@ -881,8 +879,8 @@ separately reviewed Safe flush of that token (refund-execution.md, decision tree
 plan does not run.
 
 The refund request and the `rate_lock.expired` events in the account view need a product CVM
-running this driver's release: run Release images and Deploy staging product in mode `upgrade`
-with the new `product_image` first. The other rows also work with the earlier product image.
+running this driver's release: run Release images and Deploy (target `product`) in mode `upgrade`
+with that run first. The other rows also work with the earlier product image.
 Each run costs the payer two Sepolia transactions (`mint`, `transfer`, about 120000 gas; under
 0.001 ETH at 5 gwei) and mints its test tokens for free; the sweeps cost the flusher operator its
 usual flush gas, and the refund costs the Safe one ERC-20 transfer.
@@ -938,8 +936,6 @@ deploy/local/compose.sh ps
 ```sh
 make up
 make down
-make infra-smoke
-SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 ```
 
 A local stack created before the PostgreSQL 18 upgrade keeps a PostgreSQL 16 volume mounted at the
@@ -949,14 +945,10 @@ old path, which the new image does not read. Remove it (local data only) before 
 deploy/local/compose.sh down -v
 ```
 
-`infra-smoke.sh` tests migrations, route-template validation, simulator attestation, the running
-backup service, WAL-G dry-run commands, and PostgreSQL archive settings, then removes its containers
-and volumes. `service-smoke.sh` is opt-in and requires `topup run --help` to expose the unified
-`--bind` and `--route` options. It starts the service with the application database role, local
-administrative verification key, mounted route, and scanner provider URL; then it checks the TCP
-listener, `GET /healthz` for HTTP 200, `GET /openapi.json`, and the running backup service. The local
-provider URL is deliberately unreachable, exercising scanner retry behavior without contacting a
-real chain. A skipped service smoke is not a successful service check.
+The end-to-end check of the deployment artifact is `make cvm-rehearsal` (below). The sandbox
+scenarios run on this local stack instead (`make sandbox-local`, [sandbox/README.md](sandbox/README.md)):
+they need a faster scanner cadence than the attested `topup run` command, the sandbox route
+template, and the Docker socket to restart the service, none of which the rehearsal may change.
 
 Backup encryption, Garage object storage, point-in-time recovery, and the weekly destructive drill
 are documented in [RESTORE.md](RESTORE.md). Run `make restore-drill`; it uses an isolated Compose
@@ -977,7 +969,8 @@ re-rendered gateway origin must recreate every service. Then it seals the secret
 passes its startup contract check and serves `/healthz`, `/v1/attestation` binds a fresh nonce
 and the flusher operator through the simulator (the same values as `topup attest --route`), the
 flusher waits for that attested address's `OPERATOR_ROLE` and resumes once the mock Safe grants it
-and it is funded, the backup marker is fresh, the product is issued through the signed
+and it is funded, the derived key and database credentials are PostgreSQL-owned mode-0600 files
+in no container environment, the backup marker is fresh, the product is issued through the signed
 `POST /v1/admin/products`, and one quote-first deposit is credited end to end against the
 reference product with a lock priced from the live HTTPS sources (so the image's
 TLS verification with system roots works), then prints the workload's memory and checks that no

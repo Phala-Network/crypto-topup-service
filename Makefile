@@ -1,4 +1,4 @@
-.PHONY: build build-topup test lint image up down infra-smoke service-smoke verify-image \
+.PHONY: build build-topup test lint image up down verify-image \
 	restore-drill deploy-check alerts-check runbook-check sdk-check sdk-generate sandbox-local \
 	cvm-rehearsal product-conformance
 
@@ -32,12 +32,6 @@ up:
 
 down:
 	$(LOCAL_COMPOSE) down --remove-orphans
-
-infra-smoke:
-	deploy/local/infra-smoke.sh
-
-service-smoke:
-	SERVICE_SMOKE=1 deploy/local/service-smoke.sh
 
 verify-image:
 	deploy/verify-image.sh

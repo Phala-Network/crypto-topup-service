@@ -3,7 +3,7 @@
 # rejected at render time with an error naming the variable.
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 render="$root/deploy/sandbox/render-route.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM

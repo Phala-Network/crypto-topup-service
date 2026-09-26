@@ -1,0 +1,5 @@
+# Sourced helpers resolve against the sourcing script's directory.
+source-path=SCRIPTDIR
+external-sources=true
+# jq programs and `sh -c` scripts are single-quoted on purpose throughout.
+disable=SC2016

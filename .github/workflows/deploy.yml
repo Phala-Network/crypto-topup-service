@@ -1,29 +1,33 @@
 name: Deploy
 
-# Provisions or upgrades the topup CVM of one GitHub Environment, `staging` or `production`, on
-# Phala Cloud (deploy/README.md, "Deploy"). Nothing is deployed from a laptop.
+# Provisions or upgrades one CVM on Phala Cloud (deploy/README.md, "Deploy"): target `topup`, the
+# service, in the GitHub Environment `staging` or `production`; or target `product`, the staging
+# reference product (deploy/README.md, "Staging reference product"), in `staging` only. Nothing is
+# deployed from a laptop.
 #
 # Controls: only a user with write access can dispatch this workflow; the job runs only from
 # `main`, in the Environment chosen by the input (deployment branches: `main` only), whose only
 # secret is PHALA_CLOUD_API_KEY. There is no approval step (required reviewers are not available
 # on this repository's plan): whoever dispatches a run is accountable for it, and the run's
 # attested compose and verifier read-back are the audit trail. The images are those of a
-# successful Release images run on `main`, read from its `images.json` artifact, never typed in. The CVM's env holds
-# only the owner-sealed secrets (deploy/staging.env.example), which never enter GitHub:
+# successful Release images run on `main`, read from its `images.json` artifact, never typed in.
+# The CVM's env holds only the owner-sealed secrets (deploy/staging.env.example, or
+# deploy/product/staging.env.example: the product's signing seed), which never enter GitHub:
 # `provision` sends them empty, and the owner then seals them from their own machine (the run
 # summary prints the command); `upgrade` sends no env at all, so the sealed env stays. Every other
-# setting is public and attested: deploy/render-compose.sh renders the Environment variables below
-# into the compose, so a changed value is a new compose hash and takes effect only through
-# `upgrade` (deploy/README.md, "Attested settings").
+# setting is public and attested: the target's render-compose.sh renders the Environment variables
+# below into the compose, so a changed value is a new compose hash and takes effect only through
+# `upgrade` (deploy/README.md, "Attested settings"). The product's TOPUP_ORIGIN is the gateway URL
+# of the topup CVM in vars.TOPUP_CVM_ID, and it pins topup's settlement key from there at startup.
 #
-# Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22):
+# Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by
+# deploy/phala-cvm.sh:
 # - Authentication is the PHALA_CLOUD_API_KEY environment variable, which the CLI prefers over a
 #   stored profile; PHALA_CLOUD_DIR points at an empty directory so no profile or API prefix from
 #   the runner's home can be read. The API key belongs to the workspace in vars.PHALA_WORKSPACE.
 # - `--kms phala` selects Phala Cloud's KMS for every CVM (owner decision, deploy/README.md "KMS"):
 #   no DstackApp contract, no provisioner key, and an update applies directly.
-# - `deploy --json` writes `Provisioning CVM ...` before the JSON object on a new CVM, and ignores
-#   `--wait` there; this workflow waits by polling `cvms get`.
+# - `deploy --json` ignores `--wait` on a new CVM; this workflow waits by polling `cvms get`.
 #
 # Runner constraints (org self-hosted runner): a container that drives the host Docker daemon
 # through its socket, so nothing bind-mounts a workspace path (preflight and the dstack verifier
@@ -37,8 +41,13 @@ on:
         type: choice
         options: [staging, production]
         required: true
+      target:
+        description: "topup: the service CVM (vars.TOPUP_CVM_ID); product: the staging reference-product CVM (vars.STAGING_PRODUCT_CVM_ID)"
+        type: choice
+        options: [topup, product]
+        required: true
       mode:
-        description: "provision: create the first CVM; upgrade: update the CVM in vars.TOPUP_CVM_ID"
+        description: "provision: create the target's first CVM; upgrade: update the target's CVM"
         type: choice
         options: [provision, upgrade]
         required: true
@@ -52,9 +61,9 @@ permissions:
   actions: read
   contents: read
 
-# One deployment per Environment at a time; a queued run never cancels one in progress.
+# One deployment per CVM at a time; a queued run never cancels one in progress.
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-${{ inputs.environment }}-${{ inputs.target }}
   cancel-in-progress: false
 
 # `bash -eo pipefail` for every step, so a failing command in a pipeline fails the step.
@@ -70,15 +79,16 @@ jobs:
     timeout-minutes: 90
     env:
       DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      TARGET: ${{ inputs.target }}
       MODE: ${{ inputs.mode }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       DSTACK_OS_IMAGE: ${{ vars.DSTACK_OS_IMAGE }}
       TOPUP_CVM_ID: ${{ vars.TOPUP_CVM_ID }}
+      STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
-      CVM_NAME: crypto-topup-${{ inputs.environment }}
-      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_PUBLIC_ORIGIN comes
-      # from step "Resolve the public origin". The RPC URLs are published with the compose, so
-      # they must be keyless public URLs.
+      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_PUBLIC_ORIGIN,
+      # TOPUP_ORIGIN, and PRODUCT_PUBLIC_URL come from step "Resolve the public URLs". The RPC URLs
+      # are published with the compose, so they must be keyless public URLs.
       AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
@@ -88,7 +98,11 @@ jobs:
       TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
       TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
       SENTRY_ENVIRONMENT: ${{ vars.SENTRY_ENVIRONMENT }}
+      PRODUCT_RPC_URL: ${{ vars.PRODUCT_RPC_URL }}
+      PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
     steps:
+      # Fixes the target's files and settings for the later steps: DIR holds its compose,
+      # render-compose.sh, preflight.sh, and staging.env.example.
       - name: Check inputs and Environment settings
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -97,23 +111,49 @@ jobs:
           status=0
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
-          for name in PHALA_WORKSPACE DSTACK_OS_IMAGE SENTRY_ENVIRONMENT AWS_ENDPOINT AWS_REGION \
-            AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY \
-            TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL; do
+          case "$TARGET" in
+            topup)
+              required="SENTRY_ENVIRONMENT AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
+                TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL"
+              [[ "$SENTRY_ENVIRONMENT" == "$DEPLOY_ENVIRONMENT" ]] ||
+                { echo "::error::SENTRY_ENVIRONMENT must be $DEPLOY_ENVIRONMENT"; status=1; }
+              dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=crypto-topup-$DEPLOY_ENVIRONMENT
+              instance_type=tdx.medium port=8080 origin_variable=TOPUP_PUBLIC_ORIGIN
+              images="TOPUP_IMAGE POSTGRES_WALG_IMAGE" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
+            product)
+              required="TOPUP_CVM_ID PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY"
+              [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
+                { echo "::error::the reference product deploys to staging only"; status=1; }
+              dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=crypto-topup-staging-product
+              instance_type=tdx.small port=8089 origin_variable=PRODUCT_PUBLIC_URL
+              images=PRODUCT_IMAGE compose_name=docker-compose.product.yml ;;
+            *) echo "::error::unknown target $TARGET"; exit 1 ;;
+          esac
+          for name in PHALA_WORKSPACE DSTACK_OS_IMAGE $required; do
             [[ -n "${!name}" ]] ||
               { echo "::error::Environment variable $name is not set"; status=1; }
           done
-          [[ "$SENTRY_ENVIRONMENT" == "$DEPLOY_ENVIRONMENT" ]] ||
-            { echo "::error::SENTRY_ENVIRONMENT must be $DEPLOY_ENVIRONMENT"; status=1; }
+          existing=${!cvm_id_variable}
+          {
+            echo "DIR=$dir"
+            echo "CVM_ID_VARIABLE=$cvm_id_variable"
+            echo "EXISTING_CVM_ID=$existing"
+            echo "CVM_NAME=$cvm_name"
+            echo "INSTANCE_TYPE=$instance_type"
+            echo "PORT=$port"
+            echo "ORIGIN_VARIABLE=$origin_variable"
+            echo "IMAGES=$images"
+            echo "COMPOSE_NAME=$compose_name"
+          } >>"$GITHUB_ENV"
           case "$MODE" in
             provision)
-              [[ -z "$TOPUP_CVM_ID" ]] || {
-                echo "::error::TOPUP_CVM_ID is set ($TOPUP_CVM_ID); use mode upgrade, or clear it to provision a new CVM"
+              [[ -z "$existing" ]] || {
+                echo "::error::$cvm_id_variable is set ($existing); use mode upgrade, or clear it to provision a new CVM"
                 status=1
               } ;;
             upgrade)
-              [[ -n "$TOPUP_CVM_ID" ]] ||
-                { echo "::error::mode upgrade needs the Environment variable TOPUP_CVM_ID"; status=1; } ;;
+              [[ -n "$existing" ]] ||
+                { echo "::error::mode upgrade needs the Environment variable $cvm_id_variable"; status=1; } ;;
             *) echo "::error::unknown mode $MODE"; status=1 ;;
           esac
           api() {
@@ -136,12 +176,12 @@ jobs:
         run: |
           work="$RUNNER_TEMP/deploy"
           mkdir -p "$work" "$RUNNER_TEMP/phala-cloud"
-          env_file=$(umask 077 && mktemp "$RUNNER_TEMP/topup-env.XXXXXX")
+          env_file=$(umask 077 && mktemp "$RUNNER_TEMP/deploy-env.XXXXXX")
           {
             echo "WORK=$work"
             echo "ENV_FILE=$env_file"
             echo "PHALA_CLOUD_DIR=$RUNNER_TEMP/phala-cloud"
-            echo "COMPOSE=$work/docker-compose.$DEPLOY_ENVIRONMENT.yml"
+            echo "COMPOSE=$work/$COMPOSE_NAME"
           } >>"$GITHUB_ENV"
 
       - name: Download the release's images.json
@@ -153,10 +193,10 @@ jobs:
           run-id: ${{ inputs.release_run_id }}
           github-token: ${{ github.token }}
 
-      - name: Take the images from the release
+      - name: Take the target's images from the release
         run: |
           digest='^[a-z0-9]+([._/-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$'
-          for name in TOPUP_IMAGE POSTGRES_WALG_IMAGE; do
+          for name in $IMAGES; do
             ref=$(jq -er --arg name "$name" '.[$name]' "$WORK/release/images.json")
             [[ "$ref" =~ $digest ]] ||
               { echo "::error::$name of the release is not repository@sha256:<64 lowercase hex>"; exit 1; }
@@ -165,7 +205,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # verify-deployment.sh (in preflight) builds the contracts.
+          # verify-deployment.sh (in topup's preflight) builds the contracts.
           submodules: recursive
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -176,56 +216,66 @@ jobs:
         with:
           version: v1.8.3
 
-      # A new CVM is rendered with a provisional origin until its gateway URL is known (step "Set
-      # the public origin"); an upgrade renders the existing CVM's gateway URL.
-      - name: Resolve the public origin
+      # The target's own public URL: a new CVM is rendered with a provisional one until its gateway
+      # URL is known (step "Set the public URL"); an upgrade renders the existing CVM's gateway URL.
+      # The product also renders topup's gateway URL.
+      - name: Resolve the public URLs
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
           if [[ "$MODE" == provision ]]; then
-            origin=https://pending.invalid
+            url=https://pending.invalid
           else
-            npx --yes phala@1.1.22 cvms get "$TOPUP_CVM_ID" --json >"$WORK/cvm-before.json"
-            app_id=$(jq -er '.app_id' "$WORK/cvm-before.json")
-            domain=$(jq -er '.gateway.base_domain' "$WORK/cvm-before.json")
-            origin="https://${app_id#0x}-8080.$domain"
+            deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
+            url=$(deploy/phala-cvm.sh url "$WORK/cvm-before.json" "$PORT")
           fi
-          echo "TOPUP_PUBLIC_ORIGIN=$origin" >>"$GITHUB_ENV"
-          echo "public origin: $origin"
+          echo "$ORIGIN_VARIABLE=$url" | tee -a "$GITHUB_ENV"
+          if [[ "$TARGET" == product ]]; then
+            deploy/phala-cvm.sh get "$TOPUP_CVM_ID" >"$WORK/cvm-topup.json"
+            echo "TOPUP_ORIGIN=$(deploy/phala-cvm.sh url "$WORK/cvm-topup.json" 8080)" | tee -a "$GITHUB_ENV"
+          fi
 
-      # Exactly the names of deploy/staging.env.example, all empty: the owner-sealed secrets.
+      # Exactly the names of the target's staging.env.example, all empty: the owner-sealed secrets.
       # Database credentials are not inputs: the CVM derives them from dstack KMS. `upgrade` writes
       # the file for preflight only and never sends it.
       - name: Write the unsealed env file
-        run: deploy/write-staging-env.sh "$ENV_FILE"
+        run: |
+          if [[ "$TARGET" == product ]]; then
+            deploy/write-staging-env.sh --product "$ENV_FILE"
+          else
+            deploy/write-staging-env.sh "$ENV_FILE"
+          fi
 
       - name: Render the compose from this commit with the release's digests and the settings
         run: |
-          deploy/render-compose.sh >"$COMPOSE"
+          "$DIR/render-compose.sh" >"$COMPOSE"
           # Production serves only an Ethereum mainnet route, never the Sepolia staging route.
           chains=$(grep -Eo '^[[:space:]]+chain_id: [0-9]+' "$COMPOSE" | awk '{print $2}' | sort -u | tr '\n' ' ')
           [[ "$DEPLOY_ENVIRONMENT" != production || "$chains" == "1 " ]] ||
             { echo "::error::production needs a compose whose routes are all on chain 1, not: $chains"; exit 1; }
 
-      - name: Preflight (read-only; both RPCs, anonymous image pulls, Phala Cloud workspace and OS image)
+      # topup: both RPCs, the contracts, anonymous image pulls. product: its RPC's finality against
+      # topup's providers, topup's attestation, anonymous pull. Both: the Phala Cloud workspace and
+      # OS image.
+      - name: Preflight (read-only)
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          deploy/preflight.sh --env "$ENV_FILE" --compose "$COMPOSE" \
+          "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" \
             --workspace "$PHALA_WORKSPACE" --os-image "$DSTACK_OS_IMAGE" --unsealed
 
       # The CLI output (JSON, no secrets: the key is only in the environment and env values are
       # encrypted client-side) goes to the log as well, so a failure shows its reason.
-      - name: Deploy (${{ inputs.mode }})
+      - name: Deploy (${{ inputs.mode }}) and wait for the CVM
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
           if [[ "$MODE" == provision ]]; then
-            npx --yes phala@1.1.22 deploy --json \
+            deploy/phala-cvm.sh deploy "$WORK/deploy.json" \
               --name "$CVM_NAME" \
               --compose "$COMPOSE" \
               -e "$ENV_FILE" \
-              --instance-type tdx.medium \
+              --instance-type "$INSTANCE_TYPE" \
               --fs ext4 \
               --kms phala \
               --image "$DSTACK_OS_IMAGE" \
@@ -233,20 +283,18 @@ jobs:
               --no-public-logs \
               --no-public-sysinfo \
               --public-tcbinfo \
-              --secure-time 2>&1 | tee "$WORK/deploy.raw"
+              --secure-time
           else
             # No -e: CLI 1.1.22 then sends neither allowed_envs nor encrypted_env in the PATCH
             # (cli/src/commands/deploy/handler.ts: resolveEnvVars returns undefined, and updateCvm
             # sets both fields only for a non-empty list), so the owner-sealed env stays.
-            npx --yes phala@1.1.22 deploy --json \
-              --cvm-id "$TOPUP_CVM_ID" \
+            deploy/phala-cvm.sh deploy "$WORK/deploy.json" \
+              --cvm-id "$EXISTING_CVM_ID" \
               --compose "$COMPOSE" \
               --no-public-logs \
               --no-public-sysinfo \
-              --wait 2>&1 | tee "$WORK/deploy.raw"
+              --wait
           fi
-          sed -n '/^{/,$p' "$WORK/deploy.raw" >"$WORK/deploy.json"
-          jq -e '.success == true' "$WORK/deploy.json" >/dev/null
           cvm_id=$(jq -er '.vm_uuid' "$WORK/deploy.json")
           app_id=$(jq -er '.app_id' "$WORK/deploy.json")
           {
@@ -254,7 +302,7 @@ jobs:
             echo "APP_ID=$app_id"
           } >>"$GITHUB_ENV"
           {
-            echo "## $DEPLOY_ENVIRONMENT $MODE"
+            echo "## $DEPLOY_ENVIRONMENT $TARGET $MODE"
             echo
             echo "| | |"
             echo "|---|---|"
@@ -262,140 +310,110 @@ jobs:
             echo "| App id | \`$app_id\` |"
             echo "| Commit | \`$GITHUB_SHA\` |"
             echo "| Release images run | $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID (\`$RELEASE_SHA\`) |"
-            echo "| crypto-topup | \`$TOPUP_IMAGE\` |"
-            echo "| postgres-walg | \`$POSTGRES_WALG_IMAGE\` |"
+            for name in $IMAGES; do
+              echo "| $name | \`${!name}\` |"
+            done
             echo "| OS image | \`$DSTACK_OS_IMAGE\` |"
+            [[ -z "${TOPUP_ORIGIN:-}" ]] || echo "| topup origin | $TOPUP_ORIGIN |"
             echo
             if [[ "$MODE" == provision ]]; then
               # Written now, so a later failure still leaves the id for recovery (mode upgrade).
-              echo "Set the \`$DEPLOY_ENVIRONMENT\` Environment variable \`TOPUP_CVM_ID\` to \`$cvm_id\`;"
+              echo "Set the \`$DEPLOY_ENVIRONMENT\` Environment variable \`$CVM_ID_VARIABLE\` to \`$cvm_id\`;"
               echo "later runs, including a retry after a failure below, use mode \`upgrade\`."
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-
-      # A new CVM's PostgreSQL cannot list the backup prefix until the owner seals the storage
-      # credentials, so it refuses to initialize and the service is not up yet: only an upgrade
-      # waits for /healthz.
-      - name: Wait for the CVM and the service
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
-        run: |
-          settled='.status == "running" and (.in_progress | not)'
-          for _ in $(seq 60); do
-            npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              jq -e "$settled" "$WORK/cvm.json" >/dev/null && break
-            sleep 15
-          done
-          jq -e "$settled" "$WORK/cvm.json" >/dev/null ||
-            { echo "::error::CVM $CVM_ID is not running"; exit 1; }
-          # The hash the attestation must reach (step "Read back and verify the attested compose").
-          deployed_hash=$(jq -er '.compose_hash' "$WORK/cvm.json")
-          deployed_hash=${deployed_hash#0x}
-          echo "DEPLOYED_COMPOSE_HASH=${deployed_hash,,}" >>"$GITHUB_ENV"
-          domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
-          gateway_origin="https://${APP_ID#0x}-8080.$domain"
-          echo "GATEWAY_ORIGIN=$gateway_origin" >>"$GITHUB_ENV"
-          [[ "$MODE" == upgrade ]] || exit 0
-          for _ in $(seq 60); do
-            curl -fsS --max-time 10 "$gateway_origin/healthz" >/dev/null && exit 0
-            sleep 10
-          done
-          echo "::error::$gateway_origin/healthz did not answer"
-          exit 1
+          deploy/phala-cvm.sh wait "$cvm_id" >"$WORK/cvm.json"
+          echo "GATEWAY_URL=$(deploy/phala-cvm.sh url "$WORK/cvm.json" "$PORT")" | tee -a "$GITHUB_ENV"
 
       # The gateway URL is known only after provisioning, and it is attested configuration: upgrade
       # the new CVM to the compose rendered with it (no -e: the env stays).
-      - name: Set the public origin
+      - name: Set the public URL
         if: inputs.mode == 'provision'
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN deploy/render-compose.sh >"$COMPOSE"
-          echo "TOPUP_PUBLIC_ORIGIN=$GATEWAY_ORIGIN" >>"$GITHUB_ENV"
-          deploy/preflight.sh --env "$ENV_FILE" --compose "$COMPOSE" --offline --unsealed
-          npx --yes phala@1.1.22 deploy --json \
+          env "$ORIGIN_VARIABLE=$GATEWAY_URL" "$DIR/render-compose.sh" >"$COMPOSE"
+          echo "$ORIGIN_VARIABLE=$GATEWAY_URL" >>"$GITHUB_ENV"
+          "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" --offline --unsealed
+          previous=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
+          deploy/phala-cvm.sh deploy "$WORK/deploy-public-url.json" \
             --cvm-id "$CVM_ID" \
             --compose "$COMPOSE" \
             --no-public-logs \
             --no-public-sysinfo \
-            --wait 2>&1 | tee "$WORK/deploy-public-origin.raw"
-          sed -n '/^{/,$p' "$WORK/deploy-public-origin.raw" >"$WORK/deploy-public-origin.json"
-          jq -e '.success == true' "$WORK/deploy-public-origin.json" >/dev/null
-          # Wait for the new compose hash and a running CVM.
-          for _ in $(seq 60); do
-            if npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json" 2>/dev/null &&
-              jq -e --arg before "$DEPLOYED_COMPOSE_HASH" \
-                '.status == "running" and (.in_progress | not)
-                  and ((.compose_hash | ascii_downcase | ltrimstr("0x")) != $before)' \
-                "$WORK/cvm.json" >/dev/null; then
-              deployed_hash=$(jq -er '.compose_hash' "$WORK/cvm.json")
-              deployed_hash=${deployed_hash#0x}
-              echo "DEPLOYED_COMPOSE_HASH=${deployed_hash,,}" >>"$GITHUB_ENV"
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "::error::the CVM did not run the compose with the public origin within 15 minutes"
-          exit 1
+            --wait
+          deploy/phala-cvm.sh wait "$CVM_ID" "$previous" >"$WORK/cvm.json"
 
+      # A new topup CVM's PostgreSQL cannot list the backup prefix until the owner seals the
+      # storage credentials, so it refuses to initialize and the service is not up yet. The product
+      # serves without its seed.
+      - name: Wait for the service
+        if: inputs.target == 'product' || inputs.mode == 'upgrade'
+        run: deploy/phala-cvm.sh healthz "$GATEWAY_URL"
+
+      # After an upgrade the attestation can still describe the previous compose for a while.
       - name: Read back and verify the attested compose
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          # After an upgrade the attestation can still describe the previous compose for a while;
-          # wait (up to 10 minutes) until it attests the compose hash just deployed.
-          attested=""
-          for _ in $(seq 40); do
-            if npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json >"$WORK/attestation.json" 2>/dev/null &&
-              attested=$(jq -r '[.tcb_info.event_log[]? | select(.event == "compose-hash")
-                  | .event_payload][0] // ""' "$WORK/attestation.json" 2>/dev/null); then
-              [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] && break
-            fi
-            sleep 15
-          done
-          [[ "${attested,,}" == "$DEPLOYED_COMPOSE_HASH" ]] || {
-            echo "::error::the attestation reports compose hash '${attested:-none}', not the deployed $DEPLOYED_COMPOSE_HASH"
-            exit 1
-          }
-          npx --yes phala@1.1.22 cvms get "$CVM_ID" --json >"$WORK/cvm.json"
+          deployed=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
+          deploy/phala-cvm.sh attestation "$CVM_ID" "$deployed" >"$WORK/attestation.json"
           # The guest agent's public info (port 8090, public tcbinfo) carries the vm_config.
-          domain=$(jq -er '.gateway.base_domain' "$WORK/cvm.json")
           curl -fsS --max-time 30 --retry 5 --retry-all-errors \
-            "https://${APP_ID#0x}-8090.$domain/prpc/Info" >"$WORK/info.json"
+            "$(deploy/phala-cvm.sh url "$WORK/cvm.json" 8090)/prpc/Info" >"$WORK/info.json"
+          policy=()
+          [[ "$TARGET" == topup ]] || policy=("$DIR/staging.env.example" "product:$PORT")
           deploy/verify-attestation.sh "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
-            "$COMPOSE" 2>&1 | tee "$WORK/verification.txt"
+            "$COMPOSE" "${policy[@]}" 2>&1 | tee "$WORK/verification.txt"
           {
             echo "| | |"
             echo "|---|---|"
-            echo "| Compose hash | \`0x$DEPLOYED_COMPOSE_HASH\` |"
-            echo "| Public origin | $TOPUP_PUBLIC_ORIGIN |"
+            echo "| Compose hash | \`0x$deployed\` |"
+            echo "| Public URL | ${!ORIGIN_VARIABLE} |"
+            if [[ "$TARGET" == product ]]; then
+              echo "| Settlement URL | $GATEWAY_URL/settlements |"
+              echo "| Webhook URL | $GATEWAY_URL/webhooks |"
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Print the owner's sealing step
         if: inputs.mode == 'provision'
         run: |
           {
-            echo "### Owner: seal the runtime secrets"
-            echo
-            echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
-            echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
-            echo "write \`.env.$DEPLOY_ENVIRONMENT\` (mode 0600) with exactly the staging.env.example names:"
-            echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, and \`SENTRY_DSN\` (may be empty). The"
-            echo "same name set keeps the compose hash. From a checkout of \`$GITHUB_SHA\`:"
+            if [[ "$TARGET" == topup ]]; then
+              env_file=.env.$DEPLOY_ENVIRONMENT
+              echo "### Owner: seal the runtime secrets"
+              echo
+              echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
+              echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
+              echo "write \`$env_file\` (mode 0600) with exactly the staging.env.example names:"
+              echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, and \`SENTRY_DSN\` (may be empty). The"
+              echo "same name set keeps the compose hash."
+            else
+              env_file=.env.product
+              echo "### Owner: seal the product seed"
+              echo
+              echo "The product runs without its signing seed: settlements and webhooks are served,"
+              echo "the account API answers 503. From your own machine, write \`$env_file\` with the"
+              echo "single line \`PRODUCT_SEED=<the hex seed in ~/staging/product.seed>\` (mode 0600)."
+            fi
+            echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact:"
             echo
             echo '```sh'
-            echo "deploy/preflight.sh --env .env.$DEPLOY_ENVIRONMENT --compose docker-compose.$DEPLOY_ENVIRONMENT.yml --offline"
-            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e .env.$DEPLOY_ENVIRONMENT"
+            echo "$DIR/preflight.sh --env $env_file --compose $COMPOSE_NAME --offline"
+            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e $env_file"
             echo '```'
-            echo
-            echo "\`docker-compose.$DEPLOY_ENVIRONMENT.yml\` is in this run's artifact. The service answers"
-            echo "$GATEWAY_ORIGIN/healthz once the CVM has restarted with the secrets, and backups have"
-            echo "started when the newest archived WAL segment is younger than two minutes:"
-            echo
-            echo '```sh'
-            echo "aws s3 ls \"${WALG_S3_PREFIX%/}/wal_005/\" --endpoint-url \"$AWS_ENDPOINT\" | tail -1"
-            echo '```'
+            if [[ "$TARGET" == topup ]]; then
+              echo
+              echo "The service answers $GATEWAY_URL/healthz once the CVM has restarted with the"
+              echo "secrets, and backups have started when the newest archived WAL segment is younger"
+              echo "than two minutes:"
+              echo
+              echo '```sh'
+              echo "aws s3 ls \"${WALG_S3_PREFIX%/}/wal_005/\" --endpoint-url \"$AWS_ENDPOINT\" | tail -1"
+              echo '```'
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
       # No secrets: the compose holds the public settings and references to the sealed secrets,
@@ -404,13 +422,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.environment }}-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.environment }}-${{ inputs.target }}-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/deploy/docker-compose.${{ inputs.environment }}.yml
+            ${{ runner.temp }}/deploy/docker-compose.*.yml
             ${{ runner.temp }}/deploy/release/images.json
             ${{ runner.temp }}/deploy/deploy.json
-            ${{ runner.temp }}/deploy/deploy-public-origin.json
+            ${{ runner.temp }}/deploy/deploy-public-url.json
             ${{ runner.temp }}/deploy/cvm.json
             ${{ runner.temp }}/deploy/attestation.json
             ${{ runner.temp }}/deploy/info.json

@@ -3,7 +3,7 @@
 # and the app-compose preview; the product renderer on the same path.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 
 cleanup() {

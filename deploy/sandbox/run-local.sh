@@ -8,7 +8,7 @@
 # live Coin Metrics, Binance, and Kraken endpoints, exactly as on Sepolia.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
 for command in docker forge cast jq uv python3 curl openssl; do
     require_command "$command"
@@ -23,6 +23,7 @@ compose=("$root/deploy/local/compose.sh" -p "$project" -f "$root/deploy/sandbox/
 client_image="ghcr.io/astral-sh/uv:0.12.18-python3.14-trixie-slim@sha256:00facf17b58b02b725155862c5cd637f688f906bf7eb5b5194647886d8805cf3"
 client="$project-product"
 
+# shellcheck disable=SC2329  # invoked by the trap
 cleanup() {
     status=$?
     if ((status != 0)); then
@@ -47,8 +48,9 @@ wait_for() {
 }
 
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
-export TOPUP_LOCAL_PORT=$(free_port)
-export SANDBOX_ANVIL_PORT=$(free_port)
+TOPUP_LOCAL_PORT=$(free_port)
+SANDBOX_ANVIL_PORT=$(free_port)
+export TOPUP_LOCAL_PORT SANDBOX_ANVIL_PORT
 export TOPUP_LOCAL_ROUTES_DIR="$tmp/routes"
 rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
 service_url="http://127.0.0.1:$TOPUP_LOCAL_PORT"

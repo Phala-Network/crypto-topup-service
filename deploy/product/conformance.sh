@@ -9,7 +9,7 @@
 # Requires Foundry (anvil, forge, cast) with contracts/lib checked out, cargo, curl, jq, and uv.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
 for command in anvil forge cast cargo curl jq uv; do
     require_command "$command"

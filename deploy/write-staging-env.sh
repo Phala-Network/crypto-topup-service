@@ -13,7 +13,7 @@
 # OUTPUT must already exist (create it with mktemp, mode 0600); it is overwritten.
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 example="$root/deploy/staging.env.example"
 if [[ "${1:-}" == --product ]]; then
     example="$root/deploy/product/staging.env.example"

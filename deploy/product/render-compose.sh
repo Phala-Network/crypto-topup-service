@@ -8,6 +8,6 @@
 # Usage: deploy/product/render-compose.sh [SOURCE_COMPOSE] >docker-compose.product.yml
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 exec "$root/deploy/render-compose.sh" --env-example "$root/deploy/product/staging.env.example" \
     "${1:-"$root/deploy/product/docker-compose.yml"}"
