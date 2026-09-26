@@ -5884,6 +5884,7 @@ dependencies = [
  "sfv",
  "sha2 0.11.0",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "topup-adapters",
@@ -5925,6 +5926,7 @@ dependencies = [
  "serde_json",
  "sfv",
  "sha2 0.11.0",
+ "thiserror 2.0.20",
  "tokio",
  "topup-core",
  "tracing",
@@ -5952,6 +5954,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "topup-adapters",
  "topup-core",
@@ -5971,6 +5974,7 @@ dependencies = [
  "serde",
  "serde_json",
  "static_assertions",
+ "thiserror 2.0.20",
  "uuid",
 ]
 

@@ -71,6 +71,7 @@ fn core_runtime_dependencies_are_pure_and_reviewed() -> Result<(), Box<dyn Error
         "alloy-sol-types",  // Pure Solidity ABI encoding for deterministic salts.
         "secrecy",          // Zeroizing storage for signer key material.
         "serde",            // Pure schema serialization and deserialization.
+        "thiserror",        // Derived `Display` and `Error` impls for domain errors.
         "uuid",             // Pure UUIDv5 derivation.
     ];
     let unexpected: Vec<&str> = core

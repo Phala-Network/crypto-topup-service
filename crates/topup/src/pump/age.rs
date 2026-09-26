@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -52,23 +50,12 @@ impl AgeAlertConfig {
 }
 
 /// Duplicate route/version alert configuration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("duplicate age alert configuration for route `{route}` version {version}")]
 pub struct AgeAlertConfigError {
     route: String,
     version: u64,
 }
-
-impl Display for AgeAlertConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "duplicate age alert configuration for route `{}` version {}",
-            self.route, self.version
-        )
-    }
-}
-
-impl Error for AgeAlertConfigError {}
 
 /// Periodically finds deposits older than their route's state threshold.
 pub struct AgeAlerter {

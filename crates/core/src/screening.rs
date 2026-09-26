@@ -1,8 +1,6 @@
 //! Pure sanctions, deposit-bound, and pause-scope screening rules.
 
 use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -126,7 +124,8 @@ impl PauseScopes {
 }
 
 /// An unknown pause-scope text code.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("unknown pause scope `{code}`")]
 pub struct ParsePauseScopeError {
     code: String,
 }
@@ -138,14 +137,6 @@ impl ParsePauseScopeError {
         &self.code
     }
 }
-
-impl Display for ParsePauseScopeError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(formatter, "unknown pause scope `{}`", self.code)
-    }
-}
-
-impl Error for ParsePauseScopeError {}
 
 /// Screens a confirmed deposit for direct sanctions, amount bounds, and settlement pauses.
 ///

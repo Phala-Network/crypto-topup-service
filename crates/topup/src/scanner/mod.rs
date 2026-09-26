@@ -5,8 +5,6 @@ mod head;
 pub use head::{HEAD_SCAN_INTERVAL, HeadScan, head_scan_once};
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,15 +32,19 @@ use crate::routes::RouteSet;
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
 
 /// Scanner failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ScannerError {
     /// A route file or environment value is invalid.
+    #[error("invalid scanner configuration: {0}")]
     Configuration(String),
     /// A chain read failed.
-    Chain(ChainError),
+    #[error("{0}")]
+    Chain(#[from] ChainError),
     /// A database operation failed.
-    Database(sqlx::Error),
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
     /// The provider finalized head is behind the durable cursor.
+    #[error("provider finalized head {finalized} is behind durable cursor {cursor}")]
     FinalizedBehindCursor {
         /// Durable fully scanned block.
         cursor: u64,
@@ -50,54 +52,11 @@ pub enum ScannerError {
         finalized: u64,
     },
     /// A transfer returned for the filter did not resolve to a tracked address.
+    #[error("transfer recipient {0:#x} is not tracked")]
     UnknownRecipient(Address),
     /// A per-chain scanner task stopped unexpectedly.
+    #[error("scanner task failed: {0}")]
     Task(String),
-}
-
-impl Display for ScannerError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Configuration(message) => {
-                write!(formatter, "invalid scanner configuration: {message}")
-            }
-            Self::Chain(error) => Display::fmt(error, formatter),
-            Self::Database(error) => Display::fmt(error, formatter),
-            Self::FinalizedBehindCursor { cursor, finalized } => write!(
-                formatter,
-                "provider finalized head {finalized} is behind durable cursor {cursor}"
-            ),
-            Self::UnknownRecipient(address) => {
-                write!(formatter, "transfer recipient {address:#x} is not tracked")
-            }
-            Self::Task(message) => write!(formatter, "scanner task failed: {message}"),
-        }
-    }
-}
-
-impl Error for ScannerError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Chain(error) => Some(error),
-            Self::Database(error) => Some(error),
-            Self::Configuration(_)
-            | Self::FinalizedBehindCursor { .. }
-            | Self::UnknownRecipient(_)
-            | Self::Task(_) => None,
-        }
-    }
-}
-
-impl From<ChainError> for ScannerError {
-    fn from(error: ChainError) -> Self {
-        Self::Chain(error)
-    }
-}
-
-impl From<sqlx::Error> for ScannerError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
 }
 
 impl ScannerError {

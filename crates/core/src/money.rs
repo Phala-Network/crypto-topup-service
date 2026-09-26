@@ -1,7 +1,5 @@
 //! Checked integer money arithmetic and documented rounding rules.
 
-use std::error::Error;
-use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::{U256, U512};
@@ -184,72 +182,44 @@ impl From<Bps> for u16 {
 }
 
 /// Errors constructing constrained money types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MoneyError {
     /// A price of zero cannot be used for inverse quote calculations.
+    #[error("price must be greater than zero")]
     ZeroPrice,
     /// A price scale other than eight was supplied.
+    #[error("price scale must be {PRICE_SCALE}, got {scale}")]
     InvalidPriceScale {
         /// The rejected scale.
         scale: u8,
     },
     /// A basis-point value exceeded 10,000.
+    #[error("basis points must be at most 10000, got {value}")]
     InvalidBps {
         /// The rejected value.
         value: u16,
     },
     /// A positive price rounded to zero at the configured scale.
+    #[error("price_not_representable: locked price rounds to zero at the configured scale")]
     PriceNotRepresentable,
     /// An intermediate value exceeded the arithmetic representation.
+    #[error("money arithmetic is out of range")]
     ArithmeticOutOfRange,
 }
 
-impl fmt::Display for MoneyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroPrice => formatter.write_str("price must be greater than zero"),
-            Self::InvalidPriceScale { scale } => {
-                write!(formatter, "price scale must be {PRICE_SCALE}, got {scale}")
-            }
-            Self::InvalidBps { value } => {
-                write!(formatter, "basis points must be at most 10000, got {value}")
-            }
-            Self::PriceNotRepresentable => formatter.write_str(
-                "price_not_representable: locked price rounds to zero at the configured scale",
-            ),
-            Self::ArithmeticOutOfRange => formatter.write_str("money arithmetic is out of range"),
-        }
-    }
-}
-
-impl Error for MoneyError {}
-
 /// Errors computing destination credit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CreditError {
     /// A decimal exponent could not be represented in the 512-bit intermediate.
+    #[error("scale_out_of_range: decimal scale is out of range")]
     ScaleOutOfRange,
     /// A quote attempted division by zero.
+    #[error("division_by_zero: price must be non-zero")]
     DivisionByZero,
     /// The floored result does not fit into a `u64` minor amount.
+    #[error("out_of_range: money amount cannot be represented")]
     OutOfRange,
 }
-
-impl fmt::Display for CreditError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ScaleOutOfRange => {
-                formatter.write_str("scale_out_of_range: decimal scale is out of range")
-            }
-            Self::DivisionByZero => formatter.write_str("division_by_zero: price must be non-zero"),
-            Self::OutOfRange => {
-                formatter.write_str("out_of_range: money amount cannot be represented")
-            }
-        }
-    }
-}
-
-impl Error for CreditError {}
 
 /// Computes destination credit and rounds down toward zero.
 ///

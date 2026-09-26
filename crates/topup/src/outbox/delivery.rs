@@ -1,5 +1,3 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,40 +48,17 @@ impl Default for DeliveryConfig {
 }
 
 /// Failure to configure or access the delivery repository.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeliveryError {
     /// Configuration is internally inconsistent.
+    #[error("invalid delivery config: {0}")]
     InvalidConfig(&'static str),
     /// The HTTP client could not be constructed.
-    Client(reqwest::Error),
+    #[error("failed to build webhook client: {0}")]
+    Client(#[source] reqwest::Error),
     /// PostgreSQL could not claim or persist an event.
-    Database(sqlx::Error),
-}
-
-impl Display for DeliveryError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidConfig(message) => write!(formatter, "invalid delivery config: {message}"),
-            Self::Client(error) => write!(formatter, "failed to build webhook client: {error}"),
-            Self::Database(error) => write!(formatter, "outbox database operation failed: {error}"),
-        }
-    }
-}
-
-impl Error for DeliveryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Client(error) => Some(error),
-            Self::Database(error) => Some(error),
-            Self::InvalidConfig(_) => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for DeliveryError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
+    #[error("outbox database operation failed: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Clone, Debug)]

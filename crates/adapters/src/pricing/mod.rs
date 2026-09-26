@@ -6,8 +6,6 @@ pub mod binance;
 pub mod coinmetrics;
 pub mod kraken;
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,50 +25,33 @@ pub trait PriceSource: Send + Sync {
 }
 
 /// Price adapter construction, transport, or response failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PriceError {
     /// The HTTP client could not be configured.
+    #[error("price HTTP client configuration failed")]
     ClientConfiguration,
     /// A configured endpoint was not a valid URL.
+    #[error("price endpoint URL is invalid")]
     InvalidUrl,
     /// The provider request failed or timed out.
+    #[error("{0}")]
     Request(RedactedTransportError),
     /// The provider returned a non-success status.
+    #[error("price provider returned HTTP {0}")]
     HttpStatus(u16),
     /// The provider response did not match its documented schema.
+    #[error("price provider response has invalid `{0}`")]
     MalformedResponse(&'static str),
     /// A decimal price was invalid, zero, or outside the supported range.
+    #[error("price provider returned an invalid price")]
     InvalidPrice,
     /// The observation timestamp was outside the supported Unix range.
+    #[error("price provider returned an invalid timestamp")]
     InvalidTimestamp,
     /// No Coin Metrics source is configured for the requested asset identifier.
+    #[error("no Coin Metrics source for `{0}`")]
     UnconfiguredAsset(String),
 }
-
-impl Display for PriceError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ClientConfiguration => {
-                formatter.write_str("price HTTP client configuration failed")
-            }
-            Self::InvalidUrl => formatter.write_str("price endpoint URL is invalid"),
-            Self::Request(error) => Display::fmt(error, formatter),
-            Self::HttpStatus(status) => write!(formatter, "price provider returned HTTP {status}"),
-            Self::MalformedResponse(field) => {
-                write!(formatter, "price provider response has invalid `{field}`")
-            }
-            Self::InvalidPrice => formatter.write_str("price provider returned an invalid price"),
-            Self::InvalidTimestamp => {
-                formatter.write_str("price provider returned an invalid timestamp")
-            }
-            Self::UnconfiguredAsset(asset) => {
-                write!(formatter, "no Coin Metrics source for `{asset}`")
-            }
-        }
-    }
-}
-
-impl Error for PriceError {}
 
 impl From<decimal::DecimalPriceError> for PriceError {
     fn from(_: decimal::DecimalPriceError) -> Self {

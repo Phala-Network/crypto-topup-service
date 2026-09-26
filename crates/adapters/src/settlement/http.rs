@@ -1,7 +1,5 @@
 //! RFC 9421 signed HTTP client for product settlements.
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -68,48 +66,26 @@ pub enum SettlementAnswer {
 }
 
 /// Failure before a typed HTTP response was available.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SettlementClientError {
     /// The configured settlement endpoint is not a usable HTTP URL.
+    #[error("invalid settlement endpoint")]
     InvalidEndpoint,
     /// The idempotency key cannot be represented as an RFC 8941 string.
+    #[error("invalid settlement idempotency key")]
     InvalidIdempotencyKey,
     /// JSON serialization failed.
+    #[error("failed to encode settlement payload")]
     Encode,
     /// The system clock cannot produce a valid Unix timestamp.
+    #[error("system clock is before the Unix epoch")]
     InvalidClock,
     /// The settlement signer failed.
-    Signer(SignerError),
+    #[error("{0}")]
+    Signer(#[source] SignerError),
     /// The HTTP request failed or timed out.
-    Transport(RedactedTransportError),
-}
-
-impl Display for SettlementClientError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidEndpoint => formatter.write_str("invalid settlement endpoint"),
-            Self::InvalidIdempotencyKey => {
-                formatter.write_str("invalid settlement idempotency key")
-            }
-            Self::Encode => formatter.write_str("failed to encode settlement payload"),
-            Self::InvalidClock => formatter.write_str("system clock is before the Unix epoch"),
-            Self::Signer(error) => Display::fmt(error, formatter),
-            Self::Transport(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl Error for SettlementClientError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Signer(error) => Some(error),
-            Self::Transport(error) => Some(error),
-            Self::InvalidEndpoint
-            | Self::InvalidIdempotencyKey
-            | Self::Encode
-            | Self::InvalidClock => None,
-        }
-    }
+    #[error("{0}")]
+    Transport(#[source] RedactedTransportError),
 }
 
 /// Mockable product settlement boundary.

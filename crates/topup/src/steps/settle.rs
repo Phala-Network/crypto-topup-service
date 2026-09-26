@@ -379,17 +379,27 @@ impl Step for SettleStep {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum SettleStepError {
-    Database(sqlx::Error),
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
+    #[error("settlement account is missing")]
     MissingAccount,
+    #[error("settlement address is missing")]
     MissingAddress,
+    #[error("settlement product is missing")]
     MissingProduct,
+    #[error("no single attested route destination is configured for the product")]
     Destination,
+    #[error("settlement field `{0}` is missing")]
     MissingField(&'static str),
+    #[error("product settlement payload field `{0}` is invalid")]
     InvalidProductPayload(&'static str),
+    #[error("stored settlement answer field `{0}` is invalid")]
     InvalidStoredAnswer(&'static str),
+    #[error("failed to encode settlement payload")]
     Encode,
+    #[error("{0}")]
     Client(SettlementClientError),
 }
 
@@ -425,42 +435,6 @@ impl SettleStepError {
             Self::Encode => "settlement_payload_encode_failed",
             Self::Client(_) => "settlement_client_configuration_failed",
         }
-    }
-}
-
-impl std::fmt::Display for SettleStepError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Database(error) => std::fmt::Display::fmt(error, formatter),
-            Self::MissingAccount => formatter.write_str("settlement account is missing"),
-            Self::MissingAddress => formatter.write_str("settlement address is missing"),
-            Self::MissingProduct => formatter.write_str("settlement product is missing"),
-            Self::Destination => formatter
-                .write_str("no single attested route destination is configured for the product"),
-            Self::MissingField(field) => write!(formatter, "settlement field `{field}` is missing"),
-            Self::InvalidProductPayload(field) => {
-                write!(
-                    formatter,
-                    "product settlement payload field `{field}` is invalid"
-                )
-            }
-            Self::InvalidStoredAnswer(field) => {
-                write!(
-                    formatter,
-                    "stored settlement answer field `{field}` is invalid"
-                )
-            }
-            Self::Encode => formatter.write_str("failed to encode settlement payload"),
-            Self::Client(error) => std::fmt::Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl std::error::Error for SettleStepError {}
-
-impl From<sqlx::Error> for SettleStepError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
     }
 }
 

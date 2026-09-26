@@ -40,16 +40,9 @@ const SIGNATURE_LABEL: &str = "sig1";
 pub struct PublicOrigin(String);
 
 /// Why a configured public origin was refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
 pub struct InvalidPublicOrigin(&'static str);
-
-impl std::fmt::Display for InvalidPublicOrigin {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for InvalidPublicOrigin {}
 
 impl PublicOrigin {
     /// Parses and normalizes a configured origin.
@@ -123,16 +116,9 @@ pub struct VerifiedSignature {
 }
 
 /// Opaque verification failure; callers answer `401` without detail.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("HTTP message signature verification failed")]
 pub struct VerificationFailed;
-
-impl std::fmt::Display for VerificationFailed {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("HTTP message signature verification failed")
-    }
-}
-
-impl std::error::Error for VerificationFailed {}
 
 /// The covered components of one outbound request, as their header values will be sent.
 #[derive(Clone, Copy, Debug)]

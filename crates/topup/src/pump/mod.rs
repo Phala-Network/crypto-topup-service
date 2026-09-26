@@ -6,8 +6,6 @@
 
 mod age;
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -170,31 +168,18 @@ impl PumpConfig {
 }
 
 /// Invalid pump timing configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PumpConfigError {
     /// A zero timeout would cancel every step immediately.
+    #[error("step timeout must be positive")]
     ZeroStepTimeout,
     /// The step timeout must be strictly shorter than the five-minute lease.
+    #[error("step timeout must be shorter than the five-minute lease")]
     TimeoutNotShorterThanLease,
     /// A zero idle interval would create a busy claim loop.
+    #[error("idle poll interval must be positive")]
     ZeroIdlePollInterval,
 }
-
-impl Display for PumpConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroStepTimeout => formatter.write_str("step timeout must be positive"),
-            Self::TimeoutNotShorterThanLease => {
-                formatter.write_str("step timeout must be shorter than the five-minute lease")
-            }
-            Self::ZeroIdlePollInterval => {
-                formatter.write_str("idle poll interval must be positive")
-            }
-        }
-    }
-}
-
-impl Error for PumpConfigError {}
 
 /// Result of one claim-and-process attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -464,51 +449,20 @@ impl Pump {
 }
 
 /// Failure while claiming, scheduling, or persisting one pump iteration.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PumpError {
     /// PostgreSQL failed outside the transition writer.
-    Database(sqlx::Error),
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
     /// The transition writer rejected or failed the persistence operation.
-    ApplyTransition(ApplyTransitionError),
+    #[error("{0}")]
+    ApplyTransition(#[from] ApplyTransitionError),
     /// A terminal state was unexpectedly claimed without a registered step.
+    #[error("no pump step for state {0:?}")]
     MissingStep(DepositState),
     /// A configured delay could not be represented as a UTC timestamp.
+    #[error("next attempt time is outside the supported UTC range")]
     ScheduleOutsideChronoRange,
-}
-
-impl Display for PumpError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => Display::fmt(error, formatter),
-            Self::ApplyTransition(error) => Display::fmt(error, formatter),
-            Self::MissingStep(state) => write!(formatter, "no pump step for state {state:?}"),
-            Self::ScheduleOutsideChronoRange => {
-                formatter.write_str("next attempt time is outside the supported UTC range")
-            }
-        }
-    }
-}
-
-impl Error for PumpError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::ApplyTransition(error) => Some(error),
-            Self::MissingStep(_) | Self::ScheduleOutsideChronoRange => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for PumpError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<ApplyTransitionError> for PumpError {
-    fn from(error: ApplyTransitionError) -> Self {
-        Self::ApplyTransition(error)
-    }
 }
 
 #[cfg(test)]

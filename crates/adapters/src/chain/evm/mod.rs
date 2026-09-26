@@ -3,8 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Formatter};
 use std::future::{Future, IntoFuture};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -74,25 +73,34 @@ pub struct FinalizedHead {
 }
 
 /// Failure while reading or validating EVM chain data.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainError {
     /// The configured provider URL is invalid.
+    #[error("invalid RPC URL")]
     InvalidUrl,
     /// The provider returned an RPC failure during the named operation.
+    #[error("EVM RPC request failed during {0}")]
     Rpc(&'static str),
     /// The provider transport failed without exposing its configured URL.
+    #[error("{0}")]
     Transport(RedactedTransportError),
     /// `eth_estimateGas` reported that execution reverts, a deterministic outcome.
+    #[error("{0}")]
     EstimationRevert(RedactedTransportError),
     /// The provider answered with a value that could not be encoded, decoded, or used.
+    #[error("{0}")]
     InvalidResponse(String),
     /// A required finalized block or log field was absent.
+    #[error("EVM response omitted `{0}`")]
     MissingField(&'static str),
     /// A block timestamp did not fit the supported UTC representation.
+    #[error("block timestamp `{0}` is outside UTC range")]
     InvalidTimestamp(u64),
     /// A log matching the transfer signature could not be decoded.
+    #[error("invalid Transfer log: {0}")]
     InvalidTransfer(String),
     /// The caller supplied an invalid inclusive block range.
+    #[error("invalid block range: from {from_block} exceeds to {to_block}")]
     InvalidRange {
         /// Inclusive range start.
         from_block: u64,
@@ -100,6 +108,7 @@ pub enum ChainError {
         to_block: u64,
     },
     /// The provider's finalized head moved backwards and it is now unhealthy.
+    #[error("provider finalized head regressed from {previous} to {current}")]
     FinalizedHeadRegressed {
         /// Highest finalized head previously observed.
         previous: u64,
@@ -107,52 +116,12 @@ pub enum ChainError {
         current: u64,
     },
     /// A previous finalized-head regression permanently marked the provider unhealthy.
+    #[error("provider is unhealthy after a finalized-head regression")]
     ProviderUnhealthy,
     /// The provider health lock was poisoned.
+    #[error("provider health state unavailable")]
     HealthStateUnavailable,
 }
-
-impl Display for ChainError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidUrl => formatter.write_str("invalid RPC URL"),
-            Self::Rpc(operation) => {
-                write!(formatter, "EVM RPC request failed during {operation}")
-            }
-            Self::Transport(error) | Self::EstimationRevert(error) => {
-                Display::fmt(error, formatter)
-            }
-            Self::InvalidResponse(message) => formatter.write_str(message),
-            Self::MissingField(field) => write!(formatter, "EVM response omitted `{field}`"),
-            Self::InvalidTimestamp(timestamp) => {
-                write!(
-                    formatter,
-                    "block timestamp `{timestamp}` is outside UTC range"
-                )
-            }
-            Self::InvalidTransfer(error) => write!(formatter, "invalid Transfer log: {error}"),
-            Self::InvalidRange {
-                from_block,
-                to_block,
-            } => write!(
-                formatter,
-                "invalid block range: from {from_block} exceeds to {to_block}"
-            ),
-            Self::FinalizedHeadRegressed { previous, current } => write!(
-                formatter,
-                "provider finalized head regressed from {previous} to {current}"
-            ),
-            Self::ProviderUnhealthy => {
-                formatter.write_str("provider is unhealthy after a finalized-head regression")
-            }
-            Self::HealthStateUnavailable => {
-                formatter.write_str("provider health state unavailable")
-            }
-        }
-    }
-}
-
-impl Error for ChainError {}
 
 impl ChainError {
     /// Returns whether this error is a deterministic estimate execution revert.

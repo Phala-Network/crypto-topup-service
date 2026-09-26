@@ -1,7 +1,5 @@
 //! dstack attestation primitives.
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -76,28 +74,18 @@ pub struct AttestationBundle {
 }
 
 /// A failure while collecting dstack attestation evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AttestationError {
     /// The settlement key returned by dstack was malformed.
+    #[error("dstack returned an invalid settlement key")]
     InvalidSettlementKey,
     /// An operator key could not be derived.
+    #[error("an operator key could not be derived")]
     OperatorKeyUnavailable,
     /// The dstack attestation or information call failed or timed out.
+    #[error("dstack attestation is unavailable")]
     DstackUnavailable,
 }
-
-impl Display for AttestationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::InvalidSettlementKey => "dstack returned an invalid settlement key",
-            Self::OperatorKeyUnavailable => "an operator key could not be derived",
-            Self::DstackUnavailable => "dstack attestation is unavailable",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for AttestationError {}
 
 /// Computes `sha256(nonce ‖ settlement_public_key ‖ record_1 ‖ … ‖ record_n)`.
 ///

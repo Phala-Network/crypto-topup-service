@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,20 +33,9 @@ const DEPOSIT_STATES: [&str; 6] = [
 ];
 
 /// Failure to install the process-global Prometheus recorder.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("failed to initialize Prometheus metrics: {0}")]
 pub struct InitError(String);
-
-impl Display for InitError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "failed to initialize Prometheus metrics: {}",
-            self.0
-        )
-    }
-}
-
-impl Error for InitError {}
 
 /// Installs the Prometheus recorder and registers the stable metric contract.
 pub fn init() -> Result<(), InitError> {

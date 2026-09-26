@@ -1,20 +1,10 @@
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-
 use topup_core::money::{PRICE_SCALE, ScaledPrice};
 
 const SCALE_FACTOR: u128 = 100_000_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("price is not a positive scale-8 decimal")]
 pub(super) struct DecimalPriceError;
-
-impl Display for DecimalPriceError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("price is not a positive scale-8 decimal")
-    }
-}
-
-impl Error for DecimalPriceError {}
 
 pub(super) fn parse_scaled(value: &str) -> Result<ScaledPrice, DecimalPriceError> {
     let mut saw_digit = false;
