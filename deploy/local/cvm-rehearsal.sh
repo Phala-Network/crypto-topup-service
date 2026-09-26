@@ -8,15 +8,15 @@
 #    (deploy/contracts: canonical proxy, mock Safe as admin and treasury, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
-#    committed route lives, and renders the compose with the rehearsal's settings and the
-#    provisional origin, as Deploy provisions.
+#    committed route lives, and renders the compose with the rehearsal's settings and the staging
+#    domain, as Deploy provisions. dstack-ingress does not run (cvm-rehearsal.compose.yml).
 # 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy does (exactly
 #    the names of deploy/staging.env.example, all empty), and runs `docker compose up` on the
 #    rendered file plus cvm-rehearsal.compose.yml (simulator, S3, Anvil), as dstack's app-compose
 #    runner does. Without storage credentials PostgreSQL must refuse to initialize (the prefix
-#    cannot be listed). Re-rendered with the real origin, every service must be recreated. Then it
-#    seals the secrets (the owner's `envs update`), and PostgreSQL initializes from the provably
-#    empty prefix.
+#    cannot be listed). Re-rendered with a changed setting (an upgrade), every service must be
+#    recreated. Then it seals the secrets (the owner's `envs update`), and PostgreSQL initializes
+#    from the provably empty prefix.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
 #    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
@@ -250,16 +250,18 @@ awk -v route="$tmp/route.yaml" '
     skipping && (/^      / || /^$/) { next }
     { skipping = 0; in_config = 0; print }
 ' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
-# render_topup ORIGIN: the settings Deploy renders from the `staging` Environment
+# render_topup ADMIN_KID: the settings Deploy renders from the `staging` Environment
 # variables, for this network.
 render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
-        WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=rehearsal-admin/v1 \
-        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key TOPUP_PUBLIC_ORIGIN=$1 SENTRY_ENVIRONMENT=staging \
+        WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=$1 \
+        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key SENTRY_ENVIRONMENT=staging \
+        TOPUP_DOMAIN=crypto-topup-api-staging.phala.com \
+        TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
         TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 TOPUP_RPC_PROVIDER_B_URL=http://anvil:8545 \
         "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
 }
-render_topup https://pending.invalid
+render_topup rehearsal-admin/v0
 compose_file="$cvm/docker-compose.yaml"
 dc config --format json >"$tmp/stack.json"
 jq -j '.configs.topup_route_phala_cloud_sepolia_pha.content' "$tmp/stack.json" |
@@ -308,16 +310,16 @@ if docker run --rm --entrypoint test -v "${project}_pgdata:/var/lib/postgresql" 
 fi
 echo "ok: unsealed, PostgreSQL refuses to initialize without a listed backup prefix"
 
-echo "== re-rendering with the gateway origin (Deploy's provisioning upgrade)"
+echo "== re-rendering with a changed setting (Deploy's upgrade)"
 keys_before=$(dc ps -q keys)
-render_topup http://topup:8080
+render_topup rehearsal-admin/v1
 dc up -d --remove-orphans >/dev/null 2>&1 || true
 [[ -n "$(dc ps -q keys)" && "$(dc ps -q keys)" != "$keys_before" ]] ||
     die "a re-rendered setting did not recreate the services"
 docker inspect --format '{{json .Config.Env}}' "$(dc ps -a -q topup)" |
-    jq -e 'index("TOPUP_PUBLIC_ORIGIN=http://topup:8080") != null' >/dev/null ||
-    die "topup does not carry the re-rendered origin"
-echo "ok: the re-rendered origin recreated every service"
+    jq -e 'index("TOPUP_ADMIN_KID=rehearsal-admin/v1") != null' >/dev/null ||
+    die "topup does not carry the re-rendered setting"
+echo "ok: the re-rendered setting recreated every service"
 
 echo "== sealing the secrets (the owner's envs update: same names, restart)"
 for name in "${env_names[@]}"; do

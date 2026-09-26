@@ -110,8 +110,9 @@ gas from a public faucet.
 3. Render the sandbox compose with literal image digests, the sandbox's attested settings (the
    names of the `staging` Environment variables in `deploy/README.md`, "Attested settings",
    exported with the sandbox's values: its keyless Sepolia RPC URLs, its own backup prefix and
-   admin key, and `TOPUP_PUBLIC_ORIGIN`, the sandbox's public gateway URL, for example
-   `https://sandbox.topup.example`, no path), and the inlined route:
+   admin key, and `TOPUP_DOMAIN` and `TOPUP_GATEWAY_DOMAIN`: the sandbox's own custom domain, for
+   example `sandbox.topup.example`, which becomes `TOPUP_PUBLIC_ORIGIN`, and its gateway, with the
+   DNS records of [Custom domain](../README.md#custom-domain)), and the inlined route:
 
    ```sh
    TOPUP_IMAGE=...@sha256:... POSTGRES_WALG_IMAGE=...@sha256:... \
@@ -123,8 +124,9 @@ gas from a public faucet.
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment that
    holds only the sandbox's own secrets (the `staging.env.example` names). Integrators sign the
    URL they call and the service verifies `@target-uri` against the rendered
-   `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every signed request fail with `401`. Run `sdk/examples/phala_cloud_integration.py` against the
-   deployed sandbox URL before opening it to integrators.
+   `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every signed request fail with `401`. Run
+   `sdk/examples/phala_cloud_integration.py` against the deployed sandbox URL before opening it to
+   integrators.
 5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
    against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
    [Product credentials](../README.md#product-credentials) describes: the integrator's slug (the

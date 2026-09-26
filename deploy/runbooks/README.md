@@ -29,7 +29,7 @@ Load values from the attested route and the admin's key store, never from chat o
 `BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, or signatures fail with `401`.
 
 ```sh
-export BASE_URL=https://<app_id>-8080.<gateway domain>
+export BASE_URL=https://crypto-topup-api.phala.com   # staging: https://crypto-topup-api-staging.phala.com
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x... OPERATOR_ADDRESS=0x...

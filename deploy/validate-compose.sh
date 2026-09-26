@@ -26,7 +26,8 @@ render() {
         AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres \
         TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
         SENTRY_ENVIRONMENT=staging \
-        TOPUP_PUBLIC_ORIGIN=https://topup.example TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example \
+        TOPUP_DOMAIN=topup.example TOPUP_GATEWAY_DOMAIN=gateway.dstack.example \
+        TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example \
         TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example "$root/deploy/render-compose.sh" "$@"
 }
 render >"$compose"
@@ -86,43 +87,53 @@ jq -e '[.services[].environment // {} | to_entries[]
     exit 1
 }
 
-# The two variants differ only in the mode switches, topup's published port, and the
-# rendered-sha256 label. The service publishes only topup:8080 and the restore-check variant only
-# topup:8081: the gateway sends `<app_id>-8080` to whichever instance accepts the connection, so a
-# restore-check instance next to the live one must not listen on 8080 (deploy/RESTORE.md).
-ingress='def ingress($port): [.services | to_entries[] | select((.value.ports // []) | length > 0)
-    | {service: .key, ports: .value.ports}] == [{service: "topup", ports: [{mode: "ingress",
-    target: 8080, published: $port, protocol: "tcp"}]}];'
+# The two variants differ only in the mode switches, the ingress, and the rendered-sha256 label.
+# The service's only published port is dstack-ingress on 443 (tls-alpn-01, TLS for TOPUP_DOMAIN,
+# which is the origin topup verifies signatures against). The restore-check variant runs no
+# ingress and publishes only topup on 8081, so it never answers for the live domain and the gateway
+# reaches it as `<app_id>-8081` (deploy/RESTORE.md).
+ingress='def published: [.services | to_entries[] | select((.value.ports // []) | length > 0)
+    | {service: .key, ports: .value.ports}];
+    def only($service; $target; $port): published == [{service: $service, ports: [{
+        mode: "ingress", target: $target, published: $port, protocol: "tcp"}]}];'
 docker compose -f "$restore_check_compose" --profile tools config --format json |
     jq -e --slurpfile service "$rendered_tools" "$ingress"'
-        def normal: del(.services[].labels)
+        def normal: del(.services[].labels) | del(.services["dstack-ingress"])
+            | del(.volumes.ingress_certs, .volumes.ingress_evidences, .services.topup.ports)
             | (.services[] | select(.environment.TOPUP_SERVICE_ENABLED != null)
                 | .environment.TOPUP_SERVICE_ENABLED) |= "on"
             | (.services[] | select(.environment.TOPUP_RESTORE_FROM_BACKUP != null)
-                | .environment.TOPUP_RESTORE_FROM_BACKUP) |= "off"
-            | .services.topup.ports[0].published |= "8080";
+                | .environment.TOPUP_RESTORE_FROM_BACKUP) |= "off";
         (.services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only")
         and (.services.postgres.environment.TOPUP_RESTORE_FROM_BACKUP == "on")
-        and ingress("8081")
-        and (normal == ($service[0] | del(.services[].labels)))' >/dev/null || {
-    echo "the restore-check variant must differ from the service only in its mode switches and" \
-        "in publishing topup on 8081" >&2
+        and only("topup"; 8080; "8081")
+        and (normal == ($service[0] | normal))' >/dev/null || {
+    echo "the restore-check variant must differ from the service only in its mode switches, in" \
+        "running no dstack-ingress, and in publishing topup on 8081" >&2
     exit 1
 }
 jq -e "$ingress"'(.services.topup.environment.TOPUP_SERVICE_ENABLED == "on")
     and (.services.heartbeat.environment.TOPUP_SERVICE_ENABLED == "on")
     and ([.services[].environment.TOPUP_RESTORE_FROM_BACKUP // empty] | unique == ["off"])
-    and ingress("8080")' \
+    and only("dstack-ingress"; 443; "443")
+    and (.services["dstack-ingress"].environment as $ingress
+        | $ingress.CHALLENGE_TYPE == "tls-alpn-01" and $ingress.TARGET_ENDPOINT == "topup:8080"
+        and .services.topup.environment.TOPUP_PUBLIC_ORIGIN == "https://\($ingress.DOMAIN)")' \
     "$rendered_tools" >/dev/null || {
-    echo "the service variant must run the service, publish only topup:8080, and never" \
+    echo "the service variant must run the service, publish only dstack-ingress on 443 (tls-alpn-01," \
+        "forwarding to topup:8080, serving the domain of TOPUP_PUBLIC_ORIGIN), and never" \
         "restore-check" >&2
     exit 1
 }
 
 # Least privilege by mount: the runtime services see only the application login's credentials.
-jq -e '[.services.topup, .services.heartbeat | .volumes[]?.source]
-    | any(. == "db_owner" or . == "walg_key") | not' "$rendered_tools" >/dev/null || {
-    echo "topup and heartbeat must mount neither db_owner nor walg_key" >&2
+jq -e '([.services.topup, .services.heartbeat | .volumes[]?.source]
+        | any(. == "db_owner" or . == "walg_key") | not)
+    and ([.services["dstack-ingress"].volumes[]?.source]
+        | any(. == "db_owner" or . == "db_app" or . == "walg_key") | not)' \
+    "$rendered_tools" >/dev/null || {
+    echo "topup and heartbeat must mount neither db_owner nor walg_key, and dstack-ingress no" \
+        "credentials" >&2
     exit 1
 }
 

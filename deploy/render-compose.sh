@@ -9,12 +9,13 @@
 # services that carry it.
 #
 # The topup compose has two variants of the same source. The default is the service:
-# TOPUP_RESTORE_FROM_BACKUP=off, TOPUP_SERVICE_ENABLED=on, and TOPUP_INGRESS_PORT=8080.
-# --restore-check renders the restore verification instance (deploy/RESTORE.md):
-# TOPUP_RESTORE_FROM_BACKUP=on (PostgreSQL restores and never archives, `backup` idles,
-# `restore-check` runs), TOPUP_SERVICE_ENABLED=read-only, and TOPUP_INGRESS_PORT=8081, so the
-# gateway never routes the service's port 8080 to it. The renderer sets all three; they are never
-# read from the environment.
+# TOPUP_RESTORE_FROM_BACKUP=off and TOPUP_SERVICE_ENABLED=on. --restore-check renders the restore
+# verification instance (deploy/RESTORE.md): TOPUP_RESTORE_FROM_BACKUP=on (PostgreSQL restores and
+# never archives, `backup` idles, `restore-check` runs) and TOPUP_SERVICE_ENABLED=read-only. The
+# renderer sets both; they are never read from the environment. A source line
+# `# only-in: service` or `# only-in: restore-check` keeps the block after it (the comments and
+# the key at the marker's indentation, and everything indented deeper) in that variant only: the
+# service runs dstack-ingress, and the restore-check variant instead publishes topup on 8081.
 #
 # --images-only renders the image digests alone (Release images uses it to validate digests).
 # Values are never printed: errors name only the variable.
@@ -86,13 +87,42 @@ if [[ "$variant" == images-only ]]; then
     exit 0
 fi
 
+# The other variant's blocks are dropped, and the markers themselves never reach the output.
+rest=$(awk -v keep="$variant" '
+    /^ *# only-in: / {
+        only = $0
+        sub(/^ *# only-in: /, "", only)
+        if (only != "service" && only != "restore-check") {
+            print "render-compose.sh: unknown variant in: " $0 >"/dev/stderr"
+            exit 64
+        }
+        if (only == keep) next
+        match($0, /^ */)
+        indent = RLENGTH
+        skip = 1
+        body = 0
+        next
+    }
+    skip {
+        if ($0 ~ /^ *$/) next
+        match($0, /^ */)
+        if (RLENGTH > indent) next
+        if (RLENGTH == indent && !body) {
+            if ($0 !~ /^ *#/) body = 1
+            next
+        }
+        skip = 0
+    }
+    { print }
+' <<<"$rest")
+
 sealed=" $(awk '/^[[:space:]]*($|#)/ { next } { sub(/=.*/, ""); printf "%s ", $0 }' "$env_example")"
 # Read below through ${!name}.
 # shellcheck disable=SC2034
 if [[ "$variant" == restore-check ]]; then
-    TOPUP_RESTORE_FROM_BACKUP=on TOPUP_SERVICE_ENABLED=read-only TOPUP_INGRESS_PORT=8081
+    TOPUP_RESTORE_FROM_BACKUP=on TOPUP_SERVICE_ENABLED=read-only
 else
-    TOPUP_RESTORE_FROM_BACKUP=off TOPUP_SERVICE_ENABLED=on TOPUP_INGRESS_PORT=8080
+    TOPUP_RESTORE_FROM_BACKUP=off TOPUP_SERVICE_ENABLED=on
 fi
 
 # Values land in double-quoted YAML strings or JSON strings that Compose interpolates: allow

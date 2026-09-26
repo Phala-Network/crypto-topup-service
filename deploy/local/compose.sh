@@ -27,7 +27,7 @@ env -i PATH="$PATH" \
     AWS_S3_FORCE_PATH_STYLE=true SENTRY_ENVIRONMENT=local \
     TOPUP_ADMIN_KID="${TOPUP_LOCAL_ADMIN_KID:-local-admin/v1}" \
     TOPUP_ADMIN_PUBLIC_KEY="${TOPUP_LOCAL_ADMIN_PUBLIC_KEY:-11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=}" \
-    TOPUP_PUBLIC_ORIGIN="http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}" \
+    TOPUP_DOMAIN=topup.localhost TOPUP_GATEWAY_DOMAIN=gateway.localhost \
     TOPUP_RPC_PROVIDER_A_URL=http://127.0.0.1:1 TOPUP_RPC_PROVIDER_B_URL=http://127.0.0.1:1 \
     "$root/deploy/render-compose.sh" "${variant[@]}" >"$rendered"
 # Relative paths in the overlays resolve against deploy/, as for deploy/docker-compose.yml itself.

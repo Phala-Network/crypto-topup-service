@@ -60,7 +60,8 @@ differences, so a verification instance has its own compose hash:
 - `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET` and `HEAD` (anything else `503`),
   runs no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
   `heartbeat` exits.
-- `topup` is published on 8081 instead of 8080 ([why](#addressing-the-restore-check-instance)).
+- No `dstack-ingress`: `topup` is published on 8081 instead
+  ([why](#addressing-the-restore-check-instance)), and its origin is that gateway URL.
 
 After PostgreSQL promotes (its health check passes only out of recovery; the start period is the
 one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: migration checksums,
@@ -93,12 +94,13 @@ muting: the live instance keeps checking in.
 ### Render it and its env file
 
 Render from the commit of the live compose, with the live images and every
-[attested setting](README.md#attested-settings) exported, and a provisional origin (the instance's
-URL is known only after creation):
+[attested setting](README.md#attested-settings) exported, but a provisional `TOPUP_DOMAIN` (the
+instance's gateway host is known only after creation; the variant needs no
+`TOPUP_GATEWAY_DOMAIN`):
 
 ```sh
 export TOPUP_IMAGE=<live crypto-topup digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>
-TOPUP_PUBLIC_ORIGIN=https://pending.invalid deploy/render-compose.sh --restore-check >restore-check.yml
+TOPUP_DOMAIN=pending.invalid deploy/render-compose.sh --restore-check >restore-check.yml
 ```
 
 The env holds the sealed names of [staging.env.example](staging.env.example), but with storage
@@ -121,16 +123,17 @@ shred -u "$RESTORE_ENV_DIR/restore.env" && rm -rf "$RESTORE_ENV_DIR"
 
 The dstack gateway routes `https://<app_id>-<port>.<gateway domain>` to any instance of the app
 that accepts a connection on that port ([dstack usage](https://github.com/Dstack-TEE/dstack/blob/v0.5.9/docs/usage.md#access-the-app)).
-Two instances listening on 8080 therefore share the live URL's traffic: the first staging drill
-(2026-09-25) saw 8 of 12 live `/healthz` requests reach its drill instance. The instance-id form
-routes to one instance, but `cvms get` may report `instance_id` as `null`. Hence the variant
-publishes 8081, which the service never does:
+Two instances listening on one port therefore share its traffic: the first staging drill
+(2026-09-25), when the service was still published on 8080, saw 8 of 12 live `/healthz` requests
+reach its drill instance. The service now publishes only `dstack-ingress`, and the gateway sends
+its [custom domain](README.md#custom-domain) to the one instance the domain's TXT record names.
+The restore-check variant runs no ingress, so it never obtains a certificate for or answers on the
+live domain, and publishes topup on 8081, which the service never does:
 
-- `https://<app_id>-8080.<gateway domain>` reaches only instances running the service;
+- `https://$TOPUP_DOMAIN` reaches only the live instance;
 - `https://<app_id>-8081.<gateway domain>` (`RESTORE_URL`) reaches only the restore-check instance.
 
-This relies on the gateway trying more than one instance per connection. The live isolation check
-detects a failure; during a staging drill it is a hard abort:
+The live isolation check detects a failure; during a staging drill it is a hard abort:
 
 ```sh
 # Every one of 20 requests must reach the service: an empty 200, never the read-only JSON or an error.
@@ -188,11 +191,11 @@ live_isolated() {
    [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress); the verified app
    id must be the original. Otherwise stop.
 5. **Set its own origin**, so product-signed requests verify: render the variant again with
-   `TOPUP_PUBLIC_ORIGIN=$RESTORE_URL` and upgrade this instance only (no `-e`, so its env stays).
-   It restarts on its non-empty data directory and `restore-check` runs again:
+   `TOPUP_DOMAIN` set to the host of `$RESTORE_URL` and upgrade this instance only (no `-e`, so
+   its env stays). It restarts on its non-empty data directory and `restore-check` runs again:
 
    ```sh
-   TOPUP_PUBLIC_ORIGIN=$RESTORE_URL deploy/render-compose.sh --restore-check >restore-check.yml
+   TOPUP_DOMAIN=${RESTORE_URL#https://} deploy/render-compose.sh --restore-check >restore-check.yml
    npx --yes phala@1.1.22 deploy --json --cvm-id "$RESTORE_CVM_ID" --compose restore-check.yml \
      --no-public-logs --no-public-sysinfo --wait
    ```
@@ -207,13 +210,16 @@ Real restore only, after a human review of the report, row counts, and incident 
 the failed instance, so only one instance holds the keys and archives into the prefix, and have
 the product hold its calls ([incident communication](runbooks/incident-communication.md)). Then
 render the service variant (`deploy/render-compose.sh`, no flag) with the Environment's settings
-and the origin products call, upgrade the instance to it (`phala deploy --cvm-id
+(its `TOPUP_DOMAIN`, the origin products call), upgrade the instance to it (`phala deploy --cvm-id
 "$RESTORE_CVM_ID" --compose <file>`, no `-e`), set `TOPUP_CVM_ID` to `$RESTORE_CVM_ID`, and seal
 the read-write credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the same three
-names). Require:
+names). The domain's TXT record still names the failed instance: set
+`_dstack-app-address.$TOPUP_DOMAIN` to `$INSTANCE_ID:443` (step 2) so the gateway routes the
+domain here and dstack-ingress, whose account and certificate volume is new, can obtain a
+certificate; update a CAA record that pins the old ACME account. Require:
 
-- `/healthz` at `https://<app_id>-8080.<gateway domain>` answers `200` with an empty body, and
-  8081 no longer answers;
+- `/healthz` at `https://$TOPUP_DOMAIN` answers `200` with an empty body, its [certificate
+  evidence](README.md#custom-domain) verifies for the app id, and 8081 no longer answers;
 - a `base_…` backup newer than the switch is listed and new segments of the promoted timeline
   appear under `wal_005/` (`backup` takes that base backup at once; until then the new timeline
   cannot be restored);
@@ -234,7 +240,7 @@ a later real restore), never runs `backup` or the full `topup`, and never takes 
    the live staging images and settings, and require that it publishes only 8081:
    `docker compose -f restore-check.yml config --format json | jq -e '[.services[] | .ports[]? | .published] == ["8081"]'`.
 2. Require `live_isolated` to pass before the instance exists, with
-   `LIVE_URL=https://<app_id>-8080.<gateway domain>` from `source.json`.
+   `LIVE_URL=https://$TOPUP_DOMAIN` (`https://crypto-topup-api-staging.phala.com`).
 3. Record the start time (the RPO anchor), run steps 1-5 of [Restore](#restore), and record the
    report, RPO, and RTO. **Hard abort:** run `live_isolated` right after creation, before each
    step, and at least every five minutes; if it fails once, delete the instance at once and record
