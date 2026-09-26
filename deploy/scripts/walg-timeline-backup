@@ -31,7 +31,7 @@ if printf '%s\n' "$names" | grep -q "^$prefix"; then
     exit 3
 fi
 echo "no base backup covers timeline $timeline; taking one now"
-walg-base-backup "$1" || {
+"$walg" backup-push "$1" || {
     echo "base backup for timeline $timeline failed; retrying at the schedule" >&2
     exit 1
 }

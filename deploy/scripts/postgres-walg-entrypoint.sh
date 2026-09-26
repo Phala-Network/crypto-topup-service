@@ -64,7 +64,7 @@ bootstrap() {
     echo "restoring base backup $backup_name" >&2
     staging="$(dirname "$PGDATA")/restore-from-backup.partial"
     rm -rf "$staging"
-    as_postgres walg-backup-fetch "$staging" "$backup_name"
+    as_postgres "${WALG_BIN:-wal-g}" backup-fetch "$staging" "$backup_name"
     as_postgres test -s "$staging/PG_VERSION"
     as_postgres touch "$staging/recovery.signal"
     as_postgres chmod 0700 "$staging"

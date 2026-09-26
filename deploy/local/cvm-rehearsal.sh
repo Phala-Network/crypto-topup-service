@@ -255,8 +255,7 @@ awk -v route="$tmp/route.yaml" '
 render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
         WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=rehearsal-admin/v1 \
-        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key TOPUP_BACKUP_KEY_VERSION=1 \
-        TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 TOPUP_PUBLIC_ORIGIN=$1 SENTRY_ENVIRONMENT=staging \
+        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key TOPUP_PUBLIC_ORIGIN=$1 SENTRY_ENVIRONMENT=staging \
         TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 TOPUP_RPC_PROVIDER_B_URL=http://anvil:8545 \
         "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
 }

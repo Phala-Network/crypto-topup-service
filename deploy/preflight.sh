@@ -145,13 +145,11 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     while IFS=$'\t' read -r name value; do
         setting[$name]=$value
     done < <(jq -r '.services as $s | ($s.topup.environment + $s.postgres.environment) as $e
-        | ($s.keys.command | index("--fallback-versions")) as $i
         | (["TOPUP_ADMIN_KID", "TOPUP_ADMIN_PUBLIC_KEY", "TOPUP_PUBLIC_ORIGIN",
             "TOPUP_RPC_PROVIDER_A_URL", "TOPUP_RPC_PROVIDER_B_URL", "TOPUP_SERVICE_ENABLED",
             "WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION", "AWS_S3_FORCE_PATH_STYLE",
-            "TOPUP_BACKUP_KEY_VERSION", "TOPUP_RESTORE_FROM_BACKUP"][]
-            | [., ($e[.] // "" | strings)]),
-          ["TOPUP_BACKUP_KEY_FALLBACK_VERSIONS", (if $i then $s.keys.command[$i + 1] else "" end)]
+            "TOPUP_RESTORE_FROM_BACKUP"][]
+            | [., ($e[.] // "" | strings)])
         | @tsv' \
         "$tmp/compose.json")
     origin=${setting[TOPUP_PUBLIC_ORIGIN]-}
@@ -174,10 +172,6 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     [[ "${setting[AWS_ENDPOINT]-}" == https://?* ]] || fail "AWS_ENDPOINT must be an https:// URL"
     [[ "${setting[AWS_S3_FORCE_PATH_STYLE]-}" =~ ^(true|false)$ ]] ||
         fail "AWS_S3_FORCE_PATH_STYLE must be true or false"
-    [[ "${setting[TOPUP_BACKUP_KEY_VERSION]-}" =~ ^[0-9]+$ ]] ||
-        fail "TOPUP_BACKUP_KEY_VERSION must be a decimal integer"
-    [[ "${setting[TOPUP_BACKUP_KEY_FALLBACK_VERSIONS]-}" =~ ^[0-9]+(,[0-9]+)*$ ]] ||
-        fail "TOPUP_BACKUP_KEY_FALLBACK_VERSIONS must be comma-separated decimal integers"
     if ((${#variant[@]})); then
         expected_modes="on read-only"
     else

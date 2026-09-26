@@ -17,7 +17,7 @@ postgres=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222
 settings=(AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
     AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres
     TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
-    TOPUP_BACKUP_KEY_VERSION=2 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=1,0 SENTRY_ENVIRONMENT=staging
+    SENTRY_ENVIRONMENT=staging
     TOPUP_PUBLIC_ORIGIN=https://topup.example
     TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia
     TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia)
@@ -35,7 +35,6 @@ grep -F 'TOPUP_PUBLIC_ORIGIN: "https://topup.example"' "$tmp/compose.yml" >/dev/
 grep -F 'TOPUP_SERVICE_ENABLED: "on"' "$tmp/compose.yml" >/dev/null
 grep -F 'TOPUP_RESTORE_FROM_BACKUP: "off"' "$tmp/compose.yml" >/dev/null
 grep -F -- '- "8080:8080"' "$tmp/compose.yml" >/dev/null
-grep -F -- '- "1,0"' "$tmp/compose.yml" >/dev/null
 # Only the owner-sealed secrets stay env references.
 docker compose -f "$tmp/compose.yml" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' |
     sort |

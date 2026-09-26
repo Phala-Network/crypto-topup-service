@@ -107,10 +107,6 @@ wal_closed() {
     segment_closed_at=$(date -u -d "$closed" +%s.%3N)
 }
 
-wal_manifest_visible() {
-    dc exec -T backup wal-g st cat "key-versions/wal/$1.json"
-}
-
 wal_object_visible() {
     dc exec -T backup wal-g st ls wal_005/ | grep -F " $1."
 }
@@ -124,15 +120,6 @@ wal_object_uploaded_epoch() {
         return 1
     }
     date -u -d "$3 $4" +%s.%3N
-}
-
-pending_wals() {
-    psql_value "SELECT left(name, 24) FROM pg_ls_archive_statusdir() \
-        WHERE name ~ '^[0-9A-F]{24}[.]ready$' ORDER BY name"
-}
-
-pending_wal_count_at_least() {
-    test "$(pending_wals | grep -c .)" -ge "$1"
 }
 
 seconds_between() {
@@ -366,109 +353,27 @@ storage_is_read_only() {
     fi
 }
 
+# restore_command must abort recovery (126), not end it, when a segment does not decrypt: a wrong
+# key must never promote a partial restore. The same call with the backup key is the control.
 test_restore_failures_are_fatal() {
-    wal_name=$1
-    expected_version=$2
-    dc exec -T -e TOPUP_BACKUP_KEY_VERSION=0 backup walg-key-manifest wal "$wal_name" >/dev/null
     set +e
-    dc exec -T backup walg-restore-command "$wal_name" /tmp/wrong-key-wal >/dev/null 2>&1
+    dc exec -T backup sh -c '
+        od -An -tx1 -N32 /dev/urandom | tr -d " \n" >/tmp/wrong.key
+        WALG_LIBSODIUM_KEY_PATH=/tmp/wrong.key walg-restore-command "$1" /tmp/wrong-key-wal
+    ' sh "$1" >/dev/null 2>&1
     status=$?
     set -e
     test "$status" -eq 126 || {
         echo "wrong WAL key returned $status instead of 126" >&2
         return 1
     }
-    dc exec -T -e TOPUP_BACKUP_KEY_VERSION="$expected_version" \
-        backup walg-key-manifest wal "$wal_name" >/dev/null
-}
-
-upload_pending_wal() {
-    version=$1
-    wal_name=$2
-    dc run --rm --no-deps \
-        -e TOPUP_BACKUP_KEY_VERSION="$version" \
-        -e WAL_NAME="$wal_name" restore '
-        walg-wal-push "$PGDATA/pg_wal/$WAL_NAME"
-        mv "$PGDATA/pg_wal/archive_status/$WAL_NAME.ready" \
-            "$PGDATA/pg_wal/archive_status/$WAL_NAME.done"
-    ' >/dev/null
-}
-
-manifest_version() {
-    dc exec -T backup wal-g st cat "key-versions/wal/$1.json" | jq -er '.key_version'
-}
-
-# Decrypts every rotation segment with its own key version and proves the other version fails.
-verify_rotation_keys() {
-    dc run --rm --no-deps -e V1_WALS="$1" -e V2_WALS="$2" restore '
-        fetch() {
-            rm -f /tmp/wal
-            WALG_LIBSODIUM_KEY_PATH=/run/wal-g/backup-v$2.key WALG_DOWNLOAD_CONCURRENCY=1 \
-                wal-g wal-fetch "$1" /tmp/wal >/dev/null 2>&1 && test -s /tmp/wal
-        }
-        check() {
-            fetch "$1" "$2" || { echo "WAL $1 does not decrypt with backup/v$2" >&2; exit 1; }
-            if fetch "$1" "$3"; then
-                echo "WAL $1 also decrypts with backup/v$3" >&2
-                exit 1
-            fi
-        }
-        for wal in $V1_WALS; do check "$wal" 1 2; done
-        for wal in $V2_WALS; do check "$wal" 2 1; done
-    '
-}
-
-# Builds a WAL backlog under key v1 with object storage down, archives exactly one segment with
-# one v1 wrapper call, rotates PostgreSQL to v2, and lets its archiver finish the backlog.
-exercise_key_rotation() {
-    dc stop s3 >/dev/null
-    for _ in 1 2 3 4; do
-        record_sample >/dev/null
-        psql_value 'SELECT pg_switch_wal()' >/dev/null
-    done
-    wait_for "WAL backlog" pending_wal_count_at_least 3
-    rotation_wals=$(pending_wals)
-    dc stop postgres >/dev/null
-    dc start s3 >/dev/null
-    wait_for s3 dc exec -T s3 /garage bucket info topup-backups
-
-    set -- $rotation_wals
-    test "$#" -ge 3 || {
-        echo "key rotation test needs at least three pending WAL segments" >&2
+    dc exec -T backup walg-restore-command "$1" /tmp/restored-wal >/dev/null 2>&1 || {
+        echo "WAL $1 does not restore with the backup key" >&2
         return 1
     }
-    rotation_v1_wal=$1
-    shift
-    rotation_v2_wals=$*
-    upload_pending_wal 1 "$rotation_v1_wal"
-    test "$(manifest_version "$rotation_v1_wal")" -eq 1
-    # Positive control: the listing used below must see the segment that was just archived.
-    wal_object_visible "$rotation_v1_wal" >/dev/null || {
-        echo "WAL object listing did not show archived segment $rotation_v1_wal" >&2
-        return 1
-    }
-    for wal_name in $rotation_v2_wals; do
-        if wal_manifest_visible "$wal_name" >/dev/null 2>&1 || \
-            wal_object_visible "$wal_name" >/dev/null 2>&1; then
-            echo "WAL-G uploaded pending segment $wal_name outside its own archive call" >&2
-            return 1
-        fi
-    done
-
-    export TOPUP_BACKUP_KEY_VERSION=2
-    dc rm -f postgres >/dev/null
-    dc up -d --no-deps postgres
-    wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
-    for wal_name in $rotation_v2_wals; do
-        wait_for "v2 archive of $wal_name" wal_manifest_visible "$wal_name"
-        test "$(manifest_version "$wal_name")" -eq 2
-    done
-    verify_rotation_keys "$rotation_v1_wal" "$rotation_v2_wals"
 }
 
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
-export TOPUP_BACKUP_KEY_VERSION=2
-export TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=1,0
 
 routes_dir=$(mktemp -d)
 # The seeded deposit belongs to the `restore-drill` product; the attested route is the only source
@@ -497,7 +402,6 @@ seed_drill_volumes
 dc up -d keys s3-init mock-product
 wait_for keys dc exec -T keys topup keys --check \
     --backup-dir /run/wal-g --owner-dir /run/db-owner --app-dir /run/db-app
-export TOPUP_BACKUP_KEY_VERSION=1
 dc up -d --no-deps postgres
 wait_for postgres dc exec -T postgres pg_isready -U postgres -d topup
 # The object store is empty, so the bootstrap listed no base backup and initialized a new cluster.
@@ -514,18 +418,13 @@ wait_for mock-product dc exec -T mock-product python3 -c \
 dc run --rm --no-deps migrate >/dev/null
 seed_reconciliation_fixture
 
-backup_name=$(dc exec -T backup walg-base-backup /var/lib/postgresql/data | tail -1)
+# WAL-G 3.0.9 `backup-list --json` has `backup_name` and `time`; the newest is the one just pushed.
+backup_name=$(dc exec -T backup sh -c 'wal-g backup-push "$PGDATA" >&2 && wal-g backup-list --json' |
+    jq -er 'max_by(.time | sub("[.][0-9]+"; "") | fromdateiso8601) | .backup_name')
 case "$backup_name" in
     base_*) ;;
     *) echo "could not determine WAL-G base backup name" >&2; exit 1 ;;
 esac
-
-if [ "$mode" = controlled ]; then
-    exercise_key_rotation
-else
-    rotation_v1_wal=not-run
-    rotation_v2_wals=not-run
-fi
 
 # Time the segment that holds the first write, not whichever segment is current beforehand.
 first=$(first_sample)
@@ -547,7 +446,7 @@ else
     writer_pid=$!
     wait_for_fast "archive_timeout WAL close" wal_closed "$timed_wal"
 fi
-wait_for_fast "archived WAL metadata" wal_manifest_visible "$timed_wal"
+wait_for_fast "archived WAL" wal_object_visible "$timed_wal"
 if [ "$mode" = crash ]; then
     kill "$writer_pid" >/dev/null 2>&1 || true
     wait "$writer_pid" >/dev/null 2>&1 || true
@@ -577,7 +476,7 @@ expected_lsn=$(psql_value 'SELECT pg_current_wal_lsn()')
 expected_marker=$(psql_value 'SELECT max(id) FROM restore_drill_marker')
 last_archived_wal=$(psql_value 'SELECT last_archived_wal FROM pg_stat_archiver')
 test -n "$last_archived_wal"
-test_restore_failures_are_fatal "$last_archived_wal" "$TOPUP_BACKUP_KEY_VERSION"
+test_restore_failures_are_fatal "$last_archived_wal"
 
 storage_probe_writes
 
@@ -590,7 +489,7 @@ else
 fi
 dc rm -f backup postgres heartbeat migrate restore-check >/dev/null 2>&1 || true
 remove_pgdata_volume
-# The key tmpfs volumes die with the source CVM; the replacement derives the backup keys and
+# The key tmpfs volumes die with the source CVM; the replacement derives the backup key and
 # database credentials again, which only the same app id (here: the same simulator keys) reproduces.
 dc rm -s -f keys >/dev/null
 for volume in walg_key db_owner db_app; do
@@ -685,8 +584,6 @@ printf 'wal_bytes_behind=%s\n' "$wal_bytes_behind"
 printf 'archive_window_seconds=60\n'
 printf 'archive_wait_seconds=%s\n' "$archive_wait_seconds"
 printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
-printf 'key_rotation_v1_wal=%s\n' "$rotation_v1_wal"
-printf 'key_rotation_v2_wals=%s\n' "$rotation_v2_wals"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 echo "restore drill $mode passed"

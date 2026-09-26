@@ -2,7 +2,7 @@
 
 mod route;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::future::{Future, IntoFuture as _};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
@@ -129,7 +129,7 @@ struct AttestArgs {
 
 #[derive(Args)]
 struct KeysArgs {
-    /// Directory (tmpfs) for backup.key and backup-vN.key, which WAL-G reads.
+    /// Directory (tmpfs) for backup.key, which WAL-G reads.
     #[arg(long, value_name = "DIR")]
     backup_dir: PathBuf,
     /// Directory (tmpfs) for the owner login's postgres.password and postgres.pgpass.
@@ -138,12 +138,6 @@ struct KeysArgs {
     /// Directory (tmpfs) for the application login's topup_service.pgpass.
     #[arg(long, value_name = "DIR")]
     app_dir: PathBuf,
-    /// dstack backup key version, producing the domain backup/vN.
-    #[arg(long, default_value_t = 1)]
-    version: u32,
-    /// Comma-separated retained domains written as backup-vN.key for restore fallback.
-    #[arg(long, value_delimiter = ',', default_value = "0")]
-    fallback_versions: Vec<u32>,
     /// Keep the process alive so the shared tmpfs remains mounted.
     #[arg(long, conflicts_with = "check")]
     hold: bool,
@@ -272,39 +266,26 @@ async fn keys(args: &KeysArgs) -> ExitCode {
     }
 
     let signer = DstackSigner::new();
-    let versions = std::iter::once(args.version)
-        .chain(args.fallback_versions.iter().copied())
-        .collect::<BTreeSet<_>>();
-    for version in versions {
-        let Ok(key) = signer.derive_backup_key_version(version).await else {
-            tracing::error!(version, "failed to derive backup key");
-            return ExitCode::FAILURE;
-        };
-        let versioned = topup::keys::versioned_key_path(&args.backup_dir, version);
-        if topup::keys::write_backup_key(&versioned, &key).is_err() {
-            tracing::error!(path = %versioned.display(), version, "failed to write backup key file");
-            return ExitCode::FAILURE;
-        }
-        let current = args.backup_dir.join(topup::keys::BACKUP_KEY_FILE);
-        if version == args.version && topup::keys::write_backup_key(&current, &key).is_err() {
-            tracing::error!(path = %current.display(), version, "failed to write current backup key file");
-            return ExitCode::FAILURE;
-        }
-    }
-    let (Ok(owner), Ok(app)) = tokio::join!(
+    let (Ok(backup), Ok(owner), Ok(app)) = tokio::join!(
+        signer.derive_backup_key(),
         signer.derive_secret(DB_OWNER_KEY_DOMAIN),
         signer.derive_secret(DB_APP_KEY_DOMAIN),
     ) else {
-        tracing::error!("failed to derive database credentials");
+        tracing::error!("failed to derive the backup key and database credentials");
         return ExitCode::FAILURE;
     };
+    let backup_key = args.backup_dir.join(topup::keys::BACKUP_KEY_FILE);
+    if topup::keys::write_backup_key(&backup_key, &backup).is_err() {
+        tracing::error!(path = %backup_key.display(), "failed to write backup key file");
+        return ExitCode::FAILURE;
+    }
     if topup::keys::write_database_credentials(&args.owner_dir, &args.app_dir, &owner, &app)
         .is_err()
     {
         tracing::error!("failed to write database credential files");
         return ExitCode::FAILURE;
     }
-    tracing::info!(version = args.version, "key files are ready");
+    tracing::info!("key files are ready");
     if args.hold {
         if wait_for_shutdown_signal().await.is_err() {
             tracing::error!("failed to listen for key holder shutdown signal");

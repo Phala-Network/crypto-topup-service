@@ -137,3 +137,21 @@ async fn operator_domain_follows_the_configured_version_only() -> Result<()> {
     assert_eq!(agent.take_requests(), vec!["operator/v1"]);
     Ok(())
 }
+
+/// Staging's backup prefix was written by the versioned `backup/v{n}` derivation at version 1, so
+/// the single backup key must request exactly that path: dstack derives a key from the app key and
+/// the path alone, and the existing backups then stay restorable.
+#[tokio::test]
+async fn backup_key_is_the_version_one_derivation_of_existing_backups() -> Result<()> {
+    let agent = GuestAgent::start().await?;
+    let signer = DstackSigner::with_endpoint(agent.endpoint.clone());
+
+    let key = signer.derive_backup_key().await?;
+    // The removed `derive_backup_key_version(version)` requested `format!("backup/v{version}")`.
+    let version = 1;
+    let version_one = signer.derive_secret(&format!("backup/v{version}")).await?;
+    assert_eq!(key.expose_secret(), version_one.expose_secret());
+    assert_eq!(key.expose_secret(), &stub_key("backup/v1"));
+    assert_eq!(agent.take_requests(), vec!["backup/v1", "backup/v1"]);
+    Ok(())
+}

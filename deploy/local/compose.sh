@@ -6,8 +6,7 @@
 # it supplies the local object-storage credentials and ports. --restore-check renders the restore
 # verification variant (deploy/RESTORE.md), as the restore drill's replacement boots it.
 #
-# Local settings come from TOPUP_LOCAL_* (sandbox and drill drivers), and TOPUP_BACKUP_KEY_VERSION
-# and TOPUP_BACKUP_KEY_FALLBACK_VERSIONS (the drill's key rotation); nothing else is read from the
+# Local settings come from TOPUP_LOCAL_* (sandbox and drill drivers); nothing else is read from the
 # shell, so a developer's AWS_* variables never reach the local stack.
 #
 # Usage: deploy/local/compose.sh [--restore-check] [COMPOSE OPTIONS] COMMAND [ARGS...]
@@ -26,8 +25,6 @@ env -i PATH="$PATH" \
     POSTGRES_WALG_IMAGE=crypto-topup-postgres-walg-local@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
     WALG_S3_PREFIX=s3://topup-backups/postgres AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 \
     AWS_S3_FORCE_PATH_STYLE=true SENTRY_ENVIRONMENT=local \
-    TOPUP_BACKUP_KEY_VERSION="${TOPUP_BACKUP_KEY_VERSION:-1}" \
-    TOPUP_BACKUP_KEY_FALLBACK_VERSIONS="${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-0}" \
     TOPUP_ADMIN_KID="${TOPUP_LOCAL_ADMIN_KID:-local-admin/v1}" \
     TOPUP_ADMIN_PUBLIC_KEY="${TOPUP_LOCAL_ADMIN_PUBLIC_KEY:-11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=}" \
     TOPUP_PUBLIC_ORIGIN="http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}" \

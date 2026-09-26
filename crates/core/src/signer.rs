@@ -19,7 +19,10 @@ pub fn operator_key_domain(version: NonZeroU32) -> String {
 
 /// Domain used to derive the settlement-signing key.
 pub const SETTLEMENT_KEY_DOMAIN: &str = "settlement/v1";
-/// Domain used to derive the backup-encryption key.
+/// Domain used to derive the WAL-G backup-encryption key, the one key of the backup prefix.
+///
+/// Every existing backup is encrypted under this path, so it never changes; a new key goes with a
+/// new `WALG_S3_PREFIX` (deploy/RESTORE.md, "Backup key").
 pub const BACKUP_KEY_DOMAIN: &str = "backup/v1";
 /// Domain used to derive the database owner (`postgres`) password.
 ///
