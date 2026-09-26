@@ -125,11 +125,12 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     if env PRODUCT_IMAGE="$image" TOPUP_ORIGIN="${setting[TOPUP_ORIGIN]-}" \
         PRODUCT_PUBLIC_URL="${setting[PRODUCT_PUBLIC_URL]-}" PRODUCT_RPC_URL="$rpc" \
         PRODUCT_DRIVER_PUBLIC_KEY="${setting[PRODUCT_DRIVER_PUBLIC_KEY]-}" \
-        "$root/deploy/product/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>/dev/null &&
-        cmp -s "$tmp/fresh.yml" "$compose"; then
-        :
+        "$root/deploy/product/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>"$tmp/render.err"; then
+        cmp -s "$tmp/fresh.yml" "$compose" ||
+            fail "$compose differs from a fresh render of $source_compose with its image and settings"
     else
-        fail "$compose differs from a fresh render of $source_compose with its image and settings"
+        # render-compose.sh names only the variable, never a value.
+        fail "$source_compose does not render with the settings of $compose: $(tool_error "$tmp/render.err")"
     fi
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
@@ -149,7 +150,10 @@ check_anonymous_pulls "$tmp/images"
 
 echo "== product RPC and topup (no RPC URL is printed)"
 require_command cast
-chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>/dev/null) || chain_id=error
+if ! chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>"$tmp/cast.err"); then
+    error=$(tool_error "$tmp/cast.err")
+    chain_id="error: ${error//"$rpc"/PRODUCT_RPC_URL}"
+fi
 [[ "$chain_id" == 11155111 ]] || fail "PRODUCT_RPC_URL reports chain id $chain_id, not Sepolia"
 # The product pins the settlement key from this endpoint at startup and checks its binding.
 nonce=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')

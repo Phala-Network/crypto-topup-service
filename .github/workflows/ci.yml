@@ -158,6 +158,7 @@ jobs:
           deploy/tests/render-compose.sh
           deploy/tests/render-route.sh
           deploy/tests/preflight.sh
+          deploy/tests/preflight-phala.sh
           deploy/tests/product-preflight.sh
           deploy/tests/write-staging-env.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py

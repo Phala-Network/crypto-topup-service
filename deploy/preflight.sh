@@ -203,12 +203,14 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     done
     if env "${render_env[@]}" TOPUP_IMAGE="$(jq -r '.services.topup.image' "$tmp/compose.json")" \
         POSTGRES_WALG_IMAGE="$(jq -r '.services.postgres.image' "$tmp/compose.json")" \
-        "$root/deploy/render-compose.sh" "${variant[@]}" "$source_compose" >"$tmp/fresh.yml" 2>/dev/null &&
-        cmp -s "$tmp/fresh.yml" "$compose"; then
-        :
+        "$root/deploy/render-compose.sh" "${variant[@]}" "$source_compose" >"$tmp/fresh.yml" \
+        2>"$tmp/render.err"; then
+        cmp -s "$tmp/fresh.yml" "$compose" ||
+            fail "$compose differs from a fresh render of $source_compose with the same images and" \
+                "settings; re-run render-compose.sh from the commit being deployed"
     else
-        fail "$compose differs from a fresh render of $source_compose with the same images and" \
-            "settings; re-run render-compose.sh from the commit being deployed"
+        # render-compose.sh names only the variable, never a value.
+        fail "$source_compose does not render with the settings of $compose: $(tool_error "$tmp/render.err")"
     fi
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
@@ -268,10 +270,17 @@ redact() {
     text=${text//"$rpc_a"/provider a}
     printf '%s' "${text//"$rpc_b"/provider b}"
 }
+# rpc URL CAST_ARGS...: cast's answer from the provider at URL, or "error: " and its redacted error.
+rpc() {
+    local url=$1
+    shift
+    ETH_RPC_URL=$url cast "$@" 2>"$tmp/cast.err" ||
+        printf 'error: %s' "$(redact "$(tool_error "$tmp/cast.err")")"
+}
 chain_ok=1
 for label in a b; do
     [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
-    id=$(ETH_RPC_URL=$url cast chain-id 2>/dev/null) || id=error
+    id=$(rpc "$url" chain-id)
     if [[ "$id" == "${route[chain_id]}" ]]; then
         ok "provider $label reports chain id $id"
     else
@@ -303,13 +312,12 @@ if ((chain_ok)) && [[ -n "$network" ]]; then
     for label in a b; do
         [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
         for key in contract sanctions_oracle; do
-            code=$(ETH_RPC_URL=$url cast code "${route[$key]}" 2>/dev/null) || code=error
+            code=$(rpc "$url" code "${route[$key]}")
             [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
-                fail "route $key ${route[$key]} has no code on provider $label"
+                fail "route $key ${route[$key]} has no code on provider $label (${code:0:300})"
         done
     done
-    decimals=$(ETH_RPC_URL=$rpc_a cast call "${route[contract]}" 'decimals()(uint8)' 2>/dev/null) ||
-        decimals=error
+    decimals=$(rpc "$rpc_a" call "${route[contract]}" 'decimals()(uint8)')
     [[ "$decimals" == "${route[decimals]}" ]] ||
         fail "asset decimals() is $decimals, the route says ${route[decimals]}"
 elif ((chain_ok)); then
