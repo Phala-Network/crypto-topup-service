@@ -17,10 +17,11 @@ with TopupClient("https://topup.example", "acme", signer) as client:
 ```
 
 Create a product key with `uv run topup-sdk keygen --keyid acme/v1 --seed-out product.seed` and
-send only the printed public key to the operator. See `docs/sdk.md` for the signing profile and
-the versioning and deprecation policy, `sdk/examples/phala_cloud_integration.py` for an
-integration including settlement and webhook verification, `deploy/product/reference_product` for
-a complete product, and `deploy/sandbox/README.md` for the sandbox.
+send only the printed public key to the operator. See `docs/integration.md` for the integration
+guide, the signing profile, and the versioning and deprecation policy,
+`sdk/examples/phala_cloud_integration.py` for an integration including settlement and webhook
+verification, `deploy/product/reference_product` for a complete product, and
+`deploy/sandbox/README.md` for the sandbox.
 
 ```sh
 make sync    # install the locked environment
