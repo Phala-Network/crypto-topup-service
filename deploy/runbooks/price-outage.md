@@ -1,49 +1,35 @@
 # Price outage
 
-## Trigger
+**Trigger:** `TopupDepositStateAgeExceeded` with `state:detected` whose latest timeline evidence
+is `stage: "valuation"` ([provider disagreement](provider-disagreement.md), step 1): a stale or
+unavailable source, a primary/check deviation, an FX guard failure, or a stablecoin depeg.
 
-Trigger on `TopupDepositStateAgeExceeded` (`state:detected`; quotes are taken in the
-`detected → confirmed` step), stale primary/check observations, source request failures, FX guard
-failure, or a stablecoin depeg.
+**Impact:** spot deposits stay `detected` and rate locks cannot be priced. Funds on chain are safe
+and must never be credited by hand.
 
-## Impact and blast radius
+## First steps
 
-Spot deposits remain `detected` and new rate locks must not be quoted. Existing on-chain funds are
-safe and must not be manually credited.
-
-## First 5 minutes
+Stop new quotes, then check the sources the route uses:
 
 ```sh
-printf '%s' '{"scopes":["quotes"]}' > /tmp/pause.json
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=route="$ROUTE" <<'SQL'
-BEGIN TRANSACTION READ ONLY;
-SELECT id,state,attempt,next_attempt_at,valuation_at,price_scaled::text,quote,updated_at
-FROM deposits WHERE route=:'route' AND state='detected' ORDER BY updated_at LIMIT 50;
-COMMIT;
-SQL
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes"]}'
 curl --fail-with-body -sS 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=pha&metrics=ReferenceRateUSD&frequency=1m&limit_per_asset=1&paging_from=end'
 curl --fail-with-body -sS 'https://data-api.binance.vision/api/v3/ticker/price?symbol=PHAUSDT'
 curl --fail-with-body -sS 'https://api.kraken.com/0/public/Ticker?pair=USDTUSD'
 ```
 
-## Decision tree
+## Decide
 
-- One source down: wait for recovery; do not weaken two-source validation.
+- One source down: wait; never weaken the two-source check.
 - Sources reachable but divergent: keep quotes paused and investigate market integrity.
-- All sources agree and are fresh: observe for two policy windows, then resume.
+- All fresh and in agreement: watch two policy windows, then resume.
 
-## Remediation
+## Fix
 
-No runtime source override exists. **HUMAN-ONLY:** a source/config change requires a new route
-version and compose hash through the D2 upgrade flow. Never insert a price or credit directly.
+There is no runtime price override. Changing a source is a route config change and Deploy
+`upgrade`.
 
-## Verification
+## Done when
 
-New deposits store fresh `valuation_at`, expected `price_scaled`, and evidence naming both sources.
-Resume `quotes` with the signed curl pattern against `/v1/admin/routes/$ROUTE/resume`.
-
-## Rollback
-
-Re-pause quotes and redeploy the prior attested route version if it still has healthy sources.
+New deposits leave `detected` with a fresh valuation (support lookup) and quotes are resumed:
+`admin POST "/v1/admin/routes/$ROUTE/resume" '{"scopes":["quotes"]}'`.

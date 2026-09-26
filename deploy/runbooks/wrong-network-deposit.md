@@ -1,15 +1,11 @@
 # Wrong-network deposit
 
-## Trigger
-
-A user reports sending tokens to their deposit address on another EVM chain (for example BNB
+**Trigger:** a user reports sending tokens to their deposit address on another EVM chain (for example BNB
 Chain, Arbitrum, Base, or Polygon) instead of Ethereum mainnet, usually because an exchange
 withdrawal defaulted to a cheaper network. The service watches only configured chains, so no
 deposit row, event, or credit exists for the payment.
 
-## Impact and blast radius
-
-One user's funds sit at the same address on the other chain. Deposit addresses are CREATE2
+**Impact:** one user's funds sit at the same address on the other chain. Deposit addresses are CREATE2
 forwarder clones of the factory, and the factory is deployed through the canonical deterministic
 deployment proxy with identical init code on every chain (see `deploy/CONTRACTS.md`), so the same
 factory, implementation, and forwarder addresses can be reproduced on the other chain. Nobody,
@@ -17,38 +13,28 @@ including the service, can move the funds until Finance deploys the factory ther
 manual, costs gas on that chain, and is never automatic or guaranteed. Other users and chains are
 unaffected. The architecture's customer copy (§12) warns "Ethereum mainnet only" on every address.
 
-## First 5 minutes
+## First steps
 
-Support collects, through the agreed support channel: the chain name and chain id, the transaction
-hash, the token contract on that chain, the amount, and the workspace. Confirm the address belongs
-to the workspace and read its salt with the application role:
+Support collects, through the agreed channel: the chain name and id, the transaction hash, the
+token contract on that chain, the amount, and the workspace. The product confirms that the address
+belongs to the workspace and supplies its `salt` (address responses carry it with its inputs);
+check that the configured factory derives the address from it, then read the other chain:
 
 ```sh
 export WRONG_CHAIN_RPC_URL=https://rpc.example-other-chain
-export DEPOSIT_ADDRESS=0x...
-export WRONG_CHAIN_TOKEN=0x...
-export TX_HASH=0x...
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=address="$DEPOSIT_ADDRESS" <<'SQL'
-BEGIN TRANSACTION READ ONLY;
-SELECT ad.chain_id, ad.kind, ad.version, ad.lock_ref, ad.salt, ad.retired_at,
-       a.external_id, p.slug AS product
-FROM addresses ad
-JOIN accounts a ON a.id = ad.account_id
-JOIN products p ON p.id = a.product_id
-WHERE lower(ad.address) = lower(:'address');
-COMMIT;
-SQL
+export DEPOSIT_ADDRESS=0x... SALT=0x... WRONG_CHAIN_TOKEN=0x... TX_HASH=0x...
+cast call "$FACTORY" 'addressOf(bytes32)(address)' "$SALT" --rpc-url "$RPC_PROVIDER_A_URL"
 cast chain-id --rpc-url "$WRONG_CHAIN_RPC_URL"
 cast receipt "$TX_HASH" --rpc-url "$WRONG_CHAIN_RPC_URL"
 cast call "$WRONG_CHAIN_TOKEN" 'balanceOf(address)(uint256)' "$DEPOSIT_ADDRESS" --rpc-url "$WRONG_CHAIN_RPC_URL"
 cast code "$FACTORY" --rpc-url "$WRONG_CHAIN_RPC_URL"
 ```
 
-Record the salt (`export SALT=0x...`), the chain id, the balance still at the address, and whether
-the factory already has code on that chain. Tell the user that the payment was not credited, that recovery is a manual Finance
-decision, and that there is no automatic refund; never promise an outcome or a date.
+Record the chain id, the balance still at the address, and whether the factory already has code
+there. Tell the user the payment was not credited, that recovery is a manual Finance decision, and
+that there is no automatic refund; never promise an outcome or a date.
 
-## Decision tree
+## Decide
 
 - Address not found, or it belongs to another workspace: stop; the funds are not at one of our
   addresses. Tell the user.
@@ -64,7 +50,7 @@ decision, and that there is no automatic refund; never promise an outcome or a d
 - Recoverable, and Finance decides the amount justifies the gas: continue with Remediation. Below
   that threshold, record the decision in the case and close it.
 
-## Remediation
+## Fix
 
 All steps are **HUMAN-ONLY** Finance and deployer actions; the service is not changed and the
 chain is not added to any route.
@@ -103,7 +89,7 @@ chain is not added to any route.
    this payment, so the return is recorded in the support case and the finance ledger, not through
    `refund-requests`.
 
-## Verification
+## Done when
 
 The forwarder's token balance on the other chain is zero, the factory emitted `Flushed` for the
 salt, the treasury Safe received the amount, the admin Safe no longer holds `OPERATOR_ROLE`, and

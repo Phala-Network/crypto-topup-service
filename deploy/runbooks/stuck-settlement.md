@@ -1,51 +1,38 @@
 # Stuck settlement
 
-## Trigger
+**Trigger:** `TopupDepositStateAgeExceeded` with `state:cleared` (older than the route's
+`alerts.stuck_after_s`), a product that keeps answering `processing` or `409`, or a
+`topup-pump-<n>` monitor missing its check-ins (the pump that drives every step has stopped).
 
-Trigger on `TopupDepositStateAgeExceeded` (`state:cleared`) (a deposit exceeded the route's
-`alerts.stuck_after_s`), a settlement that remains `sent`, or a product that repeatedly answers
-`processing`/`409`.
+**Impact:** the product has not given a final credited or rejected answer. One deposit or one
+product; funds stay attributable and flushing is independent.
 
-## Impact and blast radius
+## First steps
 
-The product has not established a final credited/rejected fact. One deposit or one product can be
-affected; funds remain attributable and flushing is independent unless reconciliation blocks it.
+1. For a stopped pump: the whole pipeline waits. **HUMAN-ONLY:** restart the CVM
+   (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`); pumps resume from the database.
+2. Otherwise take the `deposit_id` from the Sentry event and read the settlement attempts in its
+   timeline (support lookup): the latest `evidence` holds the product's answer or the error.
+3. Only for a systemic product fault, pause settlement on the route:
+   `admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["settlement"]}'`.
 
-## First 5 minutes
+## Decide
 
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.state,d.attempt,d.next_attempt_at,d.updated_at,s.key,s.status,s.sent_at,s.destination_tx_id,s.resend_forbidden,s.receipt FROM deposits d LEFT JOIN settlements s ON s.deposit_id=d.id WHERE d.state='cleared' ORDER BY d.updated_at LIMIT 100; COMMIT;"
-printf '%s' '{"scopes":["settlement"]}' > /tmp/pause.json
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
-```
+- Product `GET` answers accepted or rejected: the service adopts it on the next attempt.
+- Product answers `processing`: keep waiting and escalate on the product side.
+- Product does not know the key and no `POST` was durably sent: the service resends by itself.
+- The product answered `422`: [422 payload mismatch](payload-mismatch-422.md).
 
-Pause only for a systemic product fault; for one deposit, allow GET-first recovery to continue.
+## Fix
 
-## Decision tree
-
-- Product GET says accepted/rejected: service should adopt it; verify the next pump attempt.
-- Product GET says processing: keep waiting and escalate product-side age.
-- Product says unknown and no POST was durably sent: automatic resend is allowed.
-- `resend_forbidden=true`: follow the 422 runbook.
-
-## Remediation
-
-Nudge the deposit to set `next_attempt_at=now()` and append audit evidence; do not update the row
-directly:
+Nudge the deposit, which sets its next attempt to now and writes an audit record; never change the
+deposit any other way:
 
 ```sh
-: > /tmp/empty
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge" /tmp/empty "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/empty "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
+admin POST "/v1/admin/deposits/$DEPOSIT_ID/nudge"
 ```
 
-## Verification
+## Done when
 
-The settlement becomes `accepted` or `rejected`, exactly one product ledger mutation exists, and
-the deposit advances accordingly. Resume settlement if it was paused.
-
-## Rollback
-
-Re-pause settlement if product responses regress. Never replay a POST with a changed payload or
-delete the settlement row.
+The deposit is `credited` or `rejected`, the product ledger holds exactly one mutation for it, and
+any pause is resumed. Never resend a changed payload.

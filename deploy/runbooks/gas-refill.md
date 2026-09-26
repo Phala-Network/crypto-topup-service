@@ -1,79 +1,39 @@
 # Operator gas refill
 
-## Trigger
+**Trigger:** `TopupOperatorGasReserveLow` (tags `chain`, `route`; fields `operator`,
+`balance_wei`, `reserve_wei`): on every maintenance tick while it holds `OPERATOR_ROLE`, the
+flusher found the operator's native balance below the route's
+`chain.flush.min_operator_balance_wei`. Also a `send_failed` flush planning outcome for
+insufficient funds.
 
-`TopupOperatorGasReserveLow` (tags `chain`, `route`): on every maintenance tick while it holds
-`OPERATOR_ROLE`, the flusher reads the operator's native balance and alerts when it is below the
-route's attested `chain.flush.min_operator_balance_wei`; the event carries `operator`,
-`balance_wei`, and `reserve_wei`. Also trigger when a flush fails for insufficient funds
-(`flush maintenance failed` or `planned flush send failed` Sentry issues) or when the operator
-balance cannot cover a bounded flush at the configured fee cap.
+**Impact:** flushes stop for every route on the chain that uses the operator. Credits continue;
+unflushed balances and treasury exposure grow.
 
-## Impact and blast radius
-
-Flushes stop for every route using the operator on that chain. Credits and custody attribution can
-continue, but treasury exposure and unflushed balances grow.
-
-## First 5 minutes
+## First steps
 
 ```sh
 cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_B_URL"
 cast nonce "$OPERATOR_ADDRESS" --block pending --rpc-url "$RPC_PROVIDER_A_URL"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" \
-  --set=operator_address="$OPERATOR_ADDRESS" <<'SQL'
-BEGIN TRANSACTION READ ONLY;
-SELECT id,token,nonce::text,status,tx_hash,receipt FROM flushes
-WHERE chain_id=:chain_id AND operator=lower(:'operator_address') ORDER BY nonce DESC LIMIT 20;
-COMMIT;
-SQL
 ```
 
-If the balance cannot fund the next bounded attempt, pause the `flush` scope on every route of the
-chain with the signed request in [Flush reverted or bisected](flush-reverted-or-bisected.md) to
-prevent fee-estimation/send churn, and run its no-new-`sent` check for each route. Unsigned plans
-the sender reaches while paused are voided and planned again after resume. Revoke `OPERATOR_ROLE` through the Finance Safe
-only if unexpected spend points to a compromise.
+Compare the spend with the operator's transactions on a block explorer. If the balance cannot fund
+the next attempt, pause `flush` on every route of the chain
+([flush reverted or bisected](flush-reverted-or-bisected.md), step 3).
 
-## Decision tree
+## Decide
 
-- Balance low and no unexpected spend: refill to the approved target.
-- Balance low with unknown transactions: follow operator key compromise first.
-- Fee cap reached but balance healthy: review gas policy; do not refill as a substitute.
+- Low balance, all spend explained by flushes: refill to the approved target.
+- Unknown transactions: [operator key compromise](operator-key-compromise.md) first.
+- `FeeCapReached` with a healthy balance: review the gas policy; do not refill instead.
 
-## Remediation
+## Fix
 
-**HUMAN-ONLY, Finance Safe:** submit a native-token Safe transfer to `$OPERATOR_ADDRESS` for the
-approved amount. Record the Safe transaction hash and do not send from a personal key.
+**HUMAN-ONLY, Finance Safe:** a native-coin Safe transfer of the approved amount to
+`$OPERATOR_ADDRESS`; never from a personal key. Record the Safe transaction hash.
 
-```sh
-cast receipt "$SAFE_TRANSACTION_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,transactionHash}'
-cast balance "$OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
-```
+## Done when
 
-## Verification
-
-Both providers show the finalized balance and the pending nonce is expected. Resume the `flush`
-scope, then require flush maintenance to confirm or replace the existing row and send new plans for
-the addresses of any plan that logged `flush.send_paused`. Each audit `reason` lists the voided
-plan's token and `address ids [...]`; confirm that a later `planned`, `sent`, or `confirmed` flush
-for that token carries those ids in `receipt->'plan'`:
-
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --set=chain_id="$CHAIN_ID" <<'SQL'
-BEGIN TRANSACTION READ ONLY;
-SELECT subject AS voided_flush_id,reason,created_at FROM audit
-WHERE action='flush.send_paused' ORDER BY created_at DESC LIMIT 20;
-SELECT id,token,nonce::text,status,item->>'address_id' AS address_id FROM flushes,
-  jsonb_array_elements(receipt->'plan') AS item
-WHERE chain_id=:chain_id AND status IN ('planned','sent','confirmed')
-ORDER BY nonce DESC LIMIT 100;
-COMMIT;
-SQL
-```
-
-## Rollback
-
-A finalized refill cannot be rolled back. If sent to the wrong address, pause `flush`, revoke the
-operator role if required, open a Finance incident, and rotate the operator if key ownership is
-uncertain.
+Both providers show the new balance at `finalized`, `flush` is resumed, and the next flush
+confirms. A refill sent to the wrong address cannot be undone: pause `flush` and open a Finance
+incident.

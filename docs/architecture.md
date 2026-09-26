@@ -471,7 +471,7 @@ checklist:
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
 | Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
-| Exceptions | Wrong asset or below minimum: "contact support"; funds reach the treasury and finance may return them per the refund policy (§15). Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9) and not refunded. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
+| Exceptions | Wrong asset or below minimum: "contact support"; the funds are held (§15) and finance may return them per the refund policy. Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9) and not refunded. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
 | Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`; optionally "payment received, waiting for finality" on `deposit.pending`. |
 | Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
@@ -517,6 +517,9 @@ from fetched state, never from webhook order.
 
 ## 13. Reconciliation
 
+The reconciler runs every 10 minutes and stores each finding once; repairs are silent, every
+other finding raises `TopupReconciliationMismatch` (§16).
+
 | Check | Action |
 |---|---|
 | Finalized transfer to our address with no deposit row, in the range the scanner has committed | insert `detected` |
@@ -525,7 +528,7 @@ from fetched state, never from webhook order.
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
-| After a restore, with the service stopped: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11); refused while a service process is connected to this database; stopping the old instance remains the control |
+| After a restore, in the read-only restore-check instance (§14): every deposit in `cleared`, `credited`, or `swept`, or rejected by the product after `cleared` | `GET` each key and adopt the answer (product wins, §11); resume only when every lookup is complete |
 
 ## 14. Configuration and deployment
 
@@ -537,8 +540,10 @@ The route is the only source of a product's settlement URL and of the key id its
 verified against; the database stores only the product's slug, webhook URL, and public key, and
 every loaded route that names one product must agree on both values or startup fails. Bumping
 `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
-new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Secrets
-arrive as dstack encrypted environment variables, except the in-CVM database's passwords: they
+new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
+other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
+is rendered into the compose, so it is attested too. The only dstack encrypted environment
+variables are the object-storage credentials and the Sentry DSN. The in-CVM database's passwords
 are the hex of `get_key("db/owner/v1")` and `get_key("db/app/v1")`, handed to PostgreSQL and its
 clients as tmpfs files (`POSTGRES_PASSWORD_FILE`, `PGPASSFILE`), identical on every CVM of the app
 id. Startup refuses to run without the dstack
@@ -570,9 +575,7 @@ metric (`ReferenceRateUSD`, 1m) are fixed by §8 and §11, not configured.
 services:
   topup:    { image: ghcr.io/phala-network/crypto-topup@sha256:…, command: ["topup", "run"] }
   postgres: { image: ghcr.io/phala-network/postgres-walg@sha256:…,     # postgres:18 + WAL-G
-              volumes: [pgdata:/var/lib/postgresql],
-              command: ["postgres", "-c", "archive_mode=on", "-c", "archive_timeout=60",
-                        "-c", "archive_command=wal-g wal-push %p"] }
+              volumes: [pgdata:/var/lib/postgresql] }   # archive_timeout=60, archive_command=walg-cron wal-push %p
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }
 ```
 
@@ -581,18 +584,23 @@ example `https://<app-id>-8080.<gateway-domain>`, no path); `topup run` refuses 
 valid value.
 
 Postgres on the CVM's encrypted disk; WAL-G daily base backups and continuous WAL with
-`archive_timeout=60`, encrypted with `get_key("backup/v1")` before leaving the CVM (RPO ≤ 1
-min, RTO ≤ 1 h, weekly restore drill in staging). Restore = restore → post-restore check
-(§13) → resume; addresses need no restore because salts derive from product data. Ingress
-via the dstack gateway; egress limited to providers, price sources, object storage, product
-URLs. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
+`archive_timeout=60` and a one-row heartbeat a minute, encrypted with `get_key("backup/v1")`
+before leaving the CVM, one key per backup prefix (RPO ≤ 1 min, RTO ≤ 1 h). Restore is a
+bootstrap from backup: a new instance of the same app boots the attested restore-check variant of
+the compose, whose PostgreSQL restores and promotes with archiving off, whose `topup` is
+read-only on its own port, and which runs the post-restore check (§13) and reports it on
+`/healthz`; resume upgrades that instance to the service compose (`deploy/RESTORE.md`). The
+restore drill runs weekly in CI on a local stack; the staging drill restores staging's real
+backups. Addresses need no restore because salts derive from product data. Ingress via the
+dstack gateway; egress limited to providers, price sources, object storage, product URLs, and
+Sentry. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
 it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI
 deploy (the dispatcher is accountable; no approval gate) → attested read-back. Keys come from Phala Cloud's
 KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury and the
 product verifies every settlement on its own node, so a malicious upgrade could cause downtime or
 read service data but not move funds or credits, and the attested compose hash makes it
-detectable. Upgrade governance can move to dstack's on-chain KMS later.
+detectable.
 `GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
 `/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, where `operators` lists each configured chain's
 flusher operator in ascending `chain_id` order (`chain_id`, `operator_key_version` from the
@@ -610,28 +618,32 @@ verified this way, since a production CVM exposes no logs or shell.
 | Topic | Rule |
 |---|---|
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
-| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, not credited, and flushed to the treasury with everything else. |
+| Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token are flushed to the treasury with everything else; an unsupported token stays in its forwarder, since the flusher sweeps only routed tokens, until a separately reviewed Safe flush. |
 | Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. Not refundable: credited USD, including an overpayment beyond tolerance (credited at spot for the full amount, §9), and below-minimum dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. Late funds are refundable because the product answers `rejected` for a closed workspace, recorded as `rejected(product_refused)` (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
-| Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup keys keep prior versions. |
+| Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, settlements, audit: 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | operator key compromise, provider disagreement, price outage, stuck settlement, `422` payload mismatch, restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
 
 ## 16. Observability and tests
 
-Spans carry `deposit_id`, `chain`, `state`, `attempt`. A CVM has no logs and runs no metrics
-collector, so Sentry is the one monitoring pipeline: errors and panics are events; an alert is a
-warning tagged with its name and low-cardinality grouping tags (route, state, check, scope),
-fingerprinted by them and linked to its runbook; each loop checks in to a Sentry Crons monitor;
-and a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and age,
-unflushed balance, open lock exposure, flush planning, reconciliation) is in the daily admin
-report (`GET /v1/admin/report/daily`). Alerts on age in state, any mismatch, lock exposure near cap, and lock-expiry
-failures, and an operator native balance below the route's `min_operator_balance_wei`
-(`TopupOperatorGasReserveLow`, checked on each flusher maintenance tick); Crons monitors page on
-scanner lag, backup age > 2 min, and any stopped loop.
+A production CVM has no logs, no shell, and no metrics collector, so Sentry is the one monitoring
+pipeline. Errors and panics are events. An alert is a warning tagged with its name and
+low-cardinality grouping tags (route, state, check, chain, scope), fingerprinted by them and
+linked to its runbook: `TopupDepositStateAgeExceeded` (age in state past the route's
+`alerts.stuck_after_s`), `TopupReconciliationMismatch`, `TopupLockExposureNearCap`,
+`TopupLockExpiryFailing`, `TopupUnsupportedInflows`, `TopupOperatorGasReserveLow` (the operator's
+native balance below `min_operator_balance_wei`, checked on each flusher maintenance tick), and
+the flusher's `Reverted`, `IsolatedAddress`, `MissingConsumedReceipt`, `PlanningExcluded`,
+`FeeCapReached`, `NativeBalance`, and `OperatorRoleMissing`. Each loop checks in to a Sentry Crons
+monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconciliation check, and
+any stopped loop; a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and
+age, unflushed balance, open lock exposure, flush planning, reconciliation) is in the daily admin
+report (`GET /v1/admin/report/daily`). Log lines and their spans (`deposit_id`, `chain_id`,
+`state`, `attempt`) serve local stacks.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only
@@ -642,9 +654,9 @@ divergent prices; sanctions hit; settlement `processing`, `409`, `422`, `rejecte
 then `GET`; lock exact, over, under, late, double payment; batch flush with replacement,
 reverted flush, and operator rotation; flush carrying pending and rejected deposits; deposit
 backfilled after its flush; deposit arriving while a flush is unconfirmed; restore from a
-pre-settlement snapshot with `GET`-first adoption. Conformance suite against Phala Cloud in
-CI, including obligations 4 and 5; `signer::dstack` against the simulator when explicitly
-enabled; attestation report-data construction against a known vector and the simulator
+pre-settlement snapshot with `GET`-first adoption. Conformance suite against the reference
+product in CI (`make product-conformance`), including obligations 4 and 5; `signer::dstack`
+against the simulator when explicitly enabled; attestation report-data construction against a known vector and the simulator
 response when available.
 
 ## 17. Delivery

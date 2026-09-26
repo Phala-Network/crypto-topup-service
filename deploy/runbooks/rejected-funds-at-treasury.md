@@ -1,52 +1,43 @@
 # Rejected funds at treasury
 
-## Trigger
+**Trigger:** `TopupUnsupportedInflows` (tag `chain_id`, field `count`: finalized transfers of an
+unrouted token to our addresses), Finance seeing treasury inflow tied to rejected deposits, or
+rejected holdings that disagree with the flushes.
 
-Trigger when Finance sees treasury inflow tied to `rejected` deposits, on `TopupUnsupportedInflows`
-(finalized inflows of an unsupported asset), or when rejected holdings reported by custody
-records differ from finalized `Flushed` events.
+**Impact:** rejected deposits are never credited. Rejections of the route's token
+(`below_minimum`, `out_of_bounds`, `out_of_range`, `sanctioned`, `product_refused`) are swept to
+the treasury with everything else; an unsupported token stays in its forwarder, because the
+flusher sweeps only routed tokens. The case may be a reporting question, a refundable customer
+case, or a custody mismatch.
 
-## Impact and blast radius
+## First steps
 
-Rejected funds are intentionally not credited but still flush to treasury. The incident may be a
-reporting misunderstanding, a refundable customer case, or a custody reconciliation mismatch.
+1. Read the route's `rejected_holds_atomic` and `treasury_balance_atomic` in the daily report
+   (`admin GET /v1/admin/report/daily`).
+2. Find the deposits with a support lookup by address or `tx_hash`: state, reason, and timeline.
+3. Check the chain:
 
-## First 5 minutes
+   ```sh
+   cast call "$TOKEN" 'balanceOf(address)(uint256)' "$TREASURY" --rpc-url "$RPC_PROVIDER_A_URL"
+   cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,logs}'
+   ```
 
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT d.id,d.reason,d.asset_contract,d.amount_atomic::text,d.flush_id,f.tx_hash,f.block_number FROM deposits d LEFT JOIN flushes f ON f.id=d.flush_id WHERE d.state='rejected' ORDER BY d.updated_at DESC LIMIT 100; COMMIT;"
-cast call "$TOKEN" 'balanceOf(address)(uint256)' "$TREASURY" --rpc-url "$RPC_PROVIDER_A_URL"
-cast receipt "$FLUSH_TX_HASH" --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {status,blockNumber,logs}'
-```
+## Decide
 
-## Decision tree
+- Expected rejection and a matching flush: custody is correct; classify refund eligibility
+  (architecture §15).
+- A route-token rejection with no matching flush: [flush reverted or bisected](flush-reverted-or-bisected.md).
+- Treasury inflow differs from the `Flushed` events: critical reconciliation incident; pause
+  `flush` and consider revoking the operator ([operator key compromise](operator-key-compromise.md)).
+- Sanctioned funds: Compliance owns the disposition; no refund until it is recorded.
 
-- Expected below-minimum/unsupported/rejected funds and matching flush: custody is correct; classify
-  refund eligibility.
-- Deposit has no matching flush: follow flush/reconciliation investigation.
-- Treasury event differs from stored `Flushed`: critical reconciliation incident; use the `flush`
-  pause and optional Safe role revocation procedure in
-  [Flush reverted or bisected](flush-reverted-or-bisected.md).
-- Sanctioned funds: Compliance owns disposition; do not refund automatically.
+## Fix
 
-## Remediation
+Eligible deposits go through [refund execution](refund-execution.md). Returning an unsupported
+token first needs a separately reviewed Safe flush of that token, as in
+[wrong-network deposit](wrong-network-deposit.md) step 3.
 
-For eligible deposits, follow [refund execution](refund-execution.md). Use the signed daily report
-for route-level `rejected_holds_atomic` and refund-status reconciliation; do not replace it with an
-ad hoc write or spreadsheet mutation:
+## Done when
 
-```sh
-: > /tmp/empty
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh GET "$BASE_URL/v1/admin/report/daily" /tmp/empty "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X GET -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" "$BASE_URL/v1/admin/report/daily"
-```
-
-## Verification
-
-For every reviewed deposit, chain amount, `flushed.amount_atomic`, treasury receipt, rejection
-reason, and refund disposition agree. Finance signs off the case list.
-
-## Rollback
-
-There is no rollback for finalized treasury inflow. Pause `flush` and revoke the operator role if
-reconciliation regresses; use forward accounting/refund actions only.
+For every reviewed deposit, the chain amount, the flush, the treasury receipt, the reason, and the
+refund disposition agree, and Finance signs off the case list.

@@ -17,4 +17,5 @@ SQL
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/body.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H "${headers[0]}" "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
 curl --fail-with-body -sS "$BASE_URL/v1/attestation?nonce=00"
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["flush"]}'
 ```
