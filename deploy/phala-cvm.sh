@@ -5,8 +5,8 @@
 # Usage:
 #   deploy/phala-cvm.sh get CVM_ID >cvm.json
 #   deploy/phala-cvm.sh url CVM_JSON PORT            the gateway URL of PORT
-#   deploy/phala-cvm.sh gateway CVM_JSON DOMAIN      DOMAIN (a custom domain's CNAME target) must be
-#                                                    a name under the CVM's gateway domain
+#   deploy/phala-cvm.sh gateway-domain CVM_JSON      the CVM's gateway host, gateway.BASE_DOMAIN: a
+#                                                    custom domain's CNAME target
 #   deploy/phala-cvm.sh deploy OUTPUT CLI_ARGS...    `deploy --json`; its output goes to the log, its
 #                                                    JSON object to OUTPUT, and it must succeed
 #   deploy/phala-cvm.sh wait CVM_ID [PREVIOUS_HASH] >cvm.json
@@ -34,12 +34,8 @@ case "$command" in
     url)
         jq -er --arg port "$2" '"https://\(.app_id | ltrimstr("0x"))-\($port).\(.gateway.base_domain)"' "$1"
         ;;
-    gateway)
-        base=$(jq -er '.gateway.base_domain' "$1")
-        [[ "$2" == *."$base" ]] || {
-            echo "::error::TOPUP_GATEWAY_DOMAIN $2 is not a name under the CVM's gateway domain $base; set it to gateway.$base" >&2
-            exit 1
-        }
+    gateway-domain)
+        jq -er '"gateway.\(.gateway.base_domain)"' "$1"
         ;;
     deploy)
         output=$1
