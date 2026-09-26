@@ -112,7 +112,8 @@ once the instance exists or the restore is abandoned:
 umask 077
 export RESTORE_ENV_DIR="$(mktemp -d)"
 printf '%s\n' 'AWS_ACCESS_KEY_ID=<read-only key id>' 'AWS_SECRET_ACCESS_KEY=<read-only secret>' \
-  'SENTRY_DSN=<the live DSN, or empty>' >"$RESTORE_ENV_DIR/restore.env"
+  'SENTRY_DSN=<the live DSN, or empty>' 'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
+  'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"
 deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
   --restore-check --offline
 # after creating the instance:

@@ -54,7 +54,9 @@ permission to create roles and schema objects; the command never falls back to t
 
 `topup run` reads `DATABASE_URL` and accepts each enabled route version through a repeated
 `--route FILE` option. Provider ids in each route file resolve to `TOPUP_RPC_<ID>_URL` after
-uppercasing and replacing non-alphanumeric characters with underscores; the first provider is
+uppercasing and replacing non-alphanumeric characters with underscores; a URL with the placeholder
+`{key}` takes the API key in `TOPUP_RPC_<ID>_KEY` there, so the URL can be attested while the key
+stays sealed (deploy/README.md, "Sealing the secrets"); the first provider is
 provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
 route version. The scanner poll interval is `--scanner-poll-interval-s`, defaulting to 15 seconds.
 A display-only head scan on provider A reads `[finalized + 1, latest]` every 12 seconds (or the

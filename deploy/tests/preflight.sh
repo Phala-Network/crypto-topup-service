@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Local (offline) preflight checks: the example env file, a zero-address route, a stale render, a
 # source that does not render, the wrong variant, invalid settings, and an OS image other than the
-# approved one must be refused, and a complete env file with a filled route must pass.
+# approved one must be refused, an RPC key must fit its URL and never be published or printed,
+# and a complete env file with a filled route must pass.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -93,6 +94,31 @@ TOPUP_RPC_PROVIDER_B_URL=$TOPUP_RPC_PROVIDER_A_URL "$root/deploy/render-compose.
     "$tmp/filled-source.yml" >"$tmp/same-rpc.yml"
 expect_failure same-rpc "the two RPC provider URLs must be different providers" \
     --env "$tmp/complete.env" --compose "$tmp/same-rpc.yml" --source "$tmp/filled-source.yml"
+# A keyed provider is attested with {key} and its key sealed; a URL with the key itself is refused
+# without printing it, and a key must fit its URL.
+TOPUP_RPC_PROVIDER_A_URL=https://eth-sepolia.g.alchemy.com/v2/aB3dEfGhIjKlMnOpQrStUvWxYz012345 \
+    "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/embedded-key.yml"
+expect_failure embedded-key "TOPUP_RPC_PROVIDER_A_URL seems to embed an API key" \
+    --env "$tmp/complete.env" --compose "$tmp/embedded-key.yml" --source "$tmp/filled-source.yml"
+TOPUP_RPC_PROVIDER_A_URL='https://eth-sepolia.g.alchemy.com/v2/{key}' \
+    "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/keyed.yml"
+sed 's|^TOPUP_RPC_PROVIDER_A_KEY=.*|TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789|' \
+    "$tmp/complete.env" >"$tmp/keyed.env"
+sed 's|^TOPUP_RPC_PROVIDER_A_KEY=.*|TOPUP_RPC_PROVIDER_A_KEY=sealed/key|' "$tmp/complete.env" >"$tmp/bad-key.env"
+"$preflight" --env "$tmp/keyed.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml" \
+    --offline >"$tmp/keyed.out"
+"$preflight" --env "$tmp/complete.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml" \
+    --offline --unsealed >/dev/null
+expect_failure missing-key "TOPUP_RPC_PROVIDER_A_KEY is required by the {key} placeholder" \
+    --env "$tmp/complete.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml"
+expect_failure unused-key "TOPUP_RPC_PROVIDER_A_KEY is set, but TOPUP_RPC_PROVIDER_A_URL has no {key}" \
+    --env "$tmp/keyed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+expect_failure bad-key "TOPUP_RPC_PROVIDER_A_KEY must be at least 8 characters" \
+    --env "$tmp/bad-key.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml"
+if grep -rqE 'aB3dEfGhIjKlMnOpQrStUvWxYz012345|sealed-key-0123456789|sealed/key' "$tmp"/*.out "$tmp"/*.err; then
+    echo "preflight printed an RPC key" >&2
+    exit 1
+fi
 sed 's|s3://topup-staging/postgres|s3://other/postgres|' "$tmp/filled-route.yml" >"$tmp/edited.yml"
 expect_failure edited "differs from a fresh render" \
     --env "$tmp/complete.env" --compose "$tmp/edited.yml" --source "$tmp/filled-source.yml"

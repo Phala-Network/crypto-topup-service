@@ -89,7 +89,8 @@ fi
 # The app-compose preview carries the rendered compose and the secrets as allowed_envs.
 render "$root/deploy/render-app-compose.sh" | jq -e --rawfile compose "$tmp/compose.yml" \
     '.docker_compose_file == $compose
-    and .allowed_envs == ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SENTRY_DSN"]' >/dev/null
+    and .allowed_envs == ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SENTRY_DSN",
+        "TOPUP_RPC_PROVIDER_A_KEY", "TOPUP_RPC_PROVIDER_B_KEY"]' >/dev/null
 # --images-only (Release images) needs no settings.
 TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres "$root/deploy/render-compose.sh" --images-only |
     grep -F "image: $topup" >/dev/null

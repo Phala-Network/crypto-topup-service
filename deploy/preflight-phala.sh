@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2154  # tmp, like fail and ok, comes from the sourcing script
-# Online preflight checks shared by deploy/preflight.sh and deploy/product/preflight.sh; sourced.
+# Preflight checks shared by deploy/preflight.sh and deploy/product/preflight.sh; sourced.
 # The caller defines fail, ok, and tmp (a private directory), and sources contracts/common.sh.
 
 # tool_error FILE: the last lines of a tool's stderr, on one line, for a failure message.
 tool_error() {
     tail -n 3 "$1" | paste -sd ' ' -
+}
+
+# embeds_key URL: whether URL looks like it carries a credential, which an attested setting would
+# publish: user info, or a path segment or query value of 20 or more letters, digits, - and _
+# with a digit among them, the shape of the API keys of Alchemy, Infura, QuickNode, and Ankr.
+embeds_key() {
+    local rest=${1#*://} host
+    host=${rest%%[/?#]*}
+    [[ "$host" == *@* ]] && return 0
+    tr '/?&=#;' '\n' <<<"${rest:${#host}}" | grep -E '^[A-Za-z0-9_-]{20,}$' | grep -q '[0-9]'
 }
 
 # check_anonymous_pulls FILE: every image named in FILE (one per line) pulls without credentials.
