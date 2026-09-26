@@ -103,6 +103,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
 
     let admin = OpenApiRouter::new()
         .routes(routes!(handlers::register_product))
+        .routes(routes!(handlers::update_product))
         .routes(routes!(handlers::pause_route))
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))

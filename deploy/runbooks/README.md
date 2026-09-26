@@ -14,7 +14,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Support lookup, product-signed | `GET /v1/products/{p}/deposits?tx_hash=\|address=\|lock_ref=`: each deposit with its transition timeline (each step's evidence) and its webhook `events` (`id`, `event_type`, `delivered_at`); `GET /v1/products/{p}/deposits/{id}`: the deposit. Signed with the product's key, so run by the product's support tooling (staging: the reference product's seed) |
 | Attestation, `GET /v1/attestation?nonce=` | the settlement key and each chain's flusher operator address ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, roles, receipts, `addressOf` |
-| Admin actions, admin-signed | route `pause`/`resume` of the scopes `quotes`, `addresses`, `settlement`, `flush`, `refunds`; deposit `nudge`; refund `approve`/`record`; product issue; reconciliation block `lift`; outbox event `replay` |
+| Admin actions, admin-signed | route `pause`/`resume` of the scopes `quotes`, `addresses`, `settlement`, `flush`, `refunds`; deposit `nudge`; refund `approve`/`record`; product issue and key replacement; reconciliation block `lift`; outbox event `replay` |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
 Database rows the API does not expose (reconciliation findings, flush rows, delivery attempts,
@@ -71,6 +71,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
 | `OperatorRoleMissing`, `MissingConsumedReceipt`, unexplained operator transaction | [Operator key compromise](operator-key-compromise.md) |
 | `TopupUnsupportedInflows`, rejected funds at the treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
+| Product reports its request-signing key exposed, or product requests it did not make | [Product key compromise](product-key-compromise.md) |
 | `NativeBalance` (native coin at a forwarder; the flusher never sweeps it) | No runbook: escalate to Finance and Engineering |
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
 | Approved refund | [Refund execution](refund-execution.md) |
@@ -108,4 +109,5 @@ in its current form against a CVM.
 | Backup age | 2026-09-22, local | partial: predates encrypted backups; local restore drills cover archiving | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Incident communication | 2026-09-22, local | partial: publication and roles human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Wrong-network deposit | — | not exercised; every step is human-only | — |
+| Product key compromise | 2026-09-26, local | partial: the key replacement and its hard cut in the API test `admin_product_key_replacement`; the product side not exercised | this runbook's PR |
 | Route or chain retirement | — | not exercised; the upgrade is human-only | — |

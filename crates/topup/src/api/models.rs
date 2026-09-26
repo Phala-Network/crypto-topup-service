@@ -410,6 +410,19 @@ pub struct RegisterProductRequest {
     pub webhook_url: String,
 }
 
+/// Administrative replacement of an issued product's verification key and webhook URL. The key id
+/// stays the route's `destination.product_kid`.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct UpdateProductRequest {
+    /// Standard base64 of the product's new 32-byte ed25519 request-verification public key.
+    pub public_key: String,
+    /// Absolute `https` URL of the product's webhook receiver; `http` only when the product's
+    /// attested settlement URL also uses `http` (local stacks).
+    pub webhook_url: String,
+    /// Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
+    pub reason: String,
+}
+
 /// Registered product.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ProductResponse {

@@ -385,8 +385,8 @@ as a monorepo issue.
 Product requests use the same signature scheme with the product's key; paths use the product's
 `external_id`; every request is checked for tenant ownership. Address responses include the
 salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the product can
-recompute any address without the service. The admin key can only issue products, pause and
-resume, nudge, drive the refund workflow, lift reconciliation blocks (§13), and replay webhook
+recompute any address without the service. The admin key can only issue products and replace
+their key and webhook URL, pause and resume, nudge, drive the refund workflow, lift reconciliation blocks (§13), and replay webhook
 events; each change writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
 (`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
 `X-Forwarded-*`, so signers sign the public URL they call. Each deployment (sandbox, staging,
@@ -413,6 +413,7 @@ GET    /v1/attestation?nonce=…                                    settlement k
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
 
 POST   /v1/admin/products {slug, public_key, webhook_url}   key id, settlement URL: route (§14); same values → same product, different → 409
+PUT    /v1/admin/products/{slug} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
@@ -632,7 +633,7 @@ verified this way, since a production CVM exposes no logs or shell.
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. Late funds are refundable because the product answers `rejected` for a closed workspace, recorded as `rejected(product_refused)` (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
-| Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, settlements, audit: 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | operator key compromise, provider disagreement, price outage, stuck settlement, `422` payload mismatch, restore, treasury change, gas refill, refund execution, rejected funds at treasury. |

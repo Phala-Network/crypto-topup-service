@@ -8,6 +8,8 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Added
 
+- Generated `topup_client.api.admin.update_product` with `UpdateProductRequest` for
+  `PUT /v1/admin/products/{slug}`.
 - Generated `topup_client.api.admin.lift_reconciliation_block` and `replay_outbox_event` with
   `AdminReasonRequest`, `ReconciliationBlockLiftResponse`, and `OutboxReplayResponse`.
 - `DailyReportResponse.reconciliation_blocks` (`ReconciliationBlockReport`) and

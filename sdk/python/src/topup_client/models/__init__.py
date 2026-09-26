@@ -46,6 +46,7 @@ from .route_daily_report_settlements_by_status import RouteDailyReportSettlement
 from .route_pause_response import RoutePauseResponse
 from .support_deposit_response import SupportDepositResponse
 from .support_deposits_response import SupportDepositsResponse
+from .update_product_request import UpdateProductRequest
 
 __all__ = (
     "AccountResponse",
@@ -94,4 +95,5 @@ __all__ = (
     "RoutePauseResponse",
     "SupportDepositResponse",
     "SupportDepositsResponse",
+    "UpdateProductRequest",
 )

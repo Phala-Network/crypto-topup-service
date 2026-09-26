@@ -704,6 +704,151 @@ async fn admin_product_registration() -> Result<()> {
     result.and(cleanup)
 }
 
+/// `PUT /v1/admin/products/{slug}` replaces an issued product's key and webhook URL: a hard cut
+/// from the old key to the new one under the route's key id, audited once with the replaced values.
+#[tokio::test]
+async fn admin_product_key_replacement() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let old_key = SigningKey::from_bytes(&[45; 32]);
+        let new_key = SigningKey::from_bytes(&[46; 32]);
+        let admin_key = SigningKey::from_bytes(&[47; 32]);
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let update = |slug: &str, body: &Value, created: i64| -> Result<_> {
+            Ok(signed_request(
+                Method::PUT,
+                &format!("/v1/admin/products/{slug}"),
+                serde_json::to_vec(body)?,
+                ADMIN_KID,
+                &admin_key,
+                created,
+            ))
+        };
+        let register_account = |key: &SigningKey, created: i64| -> Result<_> {
+            Ok(signed_request(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts",
+                serde_json::to_vec(&json!({"external_id": format!("team-{created}")}))?,
+                PRODUCT_KID,
+                key,
+                created,
+            ))
+        };
+        let valid = json!({
+            "public_key": public_key_base64(&new_key),
+            "webhook_url": "https://product.test/rotated",
+            "reason": "scheduled product key rotation",
+        });
+
+        let response = app
+            .clone()
+            .oneshot(update("phala-cloud", &valid, now - 1)?)
+            .await?;
+        ensure!(response.status() == StatusCode::NOT_FOUND, "not issued yet");
+        let product = seed_product(&database.app_pool, "phala-cloud", &old_key).await?;
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/v1/admin/products/phala-cloud",
+                serde_json::to_vec(&valid)?,
+                PRODUCT_KID,
+                &old_key,
+                now,
+            ))
+            .await?;
+        ensure!(
+            response.status() == StatusCode::UNAUTHORIZED,
+            "only the admin key"
+        );
+
+        let mut invalid = Vec::new();
+        for (field, value) in [
+            ("public_key", json!("AAAA")),
+            ("webhook_url", json!("http://product.test/rotated")),
+            ("reason", json!(" ")),
+        ] {
+            let mut body = valid.clone();
+            body[field] = value;
+            invalid.push(("phala-cloud", body));
+        }
+        invalid.push(("unrouted", valid.clone()));
+        for (offset, (slug, body)) in (1_i64..).zip(invalid) {
+            let response = app
+                .clone()
+                .oneshot(update(slug, &body, now + offset)?)
+                .await?;
+            ensure!(
+                response.status() == StatusCode::BAD_REQUEST,
+                "{slug} {body} must be rejected"
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(register_account(&old_key, now + 10)?)
+            .await?;
+        ensure!(
+            response.status() == StatusCode::OK,
+            "the old key works before"
+        );
+
+        for offset in [11, 12] {
+            let response = app
+                .clone()
+                .oneshot(update("phala-cloud", &valid, now + offset)?)
+                .await?;
+            ensure!(response.status() == StatusCode::OK);
+            let updated = response_json(response).await?;
+            ensure!(updated["id"] == json!(product.id));
+            ensure!(updated["public_key"] == valid["public_key"]);
+            ensure!(updated["webhook_url"] == "https://product.test/rotated");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(register_account(&old_key, now + 13)?)
+            .await?;
+        ensure!(
+            response.status() == StatusCode::UNAUTHORIZED,
+            "the old key is cut"
+        );
+        let response = app
+            .clone()
+            .oneshot(register_account(&new_key, now + 14)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK, "the new key verifies");
+
+        let audit = sqlx::query(
+            "SELECT actor, action, reason FROM audit WHERE subject = 'product:phala-cloud'",
+        )
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(
+            audit.len() == 1,
+            "a repeat with the stored values is not audited again"
+        );
+        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        ensure!(audit[0].try_get::<String, _>("action")? == "product.update");
+        let evidence: Value = serde_json::from_str(&audit[0].try_get::<String, _>("reason")?)?;
+        ensure!(
+            evidence["reason"] == "scheduled product key rotation",
+            "{evidence}"
+        );
+        ensure!(
+            evidence["replaced"]["public_key"] == json!(public_key_base64(&old_key)),
+            "{evidence}"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[tokio::test]
 async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
