@@ -1,6 +1,6 @@
 # Crypto Top-up Service — Design
 
-Status: v5. Single specification and implementation design. Numbers marked *(policy)* are set
+Status: v6 (webhook fulfillment). Single specification and implementation design. Numbers marked *(policy)* are set
 by finance and risk; this document fixes what they mean.
 
 ## 0. Standards used
@@ -19,7 +19,8 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Deposit identity | UUIDv5 (RFC 9562) over `chain_id:lowercase_tx_hash:decimal_log_index` | — |
 | Job queue | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` | — |
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
-| Idempotent HTTP | `Idempotency-Key` (IETF httpapi draft): `422` on payload mismatch, `409` on concurrent processing | Business outcome is always in a `200` body (§11) |
+| Product fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the product holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
+| Idempotent product API | Natural keys (`product_lock_ref`, `(product, external_id)`, rotation version) | A retry with a fresh signature returns the stored result |
 | Request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | — |
 | Webhooks | Standard Webhooks | — |
 | Money | Integer minor units; 8-decimal scaled prices | Precision is an application choice |
@@ -29,8 +30,8 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 ## 1. Goal
 
 A private service, called by the Phala Cloud billing backend, that turns finalized and
-screened deposits of configured tokens into USD credit and credits the product at most once
-through a signed HTTP call. Two ways to deposit, both first-class:
+screened deposits of configured tokens into USD credit and tells the product what to credit
+with one signed webhook per deposit, which the product fulfills once. Two ways to deposit, both first-class:
 
 - **Quote first (default UI).** The user states a USD or token amount, receives a locked
   price, an exact token amount, a single-use address, and a countdown, then pays. This is the
@@ -47,7 +48,7 @@ outage; balances flush to the treasury automatically; chain, service, and produc
 reconcile.
 
 First route: Ethereum Mainnet PHA → Phala Cloud USD. New tokens and EVM chains are new route
-files; new products are new settlement endpoints.
+files; new products are new routes and a registered webhook receiver.
 
 Out of scope: withdrawals, trading, fiat, on-chain credits, bonuses, and everything the
 product owns (identity, balance, debt, entitlements, billing policy, welcome promotions).
@@ -70,7 +71,7 @@ product owns (identity, balance, debt, entitlements, billing policy, welcome pro
 6. **Everything that affects money is measured.** Contracts, treasury, thresholds, and spreads
    live in the attested compose. Pause flags are the only runtime-mutable state.
 7. **Cross-check every input, and let the product cap the output.** Two RPC providers, two
-   price sources; the product enforces its own limits and verifies chain evidence.
+   price sources; the product may cap credits and verify chain evidence on its own node.
 
 ## 3. Trust model
 
@@ -79,9 +80,11 @@ alter code without changing the attested measurement; products verify by attesta
 code holds the settlement key; the database is inside the boundary.
 
 Deposit addresses are forwarders with an immutable treasury, so **a full compromise of the
-service cannot redirect deposited funds**. A compromised service could still forge settlement
-requests; that is bounded by product-side obligations (§11): independent per-deposit and
-per-period caps, and verification of the cited log against the product's own RPC. Residual
+service cannot redirect deposited funds**. A credit exists only as a `deposit.credited` event
+signed by the attested service's key, which the product pins from attestation. A compromised
+service could still sign a credit no deposit backs; as with a card processor, the product
+trusts the processor's signed event, and it may bound or check that trust with its own
+per-deposit and per-period caps and by verifying the cited log on its own node (§11). Residual
 exposure is the operator key's gas balance, kept small.
 
 ## 4. Contracts
@@ -137,7 +140,7 @@ Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
 ```text
 crates/core       pure, no I/O: money, route schema, CREATE2 math, state machine, valuation, screening
-crates/adapters   chain::evm, signer::dstack, pricing::{coinmetrics,binance,kraken}, risk::oracle, settlement::http
+crates/adapters   chain::evm, signer::dstack, pricing::{coinmetrics,binance,kraken}, risk::oracle
 crates/topup      binary: db, pump, scanner, flusher, outbox, reconciler, api, cli
 contracts/        Forwarder.sol, ForwarderFactory.sol, deploy scripts, Foundry tests
 config/routes     route files (attested)   deploy/  compose + Dockerfile   tests/  integration + contract
@@ -150,9 +153,10 @@ append-only. Physical addresses belong to an account and a chain; routes are sel
 deposit by `(chain_id, asset_contract)`.
 
 ```text
-products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- settlement URL, key id: route (§14)
+products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- key id: route (§14)
 accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
               -- scopes: quotes | addresses | settlement | flush | refunds; empty = active
+              -- (`settlement` stops crediting: deposits wait in `confirmed`)
 addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
               UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
@@ -169,9 +173,8 @@ deposits      id, chain_id, tx_hash, log_index, block_number, block_hash, block_
               flush_id, created_at, updated_at
               UNIQUE (chain_id, tx_hash, log_index)
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
-settlements   deposit_id PK, product_id, key, payload jsonb, status (intent|sent|accepted|rejected),
-              destination_tx_id, receipt jsonb, resend_forbidden bool, sent_at
-              UNIQUE (product_id, destination_tx_id) WHERE destination_tx_id IS NOT NULL
+settlements   deposit_id PK, product_id, key, payload jsonb, status, destination_tx_id, receipt jsonb,
+              resend_forbidden bool, sent_at     -- read-only history of the retired settlement protocol
 flushes       id, chain_id, token, operator, nonce, tx_hash, block_number,
               status (planned|sent|confirmed|reverted), receipt jsonb
               UNIQUE (chain_id, operator, nonce)
@@ -194,7 +197,7 @@ monotone; splitting into `n` parts loses at most `n − 1` minor units.
 ## 7. States and pump
 
 ```text
-detected → confirmed → cleared → credited → swept
+detected → confirmed → credited → swept
         ↘ rejected(reason)
 ```
 
@@ -211,9 +214,8 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 
 | Step | Does |
 |---|---|
-| `detected → confirmed` | First, `GET` the product by the deterministic key: an existing answer restores the original payload and business state (`credited` or `rejected`) directly, before any quoting or local decision, so a deposit rebuilt after a restore can never diverge from what the product already did. Then, from both providers: `finalized ≥ block_number`, same block hash, same log. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same event identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality`, never a rejection. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
-| `confirmed → cleared` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account and product not paused (paused → `Wait`, never a rejection). |
-| `cleared → credited` | Signed `POST` (§11). Body `rejected` → `rejected(product_refused)`. On an unknown result, `GET` before any resend. |
+| `detected → confirmed` | From both providers: `finalized ≥ block_number`, same block hash, same log. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same event identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality`, never a rejection. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
+| `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account, product, and route not paused for `settlement` (paused → `Wait`, never a rejection). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is final and owed to the product, whatever the product answers. |
 | `credited → swept` | `flush_id` is set: a confirmed `flushed` row exists for the deposit's address and token at a log position `(block_number, log_index)` greater than the deposit's. Evaluated on flush confirmation and on every deposit insert, so backfilled deposits resolve too. |
 
 ## 8. Chain, valuation, screening
@@ -235,7 +237,7 @@ notifications; they appear only after finality, as `rejected(unsupported_asset)`
 read by block hash. The head scan reads the finalized cursor `FOR SHARE`, and the finalized
 scanner deletes rows at or below its cursor in the transaction that advances it, so a transfer
 moves from pending to deposit atomically and no row below the cursor is written afterwards.
-Pending rows never feed deposits, transitions, locks, exposure, settlement, or reconciliation;
+Pending rows never feed deposits, transitions, locks, exposure, credits, or reconciliation;
 lock amount and timeliness are computed when read, never stored. When the head scan sees
 `finalized` advance it wakes the finalized scanner, and a confirm step waiting for provider B's
 finality retries after 12 s instead of the regular wait interval. While reconciliation has frozen
@@ -323,58 +325,61 @@ crash is by `(operator, nonce)`: if consumed, locate the transaction and read it
 if reverted, mark the flush `reverted` and plan a new one with a fresh nonce; otherwise
 rebroadcast the same signed transaction. Gas is a service cost and never reduces credit.
 
-## 11. Settlement contract
+## 11. Fulfillment webhook
 
-RFC 9421 signatures (ed25519, `keyid = settlement/v1`) over `@method`, `@target-uri`,
-`content-digest`, `idempotency-key`, `created`; receivers reject `created` outside ±5 minutes
-and verify the digest. Every resend keeps the payload and regenerates `created` and the
-signature.
+The service tells the product what to credit with one signed event per deposit, and the product
+fulfills it once: the pattern of Stripe Checkout fulfillment. The deposit's state never depends
+on the product's answer; delivery is tracked on the outbox row.
 
 ```http
-POST {settlement_url}
-Idempotency-Key: "deposit:<deposit_id>"
+POST {webhook_url}
+webhook-id: <uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit_id)>
+webhook-timestamp: <Unix seconds of this attempt>
+webhook-signature: v1a,<base64 ed25519 by settlement/v1 over "{id}.{timestamp}.{raw body}">
 
-{ "version": 1, "idempotency_key": "deposit:…", "account_id": "<external_id>",
-  "unit": "USD", "amount_minor": "1234", "source": "crypto_deposit",
-  "evidence": { "chain_id": 1, "asset_contract": "0x…", "route": "…", "route_version": 1,
-                "tx_hash": "0x…", "log_index": 12, "to": "0x<forwarder>", "amount_atomic": "…",
-                "price_scaled": "…", "price_scale": 8, "valuation_at": "…", "lock_ref": null } }
+{ "event_id": "<webhook-id>", "type": "deposit.credited", "created_at": "…",
+  "data": { "product_id": "…", "external_id": "<account>", "deposit_id": "…", "state": "credited",
+            "unit": "USD", "amount_minor": "1234", "price_source": "lock", "price_scaled": "…",
+            "price_scale": 8, "valuation_at": "…", "product_lock_ref": "…", "address": "0x…",
+            "route": "…", "route_version": 1, "chain_id": 1, "asset_contract": "0x…",
+            "tx_hash": "0x…", "log_index": 12, "amount_atomic": "…" } }
 ```
 
-| Product answers | Service does |
-|---|---|
-| `200 {status:"accepted", destination_tx_id}` | `credited` |
-| `200 {status:"processing"}` or `409` | stay, poll `GET` |
-| `200 {status:"rejected", reason}` | `rejected(product_refused)` |
-| `422` (same key, different payload) | invariant violation: stay, alert |
-| anything else | `GET {settlement_url}/{key}` first; if unknown, resend; alert on age |
-
-`GET {settlement_url}/{key}` returns the stored status, `destination_tx_id`, and the
-**original accepted payload**. Every deposit's first step `GET`s by key before quoting (§7),
-so a deposit rebuilt after a restore adopts the product's fact and the original pricing inputs
-instead of re-quoting or re-deciding; a `422` is handled the same way. The product's answer
-is authoritative for the credited fact.
+- The screen step writes the event in the transaction that moves the deposit `confirmed →
+  credited` (§7). `amount_minor` is the quoted `credit_minor` when `price_source` is `lock`,
+  otherwise the spot credit at finality (§9). `product_lock_ref` is the receiving address's
+  lock, also when a late or wrong-amount payment was valued at spot.
+- Delivery is the outbox (§12): at least once, in no order, `2xx` acknowledges, anything else or
+  no answer within 20 s is retried with full-jitter backoff (ceiling 30 s doubling to 1 h),
+  forever; an undelivered event raises the outbox age warning after 24 hours and the operator
+  can replay it. The daily report counts undelivered `deposit.credited` per route.
+- The event id is derived from the deposit id, so every retry, replay, and re-emission after a
+  restore carries the same `webhook-id`, and the outbox stores one row per deposit.
 
 Product obligations:
 
-1. Verify the signature against the pinned key (public key bytes and `keyid` pinned together).
-2. Keep idempotency records for the life of the account; never expire them.
-3. Commit before answering `accepted`; mutate the ledger once under concurrency.
-4. Enforce its own per-deposit and per-period caps, independent of the service.
-5. Verify the cited log against its own RPC: it exists at `tx_hash`/`log_index` in a
-   finalized block, was emitted by the approved `asset_contract` for that route, `to` equals
-   the forwarder address the product computed for that account, and `amount_atomic` matches.
-   Transient chain-read failures must not produce a stored rejection.
-6. Recompute `deposit_id = uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` from the
-   evidence and require `idempotency_key == "deposit:" + deposit_id`, so one chain event can
-   never be credited under a second key.
+1. Verify the Standard Webhooks `v1a` signature over the raw body against the pinned
+   `(keyid, public key)`, with a timestamp tolerance of 300 seconds.
+2. Credit `amount_minor` to `external_id` at most once per `deposit:<deposit_id>`: the credit
+   and its record in one transaction under a unique index, committed before answering `2xx`.
+   A repeat is acknowledged without a second credit. A repeat with a different amount can
+   only follow a service restore that re-priced a spot deposit (§14); keep the first credit and
+   report it.
+3. Refuse by holding, never by failing the delivery: a credit for an unknown or closed
+   workspace, a suspended account, or above the product's own caps is recorded as held, answered
+   `2xx`, and returned through a refund request (§15).
+
+Optional hardening, each the product's choice: fetch `GET /deposits/{id}` and require
+`credited` or `swept` with the same amount; recompute `deposit_id = uuid_v5(NS,
+"{chain_id}:{tx_hash}:{log_index}")` and verify the cited log on its own node at finality;
+per-deposit and per-period caps as review holds. None is needed for correctness: the credit is
+authorized by the service's signature alone.
 
 Phala Cloud: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code =
-'crypto-top-up'`, `provider_order_id = key`, partial unique index on `(team_id,
-provider_order_id)` for that flow), credit transaction tagged `funding_source =
-crypto:<asset>:<chain>`, then `complete_order_payment` in the same transaction; return
-`credit_transaction_id`. Non-card top-ups skip the welcome promotion by existing rule. Filed
-as a monorepo issue.
+'crypto-top-up'`, `provider_order_id = "deposit:<deposit_id>"`, partial unique index on
+`(team_id, provider_order_id)` for that flow), the credit transaction tagged `funding_source =
+crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction. Non-card top-ups skip
+the welcome promotion by existing rule.
 
 ## 12. API and events
 
@@ -391,7 +396,7 @@ shared key would let a signed request be replayed within the freshness window ag
 deployment that shares its public origin (for example a replacement or restored instance).
 
 ```text
-POST   /v1/products/{p}/accounts
+POST   /v1/products/{p}/accounts                                  optional: the next two create the account
 POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent; GET same
 POST   /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
 POST   /v1/products/{p}/accounts/{ext}/rate-locks                 single-use address + locked price
@@ -403,19 +408,19 @@ GET    /v1/products/{p}/deposits/{id}
 GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
 GET    /v1/products/{p}/accounts/{ext}/limits                     caps, remaining, reset time
 POST   /v1/products/{p}/accounts/{ext}/pause | resume {scopes}
-POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   finance approves and executes (§15)
+POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   rejected, or credited on the product's request; finance approves (§15)
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
 
-POST   /v1/admin/products {slug, public_key, webhook_url}   key id, settlement URL: route (§14); same values → same product, different → 409
+POST   /v1/admin/products {slug, public_key, webhook_url}   key id: route (§14); same values → same product, different → 409
 PUT    /v1/admin/products/{slug} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
-GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, global lock exposure, reconciliation blocks
+GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, undelivered credits, global lock exposure, reconciliation blocks
 ```
 
 Signatures are single-use within the acceptance window. `rotate` is idempotent on
@@ -439,7 +444,8 @@ stops for the deposit once final. While a chain is frozen (§13) its pending vie
 
 Events (Standard Webhooks, signed with the settlement key): `deposit.pending`,
 `deposit.confirmed`, `deposit.credited`, `deposit.rejected`, `deposit.refunded`,
-`rate_lock.expired`. Events never change balances. `deposit.pending` is sent at most once per chain
+`rate_lock.expired`. `deposit.credited` is the fulfillment event (§11); the others are
+informational and never change balances. `deposit.pending` is sent at most once per chain
 event when the head scan first sees a transfer to a watched address; its payload (`product_id`,
 `external_id`, `deposit_id`, `chain_id`, `tx_hash`, `log_index`, `block_number`, `address`,
 `product_lock_ref`, `asset_contract`, `from_address`, `amount_atomic`) is marked
@@ -447,10 +453,9 @@ event when the head scan first sees a transfer to a watched address; its payload
 non-zero transfers of routed tokens produce it. The outbox does not order events, so
 `deposit.pending` can arrive after `deposit.confirmed` or `deposit.credited` for the same
 deposit; receivers must act on state (the deposit or lock they fetch), never on event order.
-Every `deposit.credited` and `deposit.rejected` payload carries `product_id`,
-`deposit_id`, `chain_id`, `state` (`credited` or `rejected`), and `route` (null when no route
-was selected); `deposit.credited` adds the destination transaction and pricing fields, and
-`deposit.rejected` adds `reason` (plus `product_reason` for a product refusal). Payload changes
+`deposit.rejected` carries `product_id`, `deposit_id`, `chain_id`, `state`, `route` (null when
+no route was selected), and `reason`; rows rejected by the retired settlement protocol also
+carried `product_reason`. Payload changes
 are additive; receivers must ignore unknown fields. OpenAPI from `utoipa`; SDKs generated from
 it, shipped with a runnable
 Python integration example, a signing helper, and a versioning and deprecation policy. A
@@ -471,7 +476,7 @@ checklist:
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
 | Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
-| Exceptions | Wrong asset or below minimum: "contact support"; the funds are held (§15) and finance may return them per the refund policy. Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9) and not refunded. Sanctions or product refusal: "under compliance review, contact support"; the reason code stays server-side. Paused: "deposits temporarily unavailable", address hidden. |
+| Exceptions | Wrong asset or below minimum: "contact support"; the funds are held (§15) and finance may return them per the refund policy. Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9). Sanctions: "under compliance review, contact support"; the reason code stays server-side. A credit the product held (closed or suspended workspace, the product's caps): "under review, contact support", then a refund to an address the user supplies (§15). Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
 | Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`; optionally "payment received, waiting for finality" on `deposit.pending`. |
 | Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
@@ -489,8 +494,8 @@ from fetched state, never from webhook order.
 |---|---|---|
 | Detected, N confirmations | none yet: lock `payment.status` `seen`, or a `pending-deposits` item (display only) | "Payment detected: N confirmations. Final around {`estimated_final_at`}." When `in_time` or `amount_within_tolerance` is false on a lock, add: "This payment does not match the quote, so it will be credited at the rate when it becomes final." |
 | Finalizing | `detected` | "Final on Ethereum. Checking the payment and fixing the rate." |
-| Crediting | `confirmed`, `cleared` | "Crediting your balance." |
-| Completed | `credited`, `swept` | "Credited $X at $rate." When a lock-address payment was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |
+| Crediting | `confirmed`, or `credited` before the product has applied the credit | "Crediting your balance." |
+| Completed | `credited`, `swept`, and the product's own credit recorded | "Credited $X at $rate." When a lock-address payment was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |
 | Needs attention | `rejected` | By reason, below. The reason code itself is never shown. |
 
 | `reason` | "Needs attention" copy |
@@ -498,7 +503,7 @@ from fetched state, never from webhook order.
 | `unsupported_asset` | "This token is not accepted here, so it was not credited. Contact support to have it returned." |
 | `below_minimum` | "This payment is below the minimum deposit of X, so it was not credited. Contact support; amounts at or above the refund minimum can be returned." |
 | `out_of_bounds`, `out_of_range` | "This payment is outside the deposit limits, so it was not credited. Contact support to have it returned." |
-| `sanctioned`, `product_refused` | "This payment is under compliance review. Contact support." |
+| `sanctioned` (and `product_refused` on historical deposits) | "This payment is under compliance review. Contact support." |
 
 ### Quote and address copy (product UI)
 
@@ -523,12 +528,11 @@ other finding raises `TopupReconciliationMismatch` (§16).
 | Check | Action |
 |---|---|
 | Finalized transfer to our address with no deposit row, in the range the scanner has committed | insert `detected` |
-| Settlement `sent` with no answer, any age | `GET` by key, adopt the answer |
 | `credit_minor` ≠ recomputation from stored inputs | alert, block flush |
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
-| After a restore, in the read-only restore-check instance (§14): every deposit in `cleared`, `credited`, or `swept`, or rejected by the product after `cleared` | `GET` each key and adopt the answer (product wins, §11); resume only when every lookup is complete |
+| After a restore, in the read-only restore-check instance (§14) | the checks above, on the restored ledger alone: the service's record is authoritative for its credits, so the restore asks the product nothing and does not depend on it being reachable |
 
 A block (`block flush` for one address, `freeze chain`) stays until an operator lifts it with the
 admin-signed `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` once the cause is
@@ -540,11 +544,11 @@ lift writes `audit` with the reason and the removed block in the same transactio
 
 One route file per chain and asset pair, with its chain settings inline, in the compose, hence
 attested: chain and its finality rule, RPC provider ids, factory and implementation addresses,
-treasury, token, unit decimals, settlement URL, product key id, and every threshold and spread.
+treasury, token, unit decimals, product key id, and every threshold and spread.
 Changing a value is a new version and compose hash; deposits keep the version that created them.
-The route is the only source of a product's settlement URL and of the key id its requests are
-verified against; the database stores only the product's slug, webhook URL, and public key, and
-every loaded route that names one product must agree on both values or startup fails. Bumping
+The route is the only source of the key id a product's requests are verified against; the
+database stores only the product's slug, webhook URL, and public key, and every loaded route
+that names one product must agree on the key id or startup fails. Bumping
 `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
 new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
 other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
@@ -595,7 +599,11 @@ before leaving the CVM, one key per backup prefix (RPO ≤ 1 min, RTO ≤ 1 h). 
 bootstrap from backup: a new instance of the same app boots the attested restore-check variant of
 the compose, whose PostgreSQL restores and promotes with archiving off, whose `topup` is
 read-only on its own port, and which runs the post-restore check (§13) and reports it on
-`/healthz`; resume upgrades that instance to the service compose (`deploy/RESTORE.md`). The
+`/healthz`; resume upgrades that instance to the service compose (`deploy/RESTORE.md`). A
+restore loses at most the RPO window. A deposit whose `credited` transition was lost is rebuilt
+and credited again with the same `deposit.credited` event id and deposit id, so the product
+ignores the repeat; a lock-priced deposit gets the same amount, while a spot-priced one is
+re-priced, and the product keeps its first credit and reports a differing amount (§11). The
 restore drill runs weekly in CI on a local stack; the staging drill restores staging's real
 backups. Addresses need no restore because salts derive from product data. Ingress via the
 dstack gateway; egress limited to providers, price sources, object storage, product URLs, and
@@ -603,10 +611,10 @@ Sentry. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack rele
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
 it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI
 deploy (the dispatcher is accountable; no approval gate) → attested read-back. Keys come from Phala Cloud's
-KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury and the
-product verifies every settlement on its own node, so a malicious upgrade could cause downtime or
-read service data but not move funds or credits, and the attested compose hash makes it
-detectable.
+KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury, so a
+malicious upgrade could cause downtime, read service data, or sign credits no deposit backs, up
+to whatever caps the product keeps (§3, §11), but not move funds; the attested compose hash makes
+it detectable.
 `GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
 `/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, where `operators` lists each configured chain's
 flusher operator in ascending `chain_id` order (`chain_id`, `operator_key_version` from the
@@ -626,13 +634,13 @@ verified this way, since a production CVM exposes no logs or shell.
 | Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token are flushed to the treasury with everything else; an unsupported token stays in its forwarder, since the flusher sweeps only routed tokens, until a separately reviewed Safe flush. |
 | Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
-| Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund. Late funds are refundable because the product answers `rejected` for a closed workspace, recorded as `rejected(product_refused)` (§11); the service has no closure check of its own. |
+| Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
-| Retention | Deposits, transitions, settlements, audit: 7 years *(policy)*, append-only. |
-| Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
-| Runbooks before pilot | operator key compromise, provider disagreement, price outage, stuck settlement, `422` payload mismatch, restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
+| Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
+| Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
+| Runbooks before pilot | operator key compromise, product key compromise, provider disagreement, price outage, outbox backlog (undelivered credits), restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
 
 ## 16. Observability and tests
 
@@ -647,7 +655,8 @@ the flusher's `Reverted`, `IsolatedAddress`, `MissingConsumedReceipt`, `Planning
 `FeeCapReached`, `NativeBalance`, and `OperatorRoleMissing`. Each loop checks in to a Sentry Crons
 monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconciliation check, and
 any stopped loop; a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and
-age, unflushed balance, open lock exposure, flush planning, reconciliation) is in the daily admin
+age, unflushed balance, open lock exposure, undelivered `deposit.credited` events and their age,
+flush planning, reconciliation) is in the daily admin
 report (`GET /v1/admin/report/daily`). Log lines and their spans (`deposit_id`, `chain_id`,
 `state`, `attempt`) serve local stacks.
 
@@ -655,13 +664,15 @@ Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math a
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only
 pay the treasury; clone address prediction; ETH path; reentrancy with a hook token).
 Integration on `anvil` + Postgres: happy path; duplicate logs; provisional evidence corrected
-after provider agreement; racing pumps; stale lease; crash between intent and send; stale or
-divergent prices; sanctions hit; settlement `processing`, `409`, `422`, `rejected`, timeout
-then `GET`; lock exact, over, under, late, double payment; batch flush with replacement,
-reverted flush, and operator rotation; flush carrying pending and rejected deposits; deposit
-backfilled after its flush; deposit arriving while a flush is unconfirmed; restore from a
-pre-settlement snapshot with `GET`-first adoption. The reference product's own tests
-cover obligations 1 to 6; `signer::dstack`
+after provider agreement; racing pumps; stale lease; stale or divergent prices; sanctions hit;
+credit and its `deposit.credited` event (payload and derived id) in one transaction; a repeated
+event id stored once; lock exact, over, under, late, double payment; batch flush with
+replacement, reverted flush, and operator rotation; flush carrying pending and rejected
+deposits; deposit backfilled after its flush; deposit arriving while a flush is unconfirmed; a
+restore check that asks the product nothing and keeps recorded credits; the migration that
+retired `cleared`. The reference product's tests cover the §11 obligations (credit once across
+redeliveries, forged deliveries refused, holds); `topup-sdk send-test-event` checks any receiver;
+`signer::dstack`
 against the simulator when explicitly enabled; attestation report-data construction against a known vector and the simulator
 response when available.
 

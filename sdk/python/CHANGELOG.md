@@ -12,7 +12,7 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
   into a typed credit with its `fulfillment_key` (`deposit:<deposit_id>`), raising
   `FulfillmentError` for any other shape; `credited_event_id` derives the event's
   `webhook-id` from the deposit id; `CREDITED_EVENT`. The service emits this payload once
-  `deposit.credited` becomes the fulfillment event (docs/design/stripe-style-integration.md).
+  `deposit.credited` becomes the fulfillment event (docs/integration.md §5).
 - `topup_sdk.sign_webhook` (test senders) and `topup-sdk send-test-event`, which checks a webhook
   receiver answers a signed event and its duplicate with `2xx` and a forged copy with `4xx`.
 - `DepositResponse.external_id` and `price_source` (also on `SupportDepositResponse`).
