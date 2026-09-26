@@ -302,7 +302,7 @@ configs:
 
   topup_route_phala_cloud_sepolia_pha:
     content: |
-      # Staging route on Sepolia (test contracts). Settlements go to the staging reference-product CVM (deploy/README.md, "Staging reference product").
+      # Staging route on Sepolia (test contracts). The `phala-cloud` product is the staging reference-product CVM (deploy/README.md, "Staging reference product").
       chain:
         chain_id: 11155111
         finality: finalized
@@ -332,7 +332,6 @@ configs:
       destination:
         product: phala-cloud
         unit_decimals: 2
-        settlement_url: "https://fcb1ace9ae19492773a9384924d50cad9b532859-8089.dstack-pha-prod5.phala.network/settlements"
         product_kid: phala-cloud/v1
 
       pricing:
@@ -358,4 +357,4 @@ configs:
         max_creations_per_minute: 10
 
       alerts:
-        stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }
+        stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }

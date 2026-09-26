@@ -14,15 +14,15 @@ T = TypeVar("T", bound="RegisterProductRequest")
 
 @_attrs_define
 class RegisterProductRequest:
-    """Administrative product registration body. The product's key id and settlement URL are not
-    part of it: the attested route is their only source.
+    """Administrative product registration body. The product's key id is not part of it: the
+    attested route is its only source.
 
         Attributes:
             public_key (str): Standard base64 of the product's 32-byte ed25519 request-verification public key.
             slug (str): Product slug named by a loaded route's `destination.product`; matches
                 `^[a-z0-9][a-z0-9-]{0,62}$`.
-            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the product's
-                attested settlement URL also uses `http` (local stacks).
+            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+                own public origin uses `http` (local stacks).
     """
 
     public_key: str

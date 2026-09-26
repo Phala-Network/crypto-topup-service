@@ -18,7 +18,7 @@ use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup_adapters::chain::evm::EvmClient;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
-use topup_core::identity::deposit_id;
+use topup_core::identity::{credited_event_id, deposit_id};
 use topup_core::money::AtomicAmount;
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
@@ -115,7 +115,7 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             let clear = db::get_deposit(&context.app_pool, clear_id)
                 .await?
                 .context("clear deposit after pump")?;
-            ensure!(clear.state == DepositState::Cleared);
+            ensure!(clear.state == DepositState::Credited);
             let rejected = db::get_deposit(&context.app_pool, sanctioned_id)
                 .await?
                 .context("rejected deposit after pump")?;
@@ -141,6 +141,44 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             ensure!(event_type == "deposit.rejected");
             ensure!(payload["reason"] == "sanctioned");
             ensure!(payload["product_id"] == seed.product_id.to_string());
+
+            // Crediting writes the fulfillment event, keyed by the deposit id, with the transition.
+            let credited = sqlx::query(
+                "SELECT id, event_type, payload FROM outbox WHERE payload->>'deposit_id' = $1",
+            )
+            .bind(clear_id.to_string())
+            .fetch_one(&context.app_pool)
+            .await?;
+            let event_id: Uuid = credited.try_get("id")?;
+            let event_type: String = credited.try_get("event_type")?;
+            let payload: Value = credited.try_get("payload")?;
+            ensure!(event_id == credited_event_id(clear_id));
+            ensure!(event_type == "deposit.credited");
+            ensure!(
+                payload
+                    == serde_json::json!({
+                        "product_id": seed.product_id,
+                        "external_id": "workspace-c5",
+                        "deposit_id": clear_id,
+                        "state": "credited",
+                        "unit": "USD",
+                        "amount_minor": "37",
+                        "price_source": "spot",
+                        "price_scaled": "250000000",
+                        "price_scale": 8,
+                        "valuation_at": "2026-09-28T00:00:00Z",
+                        "product_lock_ref": null,
+                        "address": format!("{:#x}", Address::repeat_byte(0x44)),
+                        "route": "screen",
+                        "route_version": 1,
+                        "chain_id": 31_337,
+                        "asset_contract": format!("{:#x}", Address::repeat_byte(0x55)),
+                        "tx_hash": format!("{:#x}", B256::repeat_byte(1)),
+                        "log_index": 0,
+                        "amount_atomic": "15",
+                    }),
+                "{payload}"
+            );
             Ok(())
         })
     })
@@ -328,6 +366,18 @@ async fn insert_confirmed(
     };
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     ensure!(db::insert_deposit(pool, &deposit).await?);
+    // The confirm step stores the valuation the credit carries.
+    sqlx::query(
+        r#"
+        UPDATE deposits
+        SET valuation_at = '2026-09-28T00:00:00Z', price_scaled = 250000000,
+            price_source = 'spot', credit_minor = 37
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(id)
 }
 
@@ -411,12 +461,7 @@ impl Step for WaitStep {
 }
 
 fn wait_steps() -> StepSet {
-    StepSet::new(
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-    )
+    StepSet::new(Box::new(WaitStep), Box::new(WaitStep), Box::new(WaitStep))
 }
 
 fn client(rpc_url: &str, timeout: StdDuration) -> Result<Arc<EvmClient>> {

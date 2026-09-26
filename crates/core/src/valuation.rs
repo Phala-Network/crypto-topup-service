@@ -485,7 +485,6 @@ mod tests {
                 destination: DestinationConfig {
                     product: "phala-cloud".to_owned(),
                     unit_decimals: 2,
-                    settlement_url: "https://example.invalid".to_owned(),
                     product_kid: "test".to_owned(),
                 },
                 screening: ScreeningConfig {

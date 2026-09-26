@@ -66,12 +66,12 @@ pub struct RestoreReport {
     pub post_restore_reconciliation: PostRestoreReconciliation,
 }
 
-/// Outcome of the §13 post-restore reconciliation gate.
+/// Outcome of the §13 post-restore reconciliation round.
 #[derive(Debug, Serialize)]
 pub struct PostRestoreReconciliation {
-    /// `complete` unless a post-restore product lookup left a deposit unverified.
+    /// `complete` unless a finding left a subject unverified.
     pub status: &'static str,
-    /// Checks that could not finish; only the post-restore settlement check gates resume.
+    /// Checks that could not finish; they alert like any round and do not gate resume.
     pub failed_checks: Vec<CheckName>,
     /// Every finding of the round, including alert-only findings from the regular checks.
     pub findings: Vec<Finding>,
@@ -81,7 +81,8 @@ pub struct PostRestoreReconciliation {
 /// the §13 post-restore reconciliation through [`Reconciler::post_restore_once`].
 ///
 /// The service, heartbeat, and backup processes must remain stopped while this runs: the
-/// post-restore round claims every deposit at or beyond `cleared` and may apply product answers.
+/// post-restore round holds the lease-owner lock and may repair the restored ledger. It asks the
+/// product nothing: the service's own record is authoritative for its credits.
 pub async fn check(
     pool: &PgPool,
     expectations: &RestoreExpectations,
@@ -152,15 +153,6 @@ pub async fn check(
         findings: round.findings,
     };
     let row_counts = row_counts(pool).await?;
-    let deposits = *row_counts
-        .get("deposits")
-        .ok_or_else(|| "deposit row count is missing".to_owned())?;
-    let settlements = *row_counts
-        .get("settlements")
-        .ok_or_else(|| "settlement row count is missing".to_owned())?;
-    if settlements > deposits {
-        return Err("row-count sanity failed: settlements exceed deposits".to_owned());
-    }
 
     let mut failures = Vec::new();
     if let Some(measured) = measured_rpo_seconds
@@ -183,12 +175,6 @@ pub async fn check(
                 format!("post-restore reconciliation is incomplete for deposit {subject}")
             }),
     );
-    if post_restore_reconciliation
-        .failed_checks
-        .contains(&CheckName::PostRestoreSettlement)
-    {
-        failures.push("post-restore settlement check did not complete".to_owned());
-    }
     let status = if failures.is_empty() {
         "ok"
     } else {

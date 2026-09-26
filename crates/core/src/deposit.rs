@@ -10,9 +10,8 @@ pub enum DepositState {
     Detected,
     /// Finality and valuation have been confirmed.
     Confirmed,
-    /// Screening and policy checks have passed.
-    Cleared,
-    /// The product has accepted the credit.
+    /// Screening passed: the credit is final and owed to the product, which is told with a
+    /// `deposit.credited` webhook.
     Credited,
     /// A later confirmed flush covers the deposit.
     Swept,
@@ -42,7 +41,8 @@ pub enum RejectReason {
     Sanctioned,
     /// The deposited amount is outside the configured bounds.
     OutOfBounds,
-    /// The product rejected the settlement request.
+    /// The product refused the credit under the retired settlement protocol. Kept so historical
+    /// rows stay readable; no step produces it any more.
     ProductRefused,
 }
 
@@ -81,10 +81,8 @@ pub enum RetryError {
 pub enum WaitReason {
     /// At least one provider has not finalized the deposit block yet.
     Finality,
-    /// Settlement is paused for the account or product.
+    /// Crediting is paused for the account, product, or route.
     Paused,
-    /// The product is still processing the settlement.
-    ProductProcessing,
     /// No confirmed flush after the deposit has been observed yet.
     FlushNotConfirmed,
 }
@@ -106,11 +104,6 @@ pub enum StepOutcome {
         /// The expected condition that has not completed yet.
         reason: WaitReason,
     },
-    /// The confirm step found the product's authoritative prior answer.
-    AdoptProductAnswer {
-        /// Whether the product had credited rather than rejected the deposit.
-        credited: bool,
-    },
 }
 
 impl StepOutcome {
@@ -120,7 +113,6 @@ impl StepOutcome {
             Self::Reject(_) => StepOutcomeKind::Reject,
             Self::Retry { .. } => StepOutcomeKind::Retry,
             Self::Wait { .. } => StepOutcomeKind::Wait,
-            Self::AdoptProductAnswer { .. } => StepOutcomeKind::AdoptProductAnswer,
         }
     }
 }
@@ -136,8 +128,6 @@ pub enum StepOutcomeKind {
     Retry,
     /// An expected wait.
     Wait,
-    /// Adoption of an authoritative product answer.
-    AdoptProductAnswer,
 }
 
 /// The effect that applying an outcome has on the state machine.
@@ -191,11 +181,6 @@ pub fn next(state: DepositState, outcome: &StepOutcome) -> Result<Transition, In
         },
         (DepositState::Confirmed, StepOutcome::Advance) => Transition {
             from: state,
-            to: DepositState::Cleared,
-            kind: TransitionKind::Advanced,
-        },
-        (DepositState::Cleared, StepOutcome::Advance) => Transition {
-            from: state,
             to: DepositState::Credited,
             kind: TransitionKind::Advanced,
         },
@@ -204,19 +189,13 @@ pub fn next(state: DepositState, outcome: &StepOutcome) -> Result<Transition, In
             to: DepositState::Swept,
             kind: TransitionKind::Advanced,
         },
-        (
-            DepositState::Detected | DepositState::Confirmed | DepositState::Cleared,
-            StepOutcome::Reject(_),
-        ) => Transition {
+        (DepositState::Detected | DepositState::Confirmed, StepOutcome::Reject(_)) => Transition {
             from: state,
             to: DepositState::Rejected,
             kind: TransitionKind::Rejected,
         },
         (
-            DepositState::Detected
-            | DepositState::Confirmed
-            | DepositState::Cleared
-            | DepositState::Credited,
+            DepositState::Detected | DepositState::Confirmed | DepositState::Credited,
             StepOutcome::Retry { .. },
         ) => Transition {
             from: state,
@@ -224,28 +203,12 @@ pub fn next(state: DepositState, outcome: &StepOutcome) -> Result<Transition, In
             kind: TransitionKind::Retry,
         },
         (
-            DepositState::Detected
-            | DepositState::Confirmed
-            | DepositState::Cleared
-            | DepositState::Credited,
+            DepositState::Detected | DepositState::Confirmed | DepositState::Credited,
             StepOutcome::Wait { .. },
         ) => Transition {
             from: state,
             to: state,
             kind: TransitionKind::Wait,
-        },
-        (DepositState::Detected, StepOutcome::AdoptProductAnswer { credited }) => Transition {
-            from: state,
-            to: if *credited {
-                DepositState::Credited
-            } else {
-                DepositState::Rejected
-            },
-            kind: if *credited {
-                TransitionKind::Advanced
-            } else {
-                TransitionKind::Rejected
-            },
         },
         _ => {
             return Err(InvalidTransition {
@@ -273,7 +236,6 @@ mod tests {
     const PAUSED_WAIT: StepOutcome = StepOutcome::Wait {
         reason: WaitReason::Paused,
     };
-    const ADOPT_CREDITED: StepOutcome = StepOutcome::AdoptProductAnswer { credited: true };
 
     #[derive(Clone, Copy)]
     enum Expected {
@@ -283,7 +245,7 @@ mod tests {
 
     #[test]
     fn transition_table_covers_every_state_and_outcome_kind() {
-        use DepositState::{Cleared, Confirmed, Credited, Detected, Rejected, Swept};
+        use DepositState::{Confirmed, Credited, Detected, Rejected, Swept};
         use Expected::{Invalid, Valid};
         use StepOutcomeKind as Outcome;
         use TransitionKind as Kind;
@@ -293,49 +255,23 @@ mod tests {
             (Detected, &REJECT, Valid(Rejected, Kind::Rejected)),
             (Detected, &RETRY, Valid(Detected, Kind::Retry)),
             (Detected, &WAIT, Valid(Detected, Kind::Wait)),
-            (Detected, &ADOPT_CREDITED, Valid(Credited, Kind::Advanced)),
-            (Confirmed, &ADVANCE, Valid(Cleared, Kind::Advanced)),
+            (Confirmed, &ADVANCE, Valid(Credited, Kind::Advanced)),
             (Confirmed, &REJECT, Valid(Rejected, Kind::Rejected)),
             (Confirmed, &RETRY, Valid(Confirmed, Kind::Retry)),
             (Confirmed, &WAIT, Valid(Confirmed, Kind::Wait)),
             (Confirmed, &PAUSED_WAIT, Valid(Confirmed, Kind::Wait)),
-            (
-                Confirmed,
-                &ADOPT_CREDITED,
-                Invalid(Outcome::AdoptProductAnswer),
-            ),
-            (Cleared, &ADVANCE, Valid(Credited, Kind::Advanced)),
-            (Cleared, &REJECT, Valid(Rejected, Kind::Rejected)),
-            (Cleared, &RETRY, Valid(Cleared, Kind::Retry)),
-            (Cleared, &WAIT, Valid(Cleared, Kind::Wait)),
-            (
-                Cleared,
-                &ADOPT_CREDITED,
-                Invalid(Outcome::AdoptProductAnswer),
-            ),
             (Credited, &ADVANCE, Valid(Swept, Kind::Advanced)),
             (Credited, &REJECT, Invalid(Outcome::Reject)),
             (Credited, &RETRY, Valid(Credited, Kind::Retry)),
             (Credited, &WAIT, Valid(Credited, Kind::Wait)),
-            (
-                Credited,
-                &ADOPT_CREDITED,
-                Invalid(Outcome::AdoptProductAnswer),
-            ),
             (Swept, &ADVANCE, Invalid(Outcome::Advance)),
             (Swept, &REJECT, Invalid(Outcome::Reject)),
             (Swept, &RETRY, Invalid(Outcome::Retry)),
             (Swept, &WAIT, Invalid(Outcome::Wait)),
-            (Swept, &ADOPT_CREDITED, Invalid(Outcome::AdoptProductAnswer)),
             (Rejected, &ADVANCE, Invalid(Outcome::Advance)),
             (Rejected, &REJECT, Invalid(Outcome::Reject)),
             (Rejected, &RETRY, Invalid(Outcome::Retry)),
             (Rejected, &WAIT, Invalid(Outcome::Wait)),
-            (
-                Rejected,
-                &ADOPT_CREDITED,
-                Invalid(Outcome::AdoptProductAnswer),
-            ),
         ];
 
         for (state, outcome, expected) in cases {
@@ -364,21 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn rejected_product_answer_is_adopted_from_detected() {
-        assert_eq!(
-            next(
-                DepositState::Detected,
-                &StepOutcome::AdoptProductAnswer { credited: false }
-            ),
-            Ok(Transition {
-                from: DepositState::Detected,
-                to: DepositState::Rejected,
-                kind: TransitionKind::Rejected,
-            })
-        );
-    }
-
-    #[test]
     fn paused_deposit_waits_then_advances_after_resume() {
         assert_eq!(
             next(DepositState::Confirmed, &PAUSED_WAIT),
@@ -392,7 +313,7 @@ mod tests {
             next(DepositState::Confirmed, &StepOutcome::Advance),
             Ok(Transition {
                 from: DepositState::Confirmed,
-                to: DepositState::Cleared,
+                to: DepositState::Credited,
                 kind: TransitionKind::Advanced,
             })
         );
@@ -402,7 +323,6 @@ mod tests {
     fn terminal_predicate_matches_terminal_states() {
         assert!(!DepositState::Detected.is_terminal());
         assert!(!DepositState::Confirmed.is_terminal());
-        assert!(!DepositState::Cleared.is_terminal());
         assert!(!DepositState::Credited.is_terminal());
         assert!(DepositState::Swept.is_terminal());
         assert!(DepositState::Rejected.is_terminal());
@@ -413,7 +333,6 @@ mod tests {
         let states = [
             (DepositState::Detected, "\"detected\""),
             (DepositState::Confirmed, "\"confirmed\""),
-            (DepositState::Cleared, "\"cleared\""),
             (DepositState::Credited, "\"credited\""),
             (DepositState::Swept, "\"swept\""),
             (DepositState::Rejected, "\"rejected\""),

@@ -81,8 +81,8 @@ def sync_detailed(
     """
     Args:
         body (RegisterProductRequest): Administrative product registration body. The product's key
-            id and settlement URL are not
-            part of it: the attested route is their only source.
+            id is not part of it: the
+            attested route is its only source.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -111,8 +111,8 @@ def sync(
     """
     Args:
         body (RegisterProductRequest): Administrative product registration body. The product's key
-            id and settlement URL are not
-            part of it: the attested route is their only source.
+            id is not part of it: the
+            attested route is its only source.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -136,8 +136,8 @@ async def asyncio_detailed(
     """
     Args:
         body (RegisterProductRequest): Administrative product registration body. The product's key
-            id and settlement URL are not
-            part of it: the attested route is their only source.
+            id is not part of it: the
+            attested route is its only source.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -164,8 +164,8 @@ async def asyncio(
     """
     Args:
         body (RegisterProductRequest): Administrative product registration body. The product's key
-            id and settlement URL are not
-            part of it: the attested route is their only source.
+            id is not part of it: the
+            attested route is its only source.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

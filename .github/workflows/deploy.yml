@@ -376,7 +376,6 @@ jobs:
             echo "| Compose hash | \`0x$deployed\` |"
             echo "| Public URL | ${!ORIGIN_VARIABLE} |"
             if [[ "$TARGET" == product ]]; then
-              echo "| Settlement URL | $GATEWAY_URL/settlements |"
               echo "| Webhook URL | $GATEWAY_URL/webhooks |"
             fi
           } >>"$GITHUB_STEP_SUMMARY"
@@ -398,7 +397,7 @@ jobs:
               env_file=.env.product
               echo "### Owner: seal the product seed"
               echo
-              echo "The product runs without its signing seed: settlements and webhooks are served,"
+              echo "The product runs without its signing seed: webhooks and fulfillment are served,"
               echo "the account API answers 503. From your own machine, write \`$env_file\` with the"
               echo "single line \`PRODUCT_SEED=<the hex seed in ~/staging/product.seed>\` (mode 0600)."
             fi

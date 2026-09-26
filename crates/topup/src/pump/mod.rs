@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use topup_core::deposit::{
-    DepositState, RejectReason, RetryError, StepOutcome, TransitionKind, WaitReason, next,
+    DepositState, RetryError, StepOutcome, TransitionKind, WaitReason, next,
 };
 use topup_core::retry::backoff;
 use tracing::Instrument as _;
@@ -65,7 +65,6 @@ impl StepResult {
             effects: db::TransitionEffects {
                 canonical_evidence: None,
                 valuation: None,
-                settlement_adoption: None,
                 lock_consumption: None,
             },
         }
@@ -76,23 +75,16 @@ impl StepResult {
 pub struct StepSet {
     detected: Box<dyn Step>,
     confirmed: Box<dyn Step>,
-    cleared: Box<dyn Step>,
     credited: Box<dyn Step>,
 }
 
 impl StepSet {
     /// Creates a complete state-to-step registry.
     #[must_use]
-    pub fn new(
-        detected: Box<dyn Step>,
-        confirmed: Box<dyn Step>,
-        cleared: Box<dyn Step>,
-        credited: Box<dyn Step>,
-    ) -> Self {
+    pub fn new(detected: Box<dyn Step>, confirmed: Box<dyn Step>, credited: Box<dyn Step>) -> Self {
         Self {
             detected,
             confirmed,
-            cleared,
             credited,
         }
     }
@@ -115,7 +107,6 @@ impl StepSet {
         match state {
             DepositState::Detected => Some(self.detected.as_ref()),
             DepositState::Confirmed => Some(self.confirmed.as_ref()),
-            DepositState::Cleared => Some(self.cleared.as_ref()),
             DepositState::Credited => Some(self.credited.as_ref()),
             DepositState::Swept | DepositState::Rejected => None,
         }
@@ -342,9 +333,6 @@ impl Pump {
             transition,
             rejection_reason: match result.outcome {
                 StepOutcome::Reject(reason) => Some(reason),
-                StepOutcome::AdoptProductAnswer { credited: false } => {
-                    Some(RejectReason::ProductRefused)
-                }
                 _ => None,
             },
             attempt,
@@ -482,7 +470,6 @@ mod tests {
             std::time::Duration::from_secs(12)
         );
         assert_eq!(wait(WaitReason::Paused), interval);
-        assert_eq!(wait(WaitReason::ProductProcessing), interval);
         assert_eq!(
             super::wait_delay(
                 &StepOutcome::Wait {

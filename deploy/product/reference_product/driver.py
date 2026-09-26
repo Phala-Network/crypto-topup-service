@@ -222,9 +222,10 @@ def run_deposit(
             api, team, timeout, lambda view: _credited(view, address, states, expired_ref)
         )
         credited = _event(view, "deposit.credited", deposit_id=str(deposit.id))
-        confirmed = _event(view, "deposit.confirmed", deposit_id=str(deposit.id))
-        if confirmed["price_source"] != ("lock" if at_lock_price else "spot"):
-            raise RuntimeError(f"deposit was valued at the {confirmed['price_source']} price")
+        if credited["price_source"] != ("lock" if at_lock_price else "spot"):
+            raise RuntimeError(f"deposit was valued at the {credited['price_source']} price")
+        if credited["external_id"] != team or credited["product_lock_ref"] != lock_ref:
+            raise RuntimeError(f"deposit.credited names another account or quote: {credited}")
         expected_minor = deposit.credit_minor
         if lock is not None and at_lock_price:
             expected_minor = lock.credit_minor
@@ -236,14 +237,13 @@ def run_deposit(
         if credits != [(f"deposit:{deposit.id}", int(credited["amount_minor"]))]:
             raise RuntimeError(f"unexpected product ledger credits: {credits}")
         LOG.info(
-            "deposit %s is %s: credited %s minor at the %s price (quoted %s; transaction %s); "
+            "deposit %s is %s: credited %s minor at the %s price (quoted %s); "
             "the ledger holds one credit",
             deposit.id,
             deposit.state,
             credited["amount_minor"],
-            confirmed["price_source"],
+            credited["price_source"],
             None if lock is None else lock.credit_minor,
-            credited["destination_tx_id"],
         )
 
 

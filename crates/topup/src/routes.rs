@@ -13,8 +13,8 @@ use crate::rpc_provider::{configured_provider_url, provider_label};
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
 /// Construction checks everything that must agree across routes: unique versions, one finality
-/// rule and provider list per chain, one route name per chain asset, one settlement destination
-/// per product, and one destination unit across rate-lock routes.
+/// rule and provider list per chain, one route name per chain asset, one product key id per
+/// product, and one destination unit across rate-lock routes.
 #[derive(Debug, Default)]
 pub struct RouteSet {
     routes: Vec<RouteFile>,
@@ -72,8 +72,8 @@ impl RouteSet {
                 ));
             }
         }
-        // Settlement calls and product authentication read the destination from the routes, so
-        // every route of one product must name the same settlement URL and product key id.
+        // Product authentication reads the destination from the routes, so every route of one
+        // product must name the same product key id.
         let products = routes
             .iter()
             .map(|route| route.destination.product.as_str())
@@ -262,18 +262,10 @@ mod tests {
     }
 
     #[test]
-    fn route_loading_requires_one_settlement_destination_per_product() {
+    fn route_loading_requires_one_destination_per_product() {
         let route = fixture();
         let mut newer = route.clone();
         newer.version = route.version + 1;
-        newer.destination.settlement_url = "https://other.example/settlements".to_owned();
-        assert!(
-            RouteSet::new(vec![route.clone(), newer.clone()])
-                .expect_err("one product must not have two settlement URLs")
-                .contains("destination.settlement_url")
-        );
-
-        newer.destination.settlement_url = route.destination.settlement_url.clone();
         newer.destination.product_kid = "phala-cloud/v2".to_owned();
         assert!(
             RouteSet::new(vec![route.clone(), newer.clone()])
@@ -284,12 +276,11 @@ mod tests {
         newer.route = "builder-route".to_owned();
         newer.asset.contract = Address::repeat_byte(0x42);
         newer.destination.product = "builder".to_owned();
-        newer.destination.settlement_url = "https://builder.example/settlements".to_owned();
         let set = RouteSet::new(vec![route.clone(), newer]).expect("two products load");
         assert_eq!(
             set.destination("builder")
-                .map(|destination| destination.settlement_url.as_str()),
-            Some("https://builder.example/settlements")
+                .map(|destination| destination.product_kid.as_str()),
+            Some("phala-cloud/v2")
         );
         assert_eq!(set.destination("unknown"), None);
     }

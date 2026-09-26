@@ -8,7 +8,7 @@ template="$(dirname -- "$0")/routes/sandbox-sepolia.template.yaml"
 : "${RATE_LOCK_WINDOW_S:=120}"
 export RATE_LOCK_WINDOW_S
 for name in FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE \
-    PRODUCT_SLUG PRODUCT_KID SETTLEMENT_URL; do
+    PRODUCT_SLUG PRODUCT_KID; do
     [[ -n "${!name:-}" ]] || { echo "render-route.sh: $name is required" >&2; exit 1; }
 done
 for name in FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE; do
@@ -23,20 +23,16 @@ done
 }
 # Values land inside double-quoted YAML scalars: allow printable ASCII without quotes,
 # backslashes, or `$`.
-for name in PRODUCT_KID SETTLEMENT_URL; do
-    value=${!name}
-    if ! [[ "$value" =~ ^[[:print:]]{1,512}$ ]] || [[ "$value" == *[\"\\\$]* ]]; then
-        echo "render-route.sh: $name must be printable ASCII without quotes, backslashes, or \$" >&2
-        exit 1
-    fi
-done
-[[ ${#PRODUCT_KID} -le 128 ]] || { echo "render-route.sh: PRODUCT_KID is too long" >&2; exit 1; }
+if ! [[ "$PRODUCT_KID" =~ ^[[:print:]]{1,128}$ ]] || [[ "$PRODUCT_KID" == *[\"\\\$]* ]]; then
+    echo "render-route.sh: PRODUCT_KID must be printable ASCII without quotes, backslashes, or \$" >&2
+    exit 1
+fi
 
 # Single pass over the template: only allow-listed `${NAME}` placeholders are replaced, and
 # substituted values are never rescanned. Unlike envsubst, bare `$NAME` is not supported; any
 # `$NAME` or `${...}` left in the output (from the template or a value) is rejected below.
 allowed=" FORWARDER_FACTORY IMPLEMENTATION TREASURY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG \
-PRODUCT_KID SETTLEMENT_URL RATE_LOCK_WINDOW_S "
+PRODUCT_KID RATE_LOCK_WINDOW_S "
 rest="$(<"$template")"
 rendered=""
 while [[ "$rest" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do

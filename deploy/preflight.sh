@@ -209,7 +209,7 @@ route_value() {
 declare -A route=()
 if [[ -s "$tmp/route.yaml" ]]; then
     for key in chain_id forwarder_factory implementation treasury contract sanctions_oracle \
-        decimals settlement_url; do
+        decimals; do
         route[$key]=$(route_value "$key")
     done
     for key in forwarder_factory implementation treasury contract sanctions_oracle; do
@@ -221,7 +221,6 @@ if [[ -s "$tmp/route.yaml" ]]; then
                 "(deploy/CONTRACTS.md) and commit the real address"
         fi
     done
-    [[ "${route[settlement_url]}" == https://* ]] || fail "route settlement_url must use https"
 else
     fail "the compose has no inline $route_config config"
 fi

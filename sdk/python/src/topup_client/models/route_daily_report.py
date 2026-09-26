@@ -18,9 +18,6 @@ if TYPE_CHECKING:
     )
     from ..models.route_daily_report_deposits_by_state import RouteDailyReportDepositsByState
     from ..models.route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatus
-    from ..models.route_daily_report_settlements_by_status import (
-        RouteDailyReportSettlementsByStatus,
-    )
 
 
 T = TypeVar("T", bound="RouteDailyReport")
@@ -35,12 +32,15 @@ class RouteDailyReport:
             state.
         asset_contract (str): Route asset contract.
         chain_id (int): EVM chain identifier.
+        credited_undelivered (int): Credited deposits whose `deposit.credited` webhook the product has not acknowledged
+            yet.
+        credited_undelivered_max_age_seconds (int): Age in seconds of the oldest of those events; zero when every one
+            was delivered.
         deposits_by_state (RouteDailyReportDepositsByState): Deposit counts keyed by state.
         open_rate_lock_exposure_atomic (str): Sum of unconsumed rate-lock token amounts.
         refunds_by_status (RouteDailyReportRefundsByStatus): Refund counts keyed by status.
         rejected_holds_atomic (str): Rejected token amount still held after confirmed refunds.
         route (str): Stable route name.
-        settlements_by_status (RouteDailyReportSettlementsByStatus): Settlement counts keyed by status.
         treasury_balance_note (str): Balance source or explicit reason the treasury balance is unavailable.
         unflushed_balance_atomic (str): Sum of deposits not linked to a confirmed flush.
         flush_planning (FlushPlanningReport | None | Unset):
@@ -51,12 +51,13 @@ class RouteDailyReport:
     age_in_state_max_seconds: RouteDailyReportAgeInStateMaxSeconds
     asset_contract: str
     chain_id: int
+    credited_undelivered: int
+    credited_undelivered_max_age_seconds: int
     deposits_by_state: RouteDailyReportDepositsByState
     open_rate_lock_exposure_atomic: str
     refunds_by_status: RouteDailyReportRefundsByStatus
     rejected_holds_atomic: str
     route: str
-    settlements_by_status: RouteDailyReportSettlementsByStatus
     treasury_balance_note: str
     unflushed_balance_atomic: str
     flush_planning: FlushPlanningReport | None | Unset = UNSET
@@ -70,15 +71,16 @@ class RouteDailyReport:
         )  # noqa: PLC0415
         from ..models.route_daily_report_deposits_by_state import RouteDailyReportDepositsByState  # noqa: PLC0415
         from ..models.route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatus  # noqa: PLC0415
-        from ..models.route_daily_report_settlements_by_status import (
-            RouteDailyReportSettlementsByStatus,
-        )  # noqa: PLC0415
 
         age_in_state_max_seconds = self.age_in_state_max_seconds.to_dict()
 
         asset_contract = self.asset_contract
 
         chain_id = self.chain_id
+
+        credited_undelivered = self.credited_undelivered
+
+        credited_undelivered_max_age_seconds = self.credited_undelivered_max_age_seconds
 
         deposits_by_state = self.deposits_by_state.to_dict()
 
@@ -89,8 +91,6 @@ class RouteDailyReport:
         rejected_holds_atomic = self.rejected_holds_atomic
 
         route = self.route
-
-        settlements_by_status = self.settlements_by_status.to_dict()
 
         treasury_balance_note = self.treasury_balance_note
 
@@ -117,12 +117,13 @@ class RouteDailyReport:
                 "age_in_state_max_seconds": age_in_state_max_seconds,
                 "asset_contract": asset_contract,
                 "chain_id": chain_id,
+                "credited_undelivered": credited_undelivered,
+                "credited_undelivered_max_age_seconds": credited_undelivered_max_age_seconds,
                 "deposits_by_state": deposits_by_state,
                 "open_rate_lock_exposure_atomic": open_rate_lock_exposure_atomic,
                 "refunds_by_status": refunds_by_status,
                 "rejected_holds_atomic": rejected_holds_atomic,
                 "route": route,
-                "settlements_by_status": settlements_by_status,
                 "treasury_balance_note": treasury_balance_note,
                 "unflushed_balance_atomic": unflushed_balance_atomic,
             }
@@ -142,9 +143,6 @@ class RouteDailyReport:
         )  # noqa: PLC0415
         from ..models.route_daily_report_deposits_by_state import RouteDailyReportDepositsByState  # noqa: PLC0415
         from ..models.route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatus  # noqa: PLC0415
-        from ..models.route_daily_report_settlements_by_status import (
-            RouteDailyReportSettlementsByStatus,
-        )  # noqa: PLC0415
 
         d = dict(src_dict)
         age_in_state_max_seconds = RouteDailyReportAgeInStateMaxSeconds.from_dict(
@@ -155,6 +153,10 @@ class RouteDailyReport:
 
         chain_id = d.pop("chain_id")
 
+        credited_undelivered = d.pop("credited_undelivered")
+
+        credited_undelivered_max_age_seconds = d.pop("credited_undelivered_max_age_seconds")
+
         deposits_by_state = RouteDailyReportDepositsByState.from_dict(d.pop("deposits_by_state"))
 
         open_rate_lock_exposure_atomic = d.pop("open_rate_lock_exposure_atomic")
@@ -164,10 +166,6 @@ class RouteDailyReport:
         rejected_holds_atomic = d.pop("rejected_holds_atomic")
 
         route = d.pop("route")
-
-        settlements_by_status = RouteDailyReportSettlementsByStatus.from_dict(
-            d.pop("settlements_by_status")
-        )
 
         treasury_balance_note = d.pop("treasury_balance_note")
 
@@ -205,12 +203,13 @@ class RouteDailyReport:
             age_in_state_max_seconds=age_in_state_max_seconds,
             asset_contract=asset_contract,
             chain_id=chain_id,
+            credited_undelivered=credited_undelivered,
+            credited_undelivered_max_age_seconds=credited_undelivered_max_age_seconds,
             deposits_by_state=deposits_by_state,
             open_rate_lock_exposure_atomic=open_rate_lock_exposure_atomic,
             refunds_by_status=refunds_by_status,
             rejected_holds_atomic=rejected_holds_atomic,
             route=route,
-            settlements_by_status=settlements_by_status,
             treasury_balance_note=treasury_balance_note,
             unflushed_balance_atomic=unflushed_balance_atomic,
             flush_planning=flush_planning,

@@ -3,15 +3,14 @@
 These are the calls a product such as Phala Cloud makes, and the checks it adds to each:
 
 1. pin the service's settlement key from attestation evidence bound to a fresh nonce;
-2. register an account and recompute its persistent deposit address before showing it;
+2. create a persistent deposit address (the account is created with it) and recompute it;
 3. create a quote-first rate lock and recompute its single-use address before showing it;
 4. list the account's deposits;
-5. verify inbound settlement requests (RFC 9421) and webhook deliveries (Standard Webhooks).
+5. receive webhooks (Standard Webhooks) and fulfill each `deposit.credited` once.
 
-The two handlers of step 5 go behind the product's settlement and webhook URLs. The settlement
-handler stops where the SDK stops: the product still enforces its caps, verifies the cited log
-with its own RPC, and commits the credit atomically before answering (docs/architecture.md
-section 11). deploy/product/reference_product is a complete product that does all of it.
+The handler of step 5 goes behind the product's webhook URL. It stops where the SDK stops: the
+product commits the credit, keyed by `credit.fulfillment_key` under a unique index, before
+answering `2xx`. deploy/product/reference_product is a complete product that does all of it.
 
 Run steps 1-4 against the sandbox (deploy/sandbox/README.md):
 
@@ -25,31 +24,23 @@ import argparse
 import json
 import secrets
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from topup_client.models import RateLockResponse
 from topup_sdk import (
     AttestationError,
+    CreditedDeposit,
     RequestSigner,
     TopupClient,
     WebhookEvent,
     load_public_key,
-    verify_request,
     verify_webhook,
 )
-from topup_sdk.addresses import (
-    deposit_id,
-    forwarder_address,
-    lock_salt,
-    persistent_salt,
-    same_address,
-)
+from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
 
 SETTLEMENT_KEYID = "settlement/v1"
 
@@ -96,8 +87,8 @@ def pin_settlement_key(client: TopupClient) -> Ed25519PublicKey:
 
 
 def register(config: Integration, client: TopupClient, account: str) -> str:
-    """Registers an account and returns its persistent address, recomputed from its salt."""
-    client.register_account(account)
+    """Returns the account's persistent address, recomputed from its salt; creating the address
+    creates the account."""
     address = client.create_deposit_address(account)
     salt = persistent_salt(config.product_slug, account, address.salt_inputs.version)
     expected = forwarder_address(config.factory, config.implementation, salt)
@@ -122,56 +113,26 @@ def quote(
     return lock
 
 
-# 5. Inbound settlement requests and webhooks -----------------------------------------------------
-
-
-def verify_settlement(
-    public_url: str,
-    settlement_key: Ed25519PublicKey,
-    path: str,
-    headers: Mapping[str, str],
-    body: bytes,
-) -> dict[str, Any]:
-    """Returns a `POST {public_url}/settlements` payload whose signature and key check out.
-
-    Raises `SignatureError` (answer `401`) unless the request is signed by the pinned key over
-    the method, target URI, body digest, and idempotency key, and `ValueError` (answer `422`)
-    unless the key names the payload and equals `deposit:` plus the deposit id recomputed from
-    the cited chain event. The target URI comes from the product's own public URL, never from
-    the `Host` header.
-    """
-    public = urlsplit(public_url)
-    verified = verify_request(
-        method="POST",
-        target_uri=f"{public.scheme}://{public.netloc}{path}",
-        headers=headers,
-        body=body,
-        public_key=settlement_key,
-        keyid=SETTLEMENT_KEYID,
-        require_idempotency_key=True,
-    )
-    payload = json.loads(body)
-    if not isinstance(payload, dict) or payload.get("idempotency_key") != verified.idempotency_key:
-        raise ValueError("the idempotency key does not name this payload")
-    try:
-        evidence = payload["evidence"]
-        expected = deposit_id(evidence["chain_id"], evidence["tx_hash"], evidence["log_index"])
-    except (KeyError, TypeError) as error:
-        raise ValueError("the payload cites no chain event") from error
-    if verified.idempotency_key != f"deposit:{expected}":
-        raise ValueError("the idempotency key is not the cited event's deposit id")
-    return payload
+# 5. Webhooks and fulfillment ---------------------------------------------------------------------
 
 
 def receive_webhook(
-    settlement_key: Ed25519PublicKey, headers: Mapping[str, str], body: bytes
+    settlement_key: Ed25519PublicKey,
+    headers: Mapping[str, str],
+    body: bytes,
+    fulfill: Callable[[CreditedDeposit], None],
 ) -> WebhookEvent:
-    """Returns a verified event; `SignatureError` means answer `401`.
+    """Verifies a delivery and fulfills it when it is `deposit.credited`.
 
-    Store events once by `event.id`, which stays the same across redeliveries. Events never move
-    balances: settlement requests do. Use them to notify the user and refresh history.
+    `SignatureError` means answer `400`. `fulfill` must credit `credit.amount_minor` to
+    `credit.external_id` at most once per `credit.fulfillment_key`, committing before this
+    returns, and treat a repeat as done; answer `2xx` only after it returns. Every other event
+    type is informational: notify the user and refresh history.
     """
-    return verify_webhook(headers, body, settlement_key)
+    event = verify_webhook(headers, body, settlement_key)
+    if event.type == "deposit.credited":
+        fulfill(CreditedDeposit.from_event(event))
+    return event
 
 
 def main() -> int:
@@ -184,7 +145,7 @@ def main() -> int:
         pin_settlement_key(client)
         print("pinned the settlement key from attestation")
         account = f"example-{uuid.uuid4().hex[:12]}"
-        print(f"registered {account}; persistent address {register(config, client, account)}")
+        print(f"created {account}; persistent address {register(config, client, account)}")
         lock = quote(
             config, client, account, f"checkout-{uuid.uuid4().hex[:12]}", args.amount_minor
         )

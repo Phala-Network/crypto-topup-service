@@ -19,6 +19,16 @@ pub fn deposit_id(chain_id: u64, tx_hash: B256, log_index: u64) -> Uuid {
     Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
 }
 
+/// Returns the event id of a deposit's `deposit.credited` webhook.
+///
+/// UUIDv5 in the deposit namespace over `deposit.credited:{deposit_id}`, so every retry, replay,
+/// and re-emission after a restore carries the same `webhook-id`.
+#[must_use]
+pub fn credited_event_id(deposit_id: Uuid) -> Uuid {
+    let name = format!("deposit.credited:{deposit_id}");
+    Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::b256;
@@ -33,6 +43,16 @@ mod tests {
         assert_eq!(
             deposit_id(1, tx_hash, 42).to_string(),
             "20513a59-9b80-53df-9832-08749de3dcc5"
+        );
+    }
+
+    #[test]
+    fn credited_event_id_matches_python_sdk_vector() {
+        // topup_sdk.credited_event_id (sdk/python/tests/test_fulfillment.py).
+        let deposit = Uuid::from_u128(0x3f1c2b9e_6a8d_5c47_9e21_0b7d4f6a8c13);
+        assert_eq!(
+            credited_event_id(deposit).to_string(),
+            "26a20351-ab10-595a-852f-9c1aa0372d73"
         );
     }
 }

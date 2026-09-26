@@ -3,7 +3,7 @@
 Python SDK for the crypto top-up service product API (Python 3.12+).
 
 - `topup_client`: generated from `crates/topup/openapi.json`; do not edit.
-- `topup_sdk`: request signing, settlement-request and webhook verification, typed
+- `topup_sdk`: request signing, request and webhook verification, typed
   `deposit.credited` credits for fulfillment (`CreditedDeposit`), address and deposit-id
   recomputation, and `TopupClient`, whose helpers are idempotent and retry safely.
 

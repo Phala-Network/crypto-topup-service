@@ -43,6 +43,11 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Removed
 
+- **Breaking:** the generated `RouteDailyReportSettlementsByStatus` and
+  `RouteDailyReport.settlements_by_status`, replaced by `credited_undelivered` and
+  `credited_undelivered_max_age_seconds`; the settlement-request test vectors, since the service
+  no longer sends settlement requests.
+
 - **Breaking:** the generated `ErrorDetail.work_package` field and the `501` response of
   `/v1/attestation` (`get_attestation`) (#90). Both belonged only to the pre-C11 placeholder
   attestor; the production service never returned them. There was no deprecation window because

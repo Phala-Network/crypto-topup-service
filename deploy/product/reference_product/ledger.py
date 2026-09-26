@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS team_addresses (
     version INTEGER,
     lock_ref TEXT
 );
--- team_id is NULL only for durable refusals of keys that name no known workspace.
+-- team_id is NULL only for credits held because they name no known workspace.
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
     team_id TEXT REFERENCES teams (id),
@@ -67,17 +67,6 @@ class StoredOrder:
     status: str
     reason: str | None
     credit_transaction_id: str | None
-
-    def answer(self, *, include_payload: bool) -> dict[str, Any]:
-        """The settlement-contract answer; `GET` always returns the original payload."""
-        body: dict[str, Any] = {"status": self.status}
-        if self.status == "accepted":
-            body["destination_tx_id"] = self.credit_transaction_id
-        if self.status == "rejected":
-            body["reason"] = self.reason
-        if include_payload:
-            body["payload"] = self.payload
-        return body
 
 
 class ProductLedger:
@@ -154,6 +143,19 @@ class ProductLedger:
                 (team_id,),
             ).fetchall()
         return [(str(key), int(amount)) for key, amount in rows]
+
+    def orders_for(self, team_id: str) -> list[dict[str, Any]]:
+        """The workspace's crypto top-up orders: `accepted` (credited) or `held` (refused)."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT provider_order_id, status, reason FROM orders "
+                "WHERE team_id = ? AND order_flow_code = ? ORDER BY created_at",
+                (team_id, ORDER_FLOW_CODE),
+            ).fetchall()
+        return [
+            {"provider_order_id": key, "status": status, "reason": reason}
+            for key, status, reason in rows
+        ]
 
     def record_event(self, event_id: str, event_type: str, data: Mapping[str, Any]) -> bool:
         """Stores a webhook once; returns False for a duplicate delivery."""

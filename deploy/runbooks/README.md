@@ -59,14 +59,12 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | `TopupReconciliationMismatch` (`check:address_derivation`), `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupDepositStateAgeExceeded` (`state:detected` or `state:confirmed`) | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
-| `TopupDepositStateAgeExceeded` (`state:cleared`), `topup-pump-<n>` | [Stuck settlement](stuck-settlement.md) |
 | `TopupDepositStateAgeExceeded` (`state:credited`: not swept after 48 hours) | [Flush reverted or bisected](flush-reverted-or-bisected.md); a forwarder below the route's `min_flush_atomic` is never swept |
-| Settlement `422`, product reports a payload mismatch | [422 payload mismatch](payload-mismatch-422.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
 | `TopupLockExpiryFailing`, `topup-lock-expiry` | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
 | `topup-backup` | [Backup age](backup-age.md) |
-| `topup-outbox-<n>`, `outbox delivery poll failed`, product reports missing webhooks | [Outbox backlog](outbox-backlog.md) |
+| `topup-outbox-<n>`, `outbox delivery poll failed`, daily report `credited_undelivered`, product reports missing webhooks or credits | [Outbox backlog](outbox-backlog.md) |
 | `Reverted`, `IsolatedAddress`, `PlanningExcluded`, `FeeCapReached`, `topup-flush-<route>`, `flush_planning.outcome` `failed` or `send_failed` | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
 | `OperatorRoleMissing`, `MissingConsumedReceipt`, unexplained operator transaction | [Operator key compromise](operator-key-compromise.md) |
@@ -92,14 +90,12 @@ in its current form against a CVM.
 | Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Flush reverted or bisected | 2026-09-23, local | complete: selective revert, fresh nonce, bisection, isolation, pause voiding | [#83](https://github.com/Phala-Network/crypto-topup-service/pull/83) |
-| 422 payload mismatch | 2026-09-22, local | complete: 422, no resend, GET-first adoption | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Refund execution | 2026-09-22, local | complete: request, approve, record, finality-checked confirm | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Operator key compromise | 2026-09-22, local | partial: revoke, role gate, key-version rotation; Safe steps human-only | [#74](https://github.com/Phala-Network/crypto-topup-service/pull/74) |
 | Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/crypto-topup-service/pull/126) |
 | Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Provider disagreement | 2026-09-22, local | partial: sanctions truth table; no disagreeing-provider fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Stuck settlement | 2026-09-22, local | partial: nudge; no `processing`/`409` product fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Price outage | 2026-09-22, local | partial: route pause; no controllable price-source fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Rejected funds at treasury | 2026-09-22, local | partial: report; Compliance and Safe steps human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
 | Gas refill | 2026-09-22, local | partial: balance and nonce reads; the transfer is human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |

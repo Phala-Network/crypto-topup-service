@@ -130,7 +130,6 @@ jobs:
           TEST_TOKEN=0x1111111111111111111111111111111111111111 \
           SANCTIONS_ORACLE=0x2222222222222222222222222222222222222222 \
           PRODUCT_SLUG=ci-check PRODUCT_KID=ci-check/v1 \
-          SETTLEMENT_URL=https://product.invalid/settlements \
             deploy/sandbox/render-route.sh >"$route"
           docker run --rm -i crypto-topup-service:ci \
             topup route validate --template /dev/stdin <"$route"

@@ -7,8 +7,9 @@ raises no alert for this: only the product can tell its own requests from others
 **Impact:** whoever holds the seed can call the product API as the product: register accounts,
 issue addresses and rate locks (within the exposure caps and rate limits), cancel locks, pause
 accounts, read deposits, and request refunds. It cannot move funds or credit: forwarders pay only
-the treasury, settlements go only to the product's attested settlement URL, and every refund waits
-for Finance.
+the treasury, credits exist only as `deposit.credited` events the service signs and delivers to
+the registered webhook URL, and every refund waits for Finance, which confirms a refund of a
+credited deposit with the product before approving it.
 
 ## Replace the key
 

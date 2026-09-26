@@ -2,14 +2,12 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::{Connection as _, PgConnection, PgPool, Row};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_core::deposit::{DepositState, RejectReason};
 use uuid::Uuid;
 
-use crate::db::{Deposit, OutboxEvent};
 use crate::routes::RouteSet;
 
 use super::{Finding, ReconciliationError};
@@ -348,123 +346,6 @@ async fn try_lease_owner_lock(
     }))
 }
 
-/// Leases one deposit for settlement adoption, skipping rows a pump currently owns.
-///
-/// Normal mode claims only unleased `cleared` deposits. Post-restore mode holds the lease-owner
-/// lock exclusively, so no pump is running and restored lease columns carry no ownership.
-pub(crate) async fn claim_deposit(
-    pool: &PgPool,
-    deposit_id: Uuid,
-    lease_token: Uuid,
-    post_restore: bool,
-) -> Result<bool, ReconciliationError> {
-    let claimed = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        WITH candidate AS (
-            SELECT id FROM deposits
-            WHERE id = $1
-              AND ($3 OR (state = 'cleared'
-                          AND (lease_until IS NULL OR lease_until <= now())))
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE deposits d
-        SET lease_token = $2, lease_until = now() + interval '5 minutes', updated_at = now()
-        FROM candidate
-        WHERE d.id = candidate.id
-        RETURNING d.id
-        "#,
-    )
-    .bind(deposit_id)
-    .bind(lease_token)
-    .bind(post_restore)
-    .fetch_optional(pool)
-    .await?;
-    Ok(claimed.is_some())
-}
-
-/// Releases a reconciliation lease without changing the deposit schedule.
-pub(crate) async fn release_lease(
-    pool: &PgPool,
-    deposit_id: Uuid,
-    lease_token: Uuid,
-) -> Result<(), ReconciliationError> {
-    sqlx::query(
-        r#"
-        UPDATE deposits
-        SET lease_token = NULL, lease_until = NULL, updated_at = now()
-        WHERE id = $1 AND lease_token = $2
-        "#,
-    )
-    .bind(deposit_id)
-    .bind(lease_token)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Post-restore exception to `core::next`: moves a terminal deposit to the product's answer.
-///
-/// §13 makes the product answer authoritative after a restore, including terminal states that
-/// the forward-only state machine cannot reach, such as `credited → rejected`.
-pub(crate) async fn apply_product_answer(
-    pool: &PgPool,
-    deposit: &Deposit,
-    lease_token: Uuid,
-    target: DepositState,
-    evidence: &Value,
-    events: &[OutboxEvent],
-) -> Result<bool, ReconciliationError> {
-    let reason = (target == DepositState::Rejected).then_some(RejectReason::ProductRefused.code());
-    let mut transaction = pool.begin().await?;
-    let updated = sqlx::query(
-        r#"
-        UPDATE deposits
-        SET state = $2, reason = $3, attempt = 0, next_attempt_at = now(),
-            lease_token = NULL, lease_until = NULL, updated_at = now()
-        WHERE id = $1 AND state = $4 AND lease_token = $5
-        "#,
-    )
-    .bind(deposit.id)
-    .bind(state_code(target))
-    .bind(reason)
-    .bind(state_code(deposit.state))
-    .bind(lease_token)
-    .execute(&mut *transaction)
-    .await?
-    .rows_affected()
-        == 1;
-    if !updated {
-        transaction.rollback().await?;
-        return Ok(false);
-    }
-    sqlx::query(
-        r#"
-        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
-        VALUES ($1, $2, $3, $4, 0, $5)
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(deposit.id)
-    .bind(state_code(deposit.state))
-    .bind(state_code(target))
-    .bind(json!({"source": "post_restore_product_answer", "adoption": evidence}))
-    .execute(&mut *transaction)
-    .await?;
-    for event in events {
-        sqlx::query(
-            "INSERT INTO outbox (id, event_type, payload, next_attempt_at) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(event.id)
-        .bind(&event.event_type)
-        .bind(&event.payload)
-        .bind(event.next_attempt_at)
-        .execute(&mut *transaction)
-        .await?;
-    }
-    transaction.commit().await?;
-    Ok(true)
-}
-
 /// Returns the next block of the missing-deposit scan, if one was recorded.
 pub(crate) async fn deposit_cursor(
     pool: &PgPool,
@@ -611,17 +492,6 @@ pub(crate) async fn advance_custody_cursor(
         .rows_affected(),
     };
     Ok(rows == 1)
-}
-
-pub(crate) const fn state_code(state: DepositState) -> &'static str {
-    match state {
-        DepositState::Detected => "detected",
-        DepositState::Confirmed => "confirmed",
-        DepositState::Cleared => "cleared",
-        DepositState::Credited => "credited",
-        DepositState::Swept => "swept",
-        DepositState::Rejected => "rejected",
-    }
 }
 
 fn parse_u256(value: &str) -> Result<U256, ReconciliationError> {

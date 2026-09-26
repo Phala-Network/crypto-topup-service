@@ -20,8 +20,8 @@ class UpdateProductRequest:
         Attributes:
             public_key (str): Standard base64 of the product's new 32-byte ed25519 request-verification public key.
             reason (str): Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
-            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the product's
-                attested settlement URL also uses `http` (local stacks).
+            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+                own public origin uses `http` (local stacks).
     """
 
     public_key: str

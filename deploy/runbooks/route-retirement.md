@@ -18,8 +18,8 @@ admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses"]}'
 ```
 
 Then, in the daily report (`admin GET /v1/admin/report/daily`), read the route's (for a chain,
-every route on it) `open_rate_lock_exposure_atomic` and the `detected`, `confirmed`, `cleared`,
-and `credited` counts of `deposits_by_state`.
+every route on it) `open_rate_lock_exposure_atomic`, the `detected`, `confirmed`, and `credited` counts of
+`deposits_by_state`, and `credited_undelivered`.
 
 ## Decide
 

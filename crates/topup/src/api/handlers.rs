@@ -838,8 +838,7 @@ fn validate_product_slug(slug: &str) -> ApiResult<()> {
 }
 
 /// Validates a product's credentials against the attested route that names its slug. The key id
-/// and settlement URL come only from that route, so a product no loaded route names could never
-/// authenticate.
+/// comes only from that route, so a product no loaded route names could never authenticate.
 fn validate_product_credentials(
     state: &AppState,
     slug: &str,
@@ -850,22 +849,22 @@ fn validate_product_credentials(
     VerificationKey::from_base64(String::new(), public_key).map_err(|_| {
         ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
     })?;
-    let destination = state
+    state
         .routes
         .destination(slug)
         .ok_or_else(|| ApiError::bad_request("no loaded route names this product slug"))?;
-    validate_webhook_url(webhook_url, &destination.settlement_url)
+    let local_stack = state.public_origin.to_string().starts_with("http://");
+    validate_webhook_url(webhook_url, local_stack)
 }
 
 /// Requires an absolute `https` URL without credentials or fragment. `http` is accepted only
-/// when the product's attested settlement URL is itself `http`, which only local stacks use.
-fn validate_webhook_url(webhook_url: &str, settlement_url: &str) -> ApiResult<()> {
+/// when the service's own public origin is `http`, which only local stacks use.
+fn validate_webhook_url(webhook_url: &str, allow_http: bool) -> ApiResult<()> {
     const MESSAGE: &str = "webhook_url must be an absolute https URL without credentials";
     if webhook_url.len() > 2048 {
         return Err(ApiError::bad_request(MESSAGE));
     }
     let url = url::Url::parse(webhook_url).map_err(|_| ApiError::bad_request(MESSAGE))?;
-    let allow_http = url::Url::parse(settlement_url).is_ok_and(|url| url.scheme() == "http");
     let scheme_allowed = url.scheme() == "https" || (allow_http && url.scheme() == "http");
     if !scheme_allowed
         || url.host_str().is_none_or(str::is_empty)
@@ -899,7 +898,7 @@ fn validate_state(state: Option<&str>) -> ApiResult<()> {
     if let Some(state) = state
         && !matches!(
             state,
-            "detected" | "confirmed" | "cleared" | "credited" | "swept" | "rejected"
+            "detected" | "confirmed" | "credited" | "swept" | "rejected"
         )
     {
         return Err(ApiError::bad_request("unknown deposit state"));
@@ -954,19 +953,17 @@ mod tests {
     }
 
     #[test]
-    fn webhook_urls_use_https_unless_the_attested_settlement_url_is_http() {
-        let https = "https://product.example/settlements";
-        let http = "http://product:8089/settlements";
-        assert!(validate_webhook_url("https://product.example/webhooks", https).is_ok());
-        assert!(validate_webhook_url("http://product.example/webhooks", https).is_err());
-        assert!(validate_webhook_url("http://product:8089/webhooks", http).is_ok());
+    fn webhook_urls_use_https_unless_the_service_origin_is_http() {
+        assert!(validate_webhook_url("https://product.example/webhooks", false).is_ok());
+        assert!(validate_webhook_url("http://product.example/webhooks", false).is_err());
+        assert!(validate_webhook_url("http://product:8089/webhooks", true).is_ok());
         for url in [
             "product.example/webhooks",
             "ftp://product.example/webhooks",
             "https://user@product.example/webhooks",
             "https://product.example/webhooks#fragment",
         ] {
-            assert!(validate_webhook_url(url, http).is_err(), "{url}");
+            assert!(validate_webhook_url(url, true).is_err(), "{url}");
         }
     }
 }

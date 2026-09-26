@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
@@ -12,8 +11,6 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
 use topup_adapters::pricing::PriceSource;
-use topup_adapters::settlement::http::{SettlementAnswer, SettlementApi, SettlementClient};
-use topup_adapters::signer::actor::SignerHandle;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::RouteFile;
@@ -23,122 +20,11 @@ use topup_core::valuation::{
 use uuid::Uuid;
 
 use crate::db::{
-    CanonicalEvidence, Deposit, LockConsumption, OutboxEvent, SettlementAdoption, StoredValuation,
-    TransitionEffects,
+    CanonicalEvidence, Deposit, LockConsumption, OutboxEvent, StoredValuation, TransitionEffects,
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
 use crate::routes::RouteSet;
-
-/// Authoritative prior answer returned by the destination product.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProductAnswer {
-    /// Whether the product accepted rather than rejected the original payload.
-    pub accepted: bool,
-    /// Product ledger transaction identifier, when one exists.
-    pub destination_tx_id: Option<String>,
-    /// Original immutable settlement payload.
-    pub payload: Value,
-}
-
-/// Product lookup failure.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("product answer lookup failed")]
-pub struct ProductLookupError;
-
-/// Minimal GET-by-idempotency-key boundary shared with the settlement client.
-#[async_trait]
-pub trait ProductLookup: Send + Sync {
-    /// Returns the product's stored answer, when the key is known.
-    async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError>;
-}
-
-/// Signed product lookup resolved from the deposit's owning product.
-pub struct SettlementProductLookup {
-    pool: PgPool,
-    routes: Arc<RouteSet>,
-    signer: SignerHandle,
-    request_timeout: Duration,
-}
-
-impl SettlementProductLookup {
-    /// Creates a lookup using each product's attested route destination.
-    #[must_use]
-    pub fn new(
-        pool: PgPool,
-        routes: Arc<RouteSet>,
-        signer: SignerHandle,
-        request_timeout: Duration,
-    ) -> Self {
-        Self {
-            pool,
-            routes,
-            signer,
-            request_timeout,
-        }
-    }
-}
-
-#[async_trait]
-impl ProductLookup for SettlementProductLookup {
-    async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
-        let deposit_id = key
-            .strip_prefix("deposit:")
-            .ok_or(ProductLookupError)?
-            .parse::<Uuid>()
-            .map_err(|_| ProductLookupError)?;
-        let product = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT products.slug
-            FROM deposits
-            JOIN accounts ON accounts.id = deposits.account_id
-            JOIN products ON products.id = accounts.product_id
-            WHERE deposits.id = $1
-            "#,
-        )
-        .bind(deposit_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|_| ProductLookupError)?
-        .ok_or(ProductLookupError)?;
-        let destination = self
-            .routes
-            .destination(&product)
-            .ok_or(ProductLookupError)?;
-        let client = SettlementClient::new(
-            &destination.settlement_url,
-            self.signer.clone(),
-            self.request_timeout,
-        )
-        .map_err(|_| ProductLookupError)?;
-        match client
-            .get_by_key(key)
-            .await
-            .map_err(|_| ProductLookupError)?
-        {
-            None => Ok(None),
-            Some(SettlementAnswer::Accepted {
-                destination_tx_id,
-                payload,
-            }) => Ok(Some(ProductAnswer {
-                accepted: true,
-                destination_tx_id: Some(destination_tx_id),
-                payload,
-            })),
-            Some(SettlementAnswer::Rejected { payload, .. }) => Ok(Some(ProductAnswer {
-                accepted: false,
-                destination_tx_id: None,
-                payload,
-            })),
-            Some(
-                SettlementAnswer::Processing { .. }
-                | SettlementAnswer::Conflict409
-                | SettlementAnswer::PayloadMismatch422
-                | SettlementAnswer::Unknown { .. },
-            ) => Err(ProductLookupError),
-        }
-    }
-}
 
 #[async_trait]
 trait FinalityReader: Send + Sync {
@@ -189,16 +75,11 @@ pub struct ConfirmStep {
     routes: BTreeMap<(String, u64), RouteRuntime>,
     asset_routes: BTreeMap<(u64, Address), (String, u64)>,
     chains: BTreeMap<u64, ChainPair>,
-    product_lookup: Arc<dyn ProductLookup>,
 }
 
 impl ConfirmStep {
     /// Builds production adapters for every loaded route version and each chain's providers.
-    pub fn from_routes(
-        pool: PgPool,
-        routes: &RouteSet,
-        product_lookup: Arc<dyn ProductLookup>,
-    ) -> Result<Self, ConfirmConfigError> {
+    pub fn from_routes(pool: PgPool, routes: &RouteSet) -> Result<Self, ConfirmConfigError> {
         let mut runtimes = BTreeMap::new();
         for route in routes.routes() {
             let pricing = PricingRuntime::configured(route).map_err(ConfirmConfigError)?;
@@ -240,7 +121,6 @@ impl ConfirmStep {
             routes: runtimes,
             asset_routes,
             chains,
-            product_lookup,
         })
     }
 
@@ -254,7 +134,6 @@ impl ConfirmStep {
         primary_price: Arc<dyn PriceSource>,
         check_price: Option<Arc<dyn PriceSource>>,
         fx_price: Option<Arc<dyn PriceSource>>,
-        product_lookup: Arc<dyn ProductLookup>,
     ) -> Self
     where
         R1: ChainReader + Send + Sync + 'static,
@@ -280,22 +159,10 @@ impl ConfirmStep {
                     secondary: Arc::new(secondary_chain),
                 },
             )]),
-            product_lookup,
         }
     }
 
     async fn execute(&self, deposit: &Deposit) -> StepResult {
-        let key = format!("deposit:{}", deposit.id);
-        let product_answer = match self.product_lookup.get_by_key(&key).await {
-            Ok(answer) => answer,
-            Err(_) => {
-                return retry(
-                    RetryError::Transient,
-                    json!({"stage": "product_lookup", "error": "lookup_failed"}),
-                    TransitionEffects::default(),
-                );
-            }
-        };
         let context = match self.context_lookup.load(deposit.address_id).await {
             Ok(context) => context,
             Err(error) => {
@@ -307,10 +174,6 @@ impl ConfirmStep {
                 );
             }
         };
-        if let Some(answer) = product_answer {
-            return adopt_answer(deposit, &context, key, answer);
-        }
-
         let Some(chains) = self.chains.get(&deposit.chain_id) else {
             return retry(
                 RetryError::InvariantViolation,
@@ -504,7 +367,6 @@ impl Step for ConfirmStep {
 struct ConfirmationContext {
     address: Address,
     product_id: Uuid,
-    lock_ref: Option<String>,
     lock: Option<StoredLock>,
 }
 
@@ -534,7 +396,7 @@ impl ContextLookup for PostgresContextLookup {
 async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address, address.lock_ref, account.product_id, address.kind,
+        SELECT address.address, account.product_id, address.kind,
                rate_lock.route, rate_lock.amount_atomic::text AS amount_atomic,
                rate_lock.price_scaled::text AS price_scaled,
                rate_lock.credit_minor::text AS credit_minor,
@@ -600,7 +462,6 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
     Ok(ConfirmationContext {
         address,
         product_id: row.try_get("product_id")?,
-        lock_ref: row.try_get("lock_ref")?,
         lock,
     })
 }
@@ -819,122 +680,6 @@ fn retry(error: RetryError, evidence: Value, effects: TransitionEffects) -> Step
     }
 }
 
-fn adopt_answer(
-    deposit: &Deposit,
-    context: &ConfirmationContext,
-    key: String,
-    answer: ProductAnswer,
-) -> StepResult {
-    let adopted = match parse_adopted_valuation(&answer.payload) {
-        Ok(adopted) => adopted,
-        Err(error) => {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "product_lookup", "error": error}),
-                TransitionEffects::default(),
-            );
-        }
-    };
-    if adopted.lock_ref.as_deref() != context.lock_ref.as_deref() && adopted.lock_ref.is_some() {
-        return retry(
-            RetryError::InvariantViolation,
-            json!({"stage": "product_lookup", "error": "product_payload_lock_ref"}),
-            TransitionEffects::default(),
-        );
-    }
-    let ProductAnswer {
-        accepted,
-        destination_tx_id,
-        payload,
-    } = answer;
-    let events = if accepted {
-        Vec::new()
-    } else {
-        vec![rejected_event(
-            deposit,
-            context.product_id,
-            RejectReason::ProductRefused,
-        )]
-    };
-    let lock_consumption = adopted.lock_ref.map(|_| LockConsumption {
-        address_id: deposit.address_id,
-        idempotent: true,
-    });
-    let valuation = adopted.valuation;
-    StepResult {
-        outcome: StepOutcome::AdoptProductAnswer { credited: accepted },
-        evidence: json!({
-            "stage": "product_lookup",
-            "result": if accepted { "accepted" } else { "rejected" },
-            "key": key,
-            "destination_tx_id": destination_tx_id,
-            "valuation_at": valuation.valuation_at,
-            "price_scaled": valuation.price_scaled.to_string(),
-            "credit_minor": valuation.credit_minor.value().to_string(),
-            "deposit_id": deposit.id,
-        }),
-        events,
-        effects: TransitionEffects {
-            canonical_evidence: None,
-            valuation: Some(valuation),
-            settlement_adoption: Some(SettlementAdoption {
-                key,
-                payload,
-                accepted,
-                destination_tx_id,
-            }),
-            lock_consumption,
-        },
-    }
-}
-
-struct AdoptedValuation {
-    valuation: StoredValuation,
-    lock_ref: Option<String>,
-}
-
-fn parse_adopted_valuation(payload: &Value) -> Result<AdoptedValuation, &'static str> {
-    let credit_minor = payload
-        .get("amount_minor")
-        .and_then(Value::as_str)
-        .ok_or("product_payload_amount_minor")?
-        .parse::<u64>()
-        .map_err(|_| "product_payload_amount_minor")?;
-    let evidence = payload
-        .get("evidence")
-        .and_then(Value::as_object)
-        .ok_or("product_payload_evidence")?;
-    let price_scaled = evidence
-        .get("price_scaled")
-        .and_then(Value::as_str)
-        .ok_or("product_payload_price_scaled")?
-        .parse::<u64>()
-        .map_err(|_| "product_payload_price_scaled")?;
-    ScaledPrice::new(price_scaled, PRICE_SCALE).map_err(|_| "product_payload_price_scaled")?;
-    let valuation_at = evidence
-        .get("valuation_at")
-        .and_then(Value::as_str)
-        .ok_or("product_payload_valuation_at")?;
-    let valuation_at = DateTime::parse_from_rfc3339(valuation_at)
-        .map_err(|_| "product_payload_valuation_at")?
-        .with_timezone(&Utc);
-    let lock_ref = match evidence.get("lock_ref") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(lock_ref)) if !lock_ref.is_empty() => Some(lock_ref.clone()),
-        Some(_) => return Err("product_payload_lock_ref"),
-    };
-    Ok(AdoptedValuation {
-        valuation: StoredValuation {
-            valuation_at,
-            price_scaled,
-            price_source: if lock_ref.is_some() { "lock" } else { "spot" }.to_owned(),
-            credit_minor: MinorAmount::new(credit_minor),
-            quote: payload.clone(),
-        },
-        lock_ref,
-    })
-}
-
 fn unix_seconds(time: DateTime<Utc>) -> Option<UnixSeconds> {
     u64::try_from(time.timestamp()).ok().map(UnixSeconds::new)
 }
@@ -1027,18 +772,6 @@ mod tests {
         }
     }
 
-    struct MockProduct(Result<Option<ProductAnswer>, ProductLookupError>);
-
-    #[async_trait]
-    impl ProductLookup for MockProduct {
-        async fn get_by_key(
-            &self,
-            _key: &str,
-        ) -> Result<Option<ProductAnswer>, ProductLookupError> {
-            self.0.clone()
-        }
-    }
-
     struct MockContext(ConfirmationContext);
 
     #[async_trait]
@@ -1046,81 +779,6 @@ mod tests {
         async fn load(&self, _address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
             Ok(self.0.clone())
         }
-    }
-
-    #[tokio::test]
-    async fn adopts_accepted_product_answer_before_external_reads() {
-        let answer = ProductAnswer {
-            accepted: true,
-            destination_tx_id: Some("credit-1".to_owned()),
-            payload: product_payload(None),
-        };
-        let result = step(
-            route(PricingMode::Spot),
-            chain(100, Vec::new()),
-            chain(100, Vec::new()),
-            prices(now_seconds()),
-            Arc::new(MockProduct(Ok(Some(answer.clone())))),
-            context_with_lock_ref(None, Some("lock-1")),
-        )
-        .run(&deposit(1_000))
-        .await;
-        assert_eq!(
-            result.outcome,
-            StepOutcome::AdoptProductAnswer { credited: true }
-        );
-        assert_eq!(
-            result
-                .effects
-                .settlement_adoption
-                .as_ref()
-                .expect("adoption")
-                .payload,
-            answer.payload
-        );
-        assert_eq!(
-            result.effects.valuation.expect("valuation").credit_minor,
-            MinorAmount::new(1_234)
-        );
-        assert!(result.effects.lock_consumption.is_none());
-    }
-
-    #[tokio::test]
-    async fn adopts_rejected_product_answer() {
-        let deposit = deposit(1_000);
-        let context = context_with_lock_ref(None, Some("lock-1"));
-        let product_id = context.product_id;
-        let result = step(
-            route(PricingMode::Spot),
-            chain(100, Vec::new()),
-            chain(100, Vec::new()),
-            prices(now_seconds()),
-            Arc::new(MockProduct(Ok(Some(ProductAnswer {
-                accepted: false,
-                destination_tx_id: None,
-                payload: product_payload(Some("lock-1")),
-            })))),
-            context,
-        )
-        .run(&deposit)
-        .await;
-        assert_eq!(
-            result.outcome,
-            StepOutcome::AdoptProductAnswer { credited: false }
-        );
-        assert_eq!(
-            result.effects.valuation.expect("valuation").price_source,
-            "lock"
-        );
-        assert_eq!(result.events.len(), 1);
-        assert_rejected_event(&result.events[0], RejectReason::ProductRefused, product_id);
-        assert_eq!(
-            result.effects.lock_consumption,
-            Some(LockConsumption {
-                address_id: deposit.address_id,
-                idempotent: true,
-            })
-        );
     }
 
     #[tokio::test]
@@ -1134,7 +792,6 @@ mod tests {
             chain(100, vec![first]),
             chain(100, vec![second]),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1155,7 +812,6 @@ mod tests {
             chain(100, Vec::new()),
             chain(100, Vec::new()),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit(1_000))
@@ -1178,7 +834,6 @@ mod tests {
             chain(100, vec![log.clone()]),
             chain(9, vec![log]),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1200,7 +855,6 @@ mod tests {
             chain(100, vec![log]),
             chain(9, Vec::new()),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1224,7 +878,6 @@ mod tests {
             chain(100, vec![canonical.clone()]),
             chain(100, vec![canonical.clone()]),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1248,7 +901,6 @@ mod tests {
             chain(100, vec![canonical.clone()]),
             chain(100, vec![canonical.clone()]),
             prices(now_seconds()),
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1308,7 +960,6 @@ mod tests {
                     secondary: Arc::new(chain(100, vec![canonical])),
                 },
             )]),
-            product_lookup: no_product(),
         };
         let result = step.run(&deposit).await;
         assert_eq!(result.outcome, StepOutcome::Advance);
@@ -1339,7 +990,6 @@ mod tests {
             chain(100, vec![canonical.clone()]),
             chain(100, vec![canonical]),
             prices(now_seconds()),
-            no_product(),
             context,
         )
         .run(&deposit)
@@ -1427,7 +1077,6 @@ mod tests {
                 chain(100, vec![log.clone()]),
                 chain(100, vec![log.clone()]),
                 prices,
-                no_product(),
                 context(None),
             )
             .run(&deposit)
@@ -1457,7 +1106,6 @@ mod tests {
                 check: None,
                 fx: None,
             },
-            no_product(),
             context(None),
         )
         .run(&deposit)
@@ -1479,7 +1127,6 @@ mod tests {
                 chain(100, vec![log.clone()]),
                 chain(100, vec![log]),
                 prices(now),
-                no_product(),
                 context(Some(lock(now))),
             )
             .run(&deposit)
@@ -1503,7 +1150,6 @@ mod tests {
             chain(100, vec![log.clone()]),
             chain(100, vec![log]),
             prices(now),
-            no_product(),
             context(Some(lock(now))),
         )
         .run(&deposit)
@@ -1529,7 +1175,6 @@ mod tests {
             chain(100, vec![log.clone()]),
             chain(100, vec![log]),
             prices(now),
-            no_product(),
             context,
         )
         .run(&deposit)
@@ -1557,7 +1202,6 @@ mod tests {
             chain(100, vec![log.clone()]),
             chain(100, vec![log]),
             prices(now),
-            no_product(),
             context,
         )
         .run(&deposit)
@@ -1580,7 +1224,6 @@ mod tests {
         primary_chain: MockChain,
         secondary_chain: MockChain,
         prices: PriceSet,
-        product_lookup: Arc<dyn ProductLookup>,
         context: ConfirmationContext,
     ) -> ConfirmStep {
         let chain_id = route.chain.chain_id;
@@ -1611,7 +1254,6 @@ mod tests {
                     secondary: Arc::new(secondary_chain),
                 },
             )]),
-            product_lookup,
         }
     }
 
@@ -1685,17 +1327,9 @@ mod tests {
     }
 
     fn context(lock: Option<StoredLock>) -> ConfirmationContext {
-        context_with_lock_ref(lock, None)
-    }
-
-    fn context_with_lock_ref(
-        lock: Option<StoredLock>,
-        lock_ref: Option<&str>,
-    ) -> ConfirmationContext {
         ConfirmationContext {
             address: recipient(),
             product_id: Uuid::new_v4(),
-            lock_ref: lock_ref.map(str::to_owned),
             lock,
         }
     }
@@ -1730,10 +1364,6 @@ mod tests {
         u64::try_from(Utc::now().timestamp()).expect("current timestamp")
     }
 
-    fn no_product() -> Arc<dyn ProductLookup> {
-        Arc::new(MockProduct(Ok(None)))
-    }
-
     fn assert_rejected_event(event: &OutboxEvent, reason: RejectReason, product_id: Uuid) {
         assert_eq!(event.event_type, "deposit.rejected");
         assert_eq!(event.payload["product_id"], product_id.to_string());
@@ -1742,18 +1372,6 @@ mod tests {
         assert_eq!(event.payload["state"], "rejected");
         assert!(event.payload["route"].as_str().is_some());
         assert_eq!(event.payload["reason"], reason.code());
-    }
-
-    fn product_payload(lock_ref: Option<&str>) -> Value {
-        json!({
-            "version": 1,
-            "amount_minor": "1234",
-            "evidence": {
-                "price_scaled": "12345678",
-                "valuation_at": "2026-09-22T00:00:00Z",
-                "lock_ref": lock_ref,
-            }
-        })
     }
 
     fn recipient() -> Address {

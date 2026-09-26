@@ -21,9 +21,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
 use topup::routes::RouteSet;
-use topup::steps::confirm::{ConfirmStep, SettlementProductLookup};
+use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::ScreenStep;
-use topup::steps::settle::SettleStep;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
 use topup_adapters::attestation::{AttestedOperator, DstackAttestor};
@@ -69,8 +68,8 @@ enum TopupCommand {
     /// Validate a restored database and run post-restore reconciliation.
     ///
     /// Run only while the service, heartbeat, and backup processes are stopped: the post-restore
-    /// round claims every deposit at or beyond `cleared` and adopts the product's answers. It does
-    /// nothing while TOPUP_RESTORE_FROM_BACKUP=off, and writes its report to
+    /// round holds the lease-owner lock and may repair the restored ledger; it asks the product
+    /// nothing. It does nothing while TOPUP_RESTORE_FROM_BACKUP=off, and writes its report to
     /// TOPUP_RESTORE_REPORT_FILE when that is set.
     RestoreCheck(RestoreCheckArgs),
 }
@@ -429,10 +428,8 @@ async fn run_restore_check(
     let pool = connect("MIGRATE_DATABASE_URL", "restore-check", 4)
         .await
         .context("failed to connect to the restored database")?;
-    let signer = spawn_signer(None).context("failed to start the signer")?;
-    let reconciler =
-        topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer)
-            .context("failed to configure the post-restore reconciler")?;
+    let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
+        .context("failed to configure the post-restore reconciler")?;
     let expectations = topup::restore::RestoreExpectations {
         expected_heartbeat_at: args.expected_heartbeat_at,
         expected_lsn: args.expected_lsn.clone(),
@@ -642,12 +639,8 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         );
     }
     let reconciler = Arc::new(
-        topup::reconciler::Reconciler::from_routes(
-            pool.clone(),
-            Arc::clone(&routes),
-            signer.clone(),
-        )
-        .context("failed to configure reconciler")?,
+        topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::clone(&routes))
+            .context("failed to configure reconciler")?,
     );
     let flusher_tasks =
         topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
@@ -658,25 +651,13 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API listener on {}", args.bind))?;
-    let product_lookup = SettlementProductLookup::new(
-        pool.clone(),
-        Arc::clone(&routes),
-        signer.clone(),
-        Duration::from_secs(30),
-    );
-    let confirm_step = ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(product_lookup))
+    let confirm_step = ConfirmStep::from_routes(pool.clone(), &routes)
         .context("invalid confirm-step configuration")?;
     let screen_step = ScreenStep::from_routes(pool.clone(), &routes)
         .context("failed to configure screening step")?;
     let steps = Arc::new(StepSet::new(
         Box::new(confirm_step),
         Box::new(screen_step),
-        Box::new(SettleStep::new(
-            pool.clone(),
-            Arc::clone(&routes),
-            signer,
-            Duration::from_secs(30),
-        )),
         Box::new(topup::flusher::SweepStep),
     ));
     let pump = Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config)
@@ -849,10 +830,8 @@ async fn reconcile(args: &ReconcileArgs) -> anyhow::Result<ExitCode> {
     let pool = connect("DATABASE_URL", "reconcile", 4)
         .await
         .context("failed to connect to database")?;
-    let signer = spawn_signer(None).context("failed to start signer actor")?;
-    let reconciler =
-        topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer)
-            .context("failed to configure reconciler")?;
+    let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
+        .context("failed to configure reconciler")?;
     let result = match topup::reconciler::hold_lease_owner_lock(&pool).await {
         Ok(lease_owner) => {
             let result = reconciler.run_once().await;

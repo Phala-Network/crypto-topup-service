@@ -14,7 +14,6 @@ export TREASURY=0x3333333333333333333333333333333333333333
 export TEST_TOKEN=0x4444444444444444444444444444444444444444
 export SANCTIONS_ORACLE=0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa
 export PRODUCT_SLUG=ci-check PRODUCT_KID=ci-check/v1
-export SETTLEMENT_URL=https://product.invalid/settlements
 
 "$render" >"$tmp/route.yaml"
 grep -F "$TREASURY" "$tmp/route.yaml" >/dev/null
@@ -40,6 +39,6 @@ expect_rejection TEST_TOKEN=0x444444444444444444444444444444444444444g "TEST_TOK
 expect_rejection 'SANCTIONS_ORACLE=0x1111111111111111111111111111111111111111 ' "SANCTIONS_ORACLE $address_error"
 expect_rejection TREASURY= "TREASURY is required"
 expect_rejection PRODUCT_SLUG=Bad_Slug "PRODUCT_SLUG must be lowercase"
-expect_rejection 'SETTLEMENT_URL=https://x.invalid/$HOME' "SETTLEMENT_URL must be printable ASCII"
+expect_rejection 'PRODUCT_KID=ci-check/$HOME' "PRODUCT_KID must be printable ASCII"
 
 echo "sandbox route renderer test passed"

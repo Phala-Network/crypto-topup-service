@@ -8,7 +8,6 @@ mod outbox;
 mod pending;
 mod products;
 mod scanner;
-mod settlements;
 mod types;
 
 use sqlx::PgPool;
@@ -19,9 +18,9 @@ pub(crate) use addresses::list_chain_addresses_with_pause_scopes;
 pub use addresses::{Address, AddressKind, get_address, list_chain_addresses};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
-    LockConsumption, NewDeposit, OutboxEvent, SettlementAdoption, StoredValuation,
-    TransitionEffects, TransitionUpdate, TransitionWrites, adopt_settlement_pricing,
-    apply_transition, claim_deposit, get_deposit, insert_deposit, release_deposit_lease,
+    LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
+    TransitionWrites, apply_transition, claim_deposit, get_deposit, insert_deposit,
+    release_deposit_lease,
 };
 pub use flushes::{
     Flush, FlushStatus, FlushedEvent, NewFlush, confirm_flush, get_flush_locked,
@@ -38,10 +37,6 @@ pub use pending::{
 };
 pub use products::{Product, get_product};
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
-pub use settlements::{
-    Settlement, SettlementIntent, SettlementStatus, mark_accepted, mark_payload_mismatch,
-    mark_rejected, mark_sent, mark_sent_with_receipt, upsert_intent, upsert_intent_in,
-};
 
 /// Embedded SQL migrations for the service database.
 pub static MIGRATOR: Migrator = sqlx::migrate!();
@@ -57,7 +52,6 @@ pub(crate) fn state_code(state: topup_core::deposit::DepositState) -> &'static s
     match state {
         DepositState::Detected => "detected",
         DepositState::Confirmed => "confirmed",
-        DepositState::Cleared => "cleared",
         DepositState::Credited => "credited",
         DepositState::Swept => "swept",
         DepositState::Rejected => "rejected",
@@ -70,7 +64,6 @@ pub(crate) fn parse_state(value: &str) -> Result<topup_core::deposit::DepositSta
     match value {
         "detected" => Ok(DepositState::Detected),
         "confirmed" => Ok(DepositState::Confirmed),
-        "cleared" => Ok(DepositState::Cleared),
         "credited" => Ok(DepositState::Credited),
         "swept" => Ok(DepositState::Swept),
         "rejected" => Ok(DepositState::Rejected),

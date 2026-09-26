@@ -1,11 +1,10 @@
 //! Direct row writes and reads that set up and inspect test databases. Production writes these
-//! rows through the API repository, the scanner, and the settlement step.
+//! rows through the API repository and the scanner.
 
 use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 use sqlx::PgPool;
-use topup::db::{self, Account, Address, AddressKind, Product, Settlement, SettlementStatus};
+use topup::db::{self, Account, Address, AddressKind, Product};
 use uuid::Uuid;
 
 /// Values used to create a product.
@@ -151,61 +150,6 @@ pub async fn set_product_paused_scopes(
         .execute(pool)
         .await?;
     Ok(())
-}
-
-#[derive(sqlx::FromRow)]
-struct SettlementRecord {
-    deposit_id: Uuid,
-    product_id: Uuid,
-    key: String,
-    payload: Value,
-    status: String,
-    destination_tx_id: Option<String>,
-    receipt: Option<Value>,
-    resend_forbidden: bool,
-    sent_at: Option<DateTime<Utc>>,
-}
-
-pub async fn get_settlement(
-    pool: &PgPool,
-    deposit_id: Uuid,
-) -> Result<Option<Settlement>, sqlx::Error> {
-    let Some(record) = sqlx::query_as::<_, SettlementRecord>(
-        r#"
-        SELECT deposit_id, product_id, key, payload, status,
-               destination_tx_id, receipt, resend_forbidden, sent_at
-        FROM settlements
-        WHERE deposit_id = $1
-        "#,
-    )
-    .bind(deposit_id)
-    .fetch_optional(pool)
-    .await?
-    else {
-        return Ok(None);
-    };
-    let status = match record.status.as_str() {
-        "intent" => SettlementStatus::Intent,
-        "sent" => SettlementStatus::Sent,
-        "accepted" => SettlementStatus::Accepted,
-        "rejected" => SettlementStatus::Rejected,
-        other => {
-            return Err(sqlx::Error::Decode(
-                format!("unknown settlement status `{other}`").into(),
-            ));
-        }
-    };
-    Ok(Some(Settlement {
-        deposit_id: record.deposit_id,
-        product_id: record.product_id,
-        key: record.key,
-        payload: record.payload,
-        status,
-        destination_tx_id: record.destination_tx_id,
-        receipt: record.receipt,
-        resend_forbidden: record.resend_forbidden,
-        sent_at: record.sent_at,
-    }))
 }
 
 fn encode_error(error: &std::num::TryFromIntError) -> sqlx::Error {

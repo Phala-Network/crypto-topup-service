@@ -17,7 +17,7 @@ use topup::db::{self, AddressKind};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
-use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
+use topup::steps::confirm::ConfirmStep;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, TransferLog,
 };
@@ -37,15 +37,6 @@ use support::seed::{self, NewAccount, NewAddress, NewProduct};
 /// One slot per epoch keeps anvil's finalized block close to the head for the finalized scanner.
 const ANVIL_ARGS: &[&str] = &["--slots-in-an-epoch", "1"];
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-
-struct MissingProductAnswer;
-
-#[async_trait]
-impl ProductLookup for MissingProductAnswer {
-    async fn get_by_key(&self, _key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
-        Ok(None)
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordedRequest {
@@ -605,7 +596,6 @@ async fn run_confirm_scenario(
         Arc::clone(&primary_price),
         Some(Arc::clone(&check_price)),
         Some(Arc::clone(&fx_price)),
-        Arc::new(MissingProductAnswer),
     );
     let pump = Pump::new(
         database.app_pool.clone(),
@@ -666,7 +656,6 @@ async fn run_confirm_scenario(
         primary_price,
         Some(check_price),
         Some(fx_price),
-        Arc::new(MissingProductAnswer),
     );
     let result = lagging_confirm.run(&lagging_deposit).await;
     ensure!(
@@ -955,12 +944,7 @@ impl Step for WaitStep {
 }
 
 fn wait_steps() -> StepSet {
-    StepSet::new(
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-        Box::new(WaitStep),
-    )
+    StepSet::new(Box::new(WaitStep), Box::new(WaitStep), Box::new(WaitStep))
 }
 
 fn reader(rpc_url: &str) -> Result<FinalizedReader> {
