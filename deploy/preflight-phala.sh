@@ -22,10 +22,10 @@ check_anonymous_pulls() {
     done <"$1"
 }
 
-# check_phala_cloud WORKSPACE OS_IMAGE KMS KMS_CONTRACT: the CLI version, the logged-in workspace,
-# the KMS contract (base only), and a production OS image offered by a node of the workspace.
+# check_phala_cloud WORKSPACE OS_IMAGE: the CLI version, the logged-in workspace, and a production
+# OS image offered by a node of the workspace.
 check_phala_cloud() {
-    local workspace=$1 os_image=$2 kms=$3 kms_contract=$4 phala version current contract count offering
+    local workspace=$1 os_image=$2 phala version current count offering
     echo "== Phala Cloud (read-only)"
     read -r -a phala <<<"${PHALA:-npx --yes phala@1.1.22}"
     version=$("${phala[@]}" --version 2>/dev/null) || version=error
@@ -40,30 +40,6 @@ check_phala_cloud() {
         current=$(jq -r '.team_name // empty' "$tmp/status.json" 2>/dev/null) || current=""
         fail "the CLI is not logged in to workspace '$workspace' (current: ${current:-not logged in})"
     fi
-    if [[ "$kms" == base ]]; then
-        if "${phala[@]}" kms base --json >"$tmp/kms.json" 2>/dev/null; then
-            contract=$(jq -c --arg address "$(lower "$kms_contract")" \
-                '[.contracts[] | select((.contract_address | ascii_downcase) == $address)][0] // empty' \
-                "$tmp/kms.json")
-            if [[ -z "$contract" ]]; then
-                fail "KMS contract $kms_contract is not listed by 'kms base'"
-            else
-                jq -e '[.devices[] | select(.on_chain_allowed == true)] | length > 0' <<<"$contract" \
-                    >/dev/null || fail "KMS contract $kms_contract has no allowed device"
-                if jq -e --arg image "$os_image" \
-                    'any(.os_images[]; .name == $image and .on_chain_allowed == true)' <<<"$contract" \
-                    >/dev/null; then
-                    ok "OS image $os_image is allowed by KMS contract $kms_contract"
-                else
-                    fail "OS image $os_image is not allowed by KMS contract $kms_contract; allowed:" \
-                        "$(jq -r '[.os_images[] | select(.on_chain_allowed == true) | .name] | join(", ")' \
-                            <<<"$contract")"
-                fi
-            fi
-        else
-            fail "'kms base --json' failed"
-        fi
-    fi
     if "${phala[@]}" os-images --prod --all --json >"$tmp/os-images.json" 2>/dev/null &&
         jq -e --arg image "$os_image" \
             'any(.items[]; .name == $image and .is_dev == false and (.version | test("^v?0[.]5[.]9$")))' \
@@ -74,12 +50,11 @@ check_phala_cloud() {
     fi
     # The platform picks the node; it must be one whose images include this one.
     offering='[.nodes[] | select(any(.images[]; .name == $image and .is_dev == false and .version[0:3] == [0, 5, 9]))]'
-    [[ "$kms" == base ]] && offering+=' | map(select(.support_onchain_kms == true))'
     if "${phala[@]}" api /teepods/available >"$tmp/nodes.json" 2>/dev/null &&
         count=$(jq -er --arg image "$os_image" "$offering | length" "$tmp/nodes.json") && ((count > 0)); then
         ok "$count node(s) of the workspace offer OS image $os_image"
     else
-        fail "no node of the workspace offers OS image $os_image$([[ "$kms" == base ]] && echo " with on-chain KMS"); offered:" \
+        fail "no node of the workspace offers OS image $os_image; offered:" \
             "$(jq -r '[.nodes[].images[] | select(.is_dev == false) | .name] | unique | join(", ")' \
                 "$tmp/nodes.json" 2>/dev/null)"
     fi

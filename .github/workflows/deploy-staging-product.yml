@@ -3,8 +3,8 @@ name: Deploy staging product
 # Provisions or upgrades the staging reference-product CVM on Phala Cloud (deploy/README.md,
 # "Staging reference product"): sdk/examples/phala_cloud_integration.py in `serve` mode, the
 # settlement endpoint and webhook receiver of the phala-cloud product on the Sepolia staging route.
-# It follows Deploy staging (same controls, Phala CLI 1.1.22 behavior, and runner constraints; see
-# that workflow's header) with a smaller CVM:
+# It follows Deploy in the `staging` Environment (same controls, Phala CLI 1.1.22 behavior, and
+# runner constraints; see that workflow's header) with a smaller CVM:
 #
 # - The GitHub Environment `staging` holds the only secret, PHALA_CLOUD_API_KEY. The product's
 #   signing seed, its only env value, never enters GitHub: `provision` sends the env file with
@@ -13,7 +13,7 @@ name: Deploy staging product
 #   stays.
 # - Public configuration is attested: deploy/product/render-compose.sh renders it into the compose,
 #   so changing a value means running `upgrade` (a new compose hash, and a recreated container).
-#   TOPUP_ORIGIN is the gateway URL of the topup CVM in vars.STAGING_CVM_ID and PRODUCT_PUBLIC_URL
+#   TOPUP_ORIGIN is the gateway URL of the topup CVM in vars.TOPUP_CVM_ID and PRODUCT_PUBLIC_URL
 #   the product CVM's own, both read from Phala Cloud; PRODUCT_RPC_URL (the product's own Sepolia
 #   RPC, not topup's providers; keyless, since it is public in the compose) and
 #   PRODUCT_DRIVER_PUBLIC_KEY (the deposit driver's key) are Environment variables; the route's
@@ -55,11 +55,11 @@ jobs:
       MODE: ${{ inputs.mode }}
       PRODUCT_IMAGE: ${{ inputs.product_image }}
       DSTACK_OS_IMAGE: ${{ vars.DSTACK_OS_IMAGE }}
-      STAGING_CVM_ID: ${{ vars.STAGING_CVM_ID }}
+      TOPUP_CVM_ID: ${{ vars.TOPUP_CVM_ID }}
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PRODUCT_RPC_URL: ${{ vars.PRODUCT_RPC_URL }}
       PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
-      PHALA_WORKSPACE: "kingsley's projects"
+      PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
       CVM_NAME: crypto-topup-staging-product
       PORT: "8089"
     steps:
@@ -73,7 +73,7 @@ jobs:
             { echo "::error::PRODUCT_IMAGE must be repository@sha256:<64 lowercase hex>"; status=1; }
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
-          for name in DSTACK_OS_IMAGE STAGING_CVM_ID PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY; do
+          for name in PHALA_WORKSPACE DSTACK_OS_IMAGE TOPUP_CVM_ID PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY; do
             [[ -n "${!name}" ]] || { echo "::error::Environment variable $name is not set"; status=1; }
           done
           case "$MODE" in
@@ -125,7 +125,7 @@ jobs:
             domain=$(jq -er '.gateway.base_domain' "$WORK/cvm-$1.json")
             printf -v "$3" 'https://%s-%s.%s' "${app_id#0x}" "$2" "$domain"
           }
-          gateway_url "$STAGING_CVM_ID" 8080 topup_origin
+          gateway_url "$TOPUP_CVM_ID" 8080 topup_origin
           if [[ "$MODE" == provision ]]; then
             public_url=https://pending.invalid
           else
@@ -173,7 +173,7 @@ jobs:
               --public-tcbinfo \
               --secure-time 2>&1 | tee "$WORK/deploy.raw"
           else
-            # No -e: the owner-sealed env stays (see Deploy staging).
+            # No -e: the owner-sealed env stays (see Deploy).
             npx --yes phala@1.1.22 deploy --json \
               --cvm-id "$STAGING_PRODUCT_CVM_ID" \
               --compose "$WORK/docker-compose.product.yml" \

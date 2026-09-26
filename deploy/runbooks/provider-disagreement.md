@@ -70,8 +70,8 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${head
 
 **HUMAN-ONLY:** open provider incidents with the exact block/log evidence. Provider membership is
 attested configuration, not runtime state. Replacing a provider requires a new route/config version,
-`topup route validate`, immutable image digests, a new compose hash, Safe allow-list approval, and
-the D2 upgrade flow.
+`topup route validate`, immutable image digests, a new compose hash, and Deploy in mode `upgrade`
+([deploy/README.md, "Deploy"](../README.md#deploy)).
 
 For a sanctions rejection, page Compliance and follow
 [Rejected funds at treasury](rejected-funds-at-treasury.md). The rejected funds still flush to the

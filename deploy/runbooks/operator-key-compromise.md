@@ -108,8 +108,8 @@ cast balance "$NEW_OPERATOR_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
 
 4. Set `chain.operator_key_version: $NEW_OPERATOR_KEY_VERSION` in a new `version` of every current
    route file on the chain (current routes on one chain must share it),
-   validate, then upgrade through the attested path in [deploy/README.md](../README.md): new
-   compose hash, allow-list, deploy.
+   validate, then run Deploy in mode `upgrade`
+   ([deploy/README.md, "Deploy"](../README.md#deploy)): a new compose hash, attested after deploy.
 
 ```sh
 topup route validate "$ROUTE_FILE"
