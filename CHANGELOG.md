@@ -48,6 +48,14 @@ webhook receivers must ignore unknown fields.
   destination minor units (#94). The field is optional in the schema so clients also parse reports
   from servers that predate it.
 
+### Changed
+
+- **Settlement conformance:** the `unknown_get` case now requires `404` for `GET` of an unknown
+  settlement key and fails `200 {"status":"unknown"}`, which it used to accept. The service
+  resends a settlement only after a `404` by key; the other answer made it poll without ever
+  resending. `topup-conformance-reference --broken unknown-status` answers the old form and fails
+  exactly that case.
+
 ### Removed
 
 - **Breaking (administrative API):** `GET /v1/admin/report/daily` route entries no longer carry

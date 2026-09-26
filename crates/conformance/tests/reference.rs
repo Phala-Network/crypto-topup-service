@@ -1,6 +1,6 @@
 //! Proof that the suite passes the conforming reference and that every deliberately broken
-//! variant fails exactly the cases of its obligation. Requires Foundry's `anvil` and `forge` on
-//! `PATH`; the anvil-backed tests are skipped with a message otherwise, unless
+//! variant fails exactly the cases of its obligation or protocol rule. Requires Foundry's `anvil`
+//! and `forge` on `PATH`; the anvil-backed tests are skipped with a message otherwise, unless
 //! `CONFORMANCE_REQUIRE_TOOLS=1`, which turns every skip into a failure.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -357,6 +357,7 @@ async fn each_broken_variant_fails_exactly_its_obligation() -> Result<()> {
             BrokenVariant::PeriodCapRace => ["per_period_cap"].into(),
             BrokenVariant::Evidence => ["chain_evidence"].into(),
             BrokenVariant::DepositIdentity => ["deposit_identity"].into(),
+            BrokenVariant::UnknownStatus => ["unknown_get"].into(),
             BrokenVariant::None => bail!("None is not a broken variant"),
         };
         let report = run_memory_variant(&manifest, variant).await?;

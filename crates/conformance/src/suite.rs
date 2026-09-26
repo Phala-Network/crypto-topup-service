@@ -370,12 +370,7 @@ impl Runner {
             result,
         );
         let result = self.unknown_get().await;
-        self.capture(
-            "unknown_get",
-            None,
-            "GET of an unknown key is 404 or status unknown",
-            result,
-        );
+        self.capture("unknown_get", None, "GET of an unknown key is 404", result);
         let result = self.restart_retention().await;
         self.capture(
             "restart_retention",
@@ -892,19 +887,16 @@ impl Runner {
         Ok(json!({"status": "processing", "ledger_unchanged": true}))
     }
 
+    /// The service resends a settlement only after a `404` by key; any other answer to the lookup,
+    /// such as `200 {"status":"unknown"}`, makes it poll again without ever resending.
     async fn unknown_get(&self) -> Result<Value> {
         let key = format!("deposit:{}", uuid::Uuid::new_v4());
         match self.client.get_by_key(&key).await? {
             None => Ok(json!({"http_status": 404})),
-            Some(SettlementAnswer::Unknown { status: 200, body }) => {
-                let value: Value = serde_json::from_str(&body)?;
-                ensure!(
-                    value.get("status") == Some(&json!("unknown")),
-                    "unexpected 200 body"
-                );
-                Ok(json!({"http_status": 200, "status": "unknown"}))
-            }
-            other => bail!("unknown GET returned {other:?}"),
+            other => bail!(
+                "GET of an unknown key must be 404, the only answer on which the service resends; \
+                 received {other:?}"
+            ),
         }
     }
 

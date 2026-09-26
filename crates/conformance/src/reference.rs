@@ -3,7 +3,8 @@
 //! The reference is runnable documentation for product teams: it verifies signatures with the
 //! service's shared RFC 9421 verifier, keeps idempotency records forever, enforces both caps in
 //! the same critical section as the credit, verifies the cited log against its own RPC, and
-//! recomputes the deposit id. Each [`BrokenVariant`] removes exactly one of those obligations.
+//! recomputes the deposit id. Each [`BrokenVariant`] removes exactly one of those obligations or
+//! one protocol rule.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -37,7 +38,7 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Window which makes check-then-act defects in broken variants observable.
 const RACE_WINDOW: Duration = Duration::from_millis(100);
 
-/// Deliberate single-obligation failures used to prove the suite is sensitive.
+/// Deliberate single-obligation or single-rule failures used to prove the suite is sensitive.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BrokenVariant {
     /// Fully conforming behavior.
@@ -59,11 +60,14 @@ pub enum BrokenVariant {
     Evidence,
     /// Obligation 6: does not recompute the deterministic deposit id.
     DepositIdentity,
+    /// Protocol: answers `GET` of an unknown key with `200 {"status":"unknown"}` instead of
+    /// `404`, on which the service would poll forever instead of resending.
+    UnknownStatus,
 }
 
 impl BrokenVariant {
     /// Every deliberately broken variant.
-    pub const BROKEN: [Self; 8] = [
+    pub const BROKEN: [Self; 9] = [
         Self::Signature,
         Self::Idempotency,
         Self::Retention,
@@ -72,13 +76,14 @@ impl BrokenVariant {
         Self::PeriodCapRace,
         Self::Evidence,
         Self::DepositIdentity,
+        Self::UnknownStatus,
     ];
 
-    /// Architecture section 11 obligation this variant violates.
+    /// Architecture section 11 obligation this variant violates; `None` for a protocol rule.
     #[must_use]
     pub fn obligation(self) -> Option<u8> {
         match self {
-            Self::None => None,
+            Self::None | Self::UnknownStatus => None,
             Self::Signature => Some(1),
             Self::Idempotency | Self::Retention => Some(2),
             Self::Concurrency => Some(3),
@@ -103,6 +108,7 @@ impl FromStr for BrokenVariant {
             "period-cap-race" => Ok(Self::PeriodCapRace),
             "evidence" => Ok(Self::Evidence),
             "deposit-identity" => Ok(Self::DepositIdentity),
+            "unknown-status" => Ok(Self::UnknownStatus),
             _ => anyhow::bail!("unknown broken variant {value}"),
         }
     }
@@ -554,6 +560,9 @@ async fn get_settlement(
     }
     match state.storage.get(&key).await {
         Ok(Some(record)) => record_response(&record),
+        Ok(None) if state.config.broken == BrokenVariant::UnknownStatus => {
+            axum::Json(serde_json::json!({"status": "unknown"})).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
             tracing::error!(%error, "reference settlement lookup failed");
