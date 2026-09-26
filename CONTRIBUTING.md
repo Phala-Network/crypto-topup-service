@@ -23,9 +23,8 @@ make image
 ```
 
 CI's `lint` job runs `make lint`. Its `test` job runs the whole workspace once with PostgreSQL and
-Foundry. There, database, Anvil, and conformance tests fail instead of skipping: the test helpers
-check `CI=true` and the conformance suite checks `CONFORMANCE_REQUIRE_TOOLS=1`. It then runs the
-suite against the Python staging reference product with `make product-conformance`.
+Foundry. There, database and Anvil tests fail instead of skipping: the test helpers check
+`CI=true`.
 
 ## Branches and pull requests
 
@@ -80,9 +79,7 @@ docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t crypto-topup-
 docker run --rm crypto-topup-service:dev --help
 ```
 
-Release artifacts build only the `topup` package. Building the whole workspace would unify the
-`topup-adapters/conformance` feature, which exists only for the conformance suite, into the
-runtime binary; CI fails if that feature ever reaches `topup`.
+Release artifacts build only the `topup` package.
 
 The Debian 12 builder and distroless runtime images are pinned by digest and share the same libc
 baseline. Full verification that two builds produce identical image digests is owned by work

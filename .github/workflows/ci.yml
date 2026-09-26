@@ -34,23 +34,15 @@ jobs:
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - name: Format, clippy with all and with default features, and cargo-deny
         run: make lint
-      - name: Runtime binary builds without conformance-only features
-        run: |
-          cargo check -p topup --locked
-          if cargo tree -p topup --locked -e features -i topup-adapters | grep -q 'feature "conformance"'; then
-            echo "topup-adapters/conformance must never reach the topup runtime" >&2
-            exit 1
-          fi
 
   # The whole workspace once, with PostgreSQL and Foundry. The database and Anvil test helpers fail
-  # instead of skipping when CI=true (set by Actions), and CONFORMANCE_REQUIRE_TOOLS=1 does the same
-  # for conformance. The dstack simulator test still skips by design: no simulator runs here.
+  # instead of skipping when CI=true (set by Actions). The dstack simulator test still skips by
+  # design: no simulator runs here.
   test:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       MIGRATE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       DATABASE_URL: postgres://topup_ci:topup_ci@localhost:5432/postgres
-      CONFORMANCE_REQUIRE_TOOLS: "1"
     services:
       postgres:
         image: postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
@@ -91,13 +83,8 @@ jobs:
         env:
           SQLX_OFFLINE: false
         run: cargo sqlx prepare --workspace --check -- --all-targets --all-features
-      - name: Test the workspace, including conformance variants on Anvil and PostgreSQL
+      - name: Test the workspace on Anvil and PostgreSQL
         run: cargo test --workspace --locked --all-features -- --nocapture
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.12.18"
-      - name: Run the conformance suite against the staging reference product
-        run: make product-conformance
 
   sdk:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}

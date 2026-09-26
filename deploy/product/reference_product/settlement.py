@@ -11,7 +11,7 @@
    `to` equal to an address the product computed for that workspace, and the exact amount;
 6. recompute `deposit_id` from chain evidence and require `idempotency_key == "deposit:" + id`.
 
-`topup-conformance` holds it to that contract (deploy/product/conformance.sh).
+deploy/product/tests/test_settlement.py holds it to that contract.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from topup_sdk import SignatureError, verify_request, verify_webhook
 from topup_sdk.addresses import deposit_id, forwarder_address, keccak256, lock_salt, same_address
 
-from .config import CONFORMANCE_PROCESSING, SETTLEMENT_KEYID, ProductConfig
+from .config import SETTLEMENT_KEYID, ProductConfig
 from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, ProductLedger, StoredOrder
 
 LOG = logging.getLogger(__name__)
@@ -258,8 +258,6 @@ class SettlementService:
                 already = self.ledger.credited_since(db, team_id, now - self.config.period_seconds)
                 if already + int(payload["amount_minor"]) > self.config.per_period_cap_minor:
                     refusal = "per_period_cap"
-            # The conformance suite's processing account: held for review, never credited here.
-            held = refusal is None and self.config.conformance and team_id == CONFORMANCE_PROCESSING
             order_id = str(uuid.uuid4())
             db.execute(
                 "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
@@ -271,12 +269,12 @@ class SettlementService:
                     ORDER_FLOW_CODE,
                     key,
                     json.dumps(payload),
-                    "rejected" if refusal else "processing" if held else "pending",
+                    "rejected" if refusal else "pending",
                     refusal,
                     now,
                 ),
             )
-            if refusal is None and not held:
+            if refusal is None:
                 credit_id = f"ctx_{uuid.uuid4().hex}"
                 evidence = payload["evidence"]
                 db.execute(

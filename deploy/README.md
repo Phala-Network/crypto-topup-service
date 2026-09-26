@@ -313,7 +313,7 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 
 Staging settles against a second CVM running [product/reference_product](product/reference_product)
 as the `phala-cloud` product: `serve` mode is the settlement endpoint (held to the six product
-obligations by `make product-conformance` in CI), the webhook receiver, and an account API, with a
+obligations by its tests in `product/tests`), the webhook receiver, and an account API, with a
 SQLite ledger; `deposit` mode, run from an operator's machine, plays a Phala Cloud user and signs
 with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_SEED`
 ([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (from `TOPUP_CVM_ID`),

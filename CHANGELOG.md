@@ -65,6 +65,12 @@ webhook receivers must ignore unknown fields.
 
 ### Removed
 
+- **Settlement conformance suite** (`topup-conformance`, `topup-conformance-reference`,
+  `docs/conformance.md`, `make product-conformance`) and the reference product's conformance mode
+  (test accounts and the `_conformance/ledger` hook). The settlement endpoint it tested is being
+  replaced by webhook fulfillment (docs/design/stripe-style-integration.md); webhook receivers are
+  tested with `topup-sdk send-test-event`.
+
 - **Breaking (administrative API):** `GET /v1/admin/report/daily` route entries no longer carry
   `exposure_minor`, `exposure_minor_reason`, `pnl_minor`, or `pnl_minor_reason` (#94). They were
   always null placeholders; route exposure now comes from the report-level `exposure_minor`, and

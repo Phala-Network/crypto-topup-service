@@ -11,8 +11,7 @@ These are the calls a product such as Phala Cloud makes, and the checks it adds 
 The two handlers of step 5 go behind the product's settlement and webhook URLs. The settlement
 handler stops where the SDK stops: the product still enforces its caps, verifies the cited log
 with its own RPC, and commits the credit atomically before answering (docs/architecture.md
-section 11). deploy/product/reference_product is a complete product that does all of it, held to
-the contract by the conformance suite (docs/conformance.md).
+section 11). deploy/product/reference_product is a complete product that does all of it.
 
 Run steps 1-4 against the sandbox (deploy/sandbox/README.md):
 

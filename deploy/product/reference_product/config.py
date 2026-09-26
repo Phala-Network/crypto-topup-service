@@ -14,16 +14,6 @@ SETTLEMENT_KEYID = "settlement/v1"
 # The deposit driver signs its account API requests with this key id (see `AccountApi`).
 DRIVER_KEYID = "driver/v1"
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
-# With `conformance`, the accounts docs/conformance.md requires, under the suite's default ids.
-CONFORMANCE_REFUSED = "conformance-refused"
-CONFORMANCE_PROCESSING = "conformance-processing"
-CONFORMANCE_ACCOUNTS = (
-    "conformance-accepted",
-    "conformance-period",
-    "conformance-cap",
-    CONFORMANCE_REFUSED,
-    CONFORMANCE_PROCESSING,
-)
 
 
 class MissingProductKeyError(Exception):
@@ -38,10 +28,6 @@ class ProductConfig:
     variable named by `product_seed_env` (64 hexadecimal characters, as `topup-sdk keygen`
     writes them). The deposit driver needs neither: it calls the product's account API at
     `public_url`, signed with the driver key whose public key is `driver_public_key`.
-
-    `conformance` turns the product into the test environment of docs/conformance.md: it seeds
-    `CONFORMANCE_ACCOUNTS`, holds settlements for `CONFORMANCE_PROCESSING`, and serves the
-    unauthenticated ledger observation hook. Never set it in production.
     """
 
     service_url: str
@@ -69,7 +55,6 @@ class ProductConfig:
     per_period_cap_minor: int = 500_000
     period_seconds: int = 24 * 60 * 60
     restart_command: list[str] = field(default_factory=list)
-    conformance: bool = False
 
     @classmethod
     def load(cls, path: str | Path) -> ProductConfig:
