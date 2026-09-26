@@ -20,8 +20,8 @@ stored, and the product's requests fail until it signs with the new seed.
 1. The product generates a new key under the same key id, `{slug}/v1`
    (`topup-sdk keygen --keyid <slug>/v1`), and sends the printed `public_key`; confirm it with
    the product's owner over a second channel. If the product cannot do this promptly, pause
-   `quotes`, `addresses`, and `refunds` on each of its routes meanwhile
-   (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses","refunds"]}'`);
+   `quotes` and `refunds` on each of its routes meanwhile
+   (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","refunds"]}'`);
    deposits keep being credited.
 2. Store it, with the product's current webhook URL (or its new one):
 

@@ -200,8 +200,6 @@ Every product operation is idempotent, so a retry with a fresh signature is alwa
 |---|---|
 | create a quote | the `Idempotency-Key` header, covered by the signature: an RFC 8941 string (`"8e03…"`, as in the IETF Idempotency-Key draft) or a bare token (Stripe's form), up to 255 characters. The same key with the same parameters returns the same quote; with other parameters it is `409 idempotency_error`. Without a key every request creates a quote. |
 | cancel a quote | the quote: canceling a canceled quote returns it |
-| create or get the persistent address | `(product, external_id)` |
-| rotate the persistent address | `from_version` |
 | request a refund | `(deposit, to_address, amount)` |
 
 `TopupClient.create_quote` sends a fresh key unless you pass one, and reuses it on every retry.
@@ -212,8 +210,8 @@ Every product operation is idempotent, so a retry with a fresh signature is alwa
 
 ### 4.3 Endpoints
 
-The rows under `/v1/products/phala-cloud` (being replaced by top-level resources) take `{ext}`,
-your workspace id (1 to 255 bytes). A request for another product's resources is refused.
+Every path is a top-level resource; the key id names your product, and a request for another
+product's resources is refused. `account_id` is your workspace id (1 to 255 bytes).
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
@@ -221,13 +219,10 @@ your workspace id (1 to 255 bytes). A request for another product's resources is
 | `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` returns a new one. | `create_quote` |
 | `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Unsigned with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
-| `POST /accounts/{ext}/deposit-address`, `GET` same | The persistent address (created at version 1 on first `POST`). | `create_deposit_address`, `get_deposit_address` |
-| `POST /accounts/{ext}/deposit-address/rotate` | New version; older addresses stay valid and watched. | `rotate_deposit_address` |
 | `GET /v1/deposits` | Final deposits, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§7); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
-| `GET /accounts/{ext}/pending-deposits` | Transfers to persistent addresses seen above `finalized`; display only. | `list_pending_deposits` |
 | `GET /v1/attestation?nonce=` | Settlement key evidence (§3.3); unauthenticated. | `attestation` |
 
 A quote's `amount` is an integer in US cents with `currency: "usd"`; `amount_atomic` is a decimal
@@ -243,8 +238,7 @@ and `price_scaled` has scale 8.
 **Recompute every address before you show it.** A quote's address salt is
 `keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`; with the pinned forwarder
 `TopupClient` recomputes it and raises `AddressMismatchError`, so a user never pays an address you
-did not derive. Persistent address responses carry `salt_inputs` for
-`topup_sdk.persistent_salt`. You need no address records of your own to credit:
+did not derive. You need no address records of your own to credit:
 `deposit.credited` names the workspace (`external_id`) and the quote id (`product_lock_ref`), also
 for a late or wrong-amount payment.
 
@@ -298,7 +292,7 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
 - `amount_minor` is the credit: exactly the quote's `credit_minor` when `price_source` is `lock`,
   otherwise spot at finality (§7).
 - `product_lock_ref` is the lock of the receiving address, also when a late or wrong-amount
-  payment was valued at spot; it is `null` for a persistent address.
+  payment was valued at spot; it is `null` only for a legacy persistent address.
 - `webhook-id` is `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit_id)`
   (`topup_sdk.credited_event_id`): every retry, operator replay, and re-emission after a service
   restore carries the same id.
@@ -438,7 +432,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Overpayment beyond tolerance | Credited at spot for the full amount; lock not consumed. |
 | After the window (mined after `expires_at`) | `rate_lock.expired`, then credited at spot (`product_lock_ref` still names the quote). A payment mined inside the window stays at the lock price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a lock address, or to a cancelled lock | Credited at spot. |
-| Persistent address, any amount | Credited at spot at finality. |
+| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot at finality. |
 | Token without a route | After finality `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |

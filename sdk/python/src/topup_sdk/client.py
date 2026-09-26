@@ -7,17 +7,14 @@ the service side, so the wrapper retries transport failures, transient statuses,
 - `create_quote`: sends an `Idempotency-Key` (generated unless given) and reuses it on every
   retry, so a retry returns the quote the first attempt created.
 - `cancel_quote`: canceling a canceled quote returns it unchanged.
-- `create_deposit_address` / `get_deposit_address`: return the current persistent address.
-- `rotate_deposit_address`: idempotent on `from_version`; a replay returns the same new version.
 - `create_refund`: sends an `Idempotency-Key` like `create_quote`.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
 the factory, the implementation, and the quote id, and raise `AddressMismatchError` rather than
 return an address the product did not derive.
 
-`list_pending_deposits` and `Quote.payment` report transfers seen before finality. They are
-display only: nothing is credited until the deposit is final and appears under `list_deposits`,
-and a reorg can remove a pending transfer.
+`Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
+until the deposit is final and appears under `list_deposits`, and a reorg can remove it.
 """
 
 from __future__ import annotations
@@ -31,14 +28,9 @@ from typing import Any, TypeVar
 import httpx
 
 from topup_client import AuthenticatedClient
-from topup_client.api.addresses import (
-    create_deposit_address,
-    get_deposit_address,
-    rotate_deposit_address,
-)
 from topup_client.api.attestation import get_attestation
 from topup_client.api.config import get_config
-from topup_client.api.deposits import get_deposit, list_deposits, list_pending_deposits
+from topup_client.api.deposits import get_deposit, list_deposits
 from topup_client.api.quotes import cancel_quote, create_quote, get_quote
 from topup_client.api.refunds import create_refund, get_refund
 from topup_client.models import (
@@ -47,14 +39,10 @@ from topup_client.models import (
     CreateQuoteRequest,
     CreateRefundRequest,
     Deposit,
-    DepositAddressResponse,
     DepositList,
     ErrorResponse,
-    PendingDepositResponse,
-    PendingDepositsResponse,
     Quote,
     Refund,
-    RotateDepositAddressRequest,
 )
 from topup_client.types import UNSET, Response, Unset
 
@@ -165,36 +153,6 @@ class TopupClient:
         """Cancels an open, unpaid quote; later payments to its address are credited at spot."""
         return self._call(lambda: cancel_quote.sync_detailed(quote_id, client=self._client), Quote)
 
-    def create_deposit_address(self, external_id: str) -> DepositAddressResponse:
-        """Returns the account's persistent address, creating version 1 on first use."""
-        return self._call(
-            lambda: create_deposit_address.sync_detailed(
-                self.product_slug, external_id, client=self._client
-            ),
-            DepositAddressResponse,
-        )
-
-    def get_deposit_address(self, external_id: str) -> DepositAddressResponse:
-        """Returns the account's current persistent address."""
-        return self._call(
-            lambda: get_deposit_address.sync_detailed(
-                self.product_slug, external_id, client=self._client
-            ),
-            DepositAddressResponse,
-        )
-
-    def rotate_deposit_address(self, external_id: str, from_version: int) -> DepositAddressResponse:
-        """Rotates from `from_version` to the next version; older addresses stay valid."""
-        return self._call(
-            lambda: rotate_deposit_address.sync_detailed(
-                self.product_slug,
-                external_id,
-                client=self._client,
-                body=RotateDepositAddressRequest(from_version=from_version),
-            ),
-            DepositAddressResponse,
-        )
-
     def list_deposits(
         self,
         *,
@@ -231,19 +189,6 @@ class TopupClient:
             if not page.has_more or not page.data:
                 return
             starting_after = page.data[-1].id
-
-    def list_pending_deposits(self, external_id: str) -> list[PendingDepositResponse]:
-        """Returns transfers to the account's persistent addresses seen before finality.
-
-        These are not deposits and have not been credited; show them as "received, waiting for
-        finality" and credit only from `list_deposits` or `deposit.credited`.
-        """
-        return self._call(
-            lambda: list_pending_deposits.sync_detailed(
-                self.product_slug, external_id, client=self._client
-            ),
-            PendingDepositsResponse,
-        ).pending_deposits
 
     def get_deposit(self, deposit_id: str, *, expand: list[str] | None = None) -> Deposit:
         """Returns one of the product's deposits; `expand` may name `quote`."""

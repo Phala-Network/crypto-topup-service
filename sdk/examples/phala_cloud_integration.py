@@ -3,16 +3,16 @@
 These are the calls a product such as Phala Cloud makes, and the checks it adds to each:
 
 1. pin the service's settlement key from attestation evidence bound to a fresh nonce;
-2. create a persistent deposit address (the account is created with it) and recompute it;
-3. create a quote; the client recomputes its single-use address from the pinned forwarder;
-4. list the account's deposits;
-5. receive webhooks (Standard Webhooks) and fulfill each `deposit.credited` once.
+2. create a quote (the account is created with it); the client recomputes its single-use address
+   from the pinned forwarder;
+3. list the account's deposits;
+4. receive webhooks (Standard Webhooks) and fulfill each `deposit.credited` once.
 
-The handler of step 5 goes behind the product's webhook URL. It stops where the SDK stops: the
+The handler of step 4 goes behind the product's webhook URL. It stops where the SDK stops: the
 product commits the credit, keyed by `credit.fulfillment_key` under a unique index, before
 answering `2xx`. deploy/product/reference_product is a complete product that does all of it.
 
-Run steps 1-4 against the sandbox (deploy/sandbox/README.md):
+Run steps 1-3 against the sandbox (deploy/sandbox/README.md):
 
     uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py \\
         --config sandbox.json
@@ -40,7 +40,6 @@ from topup_sdk import (
     load_public_key,
     verify_webhook,
 )
-from topup_sdk.addresses import forwarder_address, persistent_salt, same_address
 
 SETTLEMENT_KEYID = "settlement/v1"
 
@@ -86,18 +85,7 @@ def pin_settlement_key(client: TopupClient) -> Ed25519PublicKey:
     return load_public_key(evidence.settlement_pubkey)
 
 
-# 2-4. Accounts, addresses, quotes, and deposits --------------------------------------------------
-
-
-def register(config: Integration, client: TopupClient, account: str) -> str:
-    """Returns the account's persistent address, recomputed from its salt; creating the address
-    creates the account."""
-    address = client.create_deposit_address(account)
-    salt = persistent_salt(config.product_slug, account, address.salt_inputs.version)
-    expected = forwarder_address(config.factory, config.implementation, salt)
-    if not same_address(expected, address.address) or address.chain_id != config.chain_id:
-        raise RuntimeError("the service returned an address the product cannot recompute")
-    return address.address
+# 2-3. Quotes and deposits --------------------------------------------------------------------
 
 
 def quote(config: Integration, client: TopupClient, account: str, amount_minor: int) -> Quote:
@@ -111,7 +99,7 @@ def quote(config: Integration, client: TopupClient, account: str, amount_minor: 
     )
 
 
-# 5. Webhooks and fulfillment ---------------------------------------------------------------------
+# 4. Webhooks and fulfillment ---------------------------------------------------------------------
 
 
 def receive_webhook(
@@ -143,7 +131,6 @@ def main() -> int:
         pin_settlement_key(client)
         print("pinned the settlement key from attestation")
         account = f"example-{uuid.uuid4().hex[:12]}"
-        print(f"created {account}; persistent address {register(config, client, account)}")
         lock = quote(config, client, account, args.amount_minor)
         print(
             f"quote {lock.id}: pay {lock.amount_atomic} atomic to {lock.address} before "

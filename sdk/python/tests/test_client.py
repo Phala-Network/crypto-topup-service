@@ -258,35 +258,6 @@ def test_refunds_send_an_idempotency_key_and_default_to_the_remainder() -> None:
     assert request.headers["idempotency-key"].startswith('"')
 
 
-def test_list_pending_deposits_returns_provisional_transfers() -> None:
-    pending = {
-        "deposit_id": str(uuid.UUID(int=7)),
-        "chain_id": 11155111,
-        "tx_hash": "0x" + "ab" * 32,
-        "log_index": 3,
-        "block_number": 10,
-        "block_time": "2026-09-22T00:00:00Z",
-        "confirmations": 2,
-        "address": "0x" + "11" * 20,
-        "asset_contract": "0x" + "22" * 20,
-        "from_address": "0x" + "33" * 20,
-        "amount_atomic": "5",
-        "supported": False,
-        "first_seen_at": "2026-09-22T00:00:05Z",
-        "estimated_final_at": "2026-09-22T00:15:00Z",
-    }
-
-    def respond(request: httpx.Request, _: int) -> httpx.Response:
-        assert request.method == "GET"
-        assert request.url.raw_path == b"/v1/products/acme/accounts/ws%201/pending-deposits"
-        return httpx.Response(200, json={"pending_deposits": [pending]})
-
-    with _client(FakeService(respond)) as client:
-        transfers = client.list_pending_deposits("ws 1")
-    assert [(item.confirmations, item.supported) for item in transfers] == [(2, False)]
-    assert transfers[0].estimated_final_at.minute == 15
-
-
 def test_quote_payment_is_optional_and_parsed() -> None:
     payment = {
         "status": "seen",

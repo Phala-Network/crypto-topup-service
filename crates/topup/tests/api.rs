@@ -349,7 +349,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
 }
 
 #[tokio::test]
-async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
+async fn tenant_isolation_and_operator_pauses() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -362,151 +362,118 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
-        // Reads need a known account; creating an address creates the account.
-        let implicit_path = format!(
-            "/v1/products/{}/accounts/implicit-001/deposit-address",
-            product.slug
-        );
-        let response = app
-            .clone()
-            .oneshot(signed_request(Method::GET, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now))
-            .await?;
-        ensure!(response.status() == StatusCode::NOT_FOUND);
-        let response = app
-            .clone()
-            .oneshot(signed_request(Method::POST, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["salt_inputs"]["external_id"] == "implicit-001");
-        let response = app
-            .clone()
-            .oneshot(signed_request(Method::GET, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now + 1))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let address_path = format!(
-            "/v1/products/{}/accounts/account-001/deposit-address",
-            product.slug
-        );
-        let first_address = app
-            .clone()
-            .oneshot(signed_request(Method::POST, &address_path, Vec::new(), PRODUCT_KID, &product_key, now))
-            .await?;
-        ensure!(first_address.status() == StatusCode::OK);
-        let first_address = response_json(first_address).await?;
-        ensure!(first_address["address"] == "0x382ca64bfc7332eef90547e1a345779fa26590c2");
-        let account_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM accounts WHERE product_id = $1 AND external_id = 'account-001'",
+        let account_id = seed::create_account(
+            &database.app_pool,
+            &NewAccount {
+                id: Uuid::new_v4(),
+                product_id: product.id,
+                external_id: "account-001".to_owned(),
+                paused_scopes: Vec::new(),
+            },
         )
-        .bind(product.id)
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(first_address["salt_inputs"]["version"] == 1);
-
-        let same_address = app
-            .clone()
-            .oneshot(signed_request(Method::GET, &address_path, Vec::new(), PRODUCT_KID, &product_key, now))
-            .await?;
-        ensure!(same_address.status() == StatusCode::OK);
-        ensure!(response_json(same_address).await?["address"] == first_address["address"]);
-
-        let rotate_path = format!("{address_path}/rotate");
-        let rotate_body = serde_json::to_vec(&json!({"from_version": 1}))?;
-        let rotated = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &rotate_path,
-                rotate_body.clone(),
-                PRODUCT_KID,
-                &product_key,
-                now,
-            ))
-            .await?;
-        ensure!(rotated.status() == StatusCode::OK);
-        let rotated = response_json(rotated).await?;
-        ensure!(rotated["address"] != first_address["address"]);
-        ensure!(rotated["salt_inputs"]["version"] == 2);
-        let retried = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &rotate_path,
-                rotate_body,
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(retried.status() == StatusCode::OK);
-        ensure!(response_json(retried).await?["address"] == rotated["address"]);
-        let address_counts = sqlx::query(
-            "SELECT count(*) AS total, count(*) FILTER (WHERE retired_at IS NOT NULL) AS retired FROM addresses WHERE account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(address_counts.try_get::<i64, _>("total")? == 2);
-        ensure!(address_counts.try_get::<i64, _>("retired")? == 1);
+        .await?
+        .id;
 
         let other_deposit = seed_other_tenant_deposit(&database.app_pool, other.id).await?;
         let cross_tenant_path = format!("/v1/deposits/dep_{}", other_deposit.simple());
         let response = app
             .clone()
-            .oneshot(signed_request(Method::GET, &cross_tenant_path, Vec::new(), PRODUCT_KID, &product_key, now))
+            .oneshot(signed_request(
+                Method::GET,
+                &cross_tenant_path,
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
 
         // Pausing an account is an operator action.
-        let pause_path = format!("/v1/admin/products/{}/accounts/account-001/pause", product.slug);
-        let pause_body = serde_json::to_vec(&json!({"scopes": ["addresses", "settlement"]}))?;
+        let pause_path = format!(
+            "/v1/admin/products/{}/accounts/account-001/pause",
+            product.slug
+        );
+        let pause_body = serde_json::to_vec(&json!({"scopes": ["quotes", "settlement"]}))?;
         let response = app
             .clone()
-            .oneshot(signed_request(Method::POST, &pause_path, pause_body.clone(), PRODUCT_KID, &product_key, now))
+            .oneshot(signed_request(
+                Method::POST,
+                &pause_path,
+                pause_body.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
         let response = app
             .clone()
-            .oneshot(signed_request(Method::POST, &pause_path, pause_body, ADMIN_KID, &admin_key, now))
+            .oneshot(signed_request(
+                Method::POST,
+                &pause_path,
+                pause_body,
+                ADMIN_KID,
+                &admin_key,
+                now,
+            ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let paused = response_json(response).await?;
-        ensure!(paused["paused_scopes"] == json!(["addresses", "settlement"]));
+        ensure!(paused["paused_scopes"] == json!(["quotes", "settlement"]));
         let stored_scopes: Vec<String> =
             sqlx::query_scalar("SELECT paused_scopes FROM accounts WHERE id = $1")
                 .bind(account_id)
                 .fetch_one(&database.app_pool)
                 .await?;
-        ensure!(stored_scopes == ["addresses", "settlement"]);
+        ensure!(stored_scopes == ["quotes", "settlement"]);
         let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit WHERE subject = $1")
             .bind(format!("account:{account_id}"))
             .fetch_one(&database.app_pool)
             .await?;
         ensure!(audit_count == 1);
 
-        let paused_address = app
+        // The paused account gets no quote.
+        let paused_quote = app
             .clone()
             .oneshot(signed_request(
-                Method::GET,
-                &address_path,
-                Vec::new(),
+                Method::POST,
+                "/v1/quotes",
+                serde_json::to_vec(&json!({
+                    "account_id": "account-001", "amount": 1000, "currency": "usd",
+                    "chain_id": 1, "asset": "pha",
+                }))?,
                 PRODUCT_KID,
                 &product_key,
                 now + 2,
             ))
             .await?;
-        ensure!(paused_address.status() == StatusCode::CONFLICT);
-        ensure!(response_json(paused_address).await?["error"]["code"] == "paused");
+        ensure!(paused_quote.status() == StatusCode::CONFLICT);
+        ensure!(response_json(paused_quote).await?["error"]["code"] == "paused");
 
         let admin_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
         let admin_body = serde_json::to_vec(&json!({"scopes": ["flush"]}))?;
         let product_signed = app
             .clone()
-            .oneshot(signed_request(Method::POST, admin_path, admin_body.clone(), PRODUCT_KID, &product_key, now))
+            .oneshot(signed_request(
+                Method::POST,
+                admin_path,
+                admin_body.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
             .await?;
         ensure!(product_signed.status() == StatusCode::UNAUTHORIZED);
         let admin_signed = app
-            .oneshot(signed_request(Method::POST, admin_path, admin_body, ADMIN_KID, &admin_key, now))
+            .oneshot(signed_request(
+                Method::POST,
+                admin_path,
+                admin_body,
+                ADMIN_KID,
+                &admin_key,
+                now,
+            ))
             .await?;
         ensure!(admin_signed.status() == StatusCode::OK);
         let admin_audit_count: i64 =
@@ -848,206 +815,7 @@ async fn admin_product_key_replacement() -> Result<()> {
 }
 
 #[tokio::test]
-async fn persistent_addresses_start_scanning_at_the_chain_cursor() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let product_key = SigningKey::from_bytes(&[23; 32]);
-        let admin_key = SigningKey::from_bytes(&[24; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        seed::create_account(
-            &database.app_pool,
-            &NewAccount {
-                id: Uuid::new_v4(),
-                product_id: product.id,
-                external_id: "cursor-001".to_owned(),
-                paused_scopes: Vec::new(),
-            },
-        )
-        .await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
-        let address_path = format!(
-            "/v1/products/{}/accounts/cursor-001/deposit-address",
-            product.slug
-        );
-
-        sqlx::query("INSERT INTO cursors (chain_id, scanned_block) VALUES (1, 1234)")
-            .execute(&database.app_pool)
-            .await?;
-        let issued = app
-            .clone()
-            .oneshot(signed_request(Method::POST, &address_path, Vec::new(), PRODUCT_KID, &product_key, now))
-            .await?;
-        ensure!(issued.status() == StatusCode::OK);
-
-        sqlx::query("UPDATE cursors SET scanned_block = 5678 WHERE chain_id = 1")
-            .execute(&database.app_pool)
-            .await?;
-        let rotated = app
-            .oneshot(signed_request(
-                Method::POST,
-                &format!("{address_path}/rotate"),
-                serde_json::to_vec(&json!({"from_version": 1}))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(rotated.status() == StatusCode::OK);
-
-        let versions: Vec<(i64, i64, bool)> = sqlx::query_as(
-            "SELECT version, created_block, backfilled FROM addresses WHERE kind = 'persistent' ORDER BY version",
-        )
-        .fetch_all(&database.app_pool)
-        .await?;
-        ensure!(versions == [(1, 1234, false), (2, 5678, false)], "{versions:?}");
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn route_pause_controls_address_routes() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let product_key = SigningKey::from_bytes(&[27; 32]);
-        let admin_key = SigningKey::from_bytes(&[28; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let account = seed::create_account(
-            &database.app_pool,
-            &NewAccount {
-                id: Uuid::new_v4(),
-                product_id: product.id,
-                external_id: "route-pause-account".to_owned(),
-                paused_scopes: Vec::new(),
-            },
-        )
-        .await?;
-        seed::set_product_paused_scopes(&database.app_pool, product.id, &["quotes".to_owned()])
-            .await?;
-        seed::set_account_paused_scopes(&database.app_pool, account.id, &["settlement".to_owned()])
-            .await?;
-
-        let app = test_router(&database.app_pool, &admin_key);
-        let health = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/healthz")
-                    .body(Body::empty())?,
-            )
-            .await?;
-        ensure!(health.status() == StatusCode::OK);
-        let now = Utc::now().timestamp();
-        let address_path = "/v1/products/phala-cloud/accounts/route-pause-account/deposit-address";
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                address_path,
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let pause_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                pause_path,
-                serde_json::to_vec(&json!({"scopes": ["flush"]}))?,
-                ADMIN_KID,
-                &admin_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::GET,
-                address_path,
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                pause_path,
-                serde_json::to_vec(&json!({"scopes": ["addresses"]}))?,
-                ADMIN_KID,
-                &admin_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::GET,
-                address_path,
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now + 2,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        ensure!(response_json(response).await?["error"]["code"] == "paused");
-
-        let resume_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/resume";
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                resume_path,
-                serde_json::to_vec(&json!({"scopes": ["addresses"]}))?,
-                ADMIN_KID,
-                &admin_key,
-                now + 2,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let response = app
-            .oneshot(signed_request(
-                Method::GET,
-                address_path,
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now + 3,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
+async fn frozen_chain_refuses_quotes() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -1076,27 +844,6 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
 
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let address_path = "/v1/products/phala-cloud/accounts/frozen-account/deposit-address";
-        for (method, created) in [(Method::GET, now), (Method::POST, now + 1)] {
-            let response = app
-                .clone()
-                .oneshot(signed_request(
-                    method,
-                    address_path,
-                    Vec::new(),
-                    PRODUCT_KID,
-                    &product_key,
-                    created,
-                ))
-                .await?;
-            ensure!(response.status() == StatusCode::CONFLICT);
-            ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
-        }
-        let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM addresses")
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(issued == 0);
-
         let lock_body = serde_json::to_vec(&json!({
             "account_id": "frozen-account", "amount": 1000, "currency": "usd",
             "chain_id": 1, "asset": "pha",
@@ -1246,18 +993,23 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         ensure!(evidence["block"]["reason"] == "test freeze");
 
         // The chain resumes without a restart.
+        // Quote creation passes the frozen-chain check and reaches pricing, which the test
+        // router does not configure.
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                "/v1/products/phala-cloud/accounts/lift-account/deposit-address",
-                Vec::new(),
+                "/v1/quotes",
+                serde_json::to_vec(&json!({
+                    "account_id": "lift-account", "amount": 1000, "currency": "usd",
+                    "chain_id": 1, "asset": "pha",
+                }))?,
                 PRODUCT_KID,
                 &product_key,
                 now + 6,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::OK);
+        ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
         let response = app
             .oneshot(admin(Method::GET, "/v1/admin/report/daily", Value::Null, now + 7)?)
             .await?;

@@ -5,39 +5,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-/// Inputs needed to recompute a persistent CREATE2 address.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct PersistentSaltInputs {
-    /// Stable product slug.
-    pub product_slug: String,
-    /// Product-owned account identifier.
-    pub external_id: String,
-    /// Persistent address version.
-    pub version: u64,
-}
-
-/// Persistent deposit address and deterministic derivation inputs.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct DepositAddressResponse {
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Route name governing deposits to this address.
-    pub route: String,
-    /// Canonical EVM address.
-    pub address: String,
-    /// Canonical CREATE2 salt.
-    pub salt: String,
-    /// Inputs encoded into the salt.
-    pub salt_inputs: PersistentSaltInputs,
-}
-
-/// Idempotent persistent-address rotation request.
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct RotateDepositAddressRequest {
-    /// Address version the caller observed before requesting rotation.
-    pub from_version: u64,
-}
-
 /// A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DepositResponse {
@@ -442,48 +409,6 @@ pub struct ConfigAsset {
     pub quote_tolerance_bps: u16,
     /// Typical time from payment to finality, in seconds.
     pub typical_finality_seconds: u64,
-}
-
-/// A transfer to a persistent address seen above the finalized head. It is not a deposit, has not
-/// been credited, and may disappear in a reorg; once final it appears under `deposits`.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct PendingDepositResponse {
-    /// Identifier the deposit will have once final.
-    pub deposit_id: Uuid,
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Canonical transaction hash.
-    pub tx_hash: String,
-    /// Transfer log index.
-    pub log_index: u64,
-    /// Block that contains the transfer.
-    pub block_number: u64,
-    /// Block time.
-    pub block_time: DateTime<Utc>,
-    /// Blocks on top of and including that block at the last head scan.
-    pub confirmations: u64,
-    /// Receiving forwarder address.
-    pub address: String,
-    /// Canonical token contract address.
-    pub asset_contract: String,
-    /// Canonical transfer sender address.
-    pub from_address: String,
-    /// Atomic token amount encoded as a decimal string.
-    pub amount_atomic: String,
-    /// Whether a route of this product accepts this token on this chain. Only routed tokens are
-    /// scanned before finality, so this is false only for a token routed for another product.
-    pub supported: bool,
-    /// First time the service saw the transfer.
-    pub first_seen_at: DateTime<Utc>,
-    /// Estimated finality time: block time plus 15 minutes.
-    pub estimated_final_at: DateTime<Utc>,
-}
-
-/// Pending transfers to an account's persistent addresses.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct PendingDepositsResponse {
-    /// Pending transfers in block order.
-    pub pending_deposits: Vec<PendingDepositResponse>,
 }
 
 /// Administrative refund record body owned by C12.

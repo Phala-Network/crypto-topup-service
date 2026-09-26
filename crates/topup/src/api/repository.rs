@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
-use topup_core::address::{forwarder_address, persistent_salt};
 use topup_core::money::AtomicAmount;
 use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
@@ -231,85 +230,6 @@ pub async fn find_account(
     .fetch_optional(pool)
     .await?;
     Ok(row.map(Into::into))
-}
-
-/// Returns the active persistent address, creating version one atomically when absent.
-#[allow(clippy::too_many_arguments)]
-pub async fn get_or_create_persistent_address(
-    pool: &PgPool,
-    product_id: Uuid,
-    account: &Account,
-    product_slug: &str,
-    chain_id: u64,
-    factory: EvmAddress,
-    implementation: EvmAddress,
-) -> Result<Address, ApiError> {
-    let mut transaction = pool.begin().await?;
-    lock_account(&mut transaction, product_id, account.id).await?;
-    if let Some(address) = find_active_address(&mut transaction, account.id, chain_id).await? {
-        transaction.commit().await?;
-        return Ok(address);
-    }
-    let address = insert_persistent_address(
-        &mut transaction,
-        account,
-        product_slug,
-        chain_id,
-        factory,
-        implementation,
-        1,
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(address)
-}
-
-/// Retires the active address and creates the next persistent version atomically.
-#[allow(clippy::too_many_arguments)]
-pub async fn rotate_persistent_address(
-    pool: &PgPool,
-    product_id: Uuid,
-    account: &Account,
-    product_slug: &str,
-    chain_id: u64,
-    factory: EvmAddress,
-    implementation: EvmAddress,
-    from_version: u64,
-) -> Result<Address, ApiError> {
-    let mut transaction = pool.begin().await?;
-    lock_account(&mut transaction, product_id, account.id).await?;
-    let current = find_active_address(&mut transaction, account.id, chain_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if current.version > from_version {
-        transaction.commit().await?;
-        return Ok(current);
-    }
-    if current.version < from_version {
-        return Err(ApiError::conflict(
-            "from_version is newer than the current address version",
-        ));
-    }
-    let version = current
-        .version
-        .checked_add(1)
-        .ok_or_else(|| ApiError::conflict("address version is exhausted"))?;
-    sqlx::query("UPDATE addresses SET retired_at = now() WHERE id = $1 AND retired_at IS NULL")
-        .bind(current.id)
-        .execute(&mut *transaction)
-        .await?;
-    let address = insert_persistent_address(
-        &mut transaction,
-        account,
-        product_slug,
-        chain_id,
-        factory,
-        implementation,
-        version,
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(address)
 }
 
 /// A refund request: the deposit, destination, and amount (the unrefunded remainder when absent).
@@ -1557,80 +1477,6 @@ async fn refund_approval_paused(
     Ok([account_scopes, product_scopes, route_scopes]
         .iter()
         .any(|scopes| scopes.iter().any(|scope| scope == "refunds")))
-}
-
-async fn lock_account(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    product_id: Uuid,
-    account_id: Uuid,
-) -> Result<(), ApiError> {
-    let found = sqlx::query("SELECT id FROM accounts WHERE id = $1 AND product_id = $2 FOR UPDATE")
-        .bind(account_id)
-        .bind(product_id)
-        .fetch_optional(&mut **transaction)
-        .await?;
-    if found.is_none() {
-        return Err(ApiError::not_found());
-    }
-    Ok(())
-}
-
-async fn find_active_address(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    account_id: Uuid,
-    chain_id: u64,
-) -> Result<Option<Address>, ApiError> {
-    let chain_id = i64::try_from(chain_id).map_err(|_| ApiError::internal())?;
-    let row = sqlx::query_as::<_, AddressRow>(
-        r#"
-        SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
-        FROM addresses
-        WHERE account_id = $1 AND chain_id = $2 AND kind = 'persistent' AND retired_at IS NULL
-        FOR UPDATE
-        "#,
-    )
-    .bind(account_id)
-    .bind(chain_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    row.map(TryInto::try_into).transpose()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_persistent_address(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    account: &Account,
-    product_slug: &str,
-    chain_id: u64,
-    factory: EvmAddress,
-    implementation: EvmAddress,
-    version: u64,
-) -> Result<Address, ApiError> {
-    let salt = persistent_salt(product_slug, &account.external_id, version);
-    let address = forwarder_address(factory, implementation, salt);
-    // Each version's address is first issued here, so, as for lock addresses, the scanner
-    // covers it from the chain's committed cursor instead of backfilling from genesis.
-    let row = sqlx::query_as::<_, AddressRow>(
-        r#"
-        INSERT INTO addresses
-            (id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at,
-             created_block)
-        VALUES (
-            $1, $2, $3, 'persistent', $4, NULL, $5, $6, NULL,
-            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $3), 0)
-        )
-        RETURNING id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(account.id)
-    .bind(i64::try_from(chain_id).map_err(|_| ApiError::internal())?)
-    .bind(i64::try_from(version).map_err(|_| ApiError::conflict("address version is exhausted"))?)
-    .bind(format!("{salt:#x}"))
-    .bind(format!("{address:#x}"))
-    .fetch_one(&mut **transaction)
-    .await?;
-    row.try_into()
 }
 
 fn updated_scopes(current: Vec<String>, requested: &[String], pause: bool) -> Vec<String> {

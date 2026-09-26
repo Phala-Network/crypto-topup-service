@@ -458,14 +458,10 @@ workspace, and checks the deposit state, the verified webhooks, and the product 
 |---|---|---|
 | underpayment | `--pay-bps 9700` | `credited` at spot for what arrived, then `swept`; the lock later expires |
 | after the quote window | `--pay-after-expiry` | `rate_lock.expired`, then `credited` at spot and `swept` |
-| persistent address | `--persistent ATOMIC` | `credited` at spot, then `swept` |
-| unsupported token | `--persistent ATOMIC --token T --until rejected` | after finality `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
-| refund | `--persistent ATOMIC --until refunded --refund-to A` | above `max_deposit_atomic` (200000 test PHA): `rejected(out_of_bounds)`, swept; the driver requests a refund and waits while it is executed as in [refund execution](runbooks/refund-execution.md), until `confirmed` and one `deposit.refunded` |
+| unsupported token | `--token T --until rejected` | after finality `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
+| refund | `--pay-bps N --until refunded --refund-to A` | a payment of N/10000 of the quote above `max_deposit_atomic` (200000 test PHA): `rejected(out_of_bounds)`, swept; the driver requests a refund and waits while it is executed as in [refund execution](runbooks/refund-execution.md), until `confirmed` and one `deposit.refunded` |
 
-Each row adds its options to the step-5 driver command (the persistent rows drop `--amount-minor`
-and `--min-atomic`): `ATOMIC` for the credited rows is at least
-`min_flush_atomic` (a smaller credited deposit is never swept and raises
-`TopupDepositStateAgeExceeded` after 48 hours), `T` is the Sepolia unsupported test token
+Each row adds its options to the step-5 driver command: `T` is the Sepolia unsupported test token
 `0x287E3577c66866a3F5Cb7a8Dac6761EB43608392`, `A` an address the operator controls, and the refund
 row needs `--timeout 43200`. A mismatch between the expected and the observed outcome exits
 non-zero with the reason.

@@ -4,8 +4,6 @@
 //! an unfinalized transfer can never produce a stored rejection or credit.
 
 use alloy_primitives::Address as EvmAddress;
-use axum::Json;
-use axum::extract::{Extension, Path, State};
 use chrono::{DateTime, TimeDelta, Utc};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -13,71 +11,17 @@ use topup_core::route::RouteFile;
 use topup_core::valuation::amount_within_tolerance;
 use uuid::Uuid;
 
-use crate::db::{self, PendingTransfer, Product};
+use crate::db::{self, PendingTransfer};
 use crate::locks::{RateLock, RateLockStatus};
 
 use super::AppState;
-use super::error::{ApiError, ErrorResponse};
-use super::handlers::require_account;
-use super::models::{PendingDepositResponse, PendingDepositsResponse, QuotePayment};
+use super::error::ApiError;
+use super::models::QuotePayment;
 
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s (12.8 to 19 minutes).
 /// This is an estimate for display; it is not tied to a chain's beacon genesis.
 const ESTIMATED_FINALITY_DELAY: TimeDelta = TimeDelta::minutes(15);
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/accounts/{ext}/pending-deposits",
-    params(
-        ("p" = String, Path, description = "Product slug"),
-        ("ext" = String, Path, description = "Product-owned account identifier")
-    ),
-    responses(
-        (status = 200, description = "OK", body = PendingDepositsResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "deposits"
-)]
-/// Transfers to the account's persistent addresses seen above the finalized head. These are not
-/// deposits and have not been credited; once final they leave this list and appear under
-/// `deposits`, and a reorg can remove them.
-pub(crate) async fn list_pending_deposits(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-) -> Result<Json<PendingDepositsResponse>, ApiError> {
-    let account = require_account(&state, product.id, &external_id).await?;
-    touch_requested(&state, account.id).await;
-    let pending_deposits = db::list_account_pending(&state.pool, account.id)
-        .await?
-        .into_iter()
-        .map(|transfer| PendingDepositResponse {
-            supported: product_accepts(
-                &state,
-                &product,
-                transfer.chain_id,
-                transfer.asset_contract,
-            ),
-            deposit_id: transfer.deposit_id,
-            chain_id: transfer.chain_id,
-            tx_hash: format!("{:#x}", transfer.tx_hash),
-            log_index: transfer.log_index,
-            block_number: transfer.block_number,
-            block_time: transfer.block_time,
-            confirmations: transfer.confirmations(),
-            address: format!("{:#x}", transfer.address),
-            asset_contract: format!("{:#x}", transfer.asset_contract),
-            from_address: format!("{:#x}", transfer.from_address),
-            amount_atomic: transfer.amount_atomic.value().to_string(),
-            first_seen_at: transfer.first_seen_at,
-            estimated_final_at: estimated_final_at(transfer.block_time),
-        })
-        .collect();
-    Ok(Json(PendingDepositsResponse { pending_deposits }))
-}
 
 /// The payment the quote page shows, following the consumption rule of §9: the deposit that
 /// consumed the quote; otherwise the first transfer that would consume it (finalized deposits
@@ -211,27 +155,6 @@ async fn address_deposits(state: &AppState, address_id: Uuid) -> Result<Vec<Obse
         )
         .collect::<Option<Vec<_>>>()
         .ok_or_else(ApiError::internal)
-}
-
-/// Records address activity for the head scan's watched set. Display bookkeeping only, so a
-/// failure is logged and never fails the request.
-pub(super) async fn touch_requested(state: &AppState, account_id: Uuid) {
-    if let Err(error) = db::touch_persistent_requested(&state.pool, account_id).await {
-        tracing::warn!(%error, %account_id, "failed to record persistent address activity");
-    }
-}
-
-fn product_accepts(
-    state: &AppState,
-    product: &Product,
-    chain_id: u64,
-    asset_contract: EvmAddress,
-) -> bool {
-    state.routes.routes().iter().any(|route| {
-        route.destination.product == product.slug
-            && route.chain.chain_id == chain_id
-            && route.asset.contract == asset_contract
-    })
 }
 
 fn estimated_final_at(block_time: DateTime<Utc>) -> DateTime<Utc> {

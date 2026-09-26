@@ -14,7 +14,7 @@ In-flight deposits on the chain stop too, and deposits of a removed version lose
 Stop new locks and addresses on the route:
 
 ```sh
-admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses"]}'
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes"]}'
 ```
 
 Then, in the daily report (`admin GET /v1/admin/report/daily`), read the route's (for a chain,
@@ -38,4 +38,4 @@ chain's last route) by reviewed PR (`deploy/validate-compose.sh` passes) and Dep
 
 The report no longer lists the retired route, and the remaining routes show no exposure growth.
 Rollback is a Deploy `upgrade` to the prior compose: the route, its scanner, and its locks resume
-from the database; resume `quotes` and `addresses` only if the retirement is abandoned.
+from the database; resume `quotes` only if the retirement is abandoned.

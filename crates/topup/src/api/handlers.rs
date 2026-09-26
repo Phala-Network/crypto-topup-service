@@ -5,8 +5,7 @@ use std::str::FromStr;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::B256;
 use axum::Json;
-use axum::extract::{Extension, Path, Query, State};
-use topup_core::route::RouteFile;
+use axum::extract::{Path, Query, State};
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
@@ -19,92 +18,13 @@ use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
     AdminReasonRequest, AdminRefundResponse, AttestationQuery, AttestationResponse,
-    DailyReportResponse, DepositAddressResponse, NudgeResponse, OutboxReplayResponse, PauseRequest,
-    PauseResponse, PersistentSaltInputs, ProductResponse, ReconciliationBlockLiftResponse,
-    RecordRefundRequest, RegisterProductRequest, RotateDepositAddressRequest, RoutePauseResponse,
-    SupportDepositResponse, UpdateProductRequest,
+    DailyReportResponse, NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
+    ProductResponse, ReconciliationBlockLiftResponse, RecordRefundRequest, RegisterProductRequest,
+    RoutePauseResponse, SupportDepositResponse, UpdateProductRequest,
 };
 use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/accounts/{ext}/deposit-address",
-    params(
-        ("p" = String, Path, description = "Product slug"),
-        ("ext" = String, Path, description = "Product-owned account identifier")
-    ),
-    responses(
-        (status = 200, description = "OK", body = DepositAddressResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 423, description = "Locked", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "addresses"
-)]
-pub(crate) async fn get_deposit_address(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-) -> ApiResult<Json<DepositAddressResponse>> {
-    let account = require_account(&state, product.id, &external_id).await?;
-    deposit_address(&state, &product, account, None).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts/{ext}/deposit-address",
-    params(
-        ("p" = String, Path, description = "Product slug"),
-        ("ext" = String, Path, description = "Product-owned account identifier")
-    ),
-    responses(
-        (status = 200, description = "OK", body = DepositAddressResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 423, description = "Locked", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "addresses"
-)]
-pub(crate) async fn create_deposit_address(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-) -> ApiResult<Json<DepositAddressResponse>> {
-    let account = ensure_account(&state, product.id, &external_id).await?;
-    deposit_address(&state, &product, account, None).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts/{ext}/deposit-address/rotate",
-    params(
-        ("p" = String, Path, description = "Product slug"),
-        ("ext" = String, Path, description = "Product-owned account identifier")
-    ),
-    request_body = RotateDepositAddressRequest,
-    responses(
-        (status = 200, description = "OK", body = DepositAddressResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 409, description = "Conflict", body = ErrorResponse),
-        (status = 423, description = "Locked", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "addresses"
-)]
-pub(crate) async fn rotate_deposit_address(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-    Json(request): Json<RotateDepositAddressRequest>,
-) -> ApiResult<Json<DepositAddressResponse>> {
-    let account = require_account(&state, product.id, &external_id).await?;
-    deposit_address(&state, &product, account, Some(request.from_version)).await
-}
 
 #[utoipa::path(
     get,
@@ -504,79 +424,6 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
             }
         }
     }
-}
-
-async fn deposit_address(
-    state: &AppState,
-    product: &Product,
-    account: Account,
-    rotate_from_version: Option<u64>,
-) -> ApiResult<Json<DepositAddressResponse>> {
-    let route = state.route_for_product(product)?;
-    require_unfrozen_chain(state, route).await?;
-    let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
-    if has_scope(&product.paused_scopes, "addresses")
-        || has_scope(&account.paused_scopes, "addresses")
-        || has_scope(&route_scopes, "addresses")
-    {
-        return Err(ApiError::paused("deposit addresses are paused"));
-    }
-    let address = if let Some(from_version) = rotate_from_version {
-        repository::rotate_persistent_address(
-            &state.pool,
-            product.id,
-            &account,
-            &product.slug,
-            route.chain.chain_id,
-            route.chain.contracts.forwarder_factory,
-            route.chain.contracts.implementation,
-            from_version,
-        )
-        .await?
-    } else {
-        repository::get_or_create_persistent_address(
-            &state.pool,
-            product.id,
-            &account,
-            &product.slug,
-            route.chain.chain_id,
-            route.chain.contracts.forwarder_factory,
-            route.chain.contracts.implementation,
-        )
-        .await?
-    };
-    super::pending::touch_requested(state, account.id).await;
-    Ok(Json(address_response(route, product, &account, address)))
-}
-
-fn has_scope(scopes: &[String], expected: &str) -> bool {
-    scopes.iter().any(|scope| scope == expected)
-}
-
-fn address_response(
-    route: &RouteFile,
-    product: &Product,
-    account: &Account,
-    address: crate::db::Address,
-) -> DepositAddressResponse {
-    DepositAddressResponse {
-        chain_id: address.chain_id,
-        route: route.route.clone(),
-        address: format!("{:#x}", address.address),
-        salt: format!("{:#x}", address.salt),
-        salt_inputs: PersistentSaltInputs {
-            product_slug: product.slug.clone(),
-            external_id: account.external_id.clone(),
-            version: address.version,
-        },
-    }
-}
-
-async fn require_unfrozen_chain(state: &AppState, route: &RouteFile) -> ApiResult<()> {
-    if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
-        return Err(ApiError::chain_frozen());
-    }
-    Ok(())
 }
 
 /// Finds or creates the account, so creating a quote or an address is one call.

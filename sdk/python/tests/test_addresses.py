@@ -10,7 +10,6 @@ from topup_sdk.addresses import (
     deposit_id,
     forwarder_address,
     lock_salt,
-    persistent_salt,
     same_address,
     to_checksum_address,
 )
@@ -21,14 +20,6 @@ VECTORS: dict[str, Any] = json.loads(
         encoding="utf-8"
     )
 )
-
-
-@pytest.mark.parametrize("vector", VECTORS["persistent"], ids=lambda vector: vector["external_id"])
-def test_persistent_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]) -> None:
-    salt = persistent_salt(vector["product_slug"], vector["external_id"], vector["version"])
-    assert "0x" + salt.hex() == vector["salt"]
-    address = forwarder_address(VECTORS["factory"], VECTORS["implementation"], salt)
-    assert address == vector["predicted_address"]
 
 
 @pytest.mark.parametrize("vector", VECTORS["lock"], ids=lambda vector: vector["lock_ref"])

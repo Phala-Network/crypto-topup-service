@@ -32,8 +32,8 @@ pub use flushes::{
 };
 pub use outbox::{NewOutboxEvent, enqueue};
 pub use pending::{
-    HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_account_pending,
-    list_address_pending, list_watched_addresses, touch_persistent_requested,
+    HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,
+    list_watched_addresses,
 };
 pub use products::{Product, get_product};
 pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};

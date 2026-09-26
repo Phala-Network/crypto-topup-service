@@ -186,8 +186,11 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     bad_ref = json.dumps({"account_id": "a/b"}).encode()
     assert _account_call(api, "POST", "/accounts", bad_ref).status == 400
     assert _account_call(api, "GET", f"/accounts/{TEAM}", b"").status == 404
-    # Signed and valid, but the product key is not sealed yet: unavailable, nothing recorded.
-    assert _account_call(api, "POST", "/accounts", register).status == 503
+    # Registration is the product's own; a quote needs the service, and the product key is not
+    # sealed yet: unavailable.
+    assert _account_call(api, "POST", "/accounts", register).status == 200
+    quote = json.dumps({"amount_minor": 2500}).encode()
+    assert _account_call(api, "POST", f"/accounts/{TEAM}/quotes", quote).status == 503
 
 
 def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:

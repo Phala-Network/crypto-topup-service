@@ -56,8 +56,6 @@ impl From<&ScreeningConfig> for Bounds {
 pub enum PauseScope {
     /// Creating new rate quotes.
     Quotes,
-    /// Issuing or rotating deposit addresses.
-    Addresses,
     /// Starting new product settlements.
     Settlement,
     /// Flushing deposited funds to the treasury.
@@ -72,7 +70,6 @@ impl PauseScope {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Quotes => "quotes",
-            Self::Addresses => "addresses",
             Self::Settlement => "settlement",
             Self::Flush => "flush",
             Self::Refunds => "refunds",
@@ -86,7 +83,6 @@ impl FromStr for PauseScope {
     fn from_str(code: &str) -> Result<Self, Self::Err> {
         match code {
             "quotes" => Ok(Self::Quotes),
-            "addresses" => Ok(Self::Addresses),
             "settlement" => Ok(Self::Settlement),
             "flush" => Ok(Self::Flush),
             "refunds" => Ok(Self::Refunds),
@@ -245,18 +241,11 @@ mod tests {
 
     #[test]
     fn pause_scopes_parse_exact_codes_into_a_set() {
-        let scopes = PauseScopes::from_codes([
-            "quotes",
-            "addresses",
-            "settlement",
-            "flush",
-            "refunds",
-            "settlement",
-        ])
-        .expect("documented scope codes must parse");
+        let scopes =
+            PauseScopes::from_codes(["quotes", "settlement", "flush", "refunds", "settlement"])
+                .expect("documented scope codes must parse");
 
         assert!(scopes.contains(PauseScope::Quotes));
-        assert!(scopes.contains(PauseScope::Addresses));
         assert!(scopes.contains(PauseScope::Settlement));
         assert!(scopes.contains(PauseScope::Flush));
         assert!(scopes.contains(PauseScope::Refunds));
@@ -264,6 +253,8 @@ mod tests {
 
     #[test]
     fn pause_scopes_reject_unknown_text_codes() {
+        // `addresses` paused persistent-address issuance, which no longer exists.
+        assert!(PauseScopes::from_codes(["addresses"]).is_err());
         let error = PauseScopes::from_codes(["settlement", "payments"])
             .expect_err("unknown scope must fail parsing");
 
@@ -273,15 +264,11 @@ mod tests {
 
     #[test]
     fn pause_scopes_serde_round_trip_uses_exact_codes() {
-        let scopes =
-            PauseScopes::from_codes(["refunds", "flush", "settlement", "addresses", "quotes"])
-                .expect("documented scope codes must parse");
+        let scopes = PauseScopes::from_codes(["refunds", "flush", "settlement", "quotes"])
+            .expect("documented scope codes must parse");
 
         let json = serde_json::to_string(&scopes).expect("pause scopes must serialize");
-        assert_eq!(
-            json,
-            r#"["quotes","addresses","settlement","flush","refunds"]"#
-        );
+        assert_eq!(json, r#"["quotes","settlement","flush","refunds"]"#);
         assert_eq!(
             serde_json::from_str::<PauseScopes>(&json).expect("pause scopes must deserialize"),
             scopes
@@ -383,7 +370,7 @@ mod tests {
 
     #[test]
     fn non_settlement_pause_scopes_do_not_gate_screening() {
-        let non_settlement = scopes(&["quotes", "addresses", "flush", "refunds"]);
+        let non_settlement = scopes(&["quotes", "flush", "refunds"]);
 
         assert_eq!(
             screen(

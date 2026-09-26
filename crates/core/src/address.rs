@@ -1,19 +1,9 @@
 //! Deterministic salt derivation and EIP-1167 CREATE2 address prediction.
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
 
-/// Derives the salt for a persistent deposit address.
-#[must_use]
-pub fn persistent_salt(product_slug: &str, external_id: &str, version: u64) -> B256 {
-    keccak256(
-        (product_slug, external_id, U256::from(version))
-            .abi_encode_params()
-            .as_slice(),
-    )
-}
-
-/// Derives the salt for a single-use rate-lock deposit address.
+/// Derives the salt for a quote's single-use deposit address; a quote's `lock_ref` is its id.
 #[must_use]
 pub fn lock_salt(product_slug: &str, external_id: &str, lock_ref: &str) -> B256 {
     keccak256(

@@ -31,13 +31,13 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 
 A private service, called by the Phala Cloud billing backend, that turns finalized and
 screened deposits of configured tokens into USD credit and tells the product what to credit
-with one signed webhook per deposit, which the product fulfills once. Two ways to deposit, both first-class:
-
-- **Quote first (default UI).** The user states a USD or token amount, receives a locked
-  price, an exact token amount, a single-use address, and a countdown, then pays. This is the
-  checkout model of Coinbase Commerce and BitPay.
-- **Persistent address (advanced).** Any amount, any time, valued at the price observed when
-  the deposit reaches finality. This is the exchange deposit model.
+with one signed webhook per deposit, which the product fulfills once. Quotes are the only way to
+deposit, as Stripe's PaymentIntent is the only way to pay: the user states a USD amount,
+receives a locked price, an exact token amount, a single-use address, and a countdown, then
+pays. This is the checkout model of Coinbase Commerce and BitPay. A payment that does not match
+its quote (late, wrong amount, second payment) is still credited, at the price observed when it
+reaches finality. Persistent addresses issued before quotes became the only flow stay watched
+by the finalized scanner and their payments are credited at spot, but none is issued again.
 
 Customer contract: *tokens are converted to non-transferable Phala Cloud USD credit at the
 published rate observed when the deposit reaches Ethereum finality; the USD value is fixed
@@ -103,11 +103,11 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
 }
 ```
 
-- `salt = keccak256(abi.encode(product_slug, external_id, version))` for persistent
-  addresses; `keccak256(abi.encode(product_slug, external_id, "lock", quote_id))` for quotes
-  (rate locks), where `quote_id` is the service-assigned `qt_…` id (locks created before
-  quotes used the product's lock reference). The product holds every input, so any address can be recomputed with no service
-  state. The API returns the inputs with the address.
+- `salt = keccak256(abi.encode(product_slug, account_id, "lock", quote_id))`, where
+  `quote_id` is the service-assigned `qt_…` id (quotes created before the ids existed used the
+  product's lock reference, and legacy persistent addresses `(product_slug, external_id,
+  version)`; their stored salts stay authoritative). The product holds every input, so it
+  recomputes an address before showing it.
 - Each chain configuration records the deployed `forwarder_factory`, its immutable
   `implementation`, and the `treasury`. Address derivation uses the configured factory and
   implementation; startup verifies both against the factory contract before serving traffic.
@@ -158,9 +158,9 @@ products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- key id: r
 accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
               -- scopes: quotes | addresses | settlement | flush | refunds; empty = active
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
-addresses     id, account_id, chain_id, kind (persistent|lock), version, lock_ref, salt, address, retired_at
+addresses     id, account_id, chain_id, kind (lock | persistent: legacy, never issued again), version,
+              lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
-              UNIQUE (account_id, chain_id) WHERE kind = 'persistent' AND retired_at IS NULL
 rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
               consumed_by (deposit_id) UNIQUE
 cursors       chain_id PK, scanned_block, scanned_block_time
@@ -244,14 +244,12 @@ lock amount and timeliness are computed when read, never stored. When the head s
 finality retries after 12 s instead of the regular wait interval. While reconciliation has frozen
 a chain its head scan stops too, so the pending view stops updating.
 
-Watched addresses: lock addresses whose lock is neither consumed nor cancelled, until one hour
-after `expires_at`, and persistent addresses. Open locks are bounded by the exposure caps (each
-reserves at least `min_credit_minor` against the global cap) and, for the hour after expiry, by
-the per-account creation rate limit; any number is requested in batches of 1 000. When
-persistent addresses exceed one 1 000-address request, only those issued or fetched by the
-product (`requested_at`: address issuance, `GET` of the address, or `GET …/pending-deposits`) in
-the last 24 hours are watched, most recent first, capped at 1 000 across all products (a global
-cap, not a per-product share; revisit when a second product goes live).
+Watched addresses: quote addresses whose quote is neither completed nor canceled, until one hour
+after `expires_at`. Open quotes are bounded by the exposure caps (each reserves at least
+`min_credit_minor` against the global cap) and, for the hour after expiry, by the per-account
+creation rate limit; any number is requested in batches of 1 000. A payment to any other issued
+address (a closed quote's, or a legacy persistent one) shows no `payment` before finality; the
+finalized scanner still records it.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the finality observation
 and the price is always current at fetch time. Every route's pricing configuration declares
@@ -295,8 +293,8 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   a rejected one, can no longer be cancelled (`409 pending_payment`).
 - Exposure counters sum `credit_minor` across routes, so every route must use the same
   `unit_decimals`; the service refuses to load routes that differ.
-- A "quote, then pay to the persistent address" variant is deliberately not offered: matching
-  a lock by amount alone is ambiguous, and the single-use address is the processor-standard
+- A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
+  quote by amount alone is ambiguous, and the single-use address is the processor-standard
   answer.
 
 ## 10. Signing and flush
@@ -401,13 +399,10 @@ GET    /v1/config                                                 assets, limits
 POST   /v1/quotes {account_id, amount, currency, chain_id, asset} single-use address + locked price; Idempotency-Key
 GET    /v1/quotes/{id}                                            resume a checkout page
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
-POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent, creates the account; GET same
-POST   /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
 GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
 POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or credited on the product's request; finance approves (§15)
 GET    /v1/refunds/{id}
-GET    /v1/products/{p}/accounts/{ext}/pending-deposits           seen above finalized; not deposits
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
@@ -424,8 +419,7 @@ POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event
 GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, undelivered credits, global lock exposure, reconciliation blocks
 ```
 
-Signatures are single-use within the acceptance window. `rotate` is idempotent on
-`from_version`.
+Signatures are single-use within the acceptance window.
 
 Pending view (display only, §8). A rate lock carries an optional `payment`, chosen by the §9
 consumption rule: the deposit that consumed the lock; otherwise the first payment that would
@@ -436,8 +430,7 @@ seen above `finalized`; otherwise the first payment. Its `status` is `"seen"` wh
 against the lock. On a cancelled lock every payment is valued at spot, so `in_time` and
 `amount_within_tolerance` are false; the lock's own `status` shows why. An expired lock still
 applies to a payment mined before `expires_at` (§9), so those fields are computed normally there.
-`pending-deposits` lists the same view for the account's persistent addresses, separate from
-`deposits` so it is never mistaken for a credit. `estimated_final_at` is `block_time + 15
+It is separate from `deposits` so it is never mistaken for a credit. `estimated_final_at` is `block_time + 15
 minutes`, the typical Ethereum delay to `finalized` (64 to 95 slots); it is an estimate. A seen
 transfer can disappear in a reorg; only `deposits` and `deposit.credited` reflect credit. The
 pending view ignores pause scopes: it is informational, and a pause still stops whatever it
@@ -471,9 +464,8 @@ checklist:
 | Topic | Requirement |
 |---|---|
 | Default flow | Quote first: amount input → locked price, exact token amount, single-use address, QR as an EIP-681 URI carrying token and amount, countdown to `expires_at`, and the rule for late or wrong-amount payments. |
-| Advanced flow | Persistent address behind an explicit "send any amount" option, with "valued at the rate when the deposit is final" and an indicative current rate. |
 | Warnings | Network name and chain id, full token contract, "only PHA on Ethereum", minimum deposit, and that below-minimum deposits are not credited. Never truncate addresses or hashes. |
-| Waiting | After payment the user sees "received, N confirmations, final around hh:mm" from the lock's `payment` (`status: "seen"`) or `pending-deposits`, with a transaction-hash lookup and an explorer link; it is not credited and may still disappear in a reorg. Deposits are reported only once final. |
+| Waiting | After payment the user sees "received, N confirmations, final around hh:mm" from the quote's `payment` (`status: "seen"`), with a transaction-hash lookup and an explorer link; it is not credited and may still disappear in a reorg. Deposits are reported only once final. |
 | History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
 | Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
@@ -486,14 +478,14 @@ checklist:
 
 Exchange users expect one progress line per deposit. The product maps service states to these UI
 states. The service reports a deposit only once it is final (§8); the first state comes from its
-display-only pending view (§12): the lock's `payment` with `status: "seen"`, or an item of
-`pending-deposits`. That view is not a credit and can disappear in a reorg, and only routed tokens
+display-only pending view (§12): the quote's `payment` with `status: "seen"`. That view is not a
+credit and can disappear in a reorg, and only routed tokens
 appear in it; other tokens first show as `rejected(unsupported_asset)` once final. Drive the UI
 from fetched state, never from webhook order.
 
 | UI state | Service state | Copy |
 |---|---|---|
-| Detected, N confirmations | none yet: lock `payment.status` `seen`, or a `pending-deposits` item (display only) | "Payment detected: N confirmations. Final around {`estimated_final_at`}." When `in_time` or `amount_within_tolerance` is false on a lock, add: "This payment does not match the quote, so it will be credited at the rate when it becomes final." |
+| Detected, N confirmations | none yet: the quote's `payment.status` `seen` (display only) | "Payment detected: N confirmations. Final around {`estimated_final_at`}." When `in_time` or `amount_within_tolerance` is false on a lock, add: "This payment does not match the quote, so it will be credited at the rate when it becomes final." |
 | Finalizing | `detected` | "Final on Ethereum. Checking the payment and fixing the rate." |
 | Crediting | `confirmed`, or `credited` before the product has applied the credit | "Crediting your balance." |
 | Completed | `credited`, `swept`, and the product's own credit recorded | "Credited $X at $rate." When a lock-address payment was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |
@@ -508,12 +500,11 @@ from fetched state, never from webhook order.
 
 ### Quote and address copy (product UI)
 
-- Quote page, next to the single-use address: "Paying from an exchange? Use your persistent
-  address; exchanges may hold new withdrawal addresses and deduct withdrawal fees, so the amount
-  received must still equal the quote."
-- QR codes: the persistent address QR encodes the plain address only. Only a quote's QR is an
-  EIP-681 URI (token and amount), always shown with copy-address and copy-amount buttons for
-  wallets and exchanges that do not read the URI.
+- Quote page, next to the single-use address: "Paying from an exchange? Exchanges may hold new
+  withdrawal addresses and deduct withdrawal fees; the amount received must still equal the
+  quote, or it is credited at the rate when it becomes final."
+- QR codes: a quote's QR is an EIP-681 URI (token and amount), always shown with copy-address
+  and copy-amount buttons for wallets and exchanges that do not read the URI.
 - When a quote's `remaining_seconds` reaches 0, hide its QR code and address and show "Payment
   window closed, awaiting finality. A payment sent in time is still credited at the quoted
   price." Offer a re-quote; the lock stays `open` until chain-time expiry (§9).
@@ -666,7 +657,7 @@ verified this way, since a production CVM exposes no logs or shell.
 
 | Topic | Rule |
 |---|---|
-| Addresses | One persistent address per (account, chain), reusable forever; `rotate` creates version + 1 and keeps the old one valid and monitored. Lock addresses are single-use. |
+| Addresses | Every address is a quote's, single-use; a later payment to it is credited at spot. Legacy persistent addresses stay monitored by the finalized scanner and are never issued again. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token are flushed to the treasury with everything else; an unsupported token stays in its forwarder, since the flusher sweeps only routed tokens, until a separately reviewed Safe flush. |
 | Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
@@ -674,7 +665,7 @@ verified this way, since a production CVM exposes no logs or shell.
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
-| Kill switches | Pause scopes (`quotes`, `addresses`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
+| Kill switches | Pause scopes (`quotes`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | operator key compromise, product key compromise, provider disagreement, price outage, outbox backlog (undelivered credits), restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
 
 ## 16. Observability and tests
@@ -748,7 +739,6 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 |---|---|---|---|---|
 | Quote-first checkout: spread and fee disclosure, exact amount, EIP-681 QR, countdown, resume by `lock_ref`, cancel, re-quote | S+P | ✓ | | |
 | Underpayment shortfall and top-up re-quote; overpayment beyond tolerance credited at spot | S+P | ✓ | | |
-| Persistent address as advanced option with indicative rate | S+P | ✓ | | |
 | Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
 | Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |
 | Pre-finality "seen" payment view and `deposit.pending` notification | S | ✓ | | |

@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256};
 use serde::Deserialize;
-use topup_core::address::{forwarder_address, lock_salt, persistent_salt};
+use topup_core::address::{forwarder_address, lock_salt};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,17 +16,7 @@ struct Vectors {
     implementation: String,
     predicted_addresses: Vec<String>,
     salts: Vec<String>,
-    persistent: Vec<PersistentVector>,
     lock: Vec<LockVector>,
-}
-
-#[derive(Deserialize)]
-struct PersistentVector {
-    product_slug: String,
-    external_id: String,
-    version: u64,
-    salt: String,
-    predicted_address: String,
 }
 
 #[derive(Deserialize)]
@@ -50,15 +40,6 @@ fn reproduces_all_foundry_create2_vectors() -> Result<(), Box<dyn Error>> {
         assert_eq!(
             forwarder_address(factory, implementation, B256::from_str(salt)?),
             Address::from_str(expected)?
-        );
-    }
-
-    for vector in vectors.persistent {
-        let salt = persistent_salt(&vector.product_slug, &vector.external_id, vector.version);
-        assert_eq!(salt, B256::from_str(&vector.salt)?);
-        assert_eq!(
-            forwarder_address(factory, implementation, salt),
-            Address::from_str(&vector.predicted_address)?
         );
     }
 

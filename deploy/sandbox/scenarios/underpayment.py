@@ -17,7 +17,7 @@ ALL_STATES = {"detected", "confirmed", "credited", "swept", "rejected"}
 
 
 def run(ctx: Context) -> None:
-    team, _ = ctx.team("under")
+    team = ctx.team("under")
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
     ctx.pay(lock.address, int(lock.amount_atomic) * 97 // 100)
     ctx.deposit(team, lock.address, ALL_STATES)

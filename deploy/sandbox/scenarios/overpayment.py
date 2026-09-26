@@ -10,7 +10,7 @@ from harness import Context, check, credit
 
 
 def run(ctx: Context) -> None:
-    team, _ = ctx.team("over")
+    team = ctx.team("over")
     within_ref, within = ctx.lock(team, amount_minor=2500)
     ctx.pay(within.address, int(within.amount_atomic) * 1005 // 1000)
     deposit, confirmed = ctx.credited(team, within.address, within)

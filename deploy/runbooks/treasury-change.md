@@ -13,7 +13,7 @@ suspected compromised, have the admin Safe revoke `OPERATOR_ROLE`
 ([operator key compromise](operator-key-compromise.md)):
 
 ```sh
-admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses","settlement","flush","refunds"]}'
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","settlement","flush","refunds"]}'
 cast call "$FACTORY" 'implementation()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 cast call "$IMPLEMENTATION" 'treasury()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
 ```
