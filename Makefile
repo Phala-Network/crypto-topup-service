@@ -1,6 +1,6 @@
 .PHONY: build build-topup test lint image up down verify-image \
 	restore-drill deploy-check runbook-check sdk-check sdk-generate sandbox-local \
-	cvm-rehearsal product-conformance
+	cvm-rehearsal
 
 build:
 	cargo build --workspace --locked
@@ -54,10 +54,6 @@ runbook-check:
 
 sdk-check:
 	$(MAKE) -C sdk/python sync check
-
-# The conformance suite against the staging reference product, as CI runs it.
-product-conformance:
-	deploy/product/conformance.sh
 
 sdk-generate:
 	$(MAKE) -C sdk/python generate

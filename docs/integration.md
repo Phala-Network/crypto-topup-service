@@ -5,10 +5,8 @@ service. Where this guide and the code disagree, the code wins. The contract is 
 
 - [crates/topup/openapi.json](../crates/topup/openapi.json): every request and response shape,
   also served at `GET /openapi.json`;
-- [the conformance suite](conformance.md) (`topup-conformance`): the settlement endpoint you
-  implement;
 - [deploy/product/reference_product](../deploy/product/reference_product): a complete Python
-  product that passes that suite and settles staging;
+  product that settles staging;
 - [architecture.md](architecture.md): the design, especially §11 (settlement), §12 (API, events,
   product UI), §14 (attestation), and §15 (refunds and policies).
 
@@ -302,8 +300,6 @@ Rust test vectors of the service's own signer (a POST and a GET by key):
 
 ### 5.3 The six obligations
 
-Each one is checked by the conformance suite ([cases](conformance.md#cases)).
-
 | # | Obligation | Why |
 |---|---|---|
 | 1 | Verify the signature against the pinned `(keyid, public key)`, covering `idempotency-key`; reject a stale `created` or a changed body with `401`. | Only the attested service may credit. |
@@ -316,7 +312,7 @@ Each one is checked by the conformance suite ([cases](conformance.md#cases)).
 For obligation 5, only facts that cannot change once final may become a stored rejection: a
 reverted transaction, or a finalized log that is missing or has another emitter, recipient, or
 amount. A failed RPC call, a missing receipt, or a block your node has not finalized yet is
-transient: store nothing and answer `503` ([conformance.md](conformance.md#transient-chain-reads)).
+transient: store nothing and answer `503`.
 The service settles only after two providers saw finality, so your node lagging is the common
 case, not an error.
 
@@ -342,8 +338,7 @@ mapping: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code 
 above, and `payload`: the original payload you accepted. The service checks that its
 `idempotency_key`, `account_id`, `chain_id`, `tx_hash`, and `log_index` match the deposit. Answer
 an unknown key with `404`, the only answer on which the service resends; any other answer, such
-as `200 {"status":"unknown"}`, makes it poll again without ever resending (the conformance case
-`unknown_get`).
+as `200 {"status":"unknown"}`, makes it poll again without ever resending.
 
 ## 6. Webhooks
 
@@ -432,40 +427,16 @@ Ineligible deposits get `409`, a paused `refunds` scope `423`.
 
 ## 8. Testing and go-live
 
-### 8.1 Conformance suite against your endpoint
+### 8.1 Testing your endpoint
 
-Requirements: Foundry (`anvil`, `forge`), Rust, and this repository with its submodules
-(`git submodule update --init`).
-
-```sh
-anvil --chain-id 31337 &
-cargo run --locked -q -p topup-conformance -- prepare \
-  --rpc-url http://127.0.0.1:8545 --chain-id 31337 \
-  --manifest target/conformance-manifest.json
-# Configure and start your endpoint from the manifest (see below), then:
-cargo run --locked -q -p topup-conformance -- run \
-  --manifest target/conformance-manifest.json \
-  --settlement-url http://127.0.0.1:8080/settlements \
-  --signing-key dev --keyid settlement/v1 \
-  --per-deposit-cap 10000 --per-period-cap 50000 --period-seconds 86400 \
-  --restart-command './restart-my-product.sh' \
-  --report target/conformance-report.json
-```
-
-Your test instance pins the public key of the test seed `dev` (never a production key):
-
-```sh
-cd sdk/python
-uv run --locked python -c 'from topup_sdk import RequestSigner
-print(RequestSigner.from_seed("settlement/v1", bytes([7] * 32)).public_key_base64())'
-```
-
-It also needs an empty ledger, the manifest's route, token, factory, and chain, the caps passed to
-`run`, five test accounts, and a test-only ledger hook
-([conformance.md](conformance.md#product-test-configuration)). `run` exits `0` only when every
-case passes; `incomplete` and warnings are defects. `make product-conformance` runs the same suite
-against the reference product and is the working example of this setup
-([deploy/product/conformance.sh](../deploy/product/conformance.sh)).
+The settlement endpoint is being replaced by webhook fulfillment
+([design](design/stripe-style-integration.md)), and its conformance suite was removed with it.
+Test the webhook receiver with `topup-sdk send-test-event`
+([sdk/python/README.md](../sdk/python/README.md)): your test instance pins the public key of a test
+seed in place of the service key; the command sends a signed event, its duplicate, and a forged
+copy, and expects `2xx`, `2xx`, and `4xx`. The reference product's tests
+([deploy/product/tests](../deploy/product/tests)) are the worked example of the settlement
+obligations until then.
 
 ### 8.2 Staging
 
@@ -477,8 +448,7 @@ payments of §7. Sepolia finality takes about 15 minutes per deposit.
 
 ### 8.3 Go-live checklist
 
-- [ ] Conformance report `passed: true` with no warnings, against your production code and a
-      restart command.
+- [ ] `topup-sdk send-test-event` passes against your production code path.
 - [ ] Settlement endpoint answers `404` for unknown keys, `503` for transient chain reads, and
       its idempotency records have no expiry.
 - [ ] Your RPC for obligation 5 is your own node or provider on the route's chain, and its

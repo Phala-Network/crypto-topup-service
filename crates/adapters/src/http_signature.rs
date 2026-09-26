@@ -1,8 +1,7 @@
 //! RFC 9421 HTTP Message Signatures: the one signing and verification profile.
 //!
 //! The settlement client signs with [`sign`]; the service authenticates product and admin
-//! requests with [`verify`], and the settlement conformance reference uses it to verify
-//! service-signed settlement requests. Both build the same signature base, and every header
+//! requests with [`verify`]. Both build the same signature base, and every header
 //! value is serialized or parsed as an RFC 8941 Structured Field, so a verifier accepts any
 //! signature label, any parameter order, and an optional `alg="ed25519"` parameter.
 //!

@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -39,8 +39,6 @@ from topup_sdk import (
 from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
 
 from .config import (
-    CONFORMANCE_ACCOUNTS,
-    CONFORMANCE_REFUSED,
     DRIVER_KEYID,
     EVM_ADDRESS,
     SETTLEMENT_KEYID,
@@ -66,8 +64,7 @@ ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 class ProductServer:
     """Serves `POST /settlements`, `GET /settlements/{key}`, `POST /webhooks`, `GET /healthz`,
-    and, given an `AccountApi`, `/accounts`. With `conformance`, it also serves the test-only
-    ledger observation hook `GET /settlements/_conformance/ledger/{account_id}`."""
+    and, given an `AccountApi`, `/accounts`."""
 
     def __init__(
         self,
@@ -80,7 +77,6 @@ class ProductServer:
         self.accounts = accounts
         config = settlement.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
-        ledger_hook = base_path + "/settlements/_conformance/ledger/"
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -100,9 +96,7 @@ class ProductServer:
 
             def do_GET(self) -> None:
                 headers = dict(self.headers.items())
-                if config.conformance and self.path.startswith(ledger_hook):
-                    self._send(server.ledger_view(unquote(self.path.removeprefix(ledger_hook))))
-                elif self.path.startswith(base_path + "/settlements/"):
+                if self.path.startswith(base_path + "/settlements/"):
                     self._send(server.settlement.handle_get(self.path, headers))
                 elif self.path == base_path + "/healthz":
                     self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
@@ -132,12 +126,6 @@ class ProductServer:
 
         self._httpd = ThreadingHTTPServer((config.listen_host, config.listen_port), Handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-
-    def ledger_view(self, team: str) -> Answer:
-        """The conformance ledger observation hook's answer (docs/conformance.md)."""
-        credits = self.settlement.ledger.credits_for(team)
-        balance = sum(amount for _, amount in credits)
-        return Answer(HTTPStatus.OK, {"balance_minor": str(balance), "mutations": len(credits)})
 
     def __enter__(self) -> ProductServer:
         self._thread.start()
@@ -400,12 +388,6 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
         raise ValueError("driver_public_key is required to serve the account API")
     settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
     ledger = ProductLedger(config.ledger_path)
-    if config.conformance:
-        for team in CONFORMANCE_ACCOUNTS:
-            ledger.add_team(team, suspended=team == CONFORMANCE_REFUSED)
-            salt = persistent_salt(config.product_slug, team, 1)
-            address = forwarder_address(config.factory, config.implementation, salt)
-            ledger.record_address(address, team, version=1)
     settlement = SettlementService(config, ledger, settlement_key, JsonRpc(config.rpc_url))
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
     try:

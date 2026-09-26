@@ -128,21 +128,6 @@ impl SettlementClient {
         )
     }
 
-    /// Creates a client with an explicitly pinned settlement key identifier.
-    ///
-    /// Only the conformance suite needs a non-default `keyid`, to prove that products reject
-    /// a valid signature under the wrong key identifier.
-    #[cfg(any(test, feature = "conformance"))]
-    #[doc(hidden)]
-    pub fn new_with_keyid(
-        endpoint: &str,
-        signer: SignerHandle,
-        request_timeout: Duration,
-        keyid: String,
-    ) -> Result<Self, SettlementClientError> {
-        Self::build(endpoint, signer, request_timeout, keyid)
-    }
-
     fn build(
         endpoint: &str,
         signer: SignerHandle,
@@ -246,11 +231,9 @@ impl SettlementClient {
 
     /// Builds a signed POST at a caller-supplied time and coverage profile.
     ///
-    /// Normal callers should use [`Self::signed_post_request`]. This entry point exists so the
-    /// conformance suite can produce expired signatures and signatures which deliberately omit
-    /// `idempotency-key` without maintaining a second signing implementation.
-    #[cfg(any(test, feature = "conformance"))]
-    #[doc(hidden)]
+    /// Normal callers should use [`Self::signed_post_request`]; tests use this entry point to
+    /// produce expired signatures and signatures which deliberately omit `idempotency-key`.
+    #[cfg(test)]
     pub async fn signed_post_request_at(
         &self,
         request: &SettlementRequest,

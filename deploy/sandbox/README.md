@@ -57,7 +57,7 @@ from the product API, the verified webhooks, and the product ledger of the refer
 | `product_refusal` | Payment for a suspended workspace | Product records `rejected` without credit; deposit `rejected`, `deposit.rejected` reason `product_refused` with the product's reason. |
 | `restart_mid_flow` | The product commits the credit but its answer is lost, then the service restarts | After restart the service `GET`s the key before any resend and adopts the answer; exactly one ledger credit. Needs `restart_command`, so it is skipped on Sepolia unless an operator runs it. |
 
-These cover the same behaviours as the E1 conformance cases from the service side: business
+They cover, from the service side: business
 refusal is a typed `200 rejected`, unknown results are resolved by `GET` before resending, and a
 key is credited once.
 

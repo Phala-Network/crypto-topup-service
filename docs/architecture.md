@@ -355,7 +355,7 @@ so a deposit rebuilt after a restore adopts the product's fact and the original 
 instead of re-quoting or re-deciding; a `422` is handled the same way. The product's answer
 is authoritative for the credited fact.
 
-Product obligations, checked by the conformance suite:
+Product obligations:
 
 1. Verify the signature against the pinned key (public key bytes and `keyid` pinned together).
 2. Keep idempotency records for the life of the account; never expire them.
@@ -368,10 +368,6 @@ Product obligations, checked by the conformance suite:
 6. Recompute `deposit_id = uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` from the
    evidence and require `idempotency_key == "deposit:" + deposit_id`, so one chain event can
    never be credited under a second key.
-
-The suite (`docs/conformance.md`) also requires, in the product's test environment only, a
-ledger observation hook (`GET {settlement_url}/_conformance/ledger/{account_id}`) and a restart
-during the run, so single mutation and durability are observed rather than inferred.
 
 Phala Cloud: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code =
 'crypto-top-up'`, `provider_order_id = key`, partial unique index on `(team_id,
@@ -664,8 +660,8 @@ divergent prices; sanctions hit; settlement `processing`, `409`, `422`, `rejecte
 then `GET`; lock exact, over, under, late, double payment; batch flush with replacement,
 reverted flush, and operator rotation; flush carrying pending and rejected deposits; deposit
 backfilled after its flush; deposit arriving while a flush is unconfirmed; restore from a
-pre-settlement snapshot with `GET`-first adoption. Conformance suite against the reference
-product in CI (`make product-conformance`), including obligations 4 and 5; `signer::dstack`
+pre-settlement snapshot with `GET`-first adoption. The reference product's own tests
+cover obligations 1 to 6; `signer::dstack`
 against the simulator when explicitly enabled; attestation report-data construction against a known vector and the simulator
 response when available.
 
