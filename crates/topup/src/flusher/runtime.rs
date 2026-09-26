@@ -7,6 +7,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
 use chrono::Utc;
 use croner::Cron;
@@ -27,7 +28,8 @@ use super::{
 use crate::observability::FlushPlanningOutcome;
 use crate::routes::RouteSet;
 
-/// Interval between confirmation, replacement, and operator-role maintenance iterations.
+/// Interval between confirmation, replacement, operator-role, and operator-gas maintenance
+/// iterations.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One configured chain/token flusher task.
@@ -120,6 +122,9 @@ impl FlusherTask {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
                     authorized = self.operator_authorized(authorized).await;
+                    if authorized {
+                        self.check_operator_gas().await;
+                    }
                     let span = crate::observability::flush_action_span(
                         self.route.chain.chain_id,
                         &self.route.route,
@@ -191,6 +196,19 @@ impl FlusherTask {
         }
     }
 
+    /// Alerts when the operator's native balance is below the route's gas reserve.
+    async fn check_operator_gas(&self) {
+        match self.flusher.operator_balance().await {
+            Ok((operator, balance)) => report_operator_gas(&self.route, operator, balance),
+            Err(error) => tracing::warn!(
+                %error,
+                chain_id = self.route.chain.chain_id,
+                route = %self.route.route,
+                "flusher operator balance check failed"
+            ),
+        }
+    }
+
     /// Checks `OPERATOR_ROLE`, keeping `current` when the check itself fails.
     async fn operator_authorized(&self, current: bool) -> bool {
         let chain_id = self.route.chain.chain_id;
@@ -247,6 +265,22 @@ impl FlusherTask {
                 current
             }
         }
+    }
+}
+
+/// Raises `TopupOperatorGasReserveLow` when `balance` is below `chain.flush.min_operator_balance_wei`.
+fn report_operator_gas(route: &RouteFile, operator: Address, balance: U256) {
+    let reserve = route.chain.flush.min_operator_balance_wei.value();
+    if balance < reserve {
+        tracing::warn!(
+            tags.alert = "TopupOperatorGasReserveLow",
+            tags.chain = route.chain.chain_id,
+            tags.route = %route.route,
+            %operator,
+            balance_wei = %balance,
+            reserve_wei = %reserve,
+            "flusher operator native balance is below its gas reserve; refill it from the Finance Safe"
+        );
     }
 }
 
@@ -364,10 +398,12 @@ fn next_deadline(schedule: &Cron) -> Result<Instant, String> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, U256};
+    use topup_core::money::AtomicAmount;
     use topup_core::route::RouteFile;
+    use tracing_test::traced_test;
 
-    use super::latest_routes;
+    use super::{latest_routes, report_operator_gas};
     use crate::routes::RouteSet;
 
     fn route(name: &str, version: u64, token: u8, operator_key_version: u32) -> RouteFile {
@@ -406,5 +442,18 @@ mod tests {
         other_chain.chain.chain_id = 10;
         latest_routes(&routes(vec![route("a", 2, 1, 2), other_chain]))
             .expect("different chains may rotate independently");
+    }
+
+    #[test]
+    #[traced_test]
+    fn operator_gas_alert_fires_only_below_the_reserve() {
+        let mut route = route("a", 1, 1, 1);
+        route.chain.flush.min_operator_balance_wei = AtomicAmount::new(U256::from(1_000));
+
+        report_operator_gas(&route, Address::ZERO, U256::from(1_000));
+        assert!(!logs_contain("TopupOperatorGasReserveLow"));
+
+        report_operator_gas(&route, Address::ZERO, U256::from(999));
+        assert!(logs_contain("TopupOperatorGasReserveLow"));
     }
 }

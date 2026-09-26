@@ -61,7 +61,7 @@ checked in `error`; `/healthz` is watched by an Uptime monitor.
 | `TopupLockExpiryFailing`, `topup-lock-expiry`, `rate-lock expiry scan failed` issue, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
 | `topup-backup` | [Backup age](backup-age.md) |
-| Flush sends failing for gas, operator balance below 0.001 native token | [Gas refill](gas-refill.md) |
+| `TopupOperatorGasReserveLow`, flush sends failing for gas | [Gas refill](gas-refill.md) |
 | `TopupDepositStateAgeExceeded` (`state:detected`), providers disagreeing | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
 | `TopupDepositStateAgeExceeded` (`state:confirmed`, sanctions screen retrying) | [Provider disagreement](provider-disagreement.md) |
 | `TopupDepositStateAgeExceeded` (`state:cleared`), repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |

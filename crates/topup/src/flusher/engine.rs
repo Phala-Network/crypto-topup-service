@@ -99,6 +99,20 @@ impl Flusher {
         Ok(OperatorRole { operator, granted })
     }
 
+    /// Reads the configured operator and its native balance, which pays every flush's gas.
+    pub async fn operator_balance(&self) -> Result<(Address, U256), FlusherError> {
+        let operator = self.signer.operator_address().await.map_err(map_signer)?;
+        let balances = self
+            .chain
+            .native_balances(&[operator])
+            .await
+            .map_err(map_chain)?;
+        let balance = balances.first().copied().ok_or(FlusherError::Invariant(
+            "native balance read returned no value",
+        ))?;
+        Ok((operator, balance))
+    }
+
     /// Maintains existing sent rows first, then sends one queued plan for the current operator.
     pub async fn run_once(&self, route: &RouteFile) -> Result<RunResult, FlusherError> {
         if let Some(result) = self.maintain_sent(route).await? {

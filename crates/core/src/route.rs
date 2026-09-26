@@ -76,6 +76,12 @@ impl RouteFile {
             "chain.flush.max_fee_per_gas_wei",
             self.chain.flush.max_fee_per_gas_wei,
         )?;
+        if self.chain.flush.min_operator_balance_wei.value().is_zero() {
+            return Err(RouteError::validation(
+                "chain.flush.min_operator_balance_wei",
+                "must be greater than zero",
+            ));
+        }
         if self.chain.flush.replacement_bps <= 10_000 {
             return Err(RouteError::validation(
                 "chain.flush.replacement_bps",
@@ -195,6 +201,8 @@ pub struct FlushConfig {
     pub max_fee_per_gas_wei: u64,
     /// Required fee replacement multiplier in basis points.
     pub replacement_bps: u16,
+    /// Operator native balance in wei below which the flusher raises a gas-reserve alert.
+    pub min_operator_balance_wei: AtomicAmount,
 }
 
 /// Deposited asset configuration.

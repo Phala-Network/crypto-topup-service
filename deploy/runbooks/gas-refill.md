@@ -2,10 +2,12 @@
 
 ## Trigger
 
-The service raises no operator-gas alert yet. Trigger when a flush fails for insufficient funds
-(`flush maintenance failed` or `planned flush send failed` Sentry issues), when the operator balance
-cannot cover a bounded flush at the configured fee cap, or when the balance checked below is under
-0.001 native token.
+`TopupOperatorGasReserveLow` (tags `chain`, `route`): on every maintenance tick while it holds
+`OPERATOR_ROLE`, the flusher reads the operator's native balance and alerts when it is below the
+route's attested `chain.flush.min_operator_balance_wei`; the event carries `operator`,
+`balance_wei`, and `reserve_wei`. Also trigger when a flush fails for insufficient funds
+(`flush maintenance failed` or `planned flush send failed` Sentry issues) or when the operator
+balance cannot cover a bounded flush at the configured fee cap.
 
 ## Impact and blast radius
 

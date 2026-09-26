@@ -352,8 +352,8 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
   (`o<org>.ingest.<region>.sentry.io`); add it to the egress allow-list
   ([Attestation, ingress, and egress](#attestation-ingress-and-egress)).
 
-The operator gas reserve has no alert yet; [Gas refill](runbooks/gas-refill.md) lists its
-symptoms.
+An operator balance below the route's `chain.flush.min_operator_balance_wei` raises
+`TopupOperatorGasReserveLow` ([Gas refill](runbooks/gas-refill.md)).
 
 **One-time setup (HUMAN-ONLY, Sentry project admin).** The Crons monitors need none. Verify every
 step against the Sentry UI; nothing here is in the repository.

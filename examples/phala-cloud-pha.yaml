@@ -17,6 +17,7 @@ chain:                             # chain settings live inline in every route f
     native_price_asset: eth        # Coin Metrics asset used to value gas in USD
     max_fee_per_gas_wei: 500000000000
     replacement_bps: 12500         # both EIP-1559 fee fields must increase by 25%
+    min_operator_balance_wei: "50000000000000000"  # below 0.05 ETH, alert TopupOperatorGasReserveLow
 
 route: phala-cloud-ethereum-pha-usd
 version: 1
