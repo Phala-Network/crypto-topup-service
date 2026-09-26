@@ -55,8 +55,8 @@ SQL
 
 Only after both queries return no rows for the route (and, when retiring a chain, for the chain):
 remove the route version, or the chain's last route, create the new compose, run
-`deploy/validate-compose.sh` and `deploy/render-compose.sh`, and use the D2 Safe-approved upgrade
-flow. Retired lock and persistent addresses on a chain that stays loaded remain monitored.
+`deploy/validate-compose.sh` and `deploy/render-compose.sh`, and run Deploy in mode `upgrade`
+([deploy/README.md, "Deploy"](../README.md#deploy)). Retired lock and persistent addresses on a chain that stays loaded remain monitored.
 
 ## Verification
 

@@ -588,7 +588,7 @@ via the dstack gateway; egress limited to providers, price sources, object stora
 URLs. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
 it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI
-deploy (production after reviewer approval) → attested read-back. Keys come from Phala Cloud's
+deploy (the dispatcher is accountable; no approval gate) → attested read-back. Keys come from Phala Cloud's
 KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury and the
 product verifies every settlement on its own node, so a malicious upgrade could cause downtime or
 read service data but not move funds or credits, and the attested compose hash makes it

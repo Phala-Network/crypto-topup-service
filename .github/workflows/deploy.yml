@@ -5,9 +5,10 @@ name: Deploy
 #
 # Controls: only a user with write access can dispatch this workflow; the job runs only from
 # `main`, in the Environment chosen by the input (deployment branches: `main` only), whose only
-# secret is PHALA_CLOUD_API_KEY. `production` also has required reviewers, and the job refuses to
-# run in it unless the Environment has that rule. The images are those of a successful Release
-# images run on `main`, read from its `images.json` artifact, never typed in. The CVM's env holds
+# secret is PHALA_CLOUD_API_KEY. There is no approval step (required reviewers are not available
+# on this repository's plan): whoever dispatches a run is accountable for it, and the run's
+# attested compose and verifier read-back are the audit trail. The images are those of a
+# successful Release images run on `main`, read from its `images.json` artifact, never typed in. The CVM's env holds
 # only the owner-sealed secrets (deploy/staging.env.example), which never enter GitHub:
 # `provision` sends them empty, and the owner then seals them from their own machine (the run
 # summary prints the command); `upgrade` sends no env at all, so the sealed env stays. Every other
@@ -46,7 +47,7 @@ on:
         type: string
         required: true
 
-# actions: read downloads the Release images artifact and reads the Environment's protection rules.
+# actions: read reads the Release images run and downloads its artifact.
 permissions:
   actions: read
   contents: read
@@ -122,13 +123,6 @@ jobs:
             curl -fsS --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
               -H 'Accept: application/vnd.github+json' "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/$1"
           }
-          # Production is gated by its reviewers; refuse to deploy if the rule was removed.
-          if [[ "$DEPLOY_ENVIRONMENT" == production ]] &&
-            ! api environments/production |
-            jq -e 'any(.protection_rules[]?; .type == "required_reviewers")' >/dev/null; then
-            echo "::error::the production Environment has no required reviewers"
-            status=1
-          fi
           # Only images a successful Release images run published from main.
           if [[ "$RELEASE_RUN_ID" =~ ^[0-9]+$ ]] && release=$(api "actions/runs/$RELEASE_RUN_ID") &&
             jq -e '(.path | split("@")[0]) == ".github/workflows/release-images.yml"

@@ -20,19 +20,21 @@ Release images publishes the images; Deploy runs against the GitHub Environment 
 | Workflow | Trigger | Does |
 |---|---|---|
 | Release images ([release-images.yml](../.github/workflows/release-images.yml)) | manual, `main` only | builds and publishes `ghcr.io/phala-network/crypto-topup`, `postgres-walg`, and `crypto-topup-reference-product` ([Build and publish images](#build-and-publish-images)); platform manifest references in the job summary and the `images.json` artifact |
-| Deploy ([deploy.yml](../.github/workflows/deploy.yml)) | manual, `main` only; `production` after reviewer approval | provisions or upgrades the topup CVM of the chosen Environment with the images of a Release images run (below) |
+| Deploy ([deploy.yml](../.github/workflows/deploy.yml)) | manual, `main` only | provisions or upgrades the topup CVM of the chosen Environment with the images of a Release images run (below) |
 | Deploy staging product ([deploy-staging-product.yml](../.github/workflows/deploy-staging-product.yml)) | manual, `main` only | provisions or upgrades the staging reference-product CVM ([Staging reference product](#staging-reference-product)) |
 | Verify contracts ([verify-contracts.yml](../.github/workflows/verify-contracts.yml)) | daily and manual | read-only: `verify-safe.sh`, `verify-deployment.sh` on both Sepolia providers, `topup route validate` on the committed route; JSON reports as artifacts |
 
 ### Controls
 
 Both Environments admit only the `main` branch, and the deploy jobs also check `github.ref`.
-Starting a workflow needs write access to the repository. `staging` has **no approval gate**
-(dispatching is the decision, and the run's actor is the record). `production` has required
-reviewers: a run waits until a reviewer approves it, and Deploy refuses to run in `production`
-if the Environment has no required-reviewers rule. Deploy takes a Release images run id, not
-image references: it deploys only the digests of a successful Release images run on `main`, read
-from that run's `images.json` artifact.
+Starting a workflow needs write access to the repository. Neither Environment has an **approval
+gate** (owner decision; required reviewers are not available for this private repository on the
+GitHub Free plan): dispatching Deploy is the decision, and whoever dispatches a `production` run
+is accountable for it. The run's actor, its job summary, and its uploaded record (the rendered
+compose, the attested app-compose read back from the CVM, and the dstack verifier's output) are
+the audit trail. Deploy takes a Release images run id, not image references: it deploys only the
+digests of a successful Release images run on `main`, read from that run's `images.json`
+artifact, and it refuses a `production` compose with any route off Ethereum mainnet.
 GitHub holds exactly one secret, the Environment secret `PHALA_CLOUD_API_KEY` of each Environment,
 which reaches the CLI through an environment variable, never a command-line argument. No runtime
 secret is stored in GitHub: the S3 keys and the Sentry DSN are sealed into the CVM by the owner
@@ -80,11 +82,8 @@ not an OS image bump.
 ### One-time setup (HUMAN-ONLY, repository owner)
 
 1. **Environments.** In repository Settings > Environments, `staging` exists (deployment
-   branches: `main` only). Create `production` with deployment branches `main` only, **Required
-   reviewers** (the people who approve a production deploy; also tick *Prevent self-review*), and
-   *Allow administrators to bypass* off. GitHub offers required reviewers on a private repository only
-   with GitHub Enterprise (a public repository has them on every plan); until the rule exists,
-   Deploy refuses `production`.
+   branches: `main` only). Create `production` with the same deployment branch policy, `main`
+   only. No required reviewers (see [Controls](#controls)).
 2. **Phala Cloud API key.** Create an API key in the Phala Cloud dashboard for the Environment's
    workspace and store it as that Environment's secret `PHALA_CLOUD_API_KEY` (`staging`: workspace
    "kingsley's projects", done). An Environment secret is visible only to jobs of that
@@ -165,8 +164,7 @@ The same steps deploy `staging` and `production`; `ENV` below is the Environment
 1. Merge the change to `main`.
 2. Run **Release images** on `main` (the only ref it publishes from) and note its run id.
 3. Run **Deploy** on `main` with `environment`, `mode: provision`, and `release_run_id`. The run
-   refuses `provision` while `TOPUP_CVM_ID` is set. A `production` run starts only after a
-   required reviewer approves it.
+   refuses `provision` while `TOPUP_CVM_ID` is set.
 4. Set the Environment variable `TOPUP_CVM_ID` to the CVM id in the run summary. From then on use
    `mode: upgrade` with a newer release; an upgrade sends only the compose, never an env file, so
    the sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back
@@ -211,8 +209,7 @@ Deploy, in order; any failure stops the run:
 
 1. checks the mode against `TOPUP_CVM_ID`; that `PHALA_CLOUD_API_KEY`, `PHALA_WORKSPACE`,
    `DSTACK_OS_IMAGE`, and every attested setting are set and `SENTRY_ENVIRONMENT` is the
-   Environment's name; for `production`, that the Environment has required reviewers; and that
-   `release_run_id` is a successful Release images run of `main`;
+   Environment's name; and that `release_run_id` is a successful Release images run of `main`;
 2. takes both image references from that run's `images.json` artifact (each
    `repository@sha256:<64 hex>`);
 3. resolves `TOPUP_PUBLIC_ORIGIN`: `https://pending.invalid` for a new CVM, and for an upgrade
@@ -260,7 +257,7 @@ off chain 1). Then, in order:
 1. **Owner:** create the `production` Environment and set its secret and variables (One-time
    setup above; `SENTRY_ENVIRONMENT=production`, mainnet RPC providers, its own backup prefix and
    admin key).
-2. **Workflow, reviewer-approved:** Deploy with `environment: production`, `mode: provision`,
+2. **Workflow, dispatched by an accountable owner:** Deploy with `environment: production`, `mode: provision`,
    and the Release images run id; then set `TOPUP_CVM_ID` ([Deploy](#deploy) steps 3 and 4).
 3. **Owner:** seal the three secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
    `SENTRY_DSN` ([Deploy](#deploy) step 5, `ENV` = `production`).

@@ -191,8 +191,8 @@ deploy/render-compose.sh > deploy/docker-compose.staging.yml
 docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```
 
-Deploy the merged route with the Deploy workflow in mode `upgrade` (`deploy/README.md`, "Deploy";
-a production run waits for reviewer approval), which verifies the attested read-back. A locally
+Deploy the merged route with the Deploy workflow in mode `upgrade` (`deploy/README.md`, "Deploy"),
+which verifies the attested read-back. A locally
 rendered compose is only a review aid. Keep both contract verification reports with the deployment
 record.
 

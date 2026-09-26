@@ -101,7 +101,7 @@ docker compose -f deploy/docker-compose.staging.yml config >/dev/null
 ```
 
 After the route PR merges, run Deploy in mode `upgrade` for the Environment
-([deploy/README.md, "Deploy"](../README.md#deploy)); a production run waits for reviewer approval.
+([deploy/README.md, "Deploy"](../README.md#deploy)).
 
 ## Verification
 
