@@ -154,8 +154,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate the attested compose and the local, sandbox, and restore-drill overlays
         run: deploy/validate-compose.sh
-      - name: Validate Prometheus rules and alert behavior
-        run: deploy/check-alerts.sh
       # Every tracked file with a shell shebang, with .shellcheckrc; streamed into the container,
       # since the runner's Docker daemon cannot bind-mount the workspace.
       - name: ShellCheck the shell scripts

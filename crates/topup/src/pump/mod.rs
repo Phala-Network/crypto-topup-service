@@ -244,45 +244,26 @@ impl Pump {
 
     /// Runs one named worker until cancellation.
     pub async fn run_with_instance(&self, instance: String, cancellation: CancellationToken) {
-        crate::observability::register_loop("pump", instance.clone());
         let monitor = crate::observability::CronMonitor::pump(&instance);
         loop {
             if cancellation.is_cancelled() {
                 return;
             }
-            crate::observability::heartbeat("pump", instance.clone());
             monitor.check_in(true);
-            crate::observability::execution_deadline(
-                "pump",
-                instance.clone(),
-                self.config.step_timeout,
-            );
-
-            let result = self.run_once().await;
-            crate::observability::clear_execution_deadline("pump", instance.clone());
-            match result {
+            match self.run_once().await {
                 Ok(RunOnceResult::Idle) => {
-                    crate::observability::waiting(
-                        "pump",
-                        instance.clone(),
-                        self.config.idle_poll_interval,
-                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}
                     }
                 }
-                Ok(RunOnceResult::Applied { .. }) => {
-                    crate::observability::progress("pump", instance.clone());
-                }
-                Ok(RunOnceResult::Stale { .. } | RunOnceResult::Contended { .. }) => {}
+                Ok(
+                    RunOnceResult::Applied { .. }
+                    | RunOnceResult::Stale { .. }
+                    | RunOnceResult::Contended { .. },
+                ) => {}
                 Err(error) => {
                     tracing::error!(%error, "deposit pump iteration failed");
-                    crate::observability::waiting(
-                        "pump",
-                        instance.clone(),
-                        self.config.idle_poll_interval,
-                    );
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         () = sleep(self.config.idle_poll_interval) => {}

@@ -101,7 +101,6 @@ services:
     configs: !reset []
     ports: !override
       - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
-      - "127.0.0.1:${TOPUP_LOCAL_METRICS_PORT:-19464}:9464"
     healthcheck:
       interval: 10s
       retries: 5

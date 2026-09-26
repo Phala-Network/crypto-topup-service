@@ -12,12 +12,11 @@ use uuid::Uuid;
 use crate::db::{Deposit, OutboxEvent};
 use crate::routes::RouteSet;
 
-use super::types::record_mismatch;
 use super::{Finding, ReconciliationError};
 
 /// Persists a finding once and returns whether this call inserted it.
 ///
-/// Every first insertion writes an audit row; only mismatches increment the metric.
+/// Every first insertion writes an audit row.
 pub(crate) async fn persist_finding(
     pool: &PgPool,
     finding: &Finding,
@@ -71,9 +70,6 @@ pub(crate) async fn persist_finding(
         .await?;
     }
     transaction.commit().await?;
-    if inserted && !finding.repair_applied {
-        record_mismatch(finding.check);
-    }
     Ok(inserted)
 }
 

@@ -296,20 +296,11 @@ off chain 1). Then, in order:
   reference product, `ENV_EXAMPLE SERVICE:PORT`).
 - `Dockerfile.postgres-walg` supplies PostgreSQL 18 plus WAL-G and the D3 wrappers for encrypted,
   key-versioned WAL archiving and restore; see [RESTORE.md](RESTORE.md) for the procedure and drills.
-- `alerts/prometheus-rules.yml` and `dashboards/crypto-topup-service.json` are the Prometheus and
-  Grafana artifacts for §16. `GET /metrics` is intentionally unauthenticated and is served on the
-  separate `--metrics-bind` listener (default `127.0.0.1:9464`). The measured compose binds that
-  listener to the container network on port 9464 with `expose`; it is not published through the
-  port-8080 gateway. Only the monitoring collector may reach it; no collector runs in a CVM, which
-  reports to Sentry instead ([Sentry](#sentry)). The local compose publishes it on
-  loopback port 19464 for smoke testing. `make alerts-check` (`check-alerts.sh`) runs
-  `promtool check rules` and the alert unit tests in `alerts/prometheus-rules.test.yml` with the
-  pinned Prometheus image.
 
 ## Sentry
 
-Production CVMs have no logs and nothing scrapes `/metrics`, so the service reports to the Sentry
-project `phala-network/crypto-topup-service` itself, using the official
+Production CVMs have no logs and no metrics collector, so Sentry is the one monitoring and alerting
+pipeline (architecture §16): the service reports to the Sentry project `phala-network/crypto-topup-service` itself, using the official
 [`sentry`](https://docs.rs/sentry/0.49.3) crate (`crates/topup/src/observability/reporting.rs`).
 It is on only while the owner-sealed `SENTRY_DSN` is non-empty: without it no client is created,
 no tracing layer is installed, and check-ins return at once, so the service behaves exactly as
@@ -329,7 +320,7 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
   event per issue is sent every 10 minutes, since failing loops retry every few seconds. The
   service filters these itself: the organization's Sentry plan ignores per-key rate limits (the
   client key's `rateLimit` stays `null`), and its event quota is shared with other Phala projects.
-- **Alerts.** A line tagged `tags.alert` carries the Prometheus alert name
+- **Alerts.** A line tagged `tags.alert` carries the alert name
   ([runbooks index](runbooks/README.md#alert-and-symptom-index)), is fingerprinted by that name
   and its other `tags.*` (route, state, check, chain, scope; never a deposit id), and gets a
   `runbook` tag linking the runbook: `TopupDepositStateAgeExceeded`,
@@ -346,23 +337,23 @@ DSN stops `topup run` at startup; `preflight.sh` checks the format without print
   creates or updates the monitor (upsert); a monitor checks in at most once a minute. A monitor
   exists only after its first check-in.
 
-  | Monitor slug | Check-in | Schedule | Margin | Replaces |
+  | Monitor slug | Check-in | Schedule | Margin | Pages on |
   |---|---|---|---|---|
-  | `topup-scanner-<chain_id>` (`topup-scanner-11155111`) | `ok` after each successful finalized scan | every 1 min | 5 min | `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` |
-  | `topup-pump-<n>` (`topup-pump-0`) | `ok` at each pump iteration (a step may take 4 min) | every 1 min | 5 min | `TopupLoopStopped{loop="pump"}` |
-  | `topup-outbox-<n>` (`topup-outbox-0`) | `ok` at each webhook delivery poll | every 1 min | 5 min | `TopupLoopStopped{loop="outbox"}` |
-  | `topup-lock-expiry` | `ok` after each successful rate-lock expiry scan | every 1 min | 5 min | `TopupLockExpiryFailing`, `TopupLoopStopped{loop="lock_expiry"}` |
-  | `topup-reconciler` | `ok` after a complete round, `error` after a round with failed checks | every 10 min | 10 min | `TopupLoopStopped{loop="reconciler"}` |
-  | `topup-backup` | `ok` while the WAL-G marker is at most 120 s old, else `error`; 3 errors in a row open an issue | every 1 min | 2 min | `TopupBackupTooOld` |
-  | `topup-flush-<route>` (`topup-flush-phala-cloud-sepolia-pha-usd`) | `ok` after scheduled planning, `error` when planning failed or the operator lacks `OPERATOR_ROLE` | the route's `flush.schedule` (`0 */6 * * *`), UTC | 15 min | `TopupLoopStopped{loop="flusher"}` |
+  | `topup-scanner-<chain_id>` (`topup-scanner-11155111`) | `ok` after each successful finalized scan | every 1 min | 5 min | a stopped or lagging scanner |
+  | `topup-pump-<n>` (`topup-pump-0`) | `ok` at each pump iteration (a step may take 4 min) | every 1 min | 5 min | a stopped pump |
+  | `topup-outbox-<n>` (`topup-outbox-0`) | `ok` at each webhook delivery poll | every 1 min | 5 min | a stopped delivery worker |
+  | `topup-lock-expiry` | `ok` after each successful rate-lock expiry scan | every 1 min | 5 min | a stopped or failing expiry worker |
+  | `topup-reconciler` | `ok` after a complete round, `error` after a round with failed checks | every 10 min | 10 min | a stopped reconciler or a failed check |
+  | `topup-backup` | `ok` while the WAL-G marker is at most 120 s old, else `error`; 3 errors in a row open an issue | every 1 min | 2 min | backup age over 2 min |
+  | `topup-flush-<route>` (`topup-flush-phala-cloud-sepolia-pha-usd`) | `ok` after scheduled planning, `error` when planning failed or the operator lacks `OPERATOR_ROLE` | the route's `flush.schedule` (`0 */6 * * *`), UTC | 15 min | a stopped flusher or failed planning |
 
 - **Uptime.** `/healthz` at the gateway is watched by a Sentry Uptime monitor (below).
 - **Egress.** With a DSN, `topup` sends HTTPS (443) to the DSN's ingest host
   (`o<org>.ingest.<region>.sentry.io`); add it to the egress allow-list
   ([Attestation, ingress, and egress](#attestation-ingress-and-egress)).
 
-`TopupOperatorGasReserveLow` has no producer yet (`producer_enabled="false"`), so neither
-Prometheus nor Sentry can raise it; `/metrics` stays the standard local surface.
+The operator gas reserve has no alert yet; [Gas refill](runbooks/gas-refill.md) lists its
+symptoms.
 
 **One-time setup (HUMAN-ONLY, Sentry project admin).** The Crons monitors need none. Verify every
 step against the Sentry UI; nothing here is in the repository.
@@ -434,10 +425,9 @@ archives a segment and refreshes the marker every minute. The `backup` service r
 `CHECKPOINT` per postmaster start because PostgreSQL 15+ (re-checked on 18.6) otherwise ignores `archive_timeout` until
 the checkpointer first wakes, up to `checkpoint_timeout` after startup. The measured
 compose shares `/run/topup-observability/last-backup-unix-seconds` read-write with `postgres` and
-`backup`, and read-only with `topup`. The service exports the marker value as
-`topup_backup_last_success_unixtime_seconds`; a missing or malformed marker exports zero so the
-PromQL age calculation fails closed. Secret files remain mode `0600` and must not be written into
-the observability volume.
+`backup`, and read-only with `topup`, which checks it in to the `topup-backup` Crons monitor
+([Sentry](#sentry)): `ok` while it is at most 120 seconds old; a missing or malformed marker checks
+in `error`. Secret files remain mode `0600` and must not be written into the observability volume.
 
 ## Build and publish images
 
@@ -871,7 +861,7 @@ run registers a fresh workspace, so runs are independent. Every step is **HUMAN-
 | (a) underpayment | `--pay-bps 9700` | 97% of a fresh quote, outside the 1% `lock_tolerance_bps` | `credited`, then `swept`: valued at spot for what arrived (`deposit.confirmed` `price_source` `spot`), about 3% below the quoted credit; the lock is not consumed and later expires (`rate_lock.expired`); one product credit of the deposit's credit |
 | (b) after the quote window | `--pay-after-expiry` | the quoted amount, 60 s after `expires_at` | `rate_lock.expired`, then `credited` at spot and `swept`; the deposit keeps its `lock_ref` and the lock stays `expired` |
 | (c) persistent address | `--persistent ATOMIC` | `ATOMIC` to the workspace's persistent address, no quote | `credited` at spot, then `swept` |
-| (e) unsupported token | `--persistent ATOMIC --token T --until rejected` | an unrouted token `T` | only after finality (the head scan ignores unrouted tokens): `rejected`, `deposit.rejected` reason `unsupported_asset`; the product is never asked to settle; the flusher sweeps only the route asset, so the tokens stay in the forwarder; `TopupUnsupportedInflows` fires where metrics are scraped |
+| (e) unsupported token | `--persistent ATOMIC --token T --until rejected` | an unrouted token `T` | only after finality (the head scan ignores unrouted tokens): `rejected`, `deposit.rejected` reason `unsupported_asset`; the product is never asked to settle; the flusher sweeps only the route asset, so the tokens stay in the forwarder; the service logs the `TopupUnsupportedInflows` alert |
 | (d) refund | `--persistent ATOMIC --until refunded --refund-to A` | more than the route's `max_deposit_atomic` (200000 test PHA) | `rejected` reason `out_of_bounds` (refundable, §15), swept to the treasury with other funds; the driver files a refund request for the whole deposit (`requested`) and waits while finance runs [refund-execution.md](runbooks/refund-execution.md): `approved`, `sent`, then `confirmed` and one `deposit.refunded` webhook |
 
 Credited runs pay at least the route's `min_flush_atomic` (20000 test PHA) so the flusher sweeps

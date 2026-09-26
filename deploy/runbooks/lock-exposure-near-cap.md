@@ -2,9 +2,8 @@
 
 ## Trigger
 
-Trigger on `TopupLockExposureNearCap` (PR #56: `topup_open_lock_exposure_minor` at or above 90% of
-`topup_open_lock_exposure_cap_minor` for five minutes; product and global scopes only, account
-scopes are not exported), on product reports of
+Trigger on `TopupLockExposureNearCap` (a rate-lock creation took the open product or global lock
+exposure to at least 90% of the route's cap; account scopes do not alert), on product reports of
 `409 exposure_cap_exceeded` from rate-lock creation, or when the daily report shows unexpected open
 lock exposure.
 

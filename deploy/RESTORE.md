@@ -163,14 +163,14 @@ regular reconciliation checks run in the same round; their findings and `failed_
 example an unreachable chain RPC) are reported but do not gate resume. In the service variant,
 `restore-check` exits at once on every boot.
 
-Alerts during the restore window are expected, not incidents. The replacement archives nothing
-and refreshes no backup-age marker, so `TopupBackupTooOld` fires whenever an old or missing marker
-is scraped, and the read-only `topup` exports no metrics, so the monitoring collector's
-scrape-target-down alert for the instance fires. Silence both, scoped to the replacement instance,
-from creation until [Resume](#resume-real-restore-only) shows a fresh archived segment and the
-marker is younger than 120 seconds. During a staging drill, silence them for the drill instance
-only, never for the live staging instance, and remove the silences when the drill instance is
-deleted.
+Alerts during the restore window are expected, not incidents. The read-only replacement archives
+nothing, runs no loop, and reports to Sentry as `<environment>-restore`, so every Crons monitor of
+the environment (`topup-backup` included) misses its check-ins and the `/healthz` Uptime monitor
+fails ([README, "Sentry"](README.md#sentry)). In Sentry, mute the environment's Crons monitors and
+disable its Uptime monitor from creation until [Resume](#resume-real-restore-only) shows a fresh
+archived segment and `topup-backup` checks in `ok` again. A staging drill needs no muting: the live
+staging instance keeps checking in, and the drill instance runs no loop and reports as
+`staging-restore`, which the Sentry alert excludes.
 
 ### The restore env file
 
@@ -372,8 +372,8 @@ same three names). Require:
   until it completes the new timeline cannot be restored, so nothing resumes before a
   `base_<timeline>…` backup newer than the switch is listed and new WAL segments of that timeline
   appear under `wal_005/` (list them with the owner's own storage credentials);
-- a healthy `topup` attestation, and `topup_backup_last_success_unixtime_seconds` scraped from the
-  new instance and less than 120 seconds old. Only then remove the restore-window alert silences.
+- a healthy `topup` attestation, and an `ok` check-in of the environment's `topup-backup` Crons
+  monitor (the marker is at most 120 seconds old). Only then unmute the environment's monitors.
 
 Let the product resume calls only after health and reconciliation remain clean. Addresses need no
 separate restore because their salts are deterministic from product data.
@@ -411,18 +411,17 @@ live URL's traffic because it publishes 8081, not 8080
    live_isolated
    ```
 
-3. Silence `TopupBackupTooOld` and the scrape-target-down alert for the drill instance only.
-4. Record the drill start time (the RPO anchor), then
+3. Record the drill start time (the RPO anchor), then
    [create the instance](#create-and-read-back-the-instance) and delete the env file.
-5. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
+4. Run [Verify the restored instance](#verify-the-restored-instance) and record the report, RPO,
    and RTO in the drill log. Never upgrade the drill instance to the service compose or seal
    read-write credentials into it. **Hard abort:** run `live_isolated` right after the instance is
    created, then at least every five minutes and before each verification step (including after
    the upgrade in its step 4) until the instance is deleted. If it fails even once, stop the drill,
    delete the drill instance at once (next step), and record the drill as aborted with the failing
    responses.
-6. Delete the drill instance by its own `vm_uuid` (never by app id or name, which also match the
-   live instance), revoke the read-only token, and remove the drill silences:
+5. Delete the drill instance by its own `vm_uuid` (never by app id or name, which also match the
+   live instance) and revoke the read-only token:
 
    ```sh
    npx --yes phala@1.1.22 cvms delete "$RESTORE_CVM_ID" --force

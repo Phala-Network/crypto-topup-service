@@ -48,28 +48,28 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 
 ## Alert and symptom index
 
-Alert names are from `deploy/alerts/prometheus-rules.yml`. A CVM reports the same names to Sentry
-as the `alert` tag of an issue, with a `runbook` tag linking the page below; stopped loops and a
-stale backup are Sentry Crons monitors, and `/healthz` is a Sentry Uptime monitor
-([deploy/README.md, "Sentry"](../README.md#sentry)).
+Every alert is a Sentry issue ([deploy/README.md, "Sentry"](../README.md#sentry)). A `Topup…` or
+flusher alert name is the issue's `alert` tag, next to its grouping tags (`state:detected`) and a
+`runbook` tag linking the page below; a `topup-…` name is a Crons monitor that missed a check-in or
+checked in `error`; `/healthz` is watched by an Uptime monitor.
 
 | Alert or symptom | Runbook |
 |---|---|
-| `TopupReconciliationMismatch{check="address_derivation"}`, `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
-| `TopupReconciliationMismatch` (any other `check`), `TopupLoopStopped{loop="reconciler"}` | [Reconciliation mismatch](reconciliation-mismatch.md) |
+| `TopupReconciliationMismatch` (`check:address_derivation`), `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
+| `TopupReconciliationMismatch` (any other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `TopupLockExpiryFailing`, `TopupLoopStopped{loop="lock_expiry"}`, `rate-lock expiry scan failed` log, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
-| `TopupScannerLag`, `TopupLoopStopped{loop="scanner"}` | [Scanner lag](scanner-lag.md) |
-| `TopupBackupTooOld` | [Backup age](backup-age.md) |
-| `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
-| `TopupDepositStateAgeExceeded{state="detected"}`, `topup_provider_disagreements_total` | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
-| `TopupDepositStateAgeExceeded{state="confirmed"}` (sanctions screen retrying) | [Provider disagreement](provider-disagreement.md) |
-| `TopupDepositStateAgeExceeded{state="cleared"}`, repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
+| `TopupLockExpiryFailing`, `topup-lock-expiry`, `rate-lock expiry scan failed` issue, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
+| `topup-backup` | [Backup age](backup-age.md) |
+| Flush sends failing for gas, operator balance below 0.001 native token | [Gas refill](gas-refill.md) |
+| `TopupDepositStateAgeExceeded` (`state:detected`), providers disagreeing | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
+| `TopupDepositStateAgeExceeded` (`state:confirmed`, sanctions screen retrying) | [Provider disagreement](provider-disagreement.md) |
+| `TopupDepositStateAgeExceeded` (`state:cleared`), repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
 | Settlement HTTP `422`, `resend_forbidden=true` | [422 payload mismatch](payload-mismatch-422.md) |
-| `TopupLoopStopped{loop="flusher"}`, reverted flush, isolated forwarder | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
+| `Reverted`, `IsolatedAddress`, `PlanningExcluded`, `FeeCapReached`, `topup-flush-<route>` missed | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
 | Unflushed balance or `credited` deposits not swept after a flush schedule, `topup-flush-<route>` or `topup-reconciler` check-in `error` | Read the route's `flush_planning` and the report's `reconciliation.failed_checks` in `GET /v1/admin/report/daily` (production has no logs), then the runbook for the failing step: [Flush reverted or bisected](flush-reverted-or-bisected.md), [Reconciliation mismatch](reconciliation-mismatch.md), or [Provider disagreement](provider-disagreement.md) for RPC errors |
-| `TopupLoopStopped{loop="outbox"}`, `topup_outbox_backlog` growth | [Outbox backlog](outbox-backlog.md) |
-| `TopupLoopStopped{loop="pump"}` | [Stuck settlement](stuck-settlement.md) |
+| `topup-outbox-<n>`, undelivered outbox events piling up | [Outbox backlog](outbox-backlog.md) |
+| `topup-pump-<n>` | [Stuck settlement](stuck-settlement.md) |
 | `TopupUnsupportedInflows`, rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
 | Unauthorized operator transaction, consumed nonce without receipt | [Operator key compromise](operator-key-compromise.md) |
 | `OperatorRoleMissing` flusher alert, `flusher paused: the configured operator does not hold OPERATOR_ROLE` log | [Operator key compromise](operator-key-compromise.md): expected after an emergency revoke until the next key version is deployed; otherwise the new version was deployed before its grant |

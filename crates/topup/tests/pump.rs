@@ -889,75 +889,7 @@ async fn graceful_shutdown_finishes_in_flight_work_and_claims_nothing_else() -> 
 }
 
 #[tokio::test]
-async fn long_running_step_exports_an_execution_deadline_covering_the_step_timeout() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls the spawned pump on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    with_database(|context| {
-        Box::pin(async move {
-            let seed = seed_account(&context.app_pool, 11).await?;
-            insert_deposit(&context.app_pool, seed, 12).await?;
-            let control = Arc::new(StepControl::default());
-            let config = PumpConfig::default();
-            let step_timeout = config.step_timeout.as_secs_f64();
-            let pump = test_pump(
-                &context.app_pool,
-                blocking_steps(
-                    Arc::clone(&control),
-                    StepOutcome::Wait {
-                        reason: WaitReason::Paused,
-                    },
-                ),
-                config,
-                0,
-            )?;
-            let cancellation = CancellationToken::new();
-            let worker_cancellation = cancellation.clone();
-            let worker = tokio::spawn(async move {
-                pump.run_with_instance("long-step".to_owned(), worker_cancellation)
-                    .await;
-            });
-            control.wait_started().await?;
-
-            let rendered = handle.render();
-            let heartbeat = loop_gauge(&rendered, "heartbeat", "long-step")?;
-            let deadline = loop_gauge(&rendered, "deadline", "long-step")?;
-            // The stopped-loop alert stays silent until the deadline, so a step that uses its
-            // whole timeout cannot page even though its heartbeat is older than two minutes.
-            ensure!(
-                deadline >= heartbeat + step_timeout,
-                "deadline {deadline} does not cover a {step_timeout}s step from {heartbeat}"
-            );
-
-            cancellation.cancel();
-            control.release();
-            tokio::time::timeout(StdDuration::from_secs(2), worker)
-                .await
-                .context("pump did not stop")?
-                .context("pump task failed")?;
-            let rendered = handle.render();
-            ensure!(loop_gauge(&rendered, "deadline", "long-step")? == 0.0);
-            Ok(())
-        })
-    })
-    .await
-}
-
-fn loop_gauge(rendered: &str, kind: &str, loop_instance: &str) -> Result<f64> {
-    let prefix = format!("topup_loop_{kind}_unixtime_seconds{{");
-    let instance = format!("loop_instance=\"{loop_instance}\"");
-    rendered
-        .lines()
-        .find(|line| line.starts_with(&prefix) && line.contains(&instance))
-        .and_then(|line| line.rsplit(' ').next())
-        .context("loop gauge is exported")?
-        .parse()
-        .context("loop gauge is numeric")
-}
-
-#[tokio::test]
-async fn age_alert_uses_route_threshold_and_reminds_on_state_change() -> Result<()> {
+async fn age_alert_uses_the_route_threshold_of_the_current_state() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 6).await?;
@@ -971,18 +903,17 @@ async fn age_alert_uses_route_threshold_and_reminds_on_state_change() -> Result<
             let yaml = include_str!("fixtures/phala-cloud-pha.yaml");
             let mut route: RouteFile = serde_saphyr::from_str(yaml)?;
             route.alerts.stuck_after_s.detected = 1;
-            route.alerts.stuck_after_s.confirmed = 1;
+            route.alerts.stuck_after_s.confirmed = 3 * 60 * 60;
             let config = AgeAlertConfig::from_routes(&[route])?;
             let alerter =
                 AgeAlerter::new(context.app_pool.clone(), config, StdDuration::from_secs(60));
             ensure!(alerter.scan_once().await? == 1);
-            ensure!(alerter.scan_once().await? == 0);
 
             sqlx::query("UPDATE deposits SET state = 'confirmed' WHERE id = $1")
                 .bind(id)
                 .execute(&context.app_pool)
                 .await?;
-            ensure!(alerter.scan_once().await? == 1);
+            ensure!(alerter.scan_once().await? == 0);
             Ok(())
         })
     })

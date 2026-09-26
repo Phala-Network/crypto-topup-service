@@ -23,6 +23,7 @@ use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
 use tower::ServiceExt;
+use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewProduct};
@@ -815,55 +816,25 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
 }
 
 #[tokio::test]
-async fn database_collector_exports_product_and_global_lock_exposure() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls the spawned collector on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+#[traced_test]
+async fn a_creation_reaching_ninety_percent_of_the_product_cap_raises_an_alert() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "exposed").await?;
-        let route = test_route();
+        let mut route = test_route();
+        route.rate_lock.max_open_minor.account = 110;
+        route.rate_lock.max_open_minor.product = 110;
+        route.rate_lock.max_open_minor.global = 1_000_000;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         create_lock(&database, &quotes, &product, &account, &route, "exposed-1").await?;
 
-        let caps = topup::observability::LockExposureCaps::from_routes(std::slice::from_ref(&route));
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        let collector = tokio::spawn(topup::observability::collect_database_metrics(
-            database.app_pool.clone(),
-            caps,
-            cancellation.clone(),
-        ));
-        let product_exposure = format!(
-            "topup_open_lock_exposure_minor{{scope=\"product\",id=\"{}\",producer_enabled=\"true\"}} 100",
-            route.destination.product
-        );
-        let mut rendered = String::new();
-        for _ in 0..200 {
-            rendered = handle.render();
-            if rendered.contains(&product_exposure) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        cancellation.cancel();
-        collector.await?;
-
-        ensure!(rendered.contains(&product_exposure), "{rendered}");
-        ensure!(
-            rendered.contains(
-                "topup_open_lock_exposure_minor{scope=\"global\",id=\"global\",producer_enabled=\"true\"} 100"
-            ),
-            "{rendered}"
-        );
-        ensure!(rendered.contains(&format!(
-            "topup_open_lock_exposure_cap_minor{{scope=\"global\",id=\"global\",producer_enabled=\"true\"}} {}",
-            route.rate_lock.max_open_minor.global
-        )));
-        ensure!(!rendered.contains("scope=\"account\""), "{rendered}");
+        ensure!(logs_contain("TopupLockExposureNearCap"));
+        ensure!(logs_contain("tags.scope=\"product\""));
+        ensure!(!logs_contain("tags.scope=\"account\""));
+        ensure!(!logs_contain("tags.scope=\"global\""));
         Ok(())
     }
     .await;
@@ -1033,11 +1004,8 @@ async fn cancel_waits_for_an_uncommitted_deposit_to_the_lock_address() -> Result
 }
 
 #[tokio::test]
-async fn failing_expiry_scans_are_counted_and_recover() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls the spawned worker on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+#[traced_test]
+async fn failing_expiry_scans_alert_and_recover() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -1066,25 +1034,17 @@ async fn failing_expiry_scans_are_counted_and_recover() -> Result<()> {
         );
         let worker_cancellation = cancellation.clone();
         let running = tokio::spawn(async move { worker.run(worker_cancellation).await });
-        let failures = || {
-            handle
-                .render()
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix(
-                        "topup_lock_expiry_failures_total{producer_enabled=\"true\"} ",
-                    )
-                    .and_then(|value| value.parse::<u64>().ok())
-                })
-                .unwrap_or(0)
-        };
+        // The current-thread test runtime polls the spawned worker inside this test's span.
         for _ in 0..400 {
-            if failures() >= 2 {
+            if logs_contain("TopupLockExpiryFailing") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        ensure!(failures() >= 2, "expiry never failed");
+        ensure!(
+            logs_contain("TopupLockExpiryFailing"),
+            "expiry never failed"
+        );
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "open");
 
         sqlx::query("GRANT INSERT ON outbox TO topup_app")

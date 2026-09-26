@@ -1,21 +1,15 @@
-//! Tracing conventions, secret redaction, Prometheus metrics, and optional Sentry reporting.
+//! Tracing conventions, secret redaction, and optional Sentry reporting.
 
+mod backup;
 mod logging;
-mod metrics;
 mod redaction;
 mod reporting;
 mod request;
 mod spans;
 mod status;
 
+pub use backup::monitor_backup;
 pub use logging::log_subscriber;
-pub use metrics::{
-    InitError, LockExposureCaps, clear_execution_deadline, collect_backup_metrics,
-    collect_database_metrics, execution_deadline, heartbeat, init, metrics_response,
-    metrics_router, progress, record_flush_send_paused, record_lock_expiry_failure,
-    record_scanner_lag, record_scanner_success, register_loop, register_metrics, register_scanner,
-    waiting,
-};
 pub use redaction::{Redacted, RedactedTransportError};
 pub use reporting::{CronMonitor, ReportingError, init_reporting};
 pub use request::request_context;

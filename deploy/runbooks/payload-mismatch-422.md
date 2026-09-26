@@ -3,7 +3,7 @@
 ## Trigger
 
 Trigger when the settlement endpoint returns HTTP `422` for an existing idempotency key, usually
-first seen as `TopupDepositStateAgeExceeded{state="cleared"}`. The durable symptom is
+first seen as `TopupDepositStateAgeExceeded` (`state:cleared`). The durable symptom is
 `settlements.resend_forbidden=true` with receipt status `payload_mismatch`.
 
 ## Impact and blast radius

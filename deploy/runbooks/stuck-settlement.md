@@ -2,7 +2,7 @@
 
 ## Trigger
 
-Trigger on `TopupDepositStateAgeExceeded{state="cleared"}` (PR #56: a deposit exceeded route
+Trigger on `TopupDepositStateAgeExceeded` (`state:cleared`) (a deposit exceeded the route's
 `alerts.stuck_after_s`), a settlement that remains `sent`, or a product that repeatedly answers
 `processing`/`409`.
 

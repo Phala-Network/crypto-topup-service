@@ -3,8 +3,8 @@
 ## Trigger
 
 Trigger on a `flushes.status='reverted'`, `FlushAlert::Reverted`, `IsolatedAddress`,
-`PlanningExcluded`, or repeated singleton estimation failure, or on
-`TopupLoopStopped{loop="flusher"}` from PR #56. PR #56 has no dedicated reverted-flush alert.
+`PlanningExcluded`, or repeated singleton estimation failure, or on an `error` or missed check-in of
+the Sentry Crons monitor `topup-flush-<route>`.
 
 ## Impact and blast radius
 

@@ -2,8 +2,8 @@
 
 ## Trigger
 
-Trigger on `TopupLockExpiryFailing` (expiry scans failing with no successful scan for more than
-five minutes, held for five minutes), `TopupLoopStopped{loop="lock_expiry"}`,
+Trigger on `TopupLockExpiryFailing` (an expiry scan failed), missed check-ins of the Sentry Crons
+monitor `topup-lock-expiry` (no successful scan for five minutes),
 `rate-lock expiry scan failed` errors in the service log, `overdue_locks > 0` for more than a
 minute in the query below or in the [Lock exposure near cap](lock-exposure-near-cap.md) query, or
 missing `rate_lock.expired` events.
@@ -11,8 +11,8 @@ A lock is overdue only once the worker could expire it: its chain's scanner has 
 finalized block whose time is past `expires_at`, and no payment mined inside the window still awaits
 its confirm step (architecture §9). A lock merely past `expires_at` by wall clock is still waiting
 for finality, about 15 minutes, and is not a worker failure.
-The loop heartbeat only proves the worker is scanning; a scan that keeps failing still heartbeats,
-which is what `TopupLockExpiryFailing` covers.
+`topup-lock-expiry` checks in only after a successful scan, so a scan that keeps failing misses
+its check-ins as well as raising `TopupLockExpiryFailing`.
 
 ## Impact and blast radius
 
@@ -20,8 +20,8 @@ The C10 worker scans every five seconds and, in one transaction per batch of 100
 locks `expired`, which releases their exposure, and queues `rate_lock.expired`. When it fails,
 overdue locks keep holding exposure, so new quotes reach `409 exposure_cap_exceeded` early, and
 products are not told that checkouts expired. A scan that finds nothing to expire,
-including while the scanner is stalled, still counts as progress, so `TopupLockExpiryFailing` means
-scans are failing; a stalled scanner holds locks open by design and pages as `TopupScannerLag`. A
+including while the scanner is stalled, still succeeds, so `TopupLockExpiryFailing` means scans are
+failing; a stalled scanner holds locks open by design and pages as `topup-scanner-<chain_id>`. A
 failure rolls back the whole batch, and because batches are taken oldest `expires_at` first, the
 same locks are selected again on every tick: the worker makes no progress at all until the cause is
 repaired.
@@ -64,9 +64,9 @@ scope is to its cap.
 
 - No error logs and no overdue locks: the worker is healthy; close the alert.
 - `awaiting_chain_30m > 0` with no overdue locks: the worker is waiting for chain time, as designed.
-  Either the scanner's finalized cursor is stalled (`TopupScannerLag`; follow
+  Either the scanner's finalized cursor is stalled (`topup-scanner-<chain_id>`; follow
   [Scanner lag](scanner-lag.md)) or an in-window payment is stuck in `detected`
-  (`TopupDepositStateAgeExceeded{state="detected"}`; follow
+  (`TopupDepositStateAgeExceeded`, `state:detected`; follow
   [Provider disagreement](provider-disagreement.md)). The locks expire on their own once that
   clears; do not expire them by hand.
 - Errors name a database connection or timeout: restore database health; the worker retries on the

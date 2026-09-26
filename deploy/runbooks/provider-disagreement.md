@@ -2,11 +2,10 @@
 
 ## Trigger
 
-Trigger when the two configured providers return different finalized block hashes or log evidence
-(`topup_provider_disagreements_total` in PR #56, which defines no dedicated alert), when
-`TopupDepositStateAgeExceeded{state="detected"}` fires, or when sanctions screening is unavailable or
-reports a hit (screening runs in `confirmed → cleared`, so an unavailable screen shows as
-`TopupDepositStateAgeExceeded{state="confirmed"}`).
+Trigger when the two configured providers return different finalized block hashes or log evidence,
+when `TopupDepositStateAgeExceeded` (`state:detected`) fires, or when sanctions screening is
+unavailable or reports a hit (screening runs in `confirmed → cleared`, so an unavailable screen
+shows as `TopupDepositStateAgeExceeded` (`state:confirmed`)).
 
 ## Impact and blast radius
 

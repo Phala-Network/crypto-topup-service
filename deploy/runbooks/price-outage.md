@@ -2,11 +2,9 @@
 
 ## Trigger
 
-Trigger on `TopupDepositStateAgeExceeded{state="detected"}` (quotes are taken in the
-`detected → confirmed` step), high
-`topup_price_deviation_basis_points` or `topup_fx_deviation_basis_points` (PR #56 metrics without a
-dedicated alert), stale primary/check observations, source request failures, FX guard failure, or a
-stablecoin depeg.
+Trigger on `TopupDepositStateAgeExceeded` (`state:detected`; quotes are taken in the
+`detected → confirmed` step), stale primary/check observations, source request failures, FX guard
+failure, or a stablecoin depeg.
 
 ## Impact and blast radius
 

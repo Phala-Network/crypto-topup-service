@@ -200,17 +200,10 @@ impl FlushAlert {
     }
 }
 
-/// Sink for flusher alerts and alert metrics.
+/// Sink for flusher alerts.
 pub trait AlertSink: Send + Sync {
     /// Records one alert occurrence.
     fn emit(&self, alert: FlushAlert);
-}
-
-/// No-op alert sink for applications which wire metrics separately.
-pub struct NoopAlertSink;
-
-impl AlertSink for NoopAlertSink {
-    fn emit(&self, _alert: FlushAlert) {}
 }
 
 /// Runtime fee and replacement policy.

@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_router_does_not_expose_metrics() {
+    async fn unknown_paths_are_not_found_with_a_request_id() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
             .expect("lazy pool URL is valid");
@@ -310,7 +310,7 @@ mod tests {
             .0
             .oneshot(
                 Request::builder()
-                    .uri("/metrics")
+                    .uri("/unknown")
                     .body(Body::empty())
                     .expect("request builds"),
             )

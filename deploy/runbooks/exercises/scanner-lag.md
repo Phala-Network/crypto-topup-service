@@ -6,7 +6,7 @@ Commands changed after this exercise (#95): `deploy/local/docker-compose.yml` is
 `-f deploy/docker-compose.yml -f deploy/local/docker-compose.yml`. The commands below are recorded
 as run.
 
-Status: partial; blocked on a controllable finalized-chain fixture and PR #56 alert rules.
+Status: partial; blocked on a controllable finalized-chain fixture.
 
 G2 exercised once: [ ]
 

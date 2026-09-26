@@ -413,17 +413,7 @@ marker_fresh() {
     (($(date +%s) - marker <= 180))
 }
 wait_for "a fresh backup marker" 120 marker_fresh
-# The service reads the marker on its metrics refresh; a missing marker exports zero.
-marker_exported() {
-    product_python -c '
-import httpx, sys
-text = httpx.get("http://topup:9464/metrics", timeout=5).raise_for_status().text
-values = [float(line.split()[-1]) for line in text.splitlines()
-          if line.startswith("topup_backup_last_success_unixtime_seconds{")]
-sys.exit(0 if values and min(values) > 0 else 1)'
-}
-wait_for "topup to export the backup marker" 60 marker_exported
-echo "ok: WAL archiving refreshed the backup marker and topup exports it"
+echo "ok: WAL archiving refreshed the backup marker"
 
 echo "== one quote-first deposit against the reference product"
 # A CVM has no database access, so the owner issues the product through the signed admin API.

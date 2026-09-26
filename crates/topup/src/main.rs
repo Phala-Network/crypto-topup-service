@@ -80,9 +80,6 @@ struct RunArgs {
     /// API socket address; defaults to the deployment port on all interfaces.
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind: std::net::SocketAddr,
-    /// Monitoring socket address; keep this listener off the public gateway.
-    #[arg(long, default_value = "127.0.0.1:9464")]
-    metrics_bind: std::net::SocketAddr,
     /// Validated route file; repeat for every enabled route version.
     #[arg(long = "route", required = true, value_name = "FILE")]
     routes: Vec<PathBuf>,
@@ -100,8 +97,6 @@ const PUMPS: usize = 1;
 const STEP_TIMEOUT: Duration = Duration::from_secs(240);
 /// Interval between deposit state-age scans.
 const AGE_ALERT_INTERVAL: Duration = Duration::from_secs(60);
-/// Minimum interval between repeated alerts for the same deposit state.
-const AGE_ALERT_REMINDER: Duration = Duration::from_secs(60 * 60);
 /// Interval between full reconciliation passes.
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -215,10 +210,6 @@ async fn main() -> ExitCode {
     };
     if let Err(error) = topup::observability::log_subscriber(std::io::stdout).try_init() {
         eprintln!("failed to initialize tracing: {error}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(error) = topup::observability::init() {
-        tracing::error!(%error, "failed to initialize observability");
         return ExitCode::FAILURE;
     }
 
@@ -667,9 +658,6 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API listener on {}", args.bind))?;
-    let metrics_listener = tokio::net::TcpListener::bind(args.metrics_bind)
-        .await
-        .with_context(|| format!("failed to bind metrics listener on {}", args.metrics_bind))?;
     let product_lookup = SettlementProductLookup::new(
         pool.clone(),
         Arc::clone(&routes),
@@ -719,12 +707,6 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             .into_future()
     });
     tracing::info!(bind = %args.bind, "API listening");
-    tasks.spawn("metrics server", |cancellation| {
-        axum::serve(metrics_listener, topup::observability::metrics_router())
-            .with_graceful_shutdown(cancellation.cancelled_owned())
-            .into_future()
-    });
-    tracing::info!(bind = %args.metrics_bind, "metrics listening");
 
     let scanner_pool = pool.clone();
     let scanner_routes = Arc::clone(&routes);
@@ -753,28 +735,11 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             },
         );
     }
-    let age_alerter = AgeAlerter::with_reminder_interval(
-        pool.clone(),
-        age_config,
-        AGE_ALERT_INTERVAL,
-        AGE_ALERT_REMINDER,
-    );
+    let age_alerter = AgeAlerter::new(pool.clone(), age_config, AGE_ALERT_INTERVAL);
     tasks.spawn("age alerter", |cancellation| async move {
         age_alerter.run(cancellation).await;
     });
-    let metrics_pool = pool.clone();
-    let lock_exposure_caps = topup::observability::LockExposureCaps::from_routes(routes.routes());
-    tasks.spawn("database metrics collector", |cancellation| {
-        topup::observability::collect_database_metrics(
-            metrics_pool,
-            lock_exposure_caps,
-            cancellation,
-        )
-    });
-    tasks.spawn(
-        "backup metrics collector",
-        topup::observability::collect_backup_metrics,
-    );
+    tasks.spawn("backup monitor", topup::observability::monitor_backup);
     let expiry_worker = topup::locks::ExpiryWorker::new(pool.clone(), Duration::from_secs(5));
     tasks.spawn("rate-lock expiry worker", |cancellation| async move {
         expiry_worker.run(cancellation).await;

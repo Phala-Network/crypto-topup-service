@@ -286,7 +286,7 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   head, is stored with the cursor) and no deposit mined inside the window still awaits its
   confirm step. A payment mined inside the window is therefore consumed at the lock price and
   never reported as expired. Exposure stays reserved until finality, about 15 minutes after
-  `expires_at`, and longer while the scanner is stalled (`TopupScannerLag`). Until then the API
+  `expires_at`, and longer while the scanner is stalled (§16). Until then the API
   shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
   window has closed (`409 window_closed`). A lock whose address has received any deposit, even
   a rejected one, can no longer be cancelled (`409 pending_payment`).
@@ -621,11 +621,15 @@ verified this way, since a production CVM exposes no logs or shell.
 
 ## 16. Observability and tests
 
-Spans carry `deposit_id`, `chain`, `state`, `attempt`. Metrics: scanner lag, deposits by
-state and age, provider disagreements, price deviation, settlement outcomes, outbox backlog,
-unflushed balance, operator gas, open lock exposure, backup age, reconciliation mismatches.
-Alerts on age in state, any mismatch, scanner lag, backup age > 2 min, stopped loop, gas
-reserve, lock exposure near cap, repeated lock-expiry failures.
+Spans carry `deposit_id`, `chain`, `state`, `attempt`. A CVM has no logs and runs no metrics
+collector, so Sentry is the one monitoring pipeline: errors and panics are events; an alert is a
+warning tagged with its name and low-cardinality grouping tags (route, state, check, scope),
+fingerprinted by them and linked to its runbook; each loop checks in to a Sentry Crons monitor;
+and a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and age,
+unflushed balance, open lock exposure, flush planning, reconciliation) is in the daily admin
+report (`GET /v1/admin/report/daily`). Alerts on age in state, any mismatch, lock exposure near cap, and lock-expiry
+failures; Crons monitors page on scanner lag, backup age > 2 min, and any stopped loop. Operator
+gas reserve has no alert yet.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only

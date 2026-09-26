@@ -25,4 +25,4 @@ No backups found
 ```
 
 WAL archiving worked locally before D3 landed. This exercise remains partial and does not satisfy G2
-until it is re-run with D3 and the #56 alert.
+until it is re-run with D3 and the `topup-backup` Crons monitor.

@@ -2,9 +2,10 @@
 
 ## Trigger
 
-Trigger on `TopupReconciliationMismatch{check="address_derivation"}` (PR #56), a
+Trigger on `TopupReconciliationMismatch` (`check:address_derivation`), a
 `reconciliation_blocks` row with `scope='chain'`, product reports of `423 chain_frozen` from address
-issuance or rate-lock creation, or `TopupScannerLag` on a chain whose scanner has paused.
+issuance or rate-lock creation, or missed `topup-scanner-<chain_id>` check-ins on a chain whose
+scanner has paused.
 
 ## Impact and blast radius
 
