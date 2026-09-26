@@ -7,6 +7,19 @@ webhook receivers must ignore unknown fields.
 
 ### Added
 
+- `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` lifts a reconciliation block
+  (`chain:{chain_id}` or `address:{address_id}`), which production could not do without a database
+  owner session. Lifting is manual: the reconciler blocks again if the finding still reproduces.
+  The `audit` row (`reconciliation_block.lift`) carries the reason and the removed block; a repeat
+  returns the first lift, and a key that never blocked is `404`. `GET /v1/admin/report/daily`
+  lists the active `reconciliation_blocks`.
+
+- `POST /v1/admin/outbox/{event_id}/replay {reason}` queues an existing webhook event for
+  delivery again with the same id and payload (audited as `outbox.replay`); a repeat while the
+  event is due changes nothing. The product-signed support lookup
+  (`GET /v1/products/{p}/deposits?tx_hash=|address=|lock_ref=`) lists each deposit's webhook
+  `events` (`id`, `event_type`, `created_at`, `delivered_at`).
+
 - `GET /v1/attestation` returns `operators`: for each configured chain, the flusher operator
   (`chain_id`, `operator_key_version` from the chain's current routes, `keyid` `operator/v{n}`,
   `address`) that needs `OPERATOR_ROLE` on the factory and native gas. `report_data` now binds

@@ -52,6 +52,73 @@
         ]
       }
     },
+    "/v1/admin/outbox/{event_id}/replay": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "replay_outbox_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event identifier, the `webhook-id` header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: queued for delivery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboxReplayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/products": {
       "post": {
         "tags": [
@@ -101,6 +168,72 @@
           },
           "409": {
             "description": "Conflict: the slug is registered with different values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/reconciliation-blocks/{block_key}/lift": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "lift_reconciliation_block",
+        "parameters": [
+          {
+            "name": "block_key",
+            "in": "path",
+            "description": "`chain:{chain_id}` or `address:{address_id}`, as listed in the daily report",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: lifted, or already lifted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationBlockLiftResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found: no active or lifted block has this key",
             "content": {
               "application/json": {
                 "schema": {
@@ -1588,6 +1721,19 @@
           }
         }
       },
+      "AdminReasonRequest": {
+        "type": "object",
+        "description": "Administrative action body; `reason` is recorded in the action's audit row.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why the action is taken, 1 to 1024 bytes: the incident or sign-off it rests on."
+          }
+        }
+      },
       "AdminRefundResponse": {
         "type": "object",
         "description": "Administrative refund workflow result.",
@@ -1728,6 +1874,13 @@
               }
             ]
           },
+          "reconciliation_blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconciliationBlockReport"
+            },
+            "description": "Active reconciliation blocks in `block_key` order. This service always sends it; it is\noptional in the schema so clients also parse reports from servers that predate it."
+          },
           "routes": {
             "type": "array",
             "items": {
@@ -1769,6 +1922,39 @@
           "salt_inputs": {
             "$ref": "#/components/schemas/PersistentSaltInputs",
             "description": "Inputs encoded into the salt."
+          }
+        }
+      },
+      "DepositEventResponse": {
+        "type": "object",
+        "description": "One webhook event about a deposit and its delivery state.",
+        "required": [
+          "id",
+          "event_type",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event creation time."
+          },
+          "delivered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the receiver accepted the event, or `null` while it is undelivered."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Event type, such as `deposit.credited`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable event identifier, sent as the `webhook-id` header."
           }
         }
       },
@@ -2159,6 +2345,31 @@
           }
         }
       },
+      "OutboxReplayResponse": {
+        "type": "object",
+        "description": "A webhook event queued for delivery again.",
+        "required": [
+          "event_id",
+          "event_type",
+          "next_attempt_at"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable event identifier, sent as the `webhook-id` header."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Event type, such as `deposit.credited`."
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the delivery worker next attempts the event."
+          }
+        }
+      },
       "PauseRequest": {
         "type": "object",
         "description": "Pause or resume request.",
@@ -2529,6 +2740,74 @@
           }
         }
       },
+      "ReconciliationBlockLiftResponse": {
+        "type": "object",
+        "description": "A lifted reconciliation block.",
+        "required": [
+          "block_key",
+          "lifted_at"
+        ],
+        "properties": {
+          "block_key": {
+            "type": "string",
+            "description": "Lifted block, `chain:{chain_id}` or `address:{address_id}`."
+          },
+          "lifted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the block was lifted; a repeated lift returns the original time."
+          }
+        }
+      },
+      "ReconciliationBlockReport": {
+        "type": "object",
+        "description": "A persistent reconciliation block (architecture §13).",
+        "required": [
+          "block_key",
+          "scope",
+          "chain_id",
+          "check",
+          "reason",
+          "created_at"
+        ],
+        "properties": {
+          "address_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Blocked address for an `address` block."
+          },
+          "block_key": {
+            "type": "string",
+            "description": "Block identifier, `chain:{chain_id}` or `address:{address_id}`."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "check": {
+            "type": "string",
+            "description": "Check that wrote the block, such as `address_derivation`."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the block was written."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the check blocked."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`chain` (the chain is frozen) or `address` (the address is left out of flush planning)."
+          }
+        }
+      },
       "ReconciliationRoundReport": {
         "type": "object",
         "description": "Latest reconciliation round of the serving process.",
@@ -2816,6 +3095,13 @@
               "timeline"
             ],
             "properties": {
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DepositEventResponse"
+                },
+                "description": "Webhook events about the deposit in ascending creation order. This service always sends\nit; it is optional in the schema so clients also parse responses from servers that predate\nit."
+              },
               "timeline": {
                 "type": "array",
                 "items": {

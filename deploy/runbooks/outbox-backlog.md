@@ -13,13 +13,21 @@ backoff by themselves. One product's receiver or every product.
 2. With the product, check its webhook endpoint, TLS, and signature verification. The product can
    catch up at any time by fetching state (deposits, rate locks), which receivers must act on
    anyway.
-
-Undelivered events and their attempts are not observable in production, and the `topup outbox
-replay` CLI needs a shell on the CVM, which production does not have.
+3. For a missing event, the product's signed support lookup lists each deposit's `events`: `id`
+   (the `webhook-id`), `event_type`, and `delivered_at` (`null` while undelivered). Delivery
+   attempts are not observable in production.
 
 ## Decide
 
 - Receiver down or answering `5xx`: fix the receiver; deliveries resume by themselves.
+- An event is still missing after the fix, or the receiver lost one it accepted: replay it. A
+  delivered event is sent again and a pending one becomes due now, with the same id and payload;
+  a repeat while it is due changes nothing:
+
+  ```sh
+  admin POST "/v1/admin/outbox/$EVENT_ID/replay" '{"reason":"INC-123: receiver lost the event"}'
+  ```
+
 - Receiver rejects signatures (`4xx`): coordinate its settlement-key pinning.
 - Monitor silent with no error: the delivery worker stopped. **HUMAN-ONLY:** restart the CVM
   (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).

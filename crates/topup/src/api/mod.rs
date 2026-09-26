@@ -108,6 +108,8 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::nudge_deposit))
         .routes(routes!(handlers::approve_refund))
         .routes(routes!(handlers::record_refund))
+        .routes(routes!(handlers::lift_reconciliation_block))
+        .routes(routes!(handlers::replay_outbox_event))
         .routes(routes!(handlers::daily_report))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

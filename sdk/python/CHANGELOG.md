@@ -8,6 +8,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Generated `topup_client.api.admin.lift_reconciliation_block` and `replay_outbox_event` with
+  `AdminReasonRequest`, `ReconciliationBlockLiftResponse`, and `OutboxReplayResponse`.
+- `DailyReportResponse.reconciliation_blocks` (`ReconciliationBlockReport`) and
+  `SupportDepositResponse.events` (`DepositEventResponse`). Optional, so the models also parse
+  responses from servers that predate them.
 - `DailyReportResponse.reconciliation` (`ReconciliationRoundReport`, `FailedCheckReport`) and
   `RouteDailyReport.flush_planning` (`FlushPlanningReport`): the latest reconciliation round and
   scheduled flush planning run of the serving process. Optional, so the models also parse

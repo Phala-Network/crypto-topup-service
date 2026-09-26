@@ -154,6 +154,24 @@ pub struct SupportDepositResponse {
     pub deposit: DepositResponse,
     /// Transitions in ascending creation order.
     pub timeline: Vec<DepositTransitionResponse>,
+    /// Webhook events about the deposit in ascending creation order. This service always sends
+    /// it; it is optional in the schema so clients also parse responses from servers that predate
+    /// it.
+    #[schema(required = false)]
+    pub events: Vec<DepositEventResponse>,
+}
+
+/// One webhook event about a deposit and its delivery state.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositEventResponse {
+    /// Stable event identifier, sent as the `webhook-id` header.
+    pub id: Uuid,
+    /// Event type, such as `deposit.credited`.
+    pub event_type: String,
+    /// Event creation time.
+    pub created_at: DateTime<Utc>,
+    /// When the receiver accepted the event, or `null` while it is undelivered.
+    pub delivered_at: Option<DateTime<Utc>>,
 }
 
 /// A support lookup page with timelines.
@@ -429,6 +447,33 @@ pub struct AdminRefundResponse {
     pub confirmation_evidence: Option<serde_json::Value>,
 }
 
+/// Administrative action body; `reason` is recorded in the action's audit row.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct AdminReasonRequest {
+    /// Why the action is taken, 1 to 1024 bytes: the incident or sign-off it rests on.
+    pub reason: String,
+}
+
+/// A lifted reconciliation block.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ReconciliationBlockLiftResponse {
+    /// Lifted block, `chain:{chain_id}` or `address:{address_id}`.
+    pub block_key: String,
+    /// When the block was lifted; a repeated lift returns the original time.
+    pub lifted_at: DateTime<Utc>,
+}
+
+/// A webhook event queued for delivery again.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct OutboxReplayResponse {
+    /// Stable event identifier, sent as the `webhook-id` header.
+    pub event_id: Uuid,
+    /// Event type, such as `deposit.credited`.
+    pub event_type: String,
+    /// When the delivery worker next attempts the event.
+    pub next_attempt_at: DateTime<Utc>,
+}
+
 /// Per-route daily finance report produced by C12.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct RouteDailyReport {
@@ -494,6 +539,25 @@ pub struct ReconciliationRoundReport {
     pub failed_checks: Vec<FailedCheckReport>,
 }
 
+/// A persistent reconciliation block (architecture §13).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ReconciliationBlockReport {
+    /// Block identifier, `chain:{chain_id}` or `address:{address_id}`.
+    pub block_key: String,
+    /// `chain` (the chain is frozen) or `address` (the address is left out of flush planning).
+    pub scope: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Blocked address for an `address` block.
+    pub address_id: Option<Uuid>,
+    /// Check that wrote the block, such as `address_derivation`.
+    pub check: String,
+    /// Why the check blocked.
+    pub reason: String,
+    /// When the block was written.
+    pub created_at: DateTime<Utc>,
+}
+
 /// One reconciliation check that could not complete.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct FailedCheckReport {
@@ -530,6 +594,10 @@ pub struct DailyReportResponse {
     /// Latest reconciliation round of the serving process; absent until the first round after a
     /// restart.
     pub reconciliation: Option<ReconciliationRoundReport>,
+    /// Active reconciliation blocks in `block_key` order. This service always sends it; it is
+    /// optional in the schema so clients also parse reports from servers that predate it.
+    #[schema(required = false)]
+    pub reconciliation_blocks: Vec<ReconciliationBlockReport>,
 }
 
 /// Administrative route pause response.

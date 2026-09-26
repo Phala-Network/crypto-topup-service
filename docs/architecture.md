@@ -386,7 +386,8 @@ Product requests use the same signature scheme with the product's key; paths use
 `external_id`; every request is checked for tenant ownership. Address responses include the
 salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the product can
 recompute any address without the service. The admin key can only issue products, pause and
-resume, nudge, and drive the refund workflow; each change writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
+resume, nudge, drive the refund workflow, lift reconciliation blocks (§13), and replay webhook
+events; each change writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
 (`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
 `X-Forwarded-*`, so signers sign the public URL they call. Each deployment (sandbox, staging,
 production) must pin a distinct product key: signature single-use is recorded per database, so a
@@ -415,7 +416,9 @@ POST   /v1/admin/products {slug, public_key, webhook_url}   key id, settlement U
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
-GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, global lock exposure
+POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
+POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
+GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, global lock exposure, reconciliation blocks
 ```
 
 Signatures are single-use within the acceptance window. `rotate` is idempotent on
@@ -529,6 +532,12 @@ other finding raises `TopupReconciliationMismatch` (§16).
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
 | After a restore, in the read-only restore-check instance (§14): every deposit in `cleared`, `credited`, or `swept`, or rejected by the product after `cleared` | `GET` each key and adopt the answer (product wins, §11); resume only when every lookup is complete |
+
+A block (`block flush` for one address, `freeze chain`) stays until an operator lifts it with the
+admin-signed `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` once the cause is
+investigated and signed off; the daily report lists active blocks. Lifting is manual: the service
+does not re-check first, and a finding that still reproduces blocks again on the next round. The
+lift writes `audit` with the reason and the removed block in the same transaction.
 
 ## 14. Configuration and deployment
 
@@ -718,7 +727,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Pause scopes with customer-facing effect; status page and incident communications | S+P | ✓ | | |
 | Localization, currency and time display | P | | ✓ | |
 | SDK with signing helper, idempotent client, examples; versioning policy; sandbox | S | ✓ | | |
-| Webhook delivery log, test send, replay | S | CLI | ✓ | |
+| Webhook delivery log, test send, replay | S | admin replay | ✓ | |
 | Multi-product tenancy administration; self-serve product onboarding | S | | | ✓ |
 | Sender address book and source whitelisting | S+P | | | ✓ |
 | Built-in token purchase, withdrawal, trading account | — | | | never |

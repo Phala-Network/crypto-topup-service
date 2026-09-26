@@ -37,11 +37,19 @@ rate-lock creation answer `423`. Other chains keep running; credited facts are n
 
 ## Fix
 
-There is no in-service repair and no API that lifts a freeze: the block is a database row only the
-database owner can delete, and a production CVM offers no owner session. Escalate to Engineering.
-Wrong contracts are corrected with a new route version; wrong stored rows by a restore to a point
-before the corruption ([RESTORE.md](../RESTORE.md)). If any stored address still disagrees, the
-next reconciliation round (every 10 minutes) freezes the chain again.
+Fix the cause first: wrong contracts are corrected with a new route version; wrong stored rows by
+a restore to a point before the corruption ([RESTORE.md](../RESTORE.md)). Then, with Security's
+sign-off, lift the freeze; the daily report lists it as `chain:<chain_id>`, and the `reason` goes
+into the audit record:
+
+```sh
+admin GET /v1/admin/report/daily | jq '.reconciliation_blocks'
+admin POST "/v1/admin/reconciliation-blocks/chain:$CHAIN_ID/lift" '{"reason":"INC-123: factory and stored addresses agree, Security sign-off"}'
+```
+
+The chain resumes on the next iteration of each component, without a restart. The lift does not
+re-check: if any stored address still disagrees, the next reconciliation round (every 10 minutes)
+freezes the chain again.
 
 ## Done when
 

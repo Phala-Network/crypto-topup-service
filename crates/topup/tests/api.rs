@@ -984,6 +984,272 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
     result.and(cleanup)
 }
 
+/// `POST /v1/admin/reconciliation-blocks/{block_key}/lift` is admin-signed, needs a reason,
+/// audits the lift with the block it removed, and answers a repeat with the first lift.
+#[tokio::test]
+async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[33; 32]);
+        let admin_key = SigningKey::from_bytes(&[34; 32]);
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        seed::create_account(
+            &database.app_pool,
+            &NewAccount {
+                id: Uuid::new_v4(),
+                product_id: product.id,
+                external_id: "lift-account".to_owned(),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
+            VALUES ('chain:1', 'chain', 1, 'address_derivation', 'test freeze')
+            "#,
+        )
+        .execute(&database.app_pool)
+        .await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let admin = |method: Method, path: &str, body: Value, created: i64| -> Result<_> {
+            Ok(signed_request(
+                method,
+                path,
+                if body.is_null() { Vec::new() } else { serde_json::to_vec(&body)? },
+                ADMIN_KID,
+                &admin_key,
+                created,
+            ))
+        };
+
+        let response = app
+            .clone()
+            .oneshot(admin(Method::GET, "/v1/admin/report/daily", Value::Null, now)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let blocks = response_json(response).await?["reconciliation_blocks"].clone();
+        ensure!(blocks.as_array().map(Vec::len) == Some(1));
+        ensure!(blocks[0]["block_key"] == "chain:1");
+        ensure!(blocks[0]["scope"] == "chain");
+        ensure!(blocks[0]["check"] == "address_derivation");
+
+        let lift = "/v1/admin/reconciliation-blocks/chain:1/lift";
+        let reason = json!({"reason": "INC-7: factory confirmed, stored rows restored"});
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                lift,
+                serde_json::to_vec(&reason)?,
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(admin(Method::POST, lift, json!({"reason": " "}), now + 2)?)
+            .await?;
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        ensure!(response_json(response).await?["error"]["code"] == "invalid_request");
+        let response = app
+            .clone()
+            .oneshot(admin(
+                Method::POST,
+                "/v1/admin/reconciliation-blocks/chain:2/lift",
+                reason.clone(),
+                now + 3,
+            )?)
+            .await?;
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+        ensure!(response_json(response).await?["error"]["code"] == "not_found");
+
+        let response = app
+            .clone()
+            .oneshot(admin(Method::POST, lift, reason.clone(), now + 4)?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let lifted = response_json(response).await?;
+        ensure!(lifted["block_key"] == "chain:1");
+        // A repeat answers with the first lift; generated clients percent-encode the key.
+        let response = app
+            .clone()
+            .oneshot(admin(
+                Method::POST,
+                "/v1/admin/reconciliation-blocks/chain%3A1/lift",
+                reason.clone(),
+                now + 5,
+            )?)
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response_json(response).await? == lifted);
+
+        let audit = sqlx::query(
+            "SELECT actor, action, reason FROM audit WHERE subject = 'reconciliation_block:chain:1'",
+        )
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(audit.len() == 1, "only the first lift is audited");
+        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        ensure!(audit[0].try_get::<String, _>("action")? == "reconciliation_block.lift");
+        let evidence: Value = serde_json::from_str(&audit[0].try_get::<String, _>("reason")?)?;
+        ensure!(evidence["reason"] == reason["reason"]);
+        ensure!(evidence["block"]["check"] == "address_derivation");
+        ensure!(evidence["block"]["reason"] == "test freeze");
+
+        // The chain resumes without a restart.
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts/lift-account/deposit-address",
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 6,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let response = app
+            .oneshot(admin(Method::GET, "/v1/admin/report/daily", Value::Null, now + 7)?)
+            .await?;
+        ensure!(response_json(response).await?["reconciliation_blocks"] == json!([]));
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// `POST /v1/admin/outbox/{event_id}/replay` requeues an existing event without touching its
+/// payload; the product finds the event id in its signed support lookup.
+#[tokio::test]
+async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[35; 32]);
+        let admin_key = SigningKey::from_bytes(&[36; 32]);
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let deposit = seed_other_tenant_deposit(&database.app_pool, product.id).await?;
+        let event_id = Uuid::new_v4();
+        let payload = json!({"product_id": product.id, "deposit_id": deposit, "state": "credited"});
+        sqlx::query(
+            r#"
+            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at)
+            VALUES ($1, 'deposit.credited', $2, now() - interval '1 hour', now())
+            "#,
+        )
+        .bind(event_id)
+        .bind(&payload)
+        .execute(&database.app_pool)
+        .await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/v1/products/phala-cloud/deposits?tx_hash=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let events = response_json(response).await?["deposits"][0]["events"].clone();
+        ensure!(events.as_array().map(Vec::len) == Some(1));
+        ensure!(events[0]["id"] == event_id.to_string());
+        ensure!(events[0]["event_type"] == "deposit.credited");
+        ensure!(!events[0]["delivered_at"].is_null());
+
+        let replay = format!("/v1/admin/outbox/{event_id}/replay");
+        let reason = serde_json::to_vec(&json!({"reason": "product lost the event"}))?;
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &replay,
+                reason.clone(),
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &replay,
+                serde_json::to_vec(&json!({"reason": ""}))?,
+                ADMIN_KID,
+                &admin_key,
+                now + 2,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &format!("/v1/admin/outbox/{}/replay", Uuid::new_v4()),
+                reason.clone(),
+                ADMIN_KID,
+                &admin_key,
+                now + 3,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+
+        for created in [now + 4, now + 5] {
+            let response = app
+                .clone()
+                .oneshot(signed_request(
+                    Method::POST,
+                    &replay,
+                    reason.clone(),
+                    ADMIN_KID,
+                    &admin_key,
+                    created,
+                ))
+                .await?;
+            ensure!(response.status() == StatusCode::OK);
+            let replayed = response_json(response).await?;
+            ensure!(replayed["event_id"] == event_id.to_string());
+            ensure!(replayed["event_type"] == "deposit.credited");
+        }
+        let row = sqlx::query(
+            "SELECT payload, delivered_at IS NULL AND next_attempt_at <= now() AS due FROM outbox WHERE id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(row.try_get::<bool, _>("due")?);
+        ensure!(row.try_get::<Value, _>("payload")? == payload);
+        let audit = sqlx::query("SELECT actor, action, reason FROM audit WHERE subject = $1")
+            .bind(format!("event:{event_id}"))
+            .fetch_all(&database.app_pool)
+            .await?;
+        ensure!(audit.len() == 1, "a repeat while the event is due is not audited again");
+        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        ensure!(audit[0].try_get::<String, _>("action")? == "outbox.replay");
+        ensure!(audit[0].try_get::<String, _>("reason")? == "product lost the event");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[cfg(feature = "dev-signer")]
 #[tokio::test]
 async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {

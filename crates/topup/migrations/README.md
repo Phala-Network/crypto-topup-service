@@ -15,12 +15,13 @@ remain trusted migration/operations identities. `BEFORE UPDATE OR DELETE` trigge
 accidental owner-side mutation.
 
 Default privileges grant `SELECT`, `INSERT`, `UPDATE`, and `DELETE` to `topup_app` on every table
-the owner creates; no application table grants `TRUNCATE`. The initial schema narrows that grant:
+the owner creates; no application table grants `TRUNCATE`. The initial schema narrows that grant,
+and `20260927000000_admin_ops` adds `DELETE` on `reconciliation_blocks` for the admin lift:
 
 | Tables | `topup_app` |
 |---|---|
 | `transitions`, `audit`, `reconciliation_findings`, `heartbeat` | `SELECT`, `INSERT` (append-only) |
-| `reconciliation_blocks` | `SELECT`, `INSERT` |
+| `reconciliation_blocks` | `SELECT`, `INSERT`, `DELETE` |
 | `reconciliation_deposit_cursors`, `reconciliation_custody_cursors` | `SELECT`, `INSERT`, `UPDATE` |
 | `_sqlx_migrations` | `SELECT` |
 | `products`, `accounts`, `route_pauses`, `seen_signatures`, `addresses`, `cursors`, `pending_transfers`, `flushes`, `flushed`, `flush_exclusions`, `deposits`, `rate_locks`, `settlements`, `outbox`, `refunds`, `refund_payment_claims` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
@@ -31,18 +32,15 @@ same migration. `topup_app` also has `USAGE, SELECT` on `heartbeat_id_seq`. The 
 table, so a new table fails it until it is listed here and in the test.
 
 A repeated reconciliation block is ignored, and an update could rewrite a block's scope or chain,
-so only the database owner can change or lift a block. A `chain` block written by the
-address-derivation check freezes that chain at runtime: pumps leave its deposits waiting, its
-scanner pauses, the flusher plans nothing, and address issuance and rate-lock creation answer
-`423 chain_frozen`. The service still starts and keeps serving other chains. An `address` block
-excludes one address from flush planning after a credit recomputation mismatch. To lift a block
-after the cause has been investigated and signed off, the owner deletes the row; the components
-resume on their next iteration without a restart:
-
-```sql
-DELETE FROM reconciliation_blocks WHERE block_key = 'chain:<chain_id>';
-DELETE FROM reconciliation_blocks WHERE block_key = 'address:<address_id>';
-```
+so only the database owner can change a block. A `chain` block written by the address-derivation
+check freezes that chain at runtime: pumps leave its deposits waiting, its scanner pauses, the
+flusher plans nothing, and address issuance and rate-lock creation answer `423 chain_frozen`. The
+service still starts and keeps serving other chains. An `address` block excludes one address from
+flush planning after a credit recomputation mismatch. To lift a block after the cause has been
+investigated and signed off, an operator calls the admin-signed
+`POST /v1/admin/reconciliation-blocks/{block_key}/lift` with a `reason`: it deletes the row and
+writes an `audit` row carrying the removed block in one transaction. The components resume on
+their next iteration without a restart.
 
 Points the schema does not show on its own:
 

@@ -13,6 +13,7 @@ from typing import cast
 import datetime
 
 if TYPE_CHECKING:
+    from ..models.reconciliation_block_report import ReconciliationBlockReport
     from ..models.reconciliation_round_report import ReconciliationRoundReport
     from ..models.route_daily_report import RouteDailyReport
 
@@ -32,15 +33,20 @@ class DailyReportResponse:
             exposure cap is enforced against. This service always sends it; it is optional in the
             schema so clients also parse reports from servers that predate it.
         reconciliation (None | ReconciliationRoundReport | Unset):
+        reconciliation_blocks (list[ReconciliationBlockReport] | Unset): Active reconciliation blocks in `block_key`
+            order. This service always sends it; it is
+            optional in the schema so clients also parse reports from servers that predate it.
     """
 
     generated_at: datetime.datetime
     routes: list[RouteDailyReport]
     exposure_minor: None | str | Unset = UNSET
     reconciliation: None | ReconciliationRoundReport | Unset = UNSET
+    reconciliation_blocks: list[ReconciliationBlockReport] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.reconciliation_block_report import ReconciliationBlockReport  # noqa: PLC0415
         from ..models.reconciliation_round_report import ReconciliationRoundReport  # noqa: PLC0415
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
@@ -65,6 +71,13 @@ class DailyReportResponse:
         else:
             reconciliation = self.reconciliation
 
+        reconciliation_blocks: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.reconciliation_blocks, Unset):
+            reconciliation_blocks = []
+            for reconciliation_blocks_item_data in self.reconciliation_blocks:
+                reconciliation_blocks_item = reconciliation_blocks_item_data.to_dict()
+                reconciliation_blocks.append(reconciliation_blocks_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -77,11 +90,14 @@ class DailyReportResponse:
             field_dict["exposure_minor"] = exposure_minor
         if reconciliation is not UNSET:
             field_dict["reconciliation"] = reconciliation
+        if reconciliation_blocks is not UNSET:
+            field_dict["reconciliation_blocks"] = reconciliation_blocks
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.reconciliation_block_report import ReconciliationBlockReport  # noqa: PLC0415
         from ..models.reconciliation_round_report import ReconciliationRoundReport  # noqa: PLC0415
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
@@ -121,11 +137,23 @@ class DailyReportResponse:
 
         reconciliation = _parse_reconciliation(d.pop("reconciliation", UNSET))
 
+        _reconciliation_blocks = d.pop("reconciliation_blocks", UNSET)
+        reconciliation_blocks: list[ReconciliationBlockReport] | Unset = UNSET
+        if _reconciliation_blocks is not UNSET:
+            reconciliation_blocks = []
+            for reconciliation_blocks_item_data in _reconciliation_blocks:
+                reconciliation_blocks_item = ReconciliationBlockReport.from_dict(
+                    reconciliation_blocks_item_data
+                )
+
+                reconciliation_blocks.append(reconciliation_blocks_item)
+
         daily_report_response = cls(
             generated_at=generated_at,
             routes=routes,
             exposure_minor=exposure_minor,
             reconciliation=reconciliation,
+            reconciliation_blocks=reconciliation_blocks,
         )
 
         daily_report_response.additional_properties = d

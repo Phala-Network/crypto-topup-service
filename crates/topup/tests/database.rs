@@ -441,7 +441,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("audit", &["SELECT", "INSERT"]),
     ("reconciliation_findings", &["SELECT", "INSERT"]),
     ("heartbeat", &["SELECT", "INSERT"]),
-    ("reconciliation_blocks", &["SELECT", "INSERT"]),
+    ("reconciliation_blocks", &["SELECT", "INSERT", "DELETE"]),
     (
         "reconciliation_deposit_cursors",
         &["SELECT", "INSERT", "UPDATE"],
