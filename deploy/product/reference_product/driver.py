@@ -363,9 +363,9 @@ def _wait_for_account(
             time.sleep(5)
             continue
         for item in view["deposits"]:
-            if states.get(item["id"]) != item["state"]:
-                LOG.info("deposit %s is %s", item["id"], item["state"])
-                states[item["id"]] = item["state"]
+            if states.get(item["id"]) != item["status"]:
+                LOG.info("deposit %s is %s", item["id"], item["status"])
+                states[item["id"]] = item["status"]
         result = ready(view)
         if result is not None:
             return result

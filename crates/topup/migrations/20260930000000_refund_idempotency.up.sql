@@ -1,4 +1,4 @@
--- Refunds (docs/design/stripe-style-api.md §2.5): `POST /v1/refunds` takes an Idempotency-Key,
+-- Refunds (docs/architecture.md §12): `POST /v1/refunds` takes an Idempotency-Key,
 -- stored on the refund and unique per product. Refunds created before this migration have no key.
 ALTER TABLE refunds
     ADD COLUMN product_id uuid REFERENCES products(id),
