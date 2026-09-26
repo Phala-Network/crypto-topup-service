@@ -534,6 +534,17 @@ other finding raises `TopupReconciliationMismatch` (§16).
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
 | After a restore, in the read-only restore-check instance (§14) | the checks above, on the restored ledger alone: the service's record is authoritative for its credits, so the restore asks the product nothing and does not depend on it being reachable |
 
+The log checks (missing deposits, treasury inflow against `Flushed` events) are incremental: each
+resumes from a durable cursor, reads at most 64 windows of 2 000 finalized blocks per
+round, and stores its progress after every window, so a round reads only what finalized since the
+last one, and a restart or a failed round resumes where the stored progress ends until the whole
+history has been covered once. A round's reads run one at a time on provider A. The first round
+after a restart runs while every other task starts on the same provider, so a provider refusal
+that asks for a retry (HTTP 429, JSON-RPC `-32005`, and the other rate-limit answers alloy
+classifies) is retried within the round with exponential backoff and jitter, up to six retries
+and at most 32 s of backoff per read. Any other failure, or a refusal outlasting the retries,
+fails only its check and withholds the round's heartbeat; the next round runs it again.
+
 A block (`block flush` for one address, `freeze chain`) stays until an operator lifts it with the
 admin-signed `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` once the cause is
 investigated and signed off; the daily report lists active blocks. Lifting is manual: the service
