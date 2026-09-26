@@ -71,7 +71,6 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         let mut other_route = route.clone();
         other_route.destination.product = other.slug.clone();
         other_route.route = "builder-ethereum-pha-usd".to_owned();
-        other_route.destination.product_kid = "builder/v1".to_owned();
         // One chain asset has one route name, so the second product routes another token.
         other_route.asset.contract = alloy_primitives::Address::repeat_byte(0x42);
         let app = topup::api::router(AppState {
@@ -959,31 +958,6 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
         ensure!(exposure(&database.app_pool, &format!("account:{}", second.id)).await? == 100);
         ensure!(exposure(&database.app_pool, &format!("product:{}", product.id)).await? == 100);
         ensure!(exposure(&database.app_pool, "global").await? == 100);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn disabled_route_still_replays_an_existing_lock() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
-        let account = seed_account(&database.app_pool, product.id, "disabled").await?;
-        let mut route = test_route();
-        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(&database, &quotes, &product, &account, &route, "d-1").await?;
-        route.rate_lock.enabled = false;
-        let replayed = create_lock(&database, &quotes, &product, &account, &route, "d-1").await?;
-        ensure!(replayed.address_id == lock.address_id && replayed.address == lock.address);
-        ensure!(matches!(
-            create_lock(&database, &quotes, &product, &account, &route, "d-2").await,
-            Err(error) if matches!(error.downcast_ref::<RateLockError>(), Some(RateLockError::Disabled))
-        ));
         Ok(())
     }
     .await;

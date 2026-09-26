@@ -176,9 +176,6 @@ pub enum RateLockError {
     /// Request amount or reference is invalid.
     #[error("{0}")]
     InvalidInput(&'static str),
-    /// Quote-first creation is disabled for the route.
-    #[error("rate locks are disabled")]
-    Disabled,
     /// Current validated pricing is unavailable.
     #[error("validated pricing is unavailable")]
     PricingUnavailable,
@@ -218,8 +215,8 @@ pub enum RateLockError {
 ///
 /// A replay of an existing reference must state the same amount in the same unit as the stored
 /// lock (`amount_atomic` against the locked token amount, `amount_minor` against the locked
-/// credit); any other amount is an idempotency mismatch. Replays are answered before the
-/// `rate_lock.enabled` check, so disabling a route never hides a lock the product already showed.
+/// credit); any other amount is an idempotency mismatch. Replays are answered before any
+/// other check, so pausing quotes never hides a lock the product already showed.
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
@@ -231,9 +228,6 @@ pub async fn create(
 ) -> Result<RateLock, RateLockError> {
     if let Some(existing) = find_replay(pool, product.id, account.id, lock_ref, requested).await? {
         return Ok(existing);
-    }
-    if !route.rate_lock.enabled {
-        return Err(RateLockError::Disabled);
     }
     // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
     // authoritative check repeats under the account row lock below.

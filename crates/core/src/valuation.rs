@@ -477,6 +477,7 @@ mod tests {
         fn new(asset: Address, min_credit_minor: u64, tolerance_bps: u16) -> Self {
             Self {
                 asset: AssetConfig {
+                    symbol: "pha".to_owned(),
                     contract: asset,
                     decimals: 18,
                     min_flush_atomic: AtomicAmount::new(U256::ZERO),
@@ -485,7 +486,6 @@ mod tests {
                 destination: DestinationConfig {
                     product: "phala-cloud".to_owned(),
                     unit_decimals: 2,
-                    product_kid: "test".to_owned(),
                 },
                 screening: ScreeningConfig {
                     sanctions_oracle: Address::from([9_u8; 20]),
@@ -494,7 +494,6 @@ mod tests {
                     min_credit_minor,
                 },
                 rate_lock: RateLockConfig {
-                    enabled: true,
                     window_s: 60,
                     spread_bps: bps(100),
                     lock_tolerance_bps: bps(tolerance_bps),

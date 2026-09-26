@@ -1,59 +1,28 @@
 # First route. Ships inside the dstack compose, so every value is part of the attested
 # measurement (docs/architecture.md §14). Changing a value is a new version and a new approved
-# compose hash. Numbers are illustrative; finance and risk set the real ones.
-
-chain:                             # chain settings live inline in every route file
-  chain_id: 1
-  finality: finalized              # reviewed rule; two RPC providers must agree
-  rpc_providers: [alchemy, quicknode]
-  operator_key_version: 1          # derives operator/v1; bump only after granting the new operator OPERATOR_ROLE
-  contracts:                       # deployed via the deterministic deployment proxy, same on every chain
-    forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory
-    implementation:    "0x0000000000000000000000000000000000000000" # set to factory.implementation()
-    treasury:          "0x0000000000000000000000000000000000000000" # set to the finance Safe at deployment
-  flush:
-    schedule: "0 */6 * * *"
-    max_gas_ratio_bps: 200         # an address's share of batch gas ≤ 2% of its value
-    native_price_asset: eth        # Coin Metrics asset used to value gas in USD
-    max_fee_per_gas_wei: 500000000000
-    replacement_bps: 12500         # both EIP-1559 fee fields must increase by 25%
-    min_operator_balance_wei: "50000000000000000"  # below 0.05 ETH, alert TopupOperatorGasReserveLow
-
+# compose hash. Every value not written here is a code default, as attested as the file (the
+# image digest is in the compose hash); `topup route show` prints the resolved route. Numbers are
+# illustrative; finance and risk set the real ones.
 route: phala-cloud-ethereum-pha-usd
 version: 1
+product: phala-cloud               # signs with key id phala-cloud/v1
+
+chain:
+  chain_id: 1                      # default sanctions oracle: Chainalysis 0x40C5…aC8fb
+  forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory; the implementation is its first CREATE
+  treasury:          "0x0000000000000000000000000000000000000000" # set to the finance Safe at deployment
 
 asset:
+  symbol: pha                      # the API's asset code
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
-  min_flush_atomic: "20000000000000000000000"        # 20,000 PHA on-chain balance
-  min_refund_atomic: "20000000000000000000"           # 20 PHA refundable dust floor
-
-destination:
-  product: phala-cloud
-  unit_decimals: 2
-  product_kid: phala-cloud/v1
 
 pricing:
-  mode: spot
   primary: { source: coinmetrics, asset: pha }
-  check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-  max_age_s: 120
-  max_deviation_bps: 100
-  max_fx_deviation_bps: 50
+  check:   { source: binance, symbol: PHAUSDT } # FX leg: Kraken USDT/USD
 
-screening:
-  sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
-  min_deposit_atomic: "20000000000000000000"         # 20 PHA
+limits:
+  min_credit_minor: 100                              # USD 1.00; smaller deposits are rejected below_minimum
   max_deposit_atomic: "200000000000000000000000"     # 200,000 PHA (pilot bound; product enforces its own caps too)
-  min_credit_minor: 100                              # USD 1.00
-
-rate_lock:
-  enabled: true                    # quote-first is the default deposit flow
-  window_s: 900
-  spread_bps: 50                   # price_lock = price_spot / (1 + 0.005)
-  lock_tolerance_bps: 100
-  max_creations_per_minute: 10     # successful creations per account in a rolling minute
+  min_refund_atomic: "20000000000000000000"          # 20 PHA refundable dust floor
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
-
-alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }

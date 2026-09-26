@@ -232,7 +232,6 @@ async fn require_account(
 fn map_error(error: RateLockError) -> ApiError {
     match error {
         RateLockError::InvalidInput(message) => ApiError::bad_request(message),
-        RateLockError::Disabled => ApiError::paused("rate-lock quotes are disabled"),
         RateLockError::PricingUnavailable => {
             ApiError::service_unavailable("validated pricing is unavailable")
         }

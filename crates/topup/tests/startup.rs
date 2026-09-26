@@ -28,9 +28,13 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
     )?;
     let implementation = implementation_of(&rpc_url, factory)?;
 
-    let yaml = route_yaml(&anvil, factory, implementation, TREASURY);
+    let yaml = route_yaml(&anvil, factory, TREASURY);
     let route: RouteFile = serde_saphyr::from_str(&yaml)?;
     route.validate().map_err(anyhow::Error::msg)?;
+    ensure!(
+        route.chain.contracts.implementation == implementation,
+        "the default implementation must be the one the factory created"
+    );
     topup::contracts::verify_routes(&route_set(&route)?)
         .await
         .map_err(anyhow::Error::msg)
@@ -89,10 +93,7 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         .context("the canonical Multicall3 must pass again")?;
 
     let path = std::env::temp_dir().join(format!("topup-startup-{}.yaml", uuid::Uuid::new_v4()));
-    std::fs::write(
-        &path,
-        route_yaml(&anvil, factory, implementation, OTHER_TREASURY),
-    )?;
+    std::fs::write(&path, route_yaml(&anvil, factory, OTHER_TREASURY))?;
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .args(["run", "--route"])
         .arg(&path)
@@ -130,7 +131,7 @@ fn route_set(route: &RouteFile) -> Result<topup::routes::RouteSet> {
     topup::routes::RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)
 }
 
-fn route_yaml(anvil: &Anvil, factory: Address, implementation: Address, treasury: &str) -> String {
+fn route_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
     // Two distinct provider entries for the same node, as route validation requires.
     let primary = anvil.rpc_url.clone();
     let secondary = primary.replace("127.0.0.1", "localhost");
@@ -142,10 +143,6 @@ fn route_yaml(anvil: &Anvil, factory: Address, implementation: Address, treasury
         .replace(
             "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
             &format!("{factory:#x}"),
-        )
-        .replace(
-            "0xfeb1871c9897251C74b39DFC74e577888290faE6",
-            &format!("{implementation:#x}"),
         )
         .replace("0x0000000000000000000000000000000000007EA5", treasury)
 }

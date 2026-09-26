@@ -45,9 +45,7 @@ their next iteration without a restart.
 
 Points the schema does not show on its own:
 
-- `products` stores no key id. The attested route's `destination.product_kid` is its only source
-  (architecture §14); the service refuses to start when two loaded routes of one product disagree
-  on it.
+- `products` stores no key id: a product's key id is `{slug}/v1` (architecture §14).
 - `addresses.created_block` defaults to zero, which makes the first scanner pass check the full
   chain history before setting `backfilled`. The API and rate-lock paths set it from the chain's
   committed cursor instead.

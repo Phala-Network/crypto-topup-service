@@ -1,56 +1,28 @@
 # Staging route on Sepolia (test contracts). The `phala-cloud` product is the staging reference-product CVM (deploy/README.md, "Staging reference product").
+# Every value not written here is a code default (docs/architecture.md §14); `topup route show` prints the resolved route.
+route: phala-cloud-sepolia-pha-usd
+version: 2
+product: phala-cloud
+
 chain:
   chain_id: 11155111
-  finality: finalized
-  rpc_providers: [provider-a, provider-b]
-  operator_key_version: 1
-  contracts:
-    forwarder_factory: "0x2407bE5Be2b632F5b166872A49E4946a70CCa531"
-    implementation: "0x70B714508BFa441449DC09f790Ca03Baa5170360"
-    treasury: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+  forwarder_factory: "0x2407bE5Be2b632F5b166872A49E4946a70CCa531"
+  treasury: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+  sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
   flush:
-    schedule: "0 */6 * * *"
-    max_gas_ratio_bps: 200
-    native_price_asset: eth
-    max_fee_per_gas_wei: 500000000000
-    replacement_bps: 12500
-    min_operator_balance_wei: "10000000000000000"
-
-route: phala-cloud-sepolia-pha-usd
-version: 1
+    min_operator_balance_wei: "10000000000000000" # 0.01 ETH; the operator holds about 0.02 ETH
 
 asset:
+  symbol: pha
   contract: "0x8F40e7E99678F44c88158f049E62817580ab113B"
   decimals: 18
-  min_flush_atomic: "20000000000000000000000"
-  min_refund_atomic: "20000000000000000000"
-
-destination:
-  product: phala-cloud
-  unit_decimals: 2
-  product_kid: phala-cloud/v1
 
 pricing:
-  mode: spot
   primary: { source: coinmetrics, asset: pha }
-  check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-  max_age_s: 120
-  max_deviation_bps: 100
-  max_fx_deviation_bps: 50
+  check: { source: binance, symbol: PHAUSDT }
 
-screening:
-  sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6"
-  min_deposit_atomic: "20000000000000000000"
-  max_deposit_atomic: "200000000000000000000000"
+limits:
   min_credit_minor: 100
-
-rate_lock:
-  enabled: true
-  window_s: 900
-  spread_bps: 50
-  lock_tolerance_bps: 100
+  max_deposit_atomic: "200000000000000000000000"
+  min_refund_atomic: "20000000000000000000"
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
-  max_creations_per_minute: 10
-
-alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }

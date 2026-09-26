@@ -17,8 +17,8 @@ Replacement is a hard cut (architecture §15, Rotation): the service verifies a 
 stored key under the key id its routes name, so the old key fails from the moment the new one is
 stored, and the product's requests fail until it signs with the new seed.
 
-1. The product generates a new key under the same key id, the route's `destination.product_kid`
-   (`topup-sdk keygen --keyid <product_kid>`), and sends the printed `public_key`; confirm it with
+1. The product generates a new key under the same key id, `{slug}/v1`
+   (`topup-sdk keygen --keyid <slug>/v1`), and sends the printed `public_key`; confirm it with
    the product's owner over a second channel. If the product cannot do this promptly, pause
    `quotes`, `addresses`, and `refunds` on each of its routes meanwhile
    (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses","refunds"]}'`);

@@ -2,61 +2,36 @@
 # runs with chain id 11155111 so the same file works unchanged). Render it with render-route.sh,
 # which refuses leftover placeholders, then validate with `topup route validate` (no --template).
 # Caps are deliberately small: the sandbox carries test tokens only and must never hold value.
-chain:
-  chain_id: 11155111
-  finality: finalized
-  rpc_providers: [provider-a, provider-b]
-  operator_key_version: 1
-  contracts:
-    forwarder_factory: "${FORWARDER_FACTORY}"
-    implementation: "${IMPLEMENTATION}"
-    treasury: "${TREASURY}"
-  flush:
-    schedule: "0 */6 * * *"
-    max_gas_ratio_bps: 200
-    native_price_asset: eth
-    max_fee_per_gas_wei: 500000000000
-    replacement_bps: 12500
-    min_operator_balance_wei: "10000000000000000"
-
+# Every value not written here is a code default (docs/architecture.md §14).
 route: sandbox-${PRODUCT_SLUG}-tpha-usd
 version: 1
+product: ${PRODUCT_SLUG}
+
+chain:
+  chain_id: 11155111
+  forwarder_factory: "${FORWARDER_FACTORY}"
+  treasury: "${TREASURY}"
+  # The sandbox deploys MockSanctionsOracle; there is no Chainalysis oracle on Sepolia.
+  sanctions_oracle: "${SANCTIONS_ORACLE}"
+  flush:
+    min_operator_balance_wei: "10000000000000000"
 
 # The sandbox test token is the A1 MockERC20 (18 decimals, public mint). It is valued as PHA so
 # integrators see production-shaped quotes; it has no market value of its own.
 asset:
+  symbol: pha
   contract: "${TEST_TOKEN}"
   decimals: 18
-  min_flush_atomic: "20000000000000000000000"
-  min_refund_atomic: "20000000000000000000"
-
-destination:
-  product: ${PRODUCT_SLUG}
-  unit_decimals: 2
-  product_kid: "${PRODUCT_KID}"
 
 pricing:
-  mode: spot
   primary: { source: coinmetrics, asset: pha }
-  check: { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-  max_age_s: 120
-  max_deviation_bps: 100
-  max_fx_deviation_bps: 50
+  check: { source: binance, symbol: PHAUSDT }
 
-# The sandbox deploys MockSanctionsOracle; there is no Chainalysis oracle on Sepolia.
-screening:
-  sanctions_oracle: "${SANCTIONS_ORACLE}"
-  min_deposit_atomic: "20000000000000000000"
-  max_deposit_atomic: "50000000000000000000000"
+limits:
   min_credit_minor: 100
-
-rate_lock:
-  enabled: true
-  window_s: ${RATE_LOCK_WINDOW_S}
-  spread_bps: 50
-  lock_tolerance_bps: 100
-  max_creations_per_minute: 10
+  max_deposit_atomic: "50000000000000000000000"
+  min_refund_atomic: "20000000000000000000"
   max_open_minor: { account: 50000, product: 200000, global: 200000 }
 
-alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }
+quote:
+  window_s: ${RATE_LOCK_WINDOW_S}

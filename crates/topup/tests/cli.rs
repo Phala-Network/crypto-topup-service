@@ -417,6 +417,27 @@ fn route_validate_requires_template_mode_for_placeholders() {
 }
 
 #[test]
+fn route_show_prints_the_resolved_route_as_json() {
+    let route = format!(
+        "{}/../../deploy/config/routes/phala-cloud-sepolia-pha.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = topup(&["route", "show", &route]);
+    assert!(output.status.success());
+    let resolved: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("route show prints JSON");
+    assert_eq!(
+        resolved["chain"]["implementation"],
+        "0x70b714508bfa441449dc09f790ca03baa5170360"
+    );
+    assert_eq!(resolved["quote"]["window_s"], 900);
+
+    let invalid = topup(&["route", "show", "/definitely/missing/route.yaml"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("failed to read"));
+}
+
+#[test]
 fn route_validate_rejects_invalid_content_and_missing_files() {
     let invalid = format!(
         "{}/../../contracts/test-vectors/create2.json",

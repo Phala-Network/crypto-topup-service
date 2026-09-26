@@ -96,12 +96,12 @@ gas from a public faucet.
      --rpc-url "$SEPOLIA_RPC_URL" --account sandbox-deployer
    ```
 
-2. Render and validate the integrator's route (one route per product). The route is the only
-   source of the product's key id; its slug must match the issued product:
+2. Render and validate the integrator's route (one route per product). Its product slug must
+   match the issued product, whose key id is `{slug}/v1`:
 
    ```sh
-   FORWARDER_FACTORY=0x... IMPLEMENTATION=0x... TREASURY=0x... TEST_TOKEN=0x... \
-     SANCTIONS_ORACLE=0x... PRODUCT_SLUG=acme PRODUCT_KID=acme/v1 \
+   FORWARDER_FACTORY=0x... TREASURY=0x... TEST_TOKEN=0x... \
+     SANCTIONS_ORACLE=0x... PRODUCT_SLUG=acme \
      deploy/sandbox/render-route.sh > sandbox-acme.yaml
    docker run --rm -v "$PWD/sandbox-acme.yaml:/route.yaml:ro" "$TOPUP_IMAGE" \
      topup route validate /route.yaml
@@ -130,9 +130,9 @@ gas from a public faucet.
 5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
    against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
    [Product credentials](../README.md#product-credentials) describes: the integrator's slug (the
-   route's `destination.product`), public key, and HTTPS webhook URL. The request is audited; a
-   repeat with the same values returns the same product, and different values for an issued slug
-   are refused with `409`. The key id comes only from the route.
+   route's `product`), public key, and HTTPS webhook URL. The request is audited; a repeat with
+   the same values returns the same product, and different values for an issued slug are refused
+   with `409`. The key id is `{slug}/v1`.
 
 ## Running the scenarios against Sepolia (integrators)
 
