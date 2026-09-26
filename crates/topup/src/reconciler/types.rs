@@ -5,7 +5,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Stable reconciliation check identifier used by findings, metrics, and alerts.
+/// Stable reconciliation check identifier used by findings and alerts.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckName {
@@ -125,13 +125,4 @@ impl ReconciliationReport {
     pub fn succeeded(&self) -> bool {
         self.failed_checks.is_empty()
     }
-}
-
-/// Prometheus metric name reserved by the architecture.
-pub(crate) const MISMATCH_METRIC: &str = "topup_reconciliation_mismatches_total";
-
-/// Counts one first-seen reconciliation mismatch in the §16 metric.
-pub(crate) fn record_mismatch(check: CheckName) {
-    metrics::counter!(MISMATCH_METRIC, "check" => check.code(), "producer_enabled" => "true")
-        .increment(1);
 }

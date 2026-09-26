@@ -3,8 +3,8 @@
 ## Trigger
 
 Trigger on an operator transaction not linked to a `flushes` row, an unexpected pending nonce,
-`MissingConsumedReceipt`, or evidence that operator key material was exposed. PR #56 defines no
-dedicated alert; an unexplained drop behind `TopupOperatorGasReserveLow` is a common first signal.
+`MissingConsumedReceipt`, or evidence that operator key material was exposed. An unexplained drop in
+the operator's gas balance ([Gas refill](gas-refill.md)) is a common first signal.
 
 ## Impact and blast radius
 

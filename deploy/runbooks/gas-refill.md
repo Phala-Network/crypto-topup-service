@@ -2,8 +2,10 @@
 
 ## Trigger
 
-Trigger on `TopupOperatorGasReserveLow` (PR #56: operator balance below 0.001 native token for
-five minutes) or when the balance cannot cover a bounded flush at the configured fee cap.
+The service raises no operator-gas alert yet. Trigger when a flush fails for insufficient funds
+(`flush maintenance failed` or `planned flush send failed` Sentry issues), when the operator balance
+cannot cover a bounded flush at the configured fee cap, or when the balance checked below is under
+0.001 native token.
 
 ## Impact and blast radius
 

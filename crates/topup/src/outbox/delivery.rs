@@ -124,22 +124,15 @@ where
 
     /// Polls one named delivery worker until shutdown.
     pub async fn run_with_instance(&self, instance: String, shutdown: CancellationToken) {
-        crate::observability::register_loop("outbox", instance.clone());
         let monitor = crate::observability::CronMonitor::outbox(&instance);
         loop {
             if shutdown.is_cancelled() {
                 return;
             }
-            crate::observability::heartbeat("outbox", instance.clone());
             monitor.check_in(true);
 
             let should_pause = match self.run_once().await {
-                Ok(claimed) => {
-                    if claimed > 0 {
-                        crate::observability::progress("outbox", instance.clone());
-                    }
-                    claimed == 0
-                }
+                Ok(claimed) => claimed == 0,
                 Err(error) => {
                     tracing::error!(%error, "outbox delivery poll failed");
                     true
@@ -147,11 +140,6 @@ where
             };
 
             if should_pause {
-                crate::observability::waiting(
-                    "outbox",
-                    instance.clone(),
-                    self.config.poll_interval,
-                );
                 tokio::select! {
                     () = sleep(self.config.poll_interval) => {}
                     () = shutdown.cancelled() => return,

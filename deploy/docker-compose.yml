@@ -109,8 +109,6 @@ services:
       - run
       - --bind
       - 0.0.0.0:8080
-      - --metrics-bind
-      - 0.0.0.0:9464
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
     environment:
@@ -142,8 +140,6 @@ services:
     # traffic (deploy/RESTORE.md, "Addressing the restore-check instance"). The renderer sets it.
     ports:
       - "${TOPUP_INGRESS_PORT:-}:8080"
-    expose:
-      - "9464"
     healthcheck:
       test: ["CMD", "topup", "healthcheck"]
       interval: 30s

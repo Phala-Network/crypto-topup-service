@@ -46,9 +46,6 @@ pub use types::{CheckName, Finding, ReconciliationReport};
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
 const MAX_WINDOWS_PER_ROUND: usize = 64;
 
-const LOOP_NAME: &str = "reconciler";
-const LOOP_INSTANCE: &str = "0";
-
 /// Order in which a round runs its checks; derivation runs first so a freeze lands early.
 const REGULAR_CHECKS: [CheckName; 6] = [
     CheckName::AddressDerivation,
@@ -305,7 +302,6 @@ impl Reconciler {
                     .failed_checks
                     .contains(&CheckName::PostRestoreSettlement));
         if report.succeeded() {
-            crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
             tracing::info!(
                 findings = report.findings.len(),
                 post_restore,
@@ -341,7 +337,6 @@ impl Reconciler {
 
     /// Runs periodic reconciliation until cancellation.
     pub async fn run_loop(&self, every: Duration, cancellation: CancellationToken) {
-        crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
         let monitor = crate::observability::CronMonitor::reconciler(every);
         let mut ticks = interval(every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -349,10 +344,6 @@ impl Reconciler {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticks.tick() => {
-                    crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
-                    // A round may legitimately run past the heartbeat threshold; it is overdue
-                    // only once it overruns the interval that schedules the next round.
-                    crate::observability::execution_deadline(LOOP_NAME, LOOP_INSTANCE, every);
                     tokio::select! {
                         () = cancellation.cancelled() => return,
                         report = self.run_checks(false) => {
@@ -367,7 +358,6 @@ impl Reconciler {
                             );
                         }
                     }
-                    crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, every);
                 }
             }
         }
@@ -1221,7 +1211,6 @@ fn log_finding(finding: &Finding, inserted: bool) {
             subjects = ?finding.subjects,
             expected = %finding.expected,
             observed = %finding.observed,
-            metric = types::MISMATCH_METRIC,
             "reconciliation mismatch"
         );
     }

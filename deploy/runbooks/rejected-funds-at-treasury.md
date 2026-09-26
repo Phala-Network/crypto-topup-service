@@ -3,7 +3,7 @@
 ## Trigger
 
 Trigger when Finance sees treasury inflow tied to `rejected` deposits, on `TopupUnsupportedInflows`
-(PR #56: finalized inflows of an unsupported asset), or when rejected holdings reported by custody
+(finalized inflows of an unsupported asset), or when rejected holdings reported by custody
 records differ from finalized `Flushed` events.
 
 ## Impact and blast radius

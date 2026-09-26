@@ -27,6 +27,7 @@ use topup_core::deposit::{DepositState, RejectReason, StepOutcome};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
+use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::TestDatabase;
@@ -350,11 +351,8 @@ async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls every reconciler future on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         let accepted = seed_sent(&pool, &route, 31).await?;
@@ -451,9 +449,8 @@ async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Res
                         .iter()
                         .any(|id| finding.subjects["deposit_id"] == id.to_string()))
         );
-        ensure!(handle.render().contains(
-            "topup_reconciliation_mismatches_total{check=\"sent_settlement\",producer_enabled=\"true\"} 1"
-        ));
+        ensure!(logs_contain("TopupReconciliationMismatch"));
+        ensure!(logs_contain("tags.check=\"sent_settlement\""));
         Ok(())
     })
     .await
@@ -689,11 +686,7 @@ async fn post_restore_stays_incomplete_without_verified_product_truth() -> Resul
 }
 
 #[tokio::test]
-async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls every reconciler future on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+async fn checks_are_independent_and_a_failed_round_recovers() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 61).await?;
@@ -736,12 +729,10 @@ async fn checks_are_independent_and_heartbeat_requires_a_successful_round() -> R
                 && finding.observed["error"] == json!("route_version_unavailable")
         }));
         ensure!(has_check(&failed, CheckName::CustodyBalance));
-        ensure!(!handle.render().contains(RECONCILER_PROGRESS));
 
         chain.fail_derivation.store(false, Ordering::SeqCst);
         let recovered = reconciler.run_once().await?;
         ensure!(recovered.succeeded());
-        ensure!(handle.render().contains(RECONCILER_PROGRESS));
         Ok(())
     })
     .await
@@ -872,10 +863,6 @@ async fn custody_balances_use_the_finalized_block_and_incremental_totals() -> Re
 
 #[tokio::test]
 async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls every reconciler future on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 91).await?;
@@ -937,9 +924,6 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
                 .fetch_all(&pool)
                 .await?;
         ensure!(scopes == ["address", "chain"]);
-        ensure!(handle.render().contains(
-            "topup_reconciliation_mismatches_total{check=\"credit_recomputation\",producer_enabled=\"true\"} 1"
-        ));
         Ok(())
     })
     .await
@@ -1100,10 +1084,6 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
 
 #[tokio::test]
 async fn loop_respects_cancellation() -> Result<()> {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    // The current-thread test runtime polls every reconciler future on this thread.
-    let _recorder = metrics::set_default_local_recorder(&recorder);
     with_database(|pool| async move {
         let route = route()?;
         seed_product(&pool, &route.destination.product).await?;
@@ -1134,14 +1114,6 @@ async fn loop_respects_cancellation() -> Result<()> {
         .await?;
         cancellation.cancel();
         tokio::time::timeout(StdDuration::from_secs(1), task).await??;
-        let rendered = handle.render();
-        // Positive control: the recorder captured this loop's metrics, so the absent progress
-        // gauge means the cancelled round never completed rather than that nothing was recorded.
-        ensure!(
-            rendered.contains("topup_loop_heartbeat_unixtime_seconds{loop=\"reconciler\""),
-            "{rendered}"
-        );
-        ensure!(!rendered.contains(RECONCILER_PROGRESS), "{rendered}");
         Ok(())
     })
     .await
@@ -1186,9 +1158,6 @@ async fn loop_publishes_failed_checks_for_the_daily_report() -> Result<()> {
     })
     .await
 }
-
-/// Progress gauge the reconciler sets only after a round in which every check completed.
-const RECONCILER_PROGRESS: &str = "topup_loop_progress_unixtime_seconds{loop=\"reconciler\"";
 
 async fn with_database<F, Fut>(test: F) -> Result<()>
 where

@@ -67,7 +67,7 @@ impl FlusherTask {
         self
     }
 
-    /// Returns `{chain_id}:{route}`, the task's loop instance and log name.
+    /// Returns `{chain_id}:{route}`, the task's log name.
     #[must_use]
     pub fn instance(&self) -> String {
         format!("{}:{}", self.route.chain.chain_id, self.route.route)
@@ -81,9 +81,6 @@ impl FlusherTask {
     /// checked on every maintenance tick, the first of which is immediate; without it, the task
     /// keeps maintaining already sent flushes.
     pub async fn run(self, cancellation: CancellationToken) {
-        let instance = self.instance();
-        crate::observability::register_loop("flusher", instance.clone());
-        crate::observability::heartbeat("flusher", instance.clone());
         let monitor = crate::observability::CronMonitor::flush_planning(
             &self.route.route,
             &self.route.chain.flush.schedule,
@@ -101,17 +98,13 @@ impl FlusherTask {
             "startup_recovery",
             0,
         );
-        match self
+        if let Err(error) = self
             .flusher
             .maintain_sent(&self.route)
             .instrument(startup_span)
             .await
         {
-            Ok(Some(_)) => crate::observability::progress("flusher", instance.clone()),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
-            }
+            tracing::error!(%error, route = %self.route.route, "flusher startup recovery failed");
         }
         let mut maintenance = interval(self.maintenance_interval);
         maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -123,14 +116,9 @@ impl FlusherTask {
             }
         };
         loop {
-            let wait = self
-                .maintenance_interval
-                .min(next_plan.saturating_duration_since(Instant::now()));
-            crate::observability::waiting("flusher", instance.clone(), wait);
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
-                    crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
                     let span = crate::observability::flush_action_span(
                         self.route.chain.chain_id,
@@ -147,16 +135,11 @@ impl FlusherTask {
                             .await
                             .map(|result| result.unwrap_or(RunResult::Idle))
                     };
-                    match result {
-                        Ok(RunResult::Idle) => {}
-                        Ok(_) => crate::observability::progress("flusher", instance.clone()),
-                        Err(error) => {
-                            tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
-                        }
+                    if let Err(error) = result {
+                        tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
                     }
                 }
                 () = sleep_until(next_plan) => {
-                    crate::observability::heartbeat("flusher", instance.clone());
                     authorized = self.operator_authorized(authorized).await;
                     let mut planned = false;
                     let mut outcome = (FlushPlanningOutcome::OperatorNotAuthorized, None);
@@ -173,7 +156,6 @@ impl FlusherTask {
                                 outcome = (FlushPlanningOutcome::Idle, None);
                                 if flush_id.is_some() {
                                     outcome.0 = FlushPlanningOutcome::Planned;
-                                    crate::observability::progress("flusher", instance.clone());
                                 }
                                 tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
                                 let send_span = crate::observability::flush_action_span(
@@ -182,13 +164,9 @@ impl FlusherTask {
                                     "planned_send",
                                     0,
                                 );
-                                match self.flusher.run_once(&self.route).instrument(send_span).await {
-                                    Ok(RunResult::Idle) => {}
-                                    Ok(_) => crate::observability::progress("flusher", instance.clone()),
-                                    Err(error) => {
-                                        tracing::error!(%error, route = %self.route.route, "planned flush send failed");
-                                        outcome = (FlushPlanningOutcome::SendFailed, Some(error.to_string()));
-                                    }
+                                if let Err(error) = self.flusher.run_once(&self.route).instrument(send_span).await {
+                                    tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                    outcome = (FlushPlanningOutcome::SendFailed, Some(error.to_string()));
                                 }
                             }
                             Err(error) => {

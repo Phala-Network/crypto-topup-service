@@ -2,7 +2,8 @@
 
 ## Trigger
 
-Trigger on `TopupBackupTooOld` (PR #56: successful backup marker older than 120 seconds), WAL
+Trigger on the Sentry Crons monitor `topup-backup` (three `error` check-ins in a row, one a
+minute, each seeing the successful backup marker older than 120 seconds, or missed check-ins), WAL
 archiving failures, or `wal-g backup-list` failing to read storage. D3 provides the encrypted base
 backups and WAL archiving described in `deploy/RESTORE.md`.
 
@@ -21,19 +22,17 @@ docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 p
 
 ## Decision tree
 
-- Restore window or staging restore drill in progress (`deploy/RESTORE.md`): expected. The
-  replacement restores from backup with archiving off and never refreshes the marker, and its
-  `topup` serves read-only without metrics, so its scrape target is also down. Silence
-  `TopupBackupTooOld` and the target-down alert for that instance only, and lift them when the
-  restore resumes archiving or the drill instance is deleted. Never silence them for the live
-  instance.
+- Restore window in progress (`deploy/RESTORE.md`): expected. The replacement restores from
+  backup with archiving off and runs no loop, so `topup-backup` misses its check-ins; mute the
+  environment's monitors as RESTORE.md describes and unmute them when the restore resumes
+  archiving. A staging drill instance never checks in, so it cannot trip the live monitor.
 
 - Idle-database margin: the only WAL on an idle database is the heartbeat's row every 60 seconds,
   and `archive_timeout=60` switches a segment only once new WAL exists. If a heartbeat commits just
   after a switch check, the next switch waits for the following check, so the marker can reach
   about 120 seconds plus the `wal-push` upload time before it refreshes (usually it refreshes every
-  60 seconds). `TopupBackupTooOld` needs the marker above 120 seconds for a full minute, so this
-  worst case does not page; a marker that stays past 180 seconds does. The local infra smoke
+  60 seconds). `topup-backup` opens an issue only after three stale check-ins a minute apart, so
+  this worst case does not page; a marker that stays past 240 seconds does. The local infra smoke
   bounds the idle marker at 150 seconds.
 - Archiver shows no new failures (`failed_count` unchanged, `last_failed_time` empty or older than
   `last_archived_time`), `last_archived_time` is older than two minutes, and the database is idle

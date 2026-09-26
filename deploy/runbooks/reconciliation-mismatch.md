@@ -2,17 +2,16 @@
 
 ## Trigger
 
-Trigger on `TopupReconciliationMismatch` (PR #56: any increase of
-`topup_reconciliation_mismatches_total{check=...}` in 15 minutes), a `reconciliation mismatch`
-warning in the service log, `TopupLoopStopped{loop="reconciler"}`, or a non-zero exit from
+Trigger on `TopupReconciliationMismatch` (a first-seen mismatch, tagged with its `check`), an
+`error` or missed check-in of the Sentry Crons monitor `topup-reconciler`, or a non-zero exit from
 `topup reconcile`.
 
 ## Impact and blast radius
 
 C8 runs the architecture section 13 checks every 10 minutes.
 Each first observation is stored once in append-only `reconciliation_findings` with an `audit` row.
-Findings with `repair_applied=true` are the safe repairs section 13 allows and do not increment the
-metric. Mismatches act by check:
+Findings with `repair_applied=true` are the safe repairs section 13 allows and raise no alert.
+Mismatches act by check:
 
 | `check_name` | Automatic action | Blast radius |
 |---|---|---|

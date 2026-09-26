@@ -613,9 +613,6 @@ impl ExpiryWorker {
 
     /// Runs expiry scans until cancellation.
     pub async fn run(&self, cancellation: CancellationToken) {
-        const LOOP_NAME: &str = "lock_expiry";
-        const LOOP_INSTANCE: &str = "0";
-        crate::observability::register_loop(LOOP_NAME, LOOP_INSTANCE);
         let monitor = crate::observability::CronMonitor::lock_expiry();
         let mut ticker = interval(self.scan_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -623,14 +620,9 @@ impl ExpiryWorker {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticker.tick() => {
-                    crate::observability::heartbeat(LOOP_NAME, LOOP_INSTANCE);
                     match expire_once(&self.pool).await {
-                        Ok(_) => {
-                            crate::observability::progress(LOOP_NAME, LOOP_INSTANCE);
-                            monitor.check_in(true);
-                        }
+                        Ok(_) => monitor.check_in(true),
                         Err(error) => {
-                            crate::observability::record_lock_expiry_failure();
                             tracing::error!(
                                 tags.alert = "TopupLockExpiryFailing",
                                 %error,
@@ -638,7 +630,6 @@ impl ExpiryWorker {
                             );
                         }
                     }
-                    crate::observability::waiting(LOOP_NAME, LOOP_INSTANCE, self.scan_interval);
                 }
             }
         }
@@ -775,7 +766,8 @@ async fn lock_account(
     Ok(())
 }
 
-/// Rejects a creation that would take any scope's open reserved lock credit past its cap.
+/// Rejects a creation that would take any scope's open reserved lock credit past its cap, and
+/// raises `TopupLockExposureNearCap` when it takes the product or global credit to 90 percent.
 ///
 /// The transaction-level advisory lock serialises creations from this check to commit, and under
 /// `READ COMMITTED` the sum, a later statement, sees every creation committed before it. Closing a
@@ -819,8 +811,28 @@ async fn check_exposure(
         if next > cap {
             return Err(RateLockError::ExposureCap(scope));
         }
+        if scope != "account" && near_cap(next, cap) {
+            let id = if scope == "product" {
+                route.destination.product.as_str()
+            } else {
+                "global"
+            };
+            tracing::warn!(
+                tags.alert = "TopupLockExposureNearCap",
+                tags.scope = scope,
+                tags.id = id,
+                open_minor = next,
+                cap_minor = cap,
+                "open rate-lock exposure is at least 90 percent of its cap"
+            );
+        }
     }
     Ok(())
+}
+
+/// Whether `open` reaches 90 percent of a nonzero `cap`.
+fn near_cap(open: u64, cap: u64) -> bool {
+    cap > 0 && u128::from(open) * 10 >= u128::from(cap) * 9
 }
 
 #[derive(FromRow)]

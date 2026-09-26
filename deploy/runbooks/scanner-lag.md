@@ -2,8 +2,8 @@
 
 ## Trigger
 
-Trigger on `TopupScannerLag` (PR #56: no successful scan for 120 s or `topup_scanner_lag_blocks`
-above zero for five minutes) or `TopupLoopStopped{loop="scanner"}`. If the chain has a
+Trigger on missed check-ins of the Sentry Crons monitor `topup-scanner-<chain_id>` (no successful
+finalized scan for five minutes; each successful scan reaches the finalized head). If the chain has a
 `reconciliation_blocks` row with `scope='chain'`, the scanner is paused on purpose: follow
 [Chain frozen](chain-frozen.md) instead.
 

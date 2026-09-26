@@ -47,8 +47,6 @@ jq -e '
         "run",
         "--bind",
         "0.0.0.0:8080",
-        "--metrics-bind",
-        "0.0.0.0:9464",
         "--route",
         "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
     ]
@@ -178,11 +176,7 @@ local_stack() {
     "$root/deploy/local/compose.sh" "$@" --profile tools config --format json
 }
 local_stack >"$rendered_tools"
-local_stack -f "$root/deploy/sandbox/docker-compose.local.yml" |
-    jq -e '[.services[].ports[]?.published] | index("19464") == null' >/dev/null || {
-    echo "the sandbox stack must not publish the fixed metrics port" >&2
-    exit 1
-}
+local_stack -f "$root/deploy/sandbox/docker-compose.local.yml" >/dev/null
 jq -e '[.services[].volumes[]? | select(.source == "/var/run/dstack.sock")] | length == 0' \
     "$rendered_tools" >/dev/null || {
     echo "the local overlay must replace the host dstack socket with the simulator's" >&2

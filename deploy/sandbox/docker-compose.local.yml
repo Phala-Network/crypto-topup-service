@@ -45,10 +45,6 @@ services:
       TOPUP_RPC_PROVIDER_B_URL: http://anvil:8545
       # The example and scenarios call the service on the compose network.
       TOPUP_PUBLIC_ORIGIN: http://topup:8080
-    # This command has no metrics listener, so only the API port is published; callers pick a
-    # free TOPUP_LOCAL_PORT and SANDBOX_ANVIL_PORT so concurrent stacks cannot collide.
-    ports: !override
-      - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
     depends_on:
       anvil:
         condition: service_healthy

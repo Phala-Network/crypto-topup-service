@@ -1,5 +1,5 @@
 .PHONY: build build-topup test lint image up down verify-image \
-	restore-drill deploy-check alerts-check runbook-check sdk-check sdk-generate sandbox-local \
+	restore-drill deploy-check runbook-check sdk-check sdk-generate sandbox-local \
 	cvm-rehearsal product-conformance
 
 build:
@@ -48,9 +48,6 @@ deploy-check:
 	cd contracts && forge test
 	deploy/contracts/check-build.sh --check
 	deploy/contracts/test-determinism.sh
-
-alerts-check:
-	deploy/check-alerts.sh
 
 runbook-check:
 	deploy/runbooks/check.sh

@@ -224,33 +224,32 @@ pub struct CronMonitor {
 }
 
 impl CronMonitor {
-    /// Successful finalized scanner passes of one chain (`TopupScannerLag`).
+    /// Successful finalized scanner passes of one chain: a stalled or stopped scanner.
     #[must_use]
     pub fn scanner(chain_id: u64) -> Self {
         Self::heartbeat(format!("topup-scanner-{chain_id}"), 5)
     }
 
-    /// Iterations of one deposit pump (`TopupLoopStopped{loop="pump"}`); a step may run for
-    /// four minutes.
+    /// Iterations of one deposit pump; a step may run for four minutes.
     #[must_use]
     pub fn pump(instance: &str) -> Self {
         Self::heartbeat(format!("topup-pump-{instance}"), 5)
     }
 
-    /// Polls of one webhook delivery worker (`TopupLoopStopped{loop="outbox"}`).
+    /// Polls of one webhook delivery worker.
     #[must_use]
     pub fn outbox(instance: &str) -> Self {
         Self::heartbeat(format!("topup-outbox-{instance}"), 5)
     }
 
-    /// Successful rate-lock expiry scans (`TopupLockExpiryFailing`).
+    /// Successful rate-lock expiry scans.
     #[must_use]
     pub fn lock_expiry() -> Self {
         Self::heartbeat("topup-lock-expiry".to_owned(), 5)
     }
 
-    /// Freshness of the WAL-G success marker (`TopupBackupTooOld`); three stale observations in
-    /// a row open an issue, so a restart's first minute does not.
+    /// Freshness of the WAL-G success marker; three stale observations in a row open an issue,
+    /// so a restart's first minute does not.
     #[must_use]
     pub fn backup() -> Self {
         let mut monitor = Self::heartbeat("topup-backup".to_owned(), 2);
@@ -258,7 +257,7 @@ impl CronMonitor {
         monitor
     }
 
-    /// Reconciliation rounds, one every `every` (`TopupLoopStopped{loop="reconciler"}`).
+    /// Reconciliation rounds, one every `every`.
     #[must_use]
     pub fn reconciler(every: Duration) -> Self {
         let minutes = every.as_secs().div_ceil(60).max(1);

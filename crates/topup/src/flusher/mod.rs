@@ -16,7 +16,7 @@ pub use topup_adapters::chain::evm::{ChainError, EvmClient, FeeQuote};
 pub use topup_adapters::pricing::PriceError;
 pub use types::{
     AlertSink, ChainClient, ChainLog, ChainReceipt, FlushAlert, FlushCallBinding, FlushEvidence,
-    FlusherPolicy, NonceReceiptSearch, NoopAlertSink, PlannedAddress, PriceSource, SignedVersion,
+    FlusherPolicy, NonceReceiptSearch, PlannedAddress, PriceSource, SignedVersion,
 };
 
 /// Failure while running a flusher operation.

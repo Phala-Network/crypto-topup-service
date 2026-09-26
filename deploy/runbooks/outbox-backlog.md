@@ -2,9 +2,9 @@
 
 ## Trigger
 
-Trigger on `TopupLoopStopped{loop="outbox"}`, growth of `topup_outbox_backlog` or
-`topup_outbox_oldest_age_seconds` (PR #56 metrics without a dedicated alert), growing delivery
-attempts, or product reports that notifications stopped.
+Trigger on missed check-ins of the Sentry Crons monitor `topup-outbox-<n>`, `outbox delivery poll
+failed` Sentry issues, a growing undelivered count or attempts in the query below, or product
+reports that notifications stopped.
 
 ## Impact and blast radius
 

@@ -78,7 +78,7 @@ Dependencies are listed as `after:`. WPs without `after` in a lane can start imm
 | D1 Images | Reproducible distroless `topup` image; `postgres-walg` image; digests pinned `after: B1` | Two builds produce identical digests | §5, §14 |
 | D2 dstack compose and staging | Compose with encrypted env, egress allow-list, gateway ingress; staging CVM on Sepolia `after: D1, C11` | Service attests; `topup route validate` passes in the CVM | §14 |
 | D3 Backup and restore | WAL-G archiving with `archive_timeout=60`, encrypted with the backup key, `restore-check`, weekly drill job `after: D2` | Restore into a throwaway CVM passes `restore-check`; post-restore reconciliation clean | §14 |
-| D4 Observability | `tracing` spans, metrics, alert rules of §16, dashboards `after: C2` | Alerts fire in staging for each rule | §16 |
+| D4 Observability | `tracing` spans, Sentry alert events and Crons monitors of §16 `after: C2` | Alerts fire in staging for each rule | §16 |
 | D5 Runbooks | One document per runbook in §15, each with exact commands `after: D2` | Each runbook executed once in staging | §15 |
 
 ### Lane E — Integration (monorepo and SDK)

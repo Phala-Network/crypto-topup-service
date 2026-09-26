@@ -1,16 +1,13 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
-use tokio::sync::Mutex;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::deposit::DepositState;
 use topup_core::route::{RouteFile, StuckAfterConfig};
 use uuid::Uuid;
-
-const DEFAULT_REMINDER_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Route-version-indexed thresholds for state-age alerts.
 #[derive(Clone, Debug)]
@@ -58,35 +55,23 @@ pub struct AgeAlertConfigError {
 }
 
 /// Periodically finds deposits older than their route's state threshold.
+///
+/// Every scan logs every overdue deposit; Sentry groups the alerts by route and state, and the
+/// reporting throttle drops the repeats.
 pub struct AgeAlerter {
     pool: PgPool,
     config: AgeAlertConfig,
     scan_interval: Duration,
-    reminder_interval: Duration,
-    alerts: Mutex<BTreeMap<Uuid, AlertRecord>>,
 }
 
 impl AgeAlerter {
     /// Creates a periodic state-age alerter.
     #[must_use]
-    pub fn new(pool: PgPool, config: AgeAlertConfig, scan_interval: Duration) -> Self {
-        Self::with_reminder_interval(pool, config, scan_interval, DEFAULT_REMINDER_INTERVAL)
-    }
-
-    /// Creates an alerter with an explicit reminder interval.
-    #[must_use]
-    pub fn with_reminder_interval(
-        pool: PgPool,
-        config: AgeAlertConfig,
-        scan_interval: Duration,
-        reminder_interval: Duration,
-    ) -> Self {
+    pub const fn new(pool: PgPool, config: AgeAlertConfig, scan_interval: Duration) -> Self {
         Self {
             pool,
             config,
             scan_interval,
-            reminder_interval,
-            alerts: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -132,21 +117,7 @@ impl AgeAlerter {
         .fetch_all(&self.pool)
         .await?;
         let now = Utc::now();
-        let alert_now = Instant::now();
         let mut alert_count = 0_u64;
-        let mut observed_states = BTreeMap::new();
-        let mut oldest_by_policy = BTreeMap::<(String, u64, &'static str), (i64, u64)>::new();
-        for ((route, version), thresholds) in &self.config.thresholds {
-            for (state, threshold) in [
-                ("detected", thresholds.detected),
-                ("confirmed", thresholds.confirmed),
-                ("cleared", thresholds.cleared),
-                ("credited", thresholds.credited),
-            ] {
-                oldest_by_policy.insert((route.clone(), *version, state), (0, threshold));
-            }
-        }
-        let mut alerts = self.alerts.lock().await;
         for row in rows {
             let Some(route) = row.route.as_deref() else {
                 continue;
@@ -160,7 +131,6 @@ impl AgeAlerter {
             let Some(state) = parse_active_state(&row.state) else {
                 continue;
             };
-            observed_states.insert(row.id, state);
             let Some(threshold) = self.config.threshold(route, version, state) else {
                 continue;
             };
@@ -168,20 +138,11 @@ impl AgeAlerter {
             let Ok(threshold_seconds) = i64::try_from(threshold) else {
                 continue;
             };
-            let state_label = state_code(state);
-            oldest_by_policy
-                .entry((route.to_owned(), version, state_label))
-                .and_modify(|(oldest, _)| *oldest = (*oldest).max(age_seconds))
-                .or_insert((age_seconds, threshold));
-            let reminder_due = alerts.get(&row.id).is_none_or(|alert| {
-                alert.state != state
-                    || alert_now.duration_since(alert.last_alerted_at) >= self.reminder_interval
-            });
-            if age_seconds > threshold_seconds && reminder_due {
+            if age_seconds > threshold_seconds {
                 tracing::warn!(
                     tags.alert = "TopupDepositStateAgeExceeded",
                     tags.route = route,
-                    tags.state = state_label,
+                    tags.state = state_code(state),
                     deposit_id = %row.id,
                     route,
                     route_version = version,
@@ -191,35 +152,8 @@ impl AgeAlerter {
                     "deposit has exceeded its state-age threshold"
                 );
                 alert_count = alert_count.saturating_add(1);
-                alerts.insert(
-                    row.id,
-                    AlertRecord {
-                        state,
-                        last_alerted_at: alert_now,
-                    },
-                );
             }
         }
-        for ((route, version, state), (age, threshold)) in oldest_by_policy {
-            let version = version.to_string();
-            metrics::gauge!(
-                "topup_deposit_state_age_seconds",
-                "state" => state,
-                "route" => route.clone(),
-                "route_version" => version.clone(),
-                "producer_enabled" => "true",
-            )
-            .set(age.max(0) as f64);
-            metrics::gauge!(
-                "topup_deposit_state_age_policy_seconds",
-                "state" => state,
-                "route" => route,
-                "route_version" => version,
-                "producer_enabled" => "true",
-            )
-            .set(threshold as f64);
-        }
-        alerts.retain(|id, alert| observed_states.get(id) == Some(&alert.state));
         Ok(alert_count)
     }
 }
@@ -233,11 +167,6 @@ const fn state_code(state: DepositState) -> &'static str {
         DepositState::Swept => "swept",
         DepositState::Rejected => "rejected",
     }
-}
-
-struct AlertRecord {
-    state: DepositState,
-    last_alerted_at: Instant,
 }
 
 #[derive(FromRow)]
