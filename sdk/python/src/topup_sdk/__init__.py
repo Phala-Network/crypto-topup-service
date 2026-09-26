@@ -8,12 +8,21 @@ from .addresses import deposit_id, forwarder_address, lock_salt, persistent_salt
 from .attestation import attestation_report_data, verify_attestation_binding
 from .client import TopupClient
 from .errors import ApiError, AttestationError, SignatureError, TopupError
+from .fulfillment import (
+    CREDITED_EVENT,
+    CreditedDeposit,
+    FulfillmentError,
+    credited_event_id,
+)
 from .signing import RequestSigner, SigningAuth, VerifiedRequest, load_public_key, verify_request
-from .webhooks import WebhookEvent, verify_webhook, verify_webhook_signature
+from .webhooks import WebhookEvent, sign_webhook, verify_webhook, verify_webhook_signature
 
 __all__ = [
+    "CREDITED_EVENT",
     "ApiError",
     "AttestationError",
+    "CreditedDeposit",
+    "FulfillmentError",
     "RequestSigner",
     "SignatureError",
     "SigningAuth",
@@ -22,11 +31,13 @@ __all__ = [
     "VerifiedRequest",
     "WebhookEvent",
     "attestation_report_data",
+    "credited_event_id",
     "deposit_id",
     "forwarder_address",
     "load_public_key",
     "lock_salt",
     "persistent_salt",
+    "sign_webhook",
     "verify_attestation_binding",
     "verify_request",
     "verify_webhook",

@@ -3,8 +3,9 @@
 Python SDK for the crypto top-up service product API (Python 3.12+).
 
 - `topup_client`: generated from `crates/topup/openapi.json`; do not edit.
-- `topup_sdk`: request signing, settlement-request and webhook verification, address and
-  deposit-id recomputation, and `TopupClient`, whose helpers are idempotent and retry safely.
+- `topup_sdk`: request signing, settlement-request and webhook verification, typed
+  `deposit.credited` credits for fulfillment (`CreditedDeposit`), address and deposit-id
+  recomputation, and `TopupClient`, whose helpers are idempotent and retry safely.
 
 ```python
 from topup_sdk import RequestSigner, TopupClient
@@ -17,8 +18,11 @@ with TopupClient("https://topup.example", "acme", signer) as client:
 ```
 
 Create a product key with `uv run topup-sdk keygen --keyid acme/v1 --seed-out product.seed` and
-send only the printed public key to the operator. See `docs/integration.md` for the integration
-guide, the signing profile, and the versioning and deprecation policy,
+send only the printed public key to the operator.
+`uv run topup-sdk send-test-event --url … --seed-file test.seed --external-id …` delivers a
+signed test `deposit.credited` to a webhook receiver whose test instance pins that seed's public
+key, then a duplicate and a forged copy, and reports whether the answers were `2xx`, `2xx`, and
+`4xx`. See `docs/integration.md` for the integration guide, the signing profile, and the versioning and deprecation policy,
 `sdk/examples/phala_cloud_integration.py` for an integration including settlement and webhook
 verification, `deploy/product/reference_product` for a complete product, and
 `deploy/sandbox/README.md` for the sandbox.
