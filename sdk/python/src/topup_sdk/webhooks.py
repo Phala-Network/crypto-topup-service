@@ -2,7 +2,8 @@
 
 Events carry `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers. The signature
 is the asymmetric `v1a` scheme: ed25519 over `{id}.{timestamp}.{body}` with the settlement key
-pinned from attestation. Events never change balances; receivers deduplicate by `webhook-id`.
+pinned from attestation. Receivers deduplicate by `webhook-id`; `deposit.credited` is the
+fulfillment event (`topup_sdk.fulfillment`), every other type is informational.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from .errors import SignatureError
 
@@ -86,6 +87,22 @@ def verify_webhook_signature(
     if not any(_matches(entry, content, public_key) for entry in signatures.split()):
         raise SignatureError("no valid webhook signature")
     return webhook_id
+
+
+def sign_webhook(
+    private_key: Ed25519PrivateKey, webhook_id: str, timestamp: int, body: bytes
+) -> dict[str, str]:
+    """Returns Standard Webhooks `v1a` headers, as the service signs a delivery.
+
+    For test senders only: a product never holds the service's key.
+    """
+    content = f"{webhook_id}.{timestamp}.".encode() + body
+    signature = base64.b64encode(private_key.sign(content)).decode("ascii")
+    return {
+        "webhook-id": webhook_id,
+        "webhook-timestamp": str(timestamp),
+        "webhook-signature": f"v1a,{signature}",
+    }
 
 
 def _matches(entry: str, content: bytes, public_key: Ed25519PublicKey) -> bool:
