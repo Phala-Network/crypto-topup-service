@@ -146,6 +146,12 @@ The CVM restarts, `/healthz` answers, and backups have started once a WAL segmen
 minutes is listed (`aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1`).
 Re-seal the same way whenever a secret changes; never change a setting with `envs update`.
 
+A CVM sealed before the RPC keys existed allows only the first three names, and Deploy `upgrade`
+keeps a CVM's allowed names, so its attestation check would refuse the upgrade. Once, before that
+upgrade, run only the `envs update` above with `.env.ENV` holding all five names (the keys empty for
+keyless URLs): the running compose ignores the two new names, and preflight against it would refuse
+them.
+
 ### Attested settings
 
 A value in the encrypted env is outside the attestation: whoever can run `phala envs update` could
