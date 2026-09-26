@@ -1,19 +1,23 @@
 """Signed, retrying wrapper over the generated `topup_client` package.
 
-Every operation exposed here is idempotent on the service side, so the wrapper retries transport
-failures, transient statuses, and `409 signature_replayed` with a freshly signed request each
-time:
+The product is the signer's key id, `{product}/v1`. Every operation exposed here is idempotent on
+the service side, so the wrapper retries transport failures, transient statuses, and
+`409 signature_replayed` with a freshly signed request each time:
 
-- `register_account`: find-or-create by `(product, external_id)`.
+- `create_quote`: sends an `Idempotency-Key` (generated unless given) and reuses it on every
+  retry, so a retry returns the quote the first attempt created.
+- `cancel_quote`: canceling a canceled quote returns it unchanged.
 - `create_deposit_address` / `get_deposit_address`: return the current persistent address.
 - `rotate_deposit_address`: idempotent on `from_version`; a replay returns the same new version.
-- `create_rate_lock`: idempotent on `lock_ref`; a replay with a different amount is a `409`.
-- `cancel_rate_lock`: cancelling a cancelled lock returns the same result.
 - `request_refund`: idempotent on `(deposit, to_address, amount)`.
 
-`list_pending_deposits` and `RateLockResponse.payment` report transfers seen before finality.
-They are display only: nothing is credited until the deposit is final and appears under
-`list_deposits`, and a reorg can remove a pending transfer.
+With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
+the factory, the implementation, and the quote id, and raise `AddressMismatchError` rather than
+return an address the product did not derive.
+
+`list_pending_deposits` and `Quote.payment` report transfers seen before finality. They are
+display only: nothing is credited until the deposit is final and appears under `list_deposits`,
+and a reorg can remove a pending transfer.
 """
 
 from __future__ import annotations
@@ -28,61 +32,66 @@ from typing import Any, TypeVar
 import httpx
 
 from topup_client import AuthenticatedClient
-from topup_client.api.accounts import get_limits, register_account
 from topup_client.api.addresses import (
     create_deposit_address,
     get_deposit_address,
     rotate_deposit_address,
 )
 from topup_client.api.attestation import get_attestation
+from topup_client.api.config import get_config
 from topup_client.api.deposits import (
     get_deposit,
     list_deposits,
     list_pending_deposits,
     lookup_deposits,
 )
-from topup_client.api.rate_locks import cancel_rate_lock, create_rate_lock, get_rate_lock
+from topup_client.api.quotes import cancel_quote, create_quote, get_quote
 from topup_client.api.refunds import request_refund
 from topup_client.models import (
-    AccountResponse,
     AttestationResponse,
-    CancelRateLockResponse,
-    CreateRateLockRequest,
+    Config,
+    CreateQuoteRequest,
     DepositAddressResponse,
     DepositResponse,
     DepositsResponse,
     ErrorResponse,
-    LimitsResponse,
     PendingDepositResponse,
     PendingDepositsResponse,
-    RateLockResponse,
+    Quote,
     RefundRequest,
     RefundResponse,
-    RegisterAccountRequest,
     RotateDepositAddressRequest,
     SupportDepositResponse,
     SupportDepositsResponse,
 )
 from topup_client.types import UNSET, Response
 
+from .addresses import forwarder_address, lock_salt, same_address
 from .attestation import verify_attestation_binding
-from .errors import ApiError
-from .signing import RequestSigner, SigningAuth
+from .errors import AddressMismatchError, ApiError
+from .signing import RequestSigner, SigningAuth, sf_string
 
 T = TypeVar("T")
 
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+PRODUCT_KEYID_SUFFIX = "/v1"
+
+
 class TopupClient:
-    """Product API client that signs every request with the product key."""
+    """Product API client that signs every request with the product key.
+
+    `forwarder` is the `(factory, implementation)` pair pinned from the attested deployment, as
+    the settlement key is; given it, open quotes are checked before they are returned.
+    """
 
     def __init__(
         self,
         base_url: str,
-        product_slug: str,
         signer: RequestSigner,
         *,
+        forwarder: tuple[str, str] | None = None,
         timeout: float = 15.0,
         max_attempts: int = 4,
         initial_backoff: float = 0.5,
@@ -91,7 +100,10 @@ class TopupClient:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        self.product_slug = product_slug
+        if not signer.keyid.endswith(PRODUCT_KEYID_SUFFIX):
+            raise ValueError("a product key id is `{product}/v1`")
+        self.product_slug = signer.keyid.removesuffix(PRODUCT_KEYID_SUFFIX)
+        self.forwarder = forwarder
         self._max_attempts = max_attempts
         self._initial_backoff = initial_backoff
         self._sleep = sleep
@@ -118,16 +130,48 @@ class TopupClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def register_account(self, external_id: str) -> AccountResponse:
-        """Registers the account, or returns it unchanged when it already exists."""
-        return self._call(
-            lambda: register_account.sync_detailed(
-                self.product_slug,
-                client=self._client,
-                body=RegisterAccountRequest(external_id=external_id),
-            ),
-            AccountResponse,
+    def get_config(self) -> Config:
+        """Returns the payable assets, limits, and quote terms the product's UI shows."""
+        return self._call(lambda: get_config.sync_detailed(client=self._client), Config)
+
+    def create_quote(
+        self,
+        account_id: str,
+        amount: int,
+        *,
+        chain_id: int,
+        asset: str,
+        currency: str = "usd",
+        idempotency_key: str | None = None,
+    ) -> Quote:
+        """Quotes `amount` minor units (cents) for `account_id`, payable in `asset` on `chain_id`.
+
+        Retries reuse one `Idempotency-Key`, so they return the quote the first attempt created;
+        pass your own key to make a retry after a crash safe too.
+        """
+        # The IETF Idempotency-Key header is an RFC 8941 string; the key is its content.
+        key = sf_string(idempotency_key or str(uuid.uuid4()))
+        body = CreateQuoteRequest(
+            account_id=account_id,
+            amount=amount,
+            currency=currency,
+            chain_id=chain_id,
+            asset=asset,
         )
+        quote = self._call(
+            lambda: create_quote.sync_detailed(client=self._client, body=body, idempotency_key=key),
+            Quote,
+        )
+        return self._checked(quote)
+
+    def get_quote(self, quote_id: str) -> Quote:
+        """Returns a quote, for example to resume a checkout page."""
+        quote = self._call(lambda: get_quote.sync_detailed(quote_id, client=self._client), Quote)
+        return self._checked(quote)
+
+    def cancel_quote(self, quote_id: str) -> Quote:
+        """Cancels an open, unpaid quote; later payments to its address are credited at spot."""
+        return self._call(lambda: cancel_quote.sync_detailed(quote_id, client=self._client), Quote)
 
     def create_deposit_address(self, external_id: str) -> DepositAddressResponse:
         """Returns the account's persistent address, creating version 1 on first use."""
@@ -157,47 +201,6 @@ class TopupClient:
                 body=RotateDepositAddressRequest(from_version=from_version),
             ),
             DepositAddressResponse,
-        )
-
-    def create_rate_lock(
-        self,
-        external_id: str,
-        lock_ref: str,
-        *,
-        amount_minor: int | None = None,
-        amount_atomic: int | None = None,
-    ) -> RateLockResponse:
-        """Creates, or replays, the quote-first lock identified by `lock_ref`."""
-        if (amount_minor is None) == (amount_atomic is None):
-            raise ValueError("pass exactly one of amount_minor or amount_atomic")
-        body = CreateRateLockRequest(
-            product_lock_ref=lock_ref,
-            amount_minor=UNSET if amount_minor is None else str(amount_minor),
-            amount_atomic=UNSET if amount_atomic is None else str(amount_atomic),
-        )
-        return self._call(
-            lambda: create_rate_lock.sync_detailed(
-                self.product_slug, external_id, client=self._client, body=body
-            ),
-            RateLockResponse,
-        )
-
-    def get_rate_lock(self, external_id: str, lock_ref: str) -> RateLockResponse:
-        """Returns a lock by reference, for example to resume a checkout page."""
-        return self._call(
-            lambda: get_rate_lock.sync_detailed(
-                self.product_slug, external_id, lock_ref, client=self._client
-            ),
-            RateLockResponse,
-        )
-
-    def cancel_rate_lock(self, external_id: str, lock_ref: str) -> CancelRateLockResponse:
-        """Cancels an unpaid lock; later payments to its address are credited at spot."""
-        return self._call(
-            lambda: cancel_rate_lock.sync_detailed(
-                self.product_slug, external_id, lock_ref, client=self._client
-            ),
-            CancelRateLockResponse,
         )
 
     def list_deposits(
@@ -276,13 +279,6 @@ class TopupClient:
                 return
             cursor = page.next_cursor
 
-    def get_limits(self, external_id: str) -> LimitsResponse:
-        """Returns route caps and the account's remaining open-lock exposure."""
-        return self._call(
-            lambda: get_limits.sync_detailed(self.product_slug, external_id, client=self._client),
-            LimitsResponse,
-        )
-
     def request_refund(
         self, deposit_id: uuid.UUID, to_address: str, amount_atomic: int
     ) -> RefundResponse:
@@ -312,6 +308,16 @@ class TopupClient:
         verify_attestation_binding(response, nonce)
         return response
 
+    def _checked(self, quote: Quote) -> Quote:
+        """Raises unless an open quote's address is the one derived from the pinned forwarder."""
+        if self.forwarder is None or quote.status != "open":
+            return quote
+        factory, implementation = self.forwarder
+        salt = lock_salt(self.product_slug, quote.account_id, quote.id)
+        if not same_address(forwarder_address(factory, implementation, salt), quote.address):
+            raise AddressMismatchError(f"quote {quote.id} has an address the product cannot derive")
+        return quote
+
     def _call(self, operation: Callable[[], Response[Any]], expected: type[T]) -> T:
         attempt = 1
         while True:
@@ -337,5 +343,12 @@ class TopupClient:
 def _api_error(response: Response[Any]) -> ApiError:
     parsed = response.parsed
     if isinstance(parsed, ErrorResponse):
-        return ApiError(response.status_code, parsed.error.code, parsed.error.message)
+        error = parsed.error
+        return ApiError(
+            response.status_code,
+            error.code,
+            error.message,
+            error_type=error.type_.value,
+            param=error.param if isinstance(error.param, str) else None,
+        )
     return ApiError(response.status_code, "unexpected_response", "undocumented response")

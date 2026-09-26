@@ -6,7 +6,24 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **Breaking**: `TopupClient(base_url, signer, *, forwarder=None, …)`: the product is the signer's
+  key id, `{product}/v1`; there is no `product_slug` argument. With `forwarder=(factory,
+  implementation)` pinned, `create_quote` and `get_quote` recompute an open quote's address and
+  raise the new `AddressMismatchError`.
+- **Breaking**: `ApiError` carries the error object's `error_type` and `param`.
+
+### Removed
+
+- **Breaking**: `register_account`, `create_rate_lock`, `get_rate_lock`, `cancel_rate_lock`, and
+  `get_limits`, with their generated `topup_client` operations and models. Use `create_quote`,
+  `get_quote`, `cancel_quote`, and `get_config`.
+
 ### Added
+
+- `TopupClient.get_config`, `create_quote` (sends an `Idempotency-Key`, generated unless given,
+  and reuses it on retries), `get_quote`, and `cancel_quote`; `topup_sdk.signing.sf_string`.
 
 - `topup_sdk.fulfillment`: `CreditedDeposit.from_event` parses a verified `deposit.credited`
   into a typed credit with its `fulfillment_key` (`deposit:<deposit_id>`), raising

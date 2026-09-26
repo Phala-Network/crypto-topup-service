@@ -70,4 +70,7 @@ class ProductConfig:
         return RequestSigner.from_seed(self.product_keyid, bytes.fromhex(seed))
 
     def client(self) -> TopupClient:
-        return TopupClient(self.service_url, self.product_slug, self.signer())
+        # The forwarder is pinned, so every open quote's address is recomputed before it is used.
+        return TopupClient(
+            self.service_url, self.signer(), forwarder=(self.factory, self.implementation)
+        )

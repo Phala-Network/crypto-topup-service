@@ -47,10 +47,17 @@ pub async fn authenticate_product(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(product_slug) = product_slug_from_path(request.uri().path()) else {
+    // The key id names the product: `{slug}/v1` (architecture §14).
+    let Some(product_slug) = request
+        .headers()
+        .get("signature-input")
+        .and_then(|value| value.to_str().ok())
+        .map(http_signature::signature_keyids)
+        .and_then(|keyids| keyids.into_iter().find_map(|keyid| product_slug_of(&keyid)))
+    else {
         return ApiError::unauthorized().into_response();
     };
-    let product = match repository::find_product_by_slug(&state.pool, product_slug).await {
+    let product = match repository::find_product_by_slug(&state.pool, &product_slug).await {
         Ok(Some(product)) => product,
         Ok(None) => return ApiError::unauthorized().into_response(),
         Err(error) => return error.into_response(),
@@ -77,8 +84,24 @@ pub async fn authenticate_product(
     if let Err(error) = repository::record_signature(&state.pool, &verified).await {
         return error.into_response();
     }
+    // Paths that still name a product must name the signer's.
+    if product_slug_from_path(request.uri().path()).is_some_and(|slug| slug != product.slug) {
+        return ApiError::unauthorized().into_response();
+    }
     request.extensions_mut().insert(product);
     next.run(request).await
+}
+
+/// The product slug of a product key id, `{slug}/v1`.
+fn product_slug_of(keyid: &str) -> Option<String> {
+    let slug = keyid.strip_suffix("/v1")?;
+    let bytes = slug.as_bytes();
+    let valid = matches!(bytes.first(), Some(b'a'..=b'z' | b'0'..=b'9'))
+        && bytes.len() <= 63
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
+    valid.then(|| slug.to_owned())
 }
 
 /// Authenticates an administrative request with the separately configured key.

@@ -1,12 +1,14 @@
 """3% less than the locked amount, outside the 1% lock tolerance.
 
 Expect: the deposit is credited at spot for what arrived, below the quoted credit, and the lock
-is not consumed. Once the address has received funds the lock can no longer be cancelled:
-`409 pending_payment` while the payment window is open, or `409` once the window has closed (on
-Sepolia finality outlasts the lock window).
+is not completed. Once the address has received funds the quote can no longer be canceled:
+`409 quote_payment_received` while the payment window is open, or `409` once the window has
+closed (on Sepolia finality outlasts the quote window).
 """
 
 from __future__ import annotations
+
+import time
 
 from harness import Context, check, credit
 from topup_sdk import ApiError
@@ -19,12 +21,12 @@ def run(ctx: Context) -> None:
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
     ctx.pay(lock.address, int(lock.amount_atomic) * 97 // 100)
     ctx.deposit(team, lock.address, ALL_STATES)
-    current = ctx.client.get_rate_lock(team, lock_ref)
-    still_open = current.status == "open" and current.remaining_seconds >= 5
+    current = ctx.client.get_quote(lock_ref)
+    still_open = current.status == "open" and current.expires_at - time.time() >= 5
     try:
-        ctx.client.cancel_rate_lock(team, lock_ref)
+        ctx.client.cancel_quote(lock_ref)
     except ApiError as error:
-        expected = "pending_payment" if still_open else error.code
+        expected = "quote_payment_received" if still_open else error.code
         check(
             error.status_code == 409 and error.code == expected,
             f"cancel failed with {error.status_code} {error.code}",
@@ -34,5 +36,5 @@ def run(ctx: Context) -> None:
 
     deposit, confirmed = ctx.credited(team, lock.address, lock)
     check(confirmed["price_source"] == "spot", "underpayment was valued at the lock price")
-    check(credit(deposit) < int(lock.credit_minor), "underpayment was credited in full")
-    check(ctx.client.get_rate_lock(team, lock_ref).status != "consumed", "lock was consumed")
+    check(credit(deposit) < lock.amount, "underpayment was credited in full")
+    check(ctx.client.get_quote(lock_ref).status != "complete", "lock was completed")

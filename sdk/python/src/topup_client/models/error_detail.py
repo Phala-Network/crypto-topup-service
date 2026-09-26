@@ -8,6 +8,10 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.error_type import ErrorType
+from ..types import UNSET, Unset
+from typing import cast
+
 
 T = TypeVar("T", bound="ErrorDetail")
 
@@ -18,11 +22,15 @@ class ErrorDetail:
 
     Attributes:
         code (str): Stable machine-readable code.
-        message (str): Human-readable summary without internal details.
+        message (str): Human-readable summary without internal details; it may change.
+        type_ (ErrorType): Error category of [`ErrorDetail`].
+        param (None | str | Unset): The request parameter the error is about, when there is one.
     """
 
     code: str
     message: str
+    type_: ErrorType
+    param: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -30,14 +38,25 @@ class ErrorDetail:
 
         message = self.message
 
+        type_ = self.type_.value
+
+        param: None | str | Unset
+        if isinstance(self.param, Unset):
+            param = UNSET
+        else:
+            param = self.param
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
                 "code": code,
                 "message": message,
+                "type": type_,
             }
         )
+        if param is not UNSET:
+            field_dict["param"] = param
 
         return field_dict
 
@@ -48,9 +67,22 @@ class ErrorDetail:
 
         message = d.pop("message")
 
+        type_ = ErrorType(d.pop("type"))
+
+        def _parse_param(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        param = _parse_param(d.pop("param", UNSET))
+
         error_detail = cls(
             code=code,
             message=message,
+            type_=type_,
+            param=param,
         )
 
         error_detail.additional_properties = d

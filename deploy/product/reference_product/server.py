@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from topup_client.models import AttestationResponse, RateLockResponse
+from topup_client.models import AttestationResponse, Quote
 from topup_sdk import (
     ApiError,
     AttestationError,
@@ -123,8 +123,8 @@ class AccountApi:
     """The product's account API; the deposit driver uses it as a signed-in user would.
 
     - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
-    - `POST /accounts/{id}/quotes` `{"lock_ref", "amount_minor"}` creates a quote-first lock
-      (`create_quote`) and returns the service's lock;
+    - `POST /accounts/{id}/quotes` `{"amount_minor"}` creates a quote (`create_quote`) and returns
+      the service's quote;
     - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"to_address", "amount_atomic"}`
       files a refund request for one of the workspace's deposits (`request_refund`);
     - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
@@ -177,15 +177,10 @@ class AccountApi:
                     raise ValueError("amount_minor must be a positive integer")
                 if self.ledger.team_suspended(team) is None:
                     return Answer(HTTPStatus.NOT_FOUND)
-                lock = create_quote(
-                    self.config,
-                    self._service(),
-                    self.ledger,
-                    team,
-                    lock_ref=_account_ref(request.get("lock_ref")),
-                    amount_minor=amount_minor,
+                quote = create_quote(
+                    self.config, self._service(), self.ledger, team, amount_minor=amount_minor
                 )
-                return Answer(HTTPStatus.OK, lock.to_dict())
+                return Answer(HTTPStatus.OK, quote.to_dict())
             if (
                 len(parts) == 4
                 and parts[1] == "deposits"
@@ -321,9 +316,11 @@ def register_team(
     *,
     suspended: bool = False,
 ) -> str:
-    """Registers a workspace and records its persistent address after recomputing it."""
+    """Registers a workspace and records its persistent address after recomputing it.
+
+    The service creates the account with the address, as it does with a first quote.
+    """
     ledger.add_team(team, suspended=suspended)
-    client.register_account(team)
     address = client.create_deposit_address(team)
     inputs = address.salt_inputs
     salt = persistent_salt(inputs.product_slug, inputs.external_id, inputs.version)
@@ -342,25 +339,23 @@ def create_quote(
     ledger: ProductLedger,
     team: str,
     *,
-    lock_ref: str,
     amount_minor: int,
-) -> RateLockResponse:
-    """Creates a quote-first lock, recording its recomputed address before the request.
+) -> Quote:
+    """Creates a quote for the workspace and records its address.
 
-    Recording first means a crash between the two steps never leaves a paid quote address the
-    product does not recognise; the service's answer must then match the recorded address.
+    The client recomputes the address from the pinned forwarder and the quote id, and raises
+    before returning an address the product did not derive.
     """
-    expected = quote_address(config, team, lock_ref)
-    ledger.record_address(expected, team, lock_ref=lock_ref)
-    lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
-    if not same_address(expected, lock.address):
-        raise RuntimeError("rate-lock address does not match the product's computation")
-    return lock
+    quote = client.create_quote(
+        team, amount_minor, chain_id=config.chain_id, asset=config.token_symbol.lower()
+    )
+    ledger.record_address(quote.address, team, lock_ref=quote.id)
+    return quote
 
 
-def quote_address(config: ProductConfig, team: str, lock_ref: str) -> str:
+def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
     return forwarder_address(
-        config.factory, config.implementation, lock_salt(config.product_slug, team, lock_ref)
+        config.factory, config.implementation, lock_salt(config.product_slug, team, quote_id)
     )
 
 

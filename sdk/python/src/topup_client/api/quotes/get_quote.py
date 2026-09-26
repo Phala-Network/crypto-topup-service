@@ -9,20 +9,18 @@ from ...types import Response, UNSET
 from ... import errors
 
 from ...models.error_response import ErrorResponse
-from ...models.limits_response import LimitsResponse
+from ...models.quote import Quote
 from typing import cast
 
 
 def _get_kwargs(
-    p: str,
-    ext: str,
+    id: str,
 ) -> dict[str, Any]:
 
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/v1/products/{p}/accounts/{ext}/limits".format(
-            p=quote(str(p), safe=""),
-            ext=quote(str(ext), safe=""),
+        "url": "/v1/quotes/{id}".format(
+            id=quote(str(id), safe=""),
         ),
     }
 
@@ -31,11 +29,16 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | LimitsResponse | None:
+) -> ErrorResponse | Quote | None:
     if response.status_code == 200:
-        response_200 = LimitsResponse.from_dict(response.json())
+        response_200 = Quote.from_dict(response.json())
 
         return response_200
+
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
 
     if response.status_code == 404:
         response_404 = ErrorResponse.from_dict(response.json())
@@ -50,7 +53,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | LimitsResponse]:
+) -> Response[ErrorResponse | Quote]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -60,27 +63,25 @@ def _build_response(
 
 
 def sync_detailed(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse | LimitsResponse]:
-    """
+) -> Response[ErrorResponse | Quote]:
+    """One quote, for example to resume a checkout page.
+
     Args:
-        p (str):
-        ext (str):
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | LimitsResponse]
+        Response[ErrorResponse | Quote]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
+        id=id,
     )
 
     response = client.get_httpx_client().request(
@@ -91,53 +92,49 @@ def sync_detailed(
 
 
 def sync(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | LimitsResponse | None:
-    """
+) -> ErrorResponse | Quote | None:
+    """One quote, for example to resume a checkout page.
+
     Args:
-        p (str):
-        ext (str):
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | LimitsResponse
+        ErrorResponse | Quote
     """
 
     return sync_detailed(
-        p=p,
-        ext=ext,
+        id=id,
         client=client,
     ).parsed
 
 
 async def asyncio_detailed(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse | LimitsResponse]:
-    """
+) -> Response[ErrorResponse | Quote]:
+    """One quote, for example to resume a checkout page.
+
     Args:
-        p (str):
-        ext (str):
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | LimitsResponse]
+        Response[ErrorResponse | Quote]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
+        id=id,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -146,28 +143,26 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    p: str,
-    ext: str,
+    id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | LimitsResponse | None:
-    """
+) -> ErrorResponse | Quote | None:
+    """One quote, for example to resume a checkout page.
+
     Args:
-        p (str):
-        ext (str):
+        id (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | LimitsResponse
+        ErrorResponse | Quote
     """
 
     return (
         await asyncio_detailed(
-            p=p,
-            ext=ext,
+            id=id,
             client=client,
         )
     ).parsed

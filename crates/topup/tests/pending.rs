@@ -96,19 +96,16 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         app,
         key: product_key,
         created: Utc::now().timestamp().into(),
+        quotes: std::sync::Mutex::default(),
     };
     let reader = FinalizedReader::new(Arc::new(EvmClient::new(&anvil.rpc_url)?));
     scan_once(pool, &reader, &chain_routes).await?;
 
-    let lock = api
-        .call(
-            Method::POST,
-            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks",
-            json!({"amount_atomic": "100", "product_lock_ref": "checkout-1"}),
-        )
-        .await?;
-    ensure!(lock.get("payment").is_none(), "unpaid lock has a payment");
-    let lock_address = Address::from_str(lock["address"].as_str().context("lock address")?)?;
+    let lock_address = api.lock("checkout-1").await?;
+    ensure!(
+        api.payment("checkout-1").await?.is_null(),
+        "unpaid quote has a payment"
+    );
     let persistent = api
         .call(
             Method::POST,
@@ -140,13 +137,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "a pending transfer changed deposits, locks, exposure, or transitions"
     );
 
-    let lock = api
-        .call(
-            Method::GET,
-            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-1",
-            Value::Null,
-        )
-        .await?;
+    let lock = api.quote("checkout-1").await?;
     ensure!(
         lock["status"] == "open",
         "pending payment consumed the lock"
@@ -154,9 +145,13 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let payment = &lock["payment"];
     ensure!(payment["status"] == "seen", "unexpected payment {payment}");
     ensure!(payment["amount_atomic"] == "100");
-    ensure!(payment["supported"] == true);
-    ensure!(payment["amount_within_tolerance"] == true);
-    ensure!(payment["in_time"] == true);
+    ensure!(payment["matches_quote"] == true);
+    ensure!(
+        payment["deposit"]
+            .as_str()
+            .is_some_and(|deposit| deposit.starts_with("dep_")),
+        "{payment}"
+    );
     ensure!(
         payment["confirmations"]
             .as_u64()
@@ -164,11 +159,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     );
     let block_time = pending_block_time(pool, payment["tx_hash"].as_str().context("hash")?).await?;
     ensure!(
-        payment["estimated_final_at"]
-            .as_str()
-            .map(parse_time)
-            .transpose()?
-            == Some(block_time + chrono::TimeDelta::minutes(15)),
+        payment["estimated_final_at"].as_i64()
+            == Some((block_time + chrono::TimeDelta::minutes(15)).timestamp()),
         "estimated_final_at is not block time plus 15 minutes: {payment}"
     );
 
@@ -215,14 +207,10 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "unexpected reorg scan {reorged:?}"
     );
     ensure!(pending_rows(pool).await? == 0);
-    let lock = api
-        .call(
-            Method::GET,
-            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-1",
-            Value::Null,
-        )
-        .await?;
-    ensure!(lock.get("payment").is_none(), "reorged payment still shown");
+    ensure!(
+        api.payment("checkout-1").await?.is_null(),
+        "reorged payment still shown"
+    );
     ensure!(pending_events(pool).await? == 2);
 
     // Once final, the finalized scanner records the deposit and clears its pending row in the same
@@ -238,18 +226,9 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "unexpected finalized scan {finalized:?}"
     );
     ensure!(pending_rows(pool).await? == 0, "finalized row was kept");
-    let lock = api
-        .call(
-            Method::GET,
-            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-1",
-            Value::Null,
-        )
-        .await?;
-    ensure!(
-        lock["payment"]["status"] == "finalized",
-        "unexpected {lock}"
-    );
-    ensure!(lock["payment"]["confirmations"].is_null());
+    let payment = api.payment("checkout-1").await?;
+    ensure!(payment["status"] == "final", "unexpected {payment}");
+    ensure!(payment["confirmations"].is_null());
 
     // Underpay, then pay in full: the finalized underpayment does not consume the lock, so the
     // later exact payment is the one shown while it is still pending.
@@ -268,8 +247,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         ensure!(
             payment["status"] == "seen"
                 && payment["amount_atomic"] == "100"
-                && payment["amount_within_tolerance"] == true
-                && payment["in_time"] == true,
+                && payment["matches_quote"] == true,
             "{lock_ref} does not show the payment that consumes it: {payment}"
         );
     }
@@ -280,13 +258,11 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     // qualifying one.
     anvil.mine(FINALITY_LAG)?;
     scan_once(pool, &reader, &chain_routes).await?;
-    let underpayment: Uuid = sqlx::query_scalar(
-        "SELECT deposit.id FROM deposits AS deposit JOIN addresses AS address \
-         ON address.id = deposit.address_id WHERE address.lock_ref = 'checkout-2' \
-         AND deposit.amount_atomic = 50",
-    )
-    .fetch_one(pool)
-    .await?;
+    let underpayment: Uuid =
+        sqlx::query_scalar("SELECT id FROM deposits WHERE address_id = $1 AND amount_atomic = 50")
+            .bind(api.address_id("checkout-2")?)
+            .fetch_one(pool)
+            .await?;
     sqlx::query(
         "UPDATE rate_locks SET status = 'consumed', consumed_by = $1, exposure_reserved = false, \
          closed_at = now() WHERE address_id = (SELECT address_id FROM deposits WHERE id = $1)",
@@ -296,34 +272,28 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     .await?;
     let payment = api.payment("checkout-2").await?;
     ensure!(
-        payment["status"] == "finalized" && payment["deposit_id"] == underpayment.to_string(),
+        payment["status"] == "final"
+            && payment["deposit"] == topup::ids::format(topup::ids::DEPOSIT, underpayment),
         "consumed lock does not show its consuming deposit: {payment}"
     );
 
     // A cancelled lock credits every payment at spot, so none is in time or within tolerance.
     let cancelled = api.lock("checkout-4").await?;
+    let id = api.id("checkout-4")?;
     api.call(
-        Method::DELETE,
-        "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-4",
+        Method::POST,
+        &format!("/v1/quotes/{id}/cancel"),
         Value::Null,
     )
     .await?;
     transfer(&anvil.rpc_url, token, cancelled, 100)?;
     anvil.mine(FINALITY_LAG)?;
     scan_once(pool, &reader, &chain_routes).await?;
-    let lock = api
-        .call(
-            Method::GET,
-            "/v1/products/phala-cloud/accounts/ws-pending/rate-locks/checkout-4",
-            Value::Null,
-        )
-        .await?;
-    ensure!(lock["status"] == "cancelled", "unexpected {lock}");
+    let lock = api.quote("checkout-4").await?;
+    ensure!(lock["status"] == "canceled", "unexpected {lock}");
     ensure!(
-        lock["payment"]["amount_atomic"] == "100"
-            && lock["payment"]["in_time"] == false
-            && lock["payment"]["amount_within_tolerance"] == false,
-        "cancelled lock shows its payment as applying: {lock}"
+        lock["payment"]["amount_atomic"] == "100" && lock["payment"]["matches_quote"] == false,
+        "canceled quote shows its payment as applying: {lock}"
     );
     ensure!(
         pending_events(pool).await? == 6,
@@ -495,31 +465,52 @@ struct Api {
     /// Distinct `created` per request: identical requests signed in the same second would carry
     /// the same single-use signature.
     created: std::sync::atomic::AtomicI64,
+    /// Quote ids by the test's name for them.
+    quotes: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 impl Api {
-    async fn lock(&self, lock_ref: &str) -> Result<Address> {
-        let lock = self
+    /// Creates a 100-cent quote for `ws-pending` and returns its address.
+    async fn lock(&self, name: &str) -> Result<Address> {
+        let quote = self
             .call(
                 Method::POST,
-                "/v1/products/phala-cloud/accounts/ws-pending/rate-locks",
-                json!({"amount_atomic": "100", "product_lock_ref": lock_ref}),
+                "/v1/quotes",
+                json!({"account_id": "ws-pending", "amount": 100, "currency": "usd",
+                       "chain_id": CHAIN_ID, "asset": "pha"}),
             )
             .await?;
+        let id = quote["id"].as_str().context("quote id")?.to_owned();
+        self.quotes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("quote map poisoned"))?
+            .insert(name.to_owned(), id);
         Ok(Address::from_str(
-            lock["address"].as_str().context("lock address")?,
+            quote["address"].as_str().context("quote address")?,
         )?)
     }
 
-    async fn payment(&self, lock_ref: &str) -> Result<Value> {
-        let lock = self
-            .call(
-                Method::GET,
-                &format!("/v1/products/phala-cloud/accounts/ws-pending/rate-locks/{lock_ref}"),
-                Value::Null,
-            )
-            .await?;
-        Ok(lock["payment"].clone())
+    fn id(&self, name: &str) -> Result<String> {
+        self.quotes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("quote map poisoned"))?
+            .get(name)
+            .cloned()
+            .context("unknown quote")
+    }
+
+    fn address_id(&self, name: &str) -> Result<Uuid> {
+        topup::ids::parse(topup::ids::QUOTE, &self.id(name)?).context("quote id")
+    }
+
+    async fn quote(&self, name: &str) -> Result<Value> {
+        let id = self.id(name)?;
+        self.call(Method::GET, &format!("/v1/quotes/{id}"), Value::Null)
+            .await
+    }
+
+    async fn payment(&self, name: &str) -> Result<Value> {
+        Ok(self.quote(name).await?["payment"].clone())
     }
 
     async fn call(&self, method: Method, path: &str, body: Value) -> Result<Value> {
@@ -573,10 +564,6 @@ async fn pending_block_time(pool: &sqlx::PgPool, tx_hash: &str) -> Result<DateTi
             .fetch_one(pool)
             .await?,
     )
-}
-
-fn parse_time(value: &str) -> Result<DateTime<Utc>> {
-    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
 async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<()> {

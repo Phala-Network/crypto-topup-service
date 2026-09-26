@@ -17,6 +17,7 @@ pub mod contracts;
 pub mod db;
 pub mod flusher;
 pub mod heartbeat;
+pub mod ids;
 pub mod jitter;
 pub mod keys;
 pub mod locks;

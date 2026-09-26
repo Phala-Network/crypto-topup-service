@@ -5,26 +5,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-/// Account registration body.
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct RegisterAccountRequest {
-    /// Product-owned account identifier.
-    pub external_id: String,
-}
-
-/// Product-owned account.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct AccountResponse {
-    /// Service account identifier.
-    pub id: Uuid,
-    /// Product-owned account identifier.
-    pub external_id: String,
-    /// Workspace lifecycle state.
-    pub status: String,
-    /// Active account-level pause scopes.
-    pub paused_scopes: Vec<String>,
-}
-
 /// Inputs needed to recompute a persistent CREATE2 address.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct PersistentSaltInputs {
@@ -199,30 +179,6 @@ pub struct DepositsResponse {
     pub next_cursor: Option<Uuid>,
 }
 
-/// Configured route limits and currently available exposure.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct LimitsResponse {
-    /// Route name.
-    pub route: String,
-    /// Minimum atomic deposit amount.
-    pub min_deposit_atomic: String,
-    /// Maximum atomic deposit amount.
-    pub max_deposit_atomic: String,
-    /// Minimum destination credit in minor units.
-    pub min_credit_minor: u64,
-    /// Per-account open rate-lock cap in minor units.
-    pub account_open_minor: u64,
-    /// Per-product open rate-lock cap in minor units.
-    pub product_open_minor: u64,
-    /// Global open rate-lock cap in minor units.
-    pub global_open_minor: u64,
-    /// Remaining account exposure.
-    pub remaining_account_minor: Option<u64>,
-    /// Earliest payment-window close among open reserved locks; it can be in the past, because
-    /// exposure is released only at chain finality, about 15 minutes after the window closes.
-    pub reset_at: Option<DateTime<Utc>>,
-}
-
 /// Pause or resume request.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct PauseRequest {
@@ -237,77 +193,125 @@ pub struct PauseResponse {
     pub paused_scopes: Vec<String>,
 }
 
-/// Rate-lock creation body owned by C10.
+/// `POST /v1/quotes` body.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct CreateRateLockRequest {
-    /// Desired destination amount in minor units.
-    pub amount_minor: Option<String>,
-    /// Desired token amount in atomic units.
-    pub amount_atomic: Option<String>,
-    /// Product checkout reference.
-    pub product_lock_ref: String,
+#[serde(deny_unknown_fields)]
+pub struct CreateQuoteRequest {
+    /// Your identifier of the customer account to credit, 1 to 255 bytes; the account is created
+    /// on its first quote.
+    pub account_id: String,
+    /// The credit to quote, a positive integer in the currency's minor unit (US cents).
+    pub amount: u64,
+    /// Lowercase ISO currency code; only `usd`.
+    pub currency: String,
+    /// EVM chain of the payment, one of `GET /v1/config` `assets[].chain_id`.
+    pub chain_id: u64,
+    /// Asset code of the payment on that chain, such as `pha`.
+    pub asset: String,
 }
 
-/// Rate-lock response shape owned by C10.
+/// A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct RateLockResponse {
-    /// Single-use forwarder address.
-    pub address: String,
-    /// Exact token amount in atomic units.
+pub struct Quote {
+    /// `qt_` id. New quotes' address salt is `keccak256(abi.encode(product_slug, account_id,
+    /// "lock", id))`.
+    pub id: String,
+    /// Always `quote`.
+    pub object: String,
+    /// Your account identifier.
+    pub account_id: String,
+    /// Credit in the currency's minor unit.
+    pub amount: u64,
+    /// `usd`.
+    pub currency: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code.
+    pub asset: String,
+    /// The exact token amount to pay, in base units, as a decimal string.
     pub amount_atomic: String,
-    /// Locked eight-decimal scaled price.
-    pub price_scaled: String,
-    /// Destination credit in minor units.
-    pub credit_minor: String,
-    /// Lock expiry time.
-    pub expires_at: DateTime<Utc>,
-    /// Stable lifecycle status: `open`, `consumed`, `expired`, or `cancelled`. A lock stays `open`
-    /// after its window closes until the finalized chain passes `expires_at`, so a payment mined
-    /// inside the window is never reported as expired.
+    /// The locked price in USD per token, a decimal string with 8 decimal places.
+    pub exchange_rate: String,
+    /// Single-use forwarder address to pay.
+    pub address: String,
+    /// EIP-681 URI carrying the token, chain, address, and amount.
+    pub payment_uri: String,
+    /// `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
+    /// `open` after `expires_at` until the finalized chain passes it, so a payment mined in time
+    /// is never reported as expired; hide the address once `expires_at` has passed.
     pub status: String,
-    /// Whole seconds remaining in the payment window; zero once `expires_at` has passed.
-    pub remaining_seconds: u64,
-    /// EIP-681 payment URI.
-    pub eip681_uri: String,
-    /// Inputs encoded into the rate-lock salt.
-    pub salt_inputs: RateLockSaltInputs,
-    /// The payment to the lock address that the checkout page should show, once one is seen on
-    /// chain: the deposit that consumed the lock; otherwise the first payment that would consume
-    /// it; otherwise the first payment. Display only: while `status` is `seen` the payment is not
-    /// final and nothing has been credited.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payment: Option<RateLockPayment>,
+    /// End of the payment window, Unix seconds.
+    pub expires_at: i64,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// The payment the checkout page should show, once one is seen on chain; display only.
+    pub payment: Option<QuotePayment>,
+    /// `dep_` id of the deposit that completed the quote.
+    pub deposit: Option<String>,
 }
 
-/// A payment observed at a rate-lock address.
+/// A payment observed at a quote's address. Display only: while `status` is `seen` it is not
+/// final, may still disappear in a reorg, and nothing has been credited.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct RateLockPayment {
-    /// `seen`: in a block above `finalized`, provisional and may still disappear in a reorg.
-    /// `finalized`: recorded as a deposit; follow it by `deposit_id`. New values may be added.
+pub struct QuotePayment {
+    /// `seen` (above the finalized head) or `final` (recorded as a deposit). New values may be
+    /// added.
     pub status: String,
-    /// Identifier the deposit has, or will have once final.
-    pub deposit_id: Uuid,
     /// Canonical transaction hash.
     pub tx_hash: String,
-    /// Transfer log index.
-    pub log_index: u64,
-    /// Block that contains the transfer.
-    pub block_number: u64,
-    /// Blocks on top of and including that block at the last head scan; `seen` only.
-    pub confirmations: Option<u64>,
-    /// Atomic token amount encoded as a decimal string.
+    /// Token amount in base units, as a decimal string.
     pub amount_atomic: String,
-    /// Canonical token contract address.
-    pub asset_contract: String,
-    /// Whether the token is the lock's route asset.
-    pub supported: bool,
-    /// Whether the amount is the lock's asset within the lock tolerance; always false on a
-    /// cancelled lock.
-    pub amount_within_tolerance: bool,
-    /// Whether the block time is at or before `expires_at`; always false on a cancelled lock.
-    pub in_time: bool,
-    /// Estimated finality time: block time plus 15 minutes; `seen` only.
-    pub estimated_final_at: Option<DateTime<Utc>>,
+    /// Blocks on top of and including the transfer's block at the last head scan; `seen` only.
+    pub confirmations: Option<u64>,
+    /// Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only.
+    pub estimated_final_at: Option<i64>,
+    /// Whether the payment is the quote's asset, in time, and within tolerance, so it will be
+    /// credited at the quoted price; otherwise it is credited at spot once final.
+    pub matches_quote: bool,
+    /// `dep_` id the deposit has, or will have once final.
+    pub deposit: String,
+}
+
+/// What a product's UI reads instead of hardcoding: assets, limits, and quote terms.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Config {
+    /// Always `config`.
+    pub object: String,
+    /// Credit currency, `usd`.
+    pub currency: String,
+    /// Per-account cap on the credit of open quotes, in cents; no single quote can exceed it.
+    pub max_open_amount_per_account: u64,
+    /// One entry per payable asset.
+    pub assets: Vec<ConfigAsset>,
+}
+
+/// A payable asset and its terms.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ConfigAsset {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code.
+    pub asset: String,
+    /// Token contract address.
+    pub contract: String,
+    /// Token decimals.
+    pub decimals: u8,
+    /// `spot` or `stablecoin`.
+    pub pricing: String,
+    /// Minimum credit in cents, for quotes and deposits; smaller deposits are not credited.
+    pub min_amount: u64,
+    /// Maximum creditable deposit in base units, as a decimal string.
+    pub max_deposit_atomic: String,
+    /// Minimum refundable amount in base units, as a decimal string.
+    pub min_refund_atomic: String,
+    /// Payment window of a quote, in seconds.
+    pub quote_ttl_seconds: u64,
+    /// A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no spread.
+    pub quote_spread_bps: u16,
+    /// A payment within this many basis points of the quoted amount completes the quote.
+    pub quote_tolerance_bps: u16,
+    /// Typical time from payment to finality, in seconds.
+    pub typical_finality_seconds: u64,
 }
 
 /// A transfer to a persistent address seen above the finalized head. It is not a deposit, has not
@@ -350,26 +354,6 @@ pub struct PendingDepositResponse {
 pub struct PendingDepositsResponse {
     /// Pending transfers in block order.
     pub pending_deposits: Vec<PendingDepositResponse>,
-}
-
-/// Inputs needed to recompute a rate-lock CREATE2 address.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct RateLockSaltInputs {
-    /// Stable product slug.
-    pub product_slug: String,
-    /// Product-owned account identifier.
-    pub external_id: String,
-    /// Product checkout reference.
-    pub lock_ref: String,
-}
-
-/// Cancellation result for an unpaid rate lock.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct CancelRateLockResponse {
-    /// Product checkout reference.
-    pub product_lock_ref: String,
-    /// Stable cancellation status.
-    pub status: String,
 }
 
 /// Refund request body owned by C12.

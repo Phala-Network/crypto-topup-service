@@ -11,8 +11,9 @@ quote-first route. Persistent-address deposits are unaffected.
 ## First steps
 
 1. Read `exposure_minor` (the global open lock credit) and each route's
-   `open_rate_lock_exposure_atomic` in the daily report (`admin GET /v1/admin/report/daily`); an
-   account's caps and remaining room are in the product-signed `GET …/accounts/{ext}/limits`.
+   `open_rate_lock_exposure_atomic` in the daily report (`admin GET /v1/admin/report/daily`); the
+   caps are in the product-signed `GET /v1/config`, and a quote refused by a cap
+   (`409 exposure_cap_exceeded`) states the room left.
 2. A lock whose window has closed keeps its reservation until the finalized chain passes
    `expires_at`, about 15 minutes later (architecture §9). If exposure does not fall after that,
    follow [lock expiry worker failure](lock-expiry-worker-failure.md).

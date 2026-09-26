@@ -10,11 +10,11 @@ Python SDK for the crypto top-up service product API (Python 3.12+).
 ```python
 from topup_sdk import RequestSigner, TopupClient
 
-signer = RequestSigner.from_seed_file("acme/v1", "product.seed")
-with TopupClient("https://topup.example", "acme", signer) as client:
-    client.register_account("workspace-42")
-    lock = client.create_rate_lock("workspace-42", "checkout-1", amount_minor=2500)
-    print(lock.address, lock.amount_atomic, lock.expires_at)
+signer = RequestSigner.from_seed_file("acme/v1", "product.seed")  # the key id names product acme
+forwarder = ("0x<factory>", "0x<implementation>")  # pinned from the attested deployment
+with TopupClient("https://topup.example", signer, forwarder=forwarder) as client:
+    quote = client.create_quote("workspace-42", 2500, chain_id=1, asset="pha")
+    print(quote.id, quote.address, quote.amount_atomic, quote.expires_at)
 ```
 
 Create a product key with `uv run topup-sdk keygen --keyid acme/v1 --seed-out product.seed` and

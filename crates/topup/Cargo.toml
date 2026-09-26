@@ -34,6 +34,7 @@ sentry.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
+sfv.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -51,7 +52,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 sentry = { workspace = true, features = ["test"] }
-sfv.workspace = true
 tower.workspace = true
 tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }
 

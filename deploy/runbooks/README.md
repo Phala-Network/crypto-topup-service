@@ -56,7 +56,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 
 | Alert, monitor, or symptom | Runbook |
 |---|---|
-| `TopupReconciliationMismatch` (`check:address_derivation`), `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
+| `TopupReconciliationMismatch` (`check:address_derivation`), `409 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupDepositStateAgeExceeded` (`state:detected` or `state:confirmed`) | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
 | `TopupDepositStateAgeExceeded` (`state:credited`: not swept after 48 hours) | [Flush reverted or bisected](flush-reverted-or-bisected.md); a forwarder below the route's `min_flush_atomic` is never swept |

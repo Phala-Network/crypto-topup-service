@@ -3,10 +3,11 @@
 mod attestation;
 mod auth;
 mod error;
+mod extract;
 mod handlers;
 pub mod models;
 mod pending;
-mod rate_locks;
+mod quotes;
 mod repository;
 
 use std::path::{Path, PathBuf};
@@ -77,22 +78,19 @@ impl AppState {
 /// Builds the authenticated Axum router and its OpenAPI document.
 pub fn router(state: AppState) -> (Router, OpenApi) {
     let product = OpenApiRouter::new()
-        .routes(routes!(handlers::register_account))
+        .routes(routes!(quotes::get_config))
+        .routes(routes!(quotes::create_quote))
+        .routes(routes!(quotes::get_quote))
+        .routes(routes!(quotes::cancel_quote))
         .routes(routes!(
             handlers::get_deposit_address,
             handlers::create_deposit_address
         ))
         .routes(routes!(handlers::rotate_deposit_address))
-        .routes(routes!(rate_locks::create_rate_lock))
-        .routes(routes!(
-            rate_locks::get_rate_lock,
-            rate_locks::cancel_rate_lock
-        ))
         .routes(routes!(handlers::list_deposits))
         .routes(routes!(pending::list_pending_deposits))
         .routes(routes!(handlers::get_deposit))
         .routes(routes!(handlers::lookup_deposits))
-        .routes(routes!(handlers::get_limits))
         .routes(routes!(handlers::pause_account))
         .routes(routes!(handlers::resume_account))
         .routes(routes!(handlers::request_refund))

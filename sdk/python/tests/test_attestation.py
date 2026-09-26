@@ -78,7 +78,7 @@ def test_client_attestation_verifies_the_binding() -> None:
 
     signer = RequestSigner.from_seed("acme/v1", bytes([5] * 32))
     with TopupClient(
-        "http://service.test:8080", "acme", signer, transport=httpx.MockTransport(respond)
+        "http://service.test:8080", signer, transport=httpx.MockTransport(respond)
     ) as client:
         evidence = client.attestation(NONCE)
         assert isinstance(evidence.operators, list)
