@@ -41,6 +41,7 @@ fi
 
 schedule=$2
 set -f
+# shellcheck disable=SC2086  # one argument per cron field
 set -- $schedule
 set +f
 if [ "$#" -ne 5 ] || [ "$3" != "*" ] || [ "$4" != "*" ] || [ "$5" != "*" ]; then

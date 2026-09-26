@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154  # tmp, like fail and ok, comes from the sourcing script
 # Online preflight checks shared by deploy/preflight.sh and deploy/product/preflight.sh; sourced.
 # The caller defines fail, ok, and tmp (a private directory), and sources contracts/common.sh.
 

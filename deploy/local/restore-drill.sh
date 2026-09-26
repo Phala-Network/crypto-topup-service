@@ -114,6 +114,7 @@ wal_object_visible() {
 # Upload time of a WAL object as recorded by object storage, in epoch seconds with milliseconds.
 wal_object_uploaded_epoch() {
     line=$(dc exec -T backup wal-g st ls wal_005/ | grep -F " $1.")
+    # shellcheck disable=SC2086  # split the listing line into its fields
     set -- $line
     test "$#" -ge 7 || {
         echo "WAL object listing has no upload time for $1" >&2

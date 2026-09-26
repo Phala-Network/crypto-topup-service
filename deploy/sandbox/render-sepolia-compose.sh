@@ -9,7 +9,7 @@
 #   render-sepolia-compose.sh ROUTE_FILE > sandbox-compose.json
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 route=${1:?usage: $0 ROUTE_FILE}
 [[ -f "$route" ]] || { echo "route file not found: $route" >&2; exit 2; }
 if grep -q '0x0000000000000000000000000000000000000000\|\${' "$route"; then

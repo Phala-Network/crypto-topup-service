@@ -21,7 +21,8 @@
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
 #    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
 #    the mock Safe grants it and it is funded, Sentry reporting is off with the empty DSN, and WAL
-#    archiving writes a fresh backup marker.
+#    archiving writes a fresh backup marker; the derived key and database credentials are mode 0600
+#    files owned by PostgreSQL and in no container environment.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
 #    deploy/product/render-compose.sh with the pushed image and a provisional public URL, an
 #    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
@@ -36,7 +37,7 @@
 # OpenSSL 3, and internet access for the live price sources, as in production.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
 for command in docker forge cast jq python3 openssl; do
     require_command "$command"
@@ -279,7 +280,7 @@ declare -A values=(
     [AWS_ACCESS_KEY_ID]=topup-s3
     [AWS_SECRET_ACCESS_KEY]=topup-s3-secret-key
     # Empty: the rehearsal proves the service runs unchanged with Sentry reporting off.
-    [SENTRY_DSN]=
+    [SENTRY_DSN]=''
 )
 ((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and staging.env.example differ"
 for name in "${env_names[@]}"; do
@@ -329,6 +330,15 @@ dc logs --no-color postgres 2>&1 |
     grep -F 'the backup prefix holds no base backup; initializing a new cluster' >/dev/null ||
     die "PostgreSQL did not initialize from the provably empty backup prefix"
 echo "ok: sealed, PostgreSQL listed an empty backup prefix and initialized a new cluster"
+# `keys` derives the backup key and the database credentials into files only PostgreSQL reads.
+[[ "$(dc exec -T postgres stat -c '%a:%u:%g' /run/wal-g/backup.key /run/db-owner/postgres.password \
+    /run/db-owner/postgres.pgpass /run/db-app/topup_service.pgpass | sort -u)" == 600:999:999 ]] ||
+    die "the derived key and credential files are not postgres-owned mode 0600"
+if dc ps -q | xargs docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' |
+    grep -Eq '^(WALG_LIBSODIUM_KEY|POSTGRES_PASSWORD|PGPASSWORD)='; then
+    die "a container environment carries a key or password"
+fi
+echo "ok: the derived key and credentials are mode 0600 files, in no container environment"
 migrate_exited() {
     [[ "$(dc ps -a --format json migrate | jq -rs 'flatten | .[0].State')" == exited ]]
 }
@@ -441,7 +451,7 @@ sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
-# render_product PUBLIC_URL: the settings Deploy staging product renders, for this network.
+# render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
     TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 PRODUCT_RPC_URL=http://anvil:8545 \
         PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
@@ -503,6 +513,6 @@ priced_locks=$(dc exec -T postgres psql -U postgres -d topup -XAtq -c \
 echo "ok: topup priced a lock from live HTTPS price sources (TLS with system roots)"
 
 echo "== workload memory (tdx.medium has 4 GiB)"
-docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \
-    $(dc ps -q keys postgres topup heartbeat backup) | tee "$tmp/memory"
+dc ps -q keys postgres topup heartbeat backup |
+    xargs docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | tee "$tmp/memory"
 echo "cvm-rehearsal: all checks passed"

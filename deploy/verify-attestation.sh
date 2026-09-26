@@ -19,7 +19,7 @@ if [ "$#" -ne 4 ] && [ "$#" -ne 6 ]; then
     exit 64
 fi
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 attestation=$1
 info=$2
 app_id=$(printf '%s' "${3#0x}" | tr 'A-F' 'a-f')

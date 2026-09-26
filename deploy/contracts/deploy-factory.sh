@@ -34,8 +34,9 @@ rpc_url="$TARGET_RPC_URL"
     --treasury "$EXPECTED_TREASURY" \
     --output "$tmp" >/dev/null
 
-export EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$tmp")"
-export EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$tmp")"
+EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$tmp")"
+EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$tmp")"
+export EXPECTED_FACTORY_CODE_HASH EXPECTED_IMPLEMENTATION_CODE_HASH
 
 # DeployFactory.s.sol reads PRIVATE_KEY from the environment; it is never a forge argument.
 export PRIVATE_KEY

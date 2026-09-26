@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 platform=${PLATFORM:-linux/amd64}
 # DOCKERFILE (relative to the repository root) selects another image; default the crypto-topup one.
@@ -39,8 +39,8 @@ build() {
 first=$(build 1)
 second=$(build 2)
 
-printf 'build 1: manifest=%s config=%s\n' $first
-printf 'build 2: manifest=%s config=%s\n' $second
+printf 'build 1: manifest=%s config=%s\n' "${first% *}" "${first#* }"
+printf 'build 2: manifest=%s config=%s\n' "${second% *}" "${second#* }"
 
 if [ "$first" != "$second" ]; then
     echo "image reproducibility check failed" >&2

@@ -4,7 +4,7 @@
 # refused, and a complete env file with a filled route must pass.
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 preflight="$root/deploy/preflight.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM

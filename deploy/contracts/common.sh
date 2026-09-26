@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # the constants and TARGET_* are read by the scripts that source this
 
 set -euo pipefail
 
-DEPLOY_CONTRACTS_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "$DEPLOY_CONTRACTS_DIR/../.." && pwd)"
+DEPLOY_CONTRACTS_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(CDPATH='' cd -- "$DEPLOY_CONTRACTS_DIR/../.." && pwd)"
 CONTRACTS_DIR="$REPO_ROOT/contracts"
 
 DETERMINISTIC_PROXY="0x4e59b44847b379578588920cA78FbF26c0B4956C"

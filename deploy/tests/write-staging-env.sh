@@ -3,7 +3,7 @@
 # environment sets it, with mode 0600; --product does the same for the reference product.
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 writer="$root/deploy/write-staging-env.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM

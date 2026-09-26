@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `docker compose` for the local stacks (make up, smokes, sandbox, restore drill): the attested
+# `docker compose` for the local stacks (make up, sandbox, restore drill): the attested
 # compose rendered by deploy/render-compose.sh exactly as for a CVM, with local settings, then the
 # local overlay (deploy/local/docker-compose.yml) and any further `-f` files the caller passes.
 # The overlay builds the images from this checkout, so the rendered digests are placeholders, and
@@ -12,7 +12,7 @@
 # Usage: deploy/local/compose.sh [--restore-check] [COMPOSE OPTIONS] COMMAND [ARGS...]
 set -euo pipefail
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 variant=()
 if [[ "${1:-}" == --restore-check ]]; then
     variant=(--restore-check)

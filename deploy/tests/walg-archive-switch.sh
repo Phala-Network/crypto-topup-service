@@ -68,8 +68,7 @@ expect() {
 }
 
 # An empty prefix: WAL-G lists no base backup, so a new cluster is initialized, and it archives.
-empty_prefix="-e WALG_FILE_PREFIX=/tmp"
-start default $empty_prefix "$image"
+start default -e WALG_FILE_PREFIX=/tmp "$image"
 expect default 'SHOW archive_mode' on
 expect default 'SHOW archive_command' 'walg-cron wal-push %p'
 expect default 'SHOW restore_command' 'walg-restore-command %f %p'
@@ -83,14 +82,14 @@ expect_exit() {
     output=$(docker run --rm -e POSTGRES_PASSWORD=postgres "$@" 2>&1)
     status=$?
     set -e
-    test "$status" -eq "$expected" && printf '%s\n' "$output" | grep -F -- "$message" >/dev/null || {
+    if [ "$status" -ne "$expected" ] || ! printf '%s\n' "$output" | grep -F -- "$message" >/dev/null; then
         printf '%s\n' "$output" >&2
         echo "expected exit $expected with '$message', got $status" >&2
         exit 1
-    }
+    fi
 }
 
-expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" $empty_prefix \
+expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" -e WALG_FILE_PREFIX=/tmp \
     -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image"
 
 # A listing error (here: a prefix that does not exist) must fail, not fall back to initdb, in
@@ -101,7 +100,7 @@ expect_exit 1 "refusing to initialize an empty data directory" \
     -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/nonexistent \
     -e TOPUP_RESTORE_FROM_BACKUP=on "$image"
 expect_exit 1 "the backup prefix holds no base backup" \
-    -v "$volume:/var/lib/postgresql" $empty_prefix -e TOPUP_RESTORE_FROM_BACKUP=on "$image"
+    -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/tmp -e TOPUP_RESTORE_FROM_BACKUP=on "$image"
 test -z "$(docker run --rm -v "$volume:/var/lib/postgresql" --entrypoint ls "$image" \
     -A /var/lib/postgresql/data)" || {
     echo "a failed bootstrap left files in the data directory" >&2
@@ -110,7 +109,7 @@ test -z "$(docker run --rm -v "$volume:/var/lib/postgresql" --entrypoint ls "$im
 
 # A data directory that holds a cluster is started as is, without listing the prefix: no fetch,
 # and with TOPUP_RESTORE_FROM_BACKUP=on archiving off even when a user flag asks for it.
-start existing -v "$volume:/var/lib/postgresql" $empty_prefix "$image"
+start existing -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/tmp "$image"
 sql existing 'CREATE TABLE existing_probe (id int); INSERT INTO existing_probe VALUES (1)' >/dev/null
 docker rm -f "$prefix-existing" >/dev/null
 start restored -v "$volume:/var/lib/postgresql" -e WALG_FILE_PREFIX=/nonexistent \

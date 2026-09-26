@@ -43,6 +43,7 @@ as_postgres() {
 # moved into place only when complete, so an interrupted fetch starts over, and a data directory
 # that holds anything is never touched.
 bootstrap() {
+    # shellcheck disable=SC2015  # either failure refuses
     backups=$(as_postgres "${WALG_BIN:-wal-g}" backup-list --json) &&
         count=$(printf '%s\n' "$backups" | jq -er 'if type == "array" then length else error end') || {
         echo "the backup prefix could not be listed; refusing to initialize an empty data directory" >&2

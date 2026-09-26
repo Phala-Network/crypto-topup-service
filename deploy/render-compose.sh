@@ -24,7 +24,7 @@
 set -euo pipefail
 export LC_ALL=C
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 env_example="$root/deploy/staging.env.example"
 variant=service
 while (($#)); do
@@ -87,6 +87,8 @@ if [[ "$variant" == images-only ]]; then
 fi
 
 sealed=" $(awk '/^[[:space:]]*($|#)/ { next } { sub(/=.*/, ""); printf "%s ", $0 }' "$env_example")"
+# Read below through ${!name}.
+# shellcheck disable=SC2034
 if [[ "$variant" == restore-check ]]; then
     TOPUP_RESTORE_FROM_BACKUP=on TOPUP_SERVICE_ENABLED=read-only TOPUP_INGRESS_PORT=8081
 else
@@ -95,7 +97,7 @@ fi
 
 # Values land in double-quoted YAML strings or JSON strings that Compose interpolates: allow
 # printable ASCII without spaces, quotes, backslashes, or `$`.
-for name in $(grep -o '[$][{][A-Z_][A-Z0-9_]*:-[}]' <<<"$rest" | sed 's/^[$][{]//; s/:-[}]$//' | sort -u); do
+while IFS= read -r name; do
     [[ "$sealed" == *" $name "* || "$name" == *_RENDERED_SHA256 ]] && continue
     value=${!name-}
     if ! [[ "$value" =~ ^[[:graph:]]{1,512}$ ]] || [[ "$value" == *[\"\\\$]* ]]; then
@@ -103,7 +105,7 @@ for name in $(grep -o '[$][{][A-Z_][A-Z0-9_]*:-[}]' <<<"$rest" | sed 's/^[$][{]/
             "quotes, backslashes, or \$" >&2
         exit 64
     fi
-done
+done < <(grep -o '[$][{][A-Z_][A-Z0-9_]*:-[}]' <<<"$rest" | sed 's/^[$][{]//; s/:-[}]$//' | sort -u)
 
 # Single pass: only the settings' `${NAME:-}` placeholders are replaced; values are not rescanned.
 rendered=""
