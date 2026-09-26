@@ -174,6 +174,31 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         ensure!(limited.status() == StatusCode::TOO_MANY_REQUESTS);
         ensure!(response_json(limited).await?["error"]["code"] == "rate_limited");
 
+        // A quote for an account the service has not seen creates it, like a checkout session.
+        let implicit = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/products/phala-cloud/accounts/implicit-rl/rate-locks",
+                serde_json::to_vec(&json!({
+                    "amount_atomic": "100",
+                    "product_lock_ref": "checkout-implicit"
+                }))?,
+                PRODUCT_KID,
+                &product_key,
+                now + 3,
+            ))
+            .await?;
+        ensure!(implicit.status() == StatusCode::OK);
+        ensure!(response_json(implicit).await?["salt_inputs"]["external_id"] == "implicit-rl");
+        let implicit_accounts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM accounts WHERE product_id = $1 AND external_id = 'implicit-rl'",
+        )
+        .bind(product.id)
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(implicit_accounts == 1);
+
         let cross_tenant = app
             .clone()
             .oneshot(signed_request(

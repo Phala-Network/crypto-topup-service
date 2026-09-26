@@ -203,7 +203,7 @@ request for another product's resources is refused.
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
-| `POST /accounts` | Register a workspace. | `register_account` |
+| `POST /accounts` | Register a workspace. Optional: creating a quote or an address creates it. | `register_account` |
 | `POST /accounts/{ext}/deposit-address`, `GET` same | The persistent address (created at version 1 on first `POST`). | `create_deposit_address`, `get_deposit_address` |
 | `POST /accounts/{ext}/deposit-address/rotate` | New version; older addresses stay valid and watched. | `rotate_deposit_address` |
 | `POST /accounts/{ext}/rate-locks` | Quote: `{product_lock_ref, amount_minor \| amount_atomic}`. | `create_rate_lock` |
@@ -403,7 +403,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 |---|---|
 | Exact lock amount, in time (within `lock_tolerance_bps`) | Lock `consumed`; credited exactly the quoted `credit_minor`; settlement `lock_ref` set. |
 | Underpayment beyond tolerance | Credited at spot for what arrived; lock not consumed and later `rate_lock.expired`; cancel refused with `409 pending_payment`. Payments are not accumulated against one lock: offer a re-quote for the shortfall. |
-| Overpayment beyond tolerance | Credited at spot for the full amount; lock not consumed; not refundable. |
+| Overpayment beyond tolerance | Credited at spot for the full amount; lock not consumed. |
 | After the window (mined after `expires_at`) | `rate_lock.expired`, then credited at spot. A payment mined inside the window stays at the lock price even if final later; the lock stays `open` with `remaining_seconds = 0` until then. |
 | Second payment to a lock address, or to a cancelled lock | Credited at spot. |
 | Persistent address, any amount | Credited at spot at finality. |
@@ -417,7 +417,8 @@ User-facing copy per state and reason, including what never to show, is in
 [architecture §12, product UI](architecture.md#customer-experience-obligations-product-ui).
 
 **Refunds.** A rejected deposit is refundable unless the reason is `sanctioned` or its amount is
-below the route's `min_refund_atomic`; credited deposits are never refundable
+below the route's `min_refund_atomic`. A credited deposit is refunded only when you ask, for a
+credit you did not apply or have reversed
 ([architecture §15](architecture.md#15-operating-policies)). Ask the user for a destination
 address they control (never default to `from_address`, which may be an exchange), then
 `POST /deposits/{id}/refund-requests {to_address, amount}` (`amount` in atomic units; at most the

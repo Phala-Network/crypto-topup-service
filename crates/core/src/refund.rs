@@ -19,8 +19,6 @@ pub struct RefundDeposit {
 /// Stable reason a deposit cannot enter the refund workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefundIneligible {
-    /// Credited value is never refundable through the token refund workflow.
-    Credited,
     /// Sanctioned funds require the compliance process, not the refund workflow.
     Sanctioned,
     /// The deposit is below the route's refundable dust floor.
@@ -33,20 +31,20 @@ pub enum RefundIneligible {
 
 /// Applies the section 15 refund policy to persisted deposit and route facts.
 ///
-/// Every refundable case is a deposit rejected for a reason other than sanctions and at or above
-/// the dust floor: a wrong token (`unsupported_asset`), a below-minimum credit (`below_minimum`),
-/// out-of-bounds amounts, and product refusals, which include funds arriving after the workspace
-/// closed. Credited deposits, including overpayments beyond the lock tolerance (credited at spot
-/// for the full amount), are never refundable.
+/// Every refundable case is at or above the dust floor and not sanctioned: a deposit rejected for
+/// a wrong token (`unsupported_asset`), a below-minimum credit (`below_minimum`), out-of-bounds
+/// amounts, or a product refusal; and a credited deposit, which only the product can ask to
+/// refund, for a credit it did not apply or has reversed (a closed workspace, its own cap, a
+/// suspended account). Finance approves every request.
 pub fn refund_eligibility(deposit: RefundDeposit) -> Result<(), RefundIneligible> {
-    if matches!(deposit.state, DepositState::Credited | DepositState::Swept) {
-        return Err(RefundIneligible::Credited);
-    }
     if deposit.reason == Some(RejectReason::Sanctioned) {
         return Err(RefundIneligible::Sanctioned);
     }
     if deposit.amount < deposit.min_refund {
         return Err(RefundIneligible::Dust);
+    }
+    if matches!(deposit.state, DepositState::Credited | DepositState::Swept) {
+        return Ok(());
     }
     if deposit.state != DepositState::Rejected {
         return Err(RefundIneligible::NotRejected);
@@ -141,20 +139,29 @@ mod tests {
                 Err(RefundIneligible::NoRefundableCase),
             ),
             (
-                "credited value, including an overpayment credited at spot",
+                "credited value the product did not apply",
                 RefundDeposit {
                     state: DepositState::Credited,
                     ..deposit()
                 },
-                Err(RefundIneligible::Credited),
+                Ok(()),
             ),
             (
-                "swept credited value",
+                "swept credited value the product did not apply",
                 RefundDeposit {
                     state: DepositState::Swept,
                     ..deposit()
                 },
-                Err(RefundIneligible::Credited),
+                Ok(()),
+            ),
+            (
+                "credited dust",
+                RefundDeposit {
+                    state: DepositState::Credited,
+                    amount: amount(9),
+                    ..deposit()
+                },
+                Err(RefundIneligible::Dust),
             ),
         ];
 

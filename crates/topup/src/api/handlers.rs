@@ -77,7 +77,8 @@ pub(crate) async fn get_deposit_address(
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, None).await
+    let account = require_account(&state, product.id, &external_id).await?;
+    deposit_address(&state, &product, account, None).await
 }
 
 #[utoipa::path(
@@ -101,7 +102,8 @@ pub(crate) async fn create_deposit_address(
     Extension(product): Extension<Product>,
     Path((_product_slug, external_id)): Path<(String, String)>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, None).await
+    let account = ensure_account(&state, product.id, &external_id).await?;
+    deposit_address(&state, &product, account, None).await
 }
 
 #[utoipa::path(
@@ -128,7 +130,8 @@ pub(crate) async fn rotate_deposit_address(
     Path((_product_slug, external_id)): Path<(String, String)>,
     Json(request): Json<RotateDepositAddressRequest>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    deposit_address(&state, &product, &external_id, Some(request.from_version)).await
+    let account = require_account(&state, product.id, &external_id).await?;
+    deposit_address(&state, &product, account, Some(request.from_version)).await
 }
 
 #[utoipa::path(
@@ -661,10 +664,9 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
 async fn deposit_address(
     state: &AppState,
     product: &Product,
-    external_id: &str,
+    account: Account,
     rotate_from_version: Option<u64>,
 ) -> ApiResult<Json<DepositAddressResponse>> {
-    let account = require_account(state, product.id, external_id).await?;
     let route = state.route_for_product(product)?;
     require_unfrozen_chain(state, route).await?;
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
@@ -730,6 +732,16 @@ async fn require_unfrozen_chain(state: &AppState, route: &RouteFile) -> ApiResul
         return Err(ApiError::chain_frozen());
     }
     Ok(())
+}
+
+/// Finds or creates the account, so creating a quote or an address is one call.
+pub(super) async fn ensure_account(
+    state: &AppState,
+    product_id: Uuid,
+    external_id: &str,
+) -> ApiResult<Account> {
+    validate_external_id(external_id)?;
+    repository::register_account(&state.pool, product_id, external_id).await
 }
 
 pub(super) async fn require_account(

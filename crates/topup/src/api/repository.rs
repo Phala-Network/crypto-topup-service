@@ -970,6 +970,7 @@ impl TryFrom<AddressRow> for Address {
 #[derive(FromRow)]
 struct DepositViewRow {
     id: Uuid,
+    external_id: String,
     chain_id: i64,
     tx_hash: String,
     log_index: i64,
@@ -985,6 +986,7 @@ struct DepositViewRow {
     state: String,
     valuation_at: Option<DateTime<Utc>>,
     price_scaled: Option<String>,
+    price_source: Option<String>,
     credit_minor: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1114,6 +1116,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
     fn try_from(row: DepositViewRow) -> Result<Self, Self::Error> {
         Ok(Self {
             id: row.id,
+            external_id: row.external_id,
             chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
             tx_hash: row.tx_hash,
             log_index: u64::try_from(row.log_index).map_err(|_| ApiError::internal())?,
@@ -1133,6 +1136,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             state: row.state,
             valuation_at: row.valuation_at,
             price_scaled: row.price_scaled,
+            price_source: row.price_source,
             credit_minor: row.credit_minor,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1143,12 +1147,14 @@ impl TryFrom<DepositViewRow> for DepositResponse {
 fn deposit_query() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         r#"
-        SELECT deposit.id, deposit.chain_id, deposit.tx_hash, deposit.log_index,
+        SELECT deposit.id, account.external_id, deposit.chain_id, deposit.tx_hash,
+               deposit.log_index,
                deposit.block_number, deposit.block_time, address.address, address.lock_ref,
                deposit.route, deposit.route_version, deposit.asset_contract,
                deposit.from_address, deposit.amount_atomic::text AS amount_atomic,
                deposit.state, deposit.valuation_at, deposit.price_scaled::text AS price_scaled,
-               deposit.credit_minor::text AS credit_minor, deposit.created_at, deposit.updated_at
+               deposit.price_source, deposit.credit_minor::text AS credit_minor,
+               deposit.created_at, deposit.updated_at
         FROM deposits AS deposit
         JOIN accounts AS account ON account.id = deposit.account_id
         JOIN addresses AS address ON address.id = deposit.address_id

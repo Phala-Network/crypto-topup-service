@@ -13,6 +13,7 @@ use crate::locks::{self, RateLockError, RequestedAmount};
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
+use super::handlers::ensure_account;
 use super::models::{
     CancelRateLockResponse, CreateRateLockRequest, RateLockResponse, RateLockSaltInputs,
 };
@@ -43,7 +44,7 @@ pub(crate) async fn create_rate_lock(
     Path((_product_slug, external_id)): Path<(String, String)>,
     Json(request): Json<CreateRateLockRequest>,
 ) -> ApiResult<Json<RateLockResponse>> {
-    let account = require_account(&state, product.id, &external_id).await?;
+    let account = ensure_account(&state, product.id, &external_id).await?;
     let route = state.route_for_product(&product)?;
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());

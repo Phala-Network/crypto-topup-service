@@ -380,6 +380,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         ensure!(response.status() == StatusCode::OK);
         let lookup = response_json(response).await?;
         ensure!(lookup["deposits"][0]["id"] == deposit.to_string());
+        ensure!(lookup["deposits"][0]["external_id"] == "refund-account");
         ensure!(lookup["deposits"][0]["timeline"][0]["to_state"] == "rejected");
         Ok(())
     }
@@ -389,7 +390,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
 }
 
 #[tokio::test]
-async fn refund_request_requires_rejection_and_approval_rechecks_current_state() -> Result<()> {
+async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_state() -> Result<()>
+{
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -453,7 +455,7 @@ async fn refund_request_requires_rejection_and_approval_rechecks_current_state()
         let requested = response_json(response).await?;
         let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
 
-        sqlx::query("UPDATE deposits SET state = 'credited', reason = NULL WHERE id = $1")
+        sqlx::query("UPDATE deposits SET state = 'confirmed', reason = NULL WHERE id = $1")
             .bind(refundable)
             .execute(&database.app_pool)
             .await?;
@@ -483,6 +485,7 @@ async fn refund_request_requires_rejection_and_approval_rechecks_current_state()
         .await?;
         ensure!(approvals == 0);
 
+        let app_for_credited = app.clone();
         let sanctioned_path = format!(
             "/v1/products/{}/deposits/{sanctioned}/refund-requests",
             product.slug
@@ -526,6 +529,37 @@ async fn refund_request_requires_rejection_and_approval_rechecks_current_state()
             .fetch_one(&database.app_pool)
             .await?;
         ensure!(status == "requested");
+
+        // The product asks to refund a credit it did not apply (for example a closed
+        // workspace); finance still approves.
+        let credited = seed_deposit(
+            &database.app_pool,
+            product.id,
+            "credited-refund",
+            100,
+            DepositState::Credited,
+            None,
+        )
+        .await?;
+        let credited_path = format!(
+            "/v1/products/{}/deposits/{credited}/refund-requests",
+            product.slug
+        );
+        let response = app_for_credited
+            .oneshot(signed_request(
+                Method::POST,
+                &credited_path,
+                serde_json::to_vec(&json!({
+                    "to_address": REFUND_DESTINATION,
+                    "amount": "100"
+                }))?,
+                PRODUCT_KID,
+                &product_key,
+                now + 5,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response_json(response).await?["status"] == "requested");
         Ok(())
     }
     .await;
