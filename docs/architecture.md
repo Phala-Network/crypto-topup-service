@@ -551,7 +551,8 @@ scanned only while it has a loaded route, and its rate locks expire only by its 
 in-flight deposits have resolved (`deploy/runbooks/route-retirement.md`).
 
 The route's attested `chain.flush` settings own the flush policy: the planning cron,
-`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, and replacement fee bump.
+`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, replacement fee bump, and
+the operator gas reserve `min_operator_balance_wei` (§16).
 Gas policy compares gas-token value and token balance value in USD using separate reference
 rates. Changing any of these fields requires a new attested configuration version. Engineering
 limits that do not decide money are code constants: RPC timeout, replacement delay (3 blocks),
@@ -628,8 +629,9 @@ fingerprinted by them and linked to its runbook; each loop checks in to a Sentry
 and a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and age,
 unflushed balance, open lock exposure, flush planning, reconciliation) is in the daily admin
 report (`GET /v1/admin/report/daily`). Alerts on age in state, any mismatch, lock exposure near cap, and lock-expiry
-failures; Crons monitors page on scanner lag, backup age > 2 min, and any stopped loop. Operator
-gas reserve has no alert yet.
+failures, and an operator native balance below the route's `min_operator_balance_wei`
+(`TopupOperatorGasReserveLow`, checked on each flusher maintenance tick); Crons monitors page on
+scanner lag, backup age > 2 min, and any stopped loop.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only

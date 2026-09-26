@@ -14,6 +14,7 @@ chain:
     native_price_asset: eth
     max_fee_per_gas_wei: 500000000000
     replacement_bps: 12500
+    min_operator_balance_wei: "10000000000000000"
 
 route: phala-cloud-sepolia-pha-usd
 version: 1

@@ -171,6 +171,7 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
         "TopupLockExpiryFailing" => "lock-expiry-worker-failure.md",
         "TopupLockExposureNearCap" => "lock-exposure-near-cap.md",
         "TopupUnsupportedInflows" => "rejected-funds-at-treasury.md",
+        "TopupOperatorGasReserveLow" => "gas-refill.md",
         "OperatorRoleMissing" | "MissingConsumedReceipt" => "operator-key-compromise.md",
         "Reverted" | "IsolatedAddress" | "PlanningExcluded" | "FeeCapReached" => {
             "flush-reverted-or-bisected.md"
@@ -532,6 +533,7 @@ mod tests {
             ("TopupLockExpiryFailing", &[]),
             ("TopupLockExposureNearCap", &[]),
             ("TopupUnsupportedInflows", &[]),
+            ("TopupOperatorGasReserveLow", &[]),
             ("OperatorRoleMissing", &[]),
             ("Reverted", &[]),
             ("NativeBalance", &[]),
