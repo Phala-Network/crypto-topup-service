@@ -168,7 +168,7 @@ Every case carries the section 11 obligation it checks; protocol cases have `nul
 | `deposit_identity` | 6 | A key other than `deposit:` plus the UUIDv5 recomputed from chain id, transaction hash, and log index is refused. |
 | `business_refusal` | — | The refused account yields a typed `200 rejected` with a reason and no ledger change. |
 | `processing` | — | The processing account yields a typed `200 processing`, retained by `GET`, with no ledger change. |
-| `unknown_get` | — | An unknown key returns `404` or `200 {"status":"unknown"}`. |
+| `unknown_get` | — | An unknown key returns `404`. The service resends a settlement only after a `404` by key; any other answer, such as `200 {"status":"unknown"}`, makes it poll again without ever resending. |
 | `restart_retention` | 2 | After the restart, every record reads back unchanged, the oldest accepted request replays to the same destination id, and no ledger changed. |
 
 ## Report format
@@ -226,8 +226,9 @@ cargo run --locked -p topup-conformance --all-features --bin topup-conformance-r
 `--database-url` (or without the `postgres` feature) state lives in memory, so a real process
 restart loses it and `restart_retention` fails, as it should.
 
-`--broken <variant>` (memory storage only) removes exactly one obligation. The integration tests
-assert that each variant fails exactly the listed cases and passes every other case:
+`--broken <variant>` (memory storage only) removes exactly one obligation or protocol rule. The
+integration tests assert that each variant fails exactly the listed cases and passes every other
+case:
 
 | Variant | Obligation | Defect | Failing cases |
 |---|---|---|---|
@@ -239,6 +240,7 @@ assert that each variant fails exactly the listed cases and passes every other c
 | `period-cap-race` | 4 | Checks the period cap outside the credit's critical section. | `per_period_cap` |
 | `evidence` | 5 | Checks evidence request fields but never consults its RPC. | `chain_evidence` |
 | `deposit-identity` | 6 | Does not recompute the deposit id. | `deposit_identity` |
+| `unknown-status` | — | Answers `GET` of an unknown key with `200 {"status":"unknown"}`. | `unknown_get` |
 
 The integration tests in `crates/conformance/tests/reference.rs` start their own Anvil and are
 skipped with a message when `anvil` or `forge` is missing; the PostgreSQL case additionally needs

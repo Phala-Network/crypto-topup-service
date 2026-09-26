@@ -325,8 +325,9 @@ mapping: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code 
 `GET {settlement_url}/{key}` returns `200` with `status`, `destination_tx_id` or `reason` as
 above, and `payload`: the original payload you accepted. The service checks that its
 `idempotency_key`, `account_id`, `chain_id`, `tx_hash`, and `log_index` match the deposit. Answer
-an unknown key with `404`: the conformance suite also accepts `200 {"status":"unknown"}`, but the
-service does not resend on it and keeps polling instead.
+an unknown key with `404`, the only answer on which the service resends; any other answer, such
+as `200 {"status":"unknown"}`, makes it poll again without ever resending (the conformance case
+`unknown_get`).
 
 ## 6. Webhooks
 
