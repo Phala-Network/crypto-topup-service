@@ -1,93 +1,48 @@
 # Reconciliation mismatch
 
-## Trigger
+**Trigger:** `TopupReconciliationMismatch` (tagged with its `check`), or the `topup-reconciler`
+Crons monitor checking in `error` (a check could not complete) or missing its check-in.
 
-Trigger on `TopupReconciliationMismatch` (a first-seen mismatch, tagged with its `check`), an
-`error` or missed check-in of the Sentry Crons monitor `topup-reconciler`, or a non-zero exit from
-`topup reconcile`.
+**Impact:** the reconciler runs the architecture §13 checks every 10 minutes and stores each first
+observation once. Safe repairs raise no alert. By check:
 
-## Impact and blast radius
-
-C8 runs the architecture section 13 checks every 10 minutes.
-Each first observation is stored once in append-only `reconciliation_findings` with an `audit` row.
-Findings with `repair_applied=true` are the safe repairs section 13 allows and raise no alert.
-Mismatches act by check:
-
-| `check_name` | Automatic action | Blast radius |
+| `check` | Automatic action | Blast radius |
 |---|---|---|
-| `address_derivation` | `chain:<chain_id>` block; follow [Chain frozen](chain-frozen.md) | Whole chain |
-| `credit_recomputation` | `address:<address_id>` block; the address is excluded from flush planning | One address |
-| `custody_balance` | Alert only | Address or treasury totals |
-| `missing_deposit` | Repair: insert `detected` | One deposit |
-| `missing_flush_link` | Repair: link the deposit to its confirmed `flushed` row | One deposit |
-| `sent_settlement` | Repair: adopt the product's GET answer under a lease | One deposit |
-| `post_restore_settlement` | Restore gate stays incomplete | Every restored settlement |
+| `address_derivation` | freezes the chain: [Chain frozen](chain-frozen.md) | whole chain |
+| `credit_recomputation` | blocks the address, which leaves flush planning | one address |
+| `custody_balance` | alert only | an address or the treasury totals |
+| `missing_deposit`, `missing_flush_link`, `sent_settlement` | repair: insert, link, or adopt the product's answer | one deposit |
+| `post_restore_settlement` | keeps a restore check incomplete ([RESTORE.md](../RESTORE.md)) | the restore |
 
-## First 5 minutes
+## First steps
 
-Read the findings, blocks, and reconciler audit trail with the application role:
+1. Read the finding's `subjects`, `expected`, and `observed` from the Sentry event.
+2. For `error` check-ins, read `reconciliation.failed_checks` in the daily report
+   (`admin GET /v1/admin/report/daily`); a failed check is usually an RPC error: check both
+   providers first.
+3. For `custody_balance`, compare both providers at the finalized block:
 
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
-BEGIN TRANSACTION READ ONLY;
-SELECT check_name,subjects,expected,observed,repair_applied,incomplete,created_at
-FROM reconciliation_findings ORDER BY created_at DESC, check_name LIMIT 50;
-SELECT block_key,scope,chain_id,address_id,check_name,reason,created_at
-FROM reconciliation_blocks ORDER BY created_at, block_key;
-SELECT action,subject,reason,created_at FROM audit
-WHERE actor='reconciler' ORDER BY created_at DESC LIMIT 20;
-COMMIT;
-SQL
-```
+   ```sh
+   export FINALIZED_BLOCK="$(cast block finalized -f number --rpc-url "$RPC_PROVIDER_A_URL")"
+   cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$FINALIZED_BLOCK" --rpc-url "$RPC_PROVIDER_A_URL"
+   cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$FINALIZED_BLOCK" --rpc-url "$RPC_PROVIDER_B_URL"
+   ```
 
-For a custody finding, compare the stored expectation with both providers at the finalized block:
+## Decide
 
-```sh
-export FINALIZED_BLOCK="$(cast block finalized -f number --rpc-url "$RPC_PROVIDER_A_URL")"
-cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$FINALIZED_BLOCK" --rpc-url "$RPC_PROVIDER_A_URL"
-cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$FINALIZED_BLOCK" --rpc-url "$RPC_PROVIDER_B_URL"
-```
-
-To re-run the checks on demand after a fix, run one pass inside the service container. It uses the
-same application role and attested route files, and is idempotent:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup reconcile --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml
-```
-
-## Decision tree
-
-- `address_derivation`: follow [Chain frozen](chain-frozen.md).
-- `credit_recomputation`: compare the stored price, valuation time, amount, and route version with
-  the product's accepted payload. If the product credited a different amount, open a Finance
-  incident; do not change `credit_minor`.
-- `custody_balance` on one address: check for an unrecorded transfer, a pending flush, or a
+- `credit_recomputation`: compare the deposit's stored valuation (support lookup) with the
+  product's accepted payload. If the product credited a different amount, open a Finance incident;
+  never change the credit.
+- `custody_balance` on one address: look for an unrecorded transfer, a pending flush, or a
   fee-on-transfer token. On treasury totals: compare treasury inflow with `Flushed` events and
   involve Finance.
-- Repairs only (`repair_applied=true`): verify the repaired rows advance; no manual action.
-- The reconciler reports failed checks rather than findings: check both providers first.
 
-## Remediation
+## Fix
 
-Fix the cause, not the finding. Findings and audit rows are append-only evidence. The application
-role cannot delete blocks; lifting one is **HUMAN-ONLY** for the database owner after Engineering
-and Finance sign off, from an owner session outside the service container. Never place owner
-credentials in the service container:
+Fix the cause, not the finding. An address block can be lifted only by the database owner, which a
+production CVM does not offer; escalate to Engineering. While the mismatch persists, every round
+blocks again.
 
-```sql
-DELETE FROM reconciliation_blocks WHERE block_key = 'address:<address_id>';
-```
+## Done when
 
-If the mismatch persists, the next pass writes the block again.
-
-## Verification
-
-A fresh `topup reconcile` exits `0`, no new mismatch appears for the subject, the block is
-absent, and flush planning includes the address again. `TopupReconciliationMismatch` resolves
-after its 15-minute window.
-
-## Rollback
-
-Nothing to roll back in the service: blocks are re-created automatically while a mismatch persists.
-If a lifted block was premature, the database owner does not need to re-insert it; the next pass
-does. Keep the finding and audit rows.
+The next round raises no new finding for the subject and `topup-reconciler` checks in `ok`.

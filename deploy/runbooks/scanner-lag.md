@@ -1,60 +1,31 @@
 # Scanner lag
 
-## Trigger
+**Trigger:** the `topup-scanner-<chain_id>` monitor missing its check-ins (no successful finalized
+scan for five minutes). If the chain is frozen (`TopupReconciliationMismatch`,
+`check:address_derivation`), the scanner is paused on purpose: [Chain frozen](chain-frozen.md).
 
-Trigger on missed check-ins of the Sentry Crons monitor `topup-scanner-<chain_id>` (no successful
-finalized scan for five minutes; each successful scan reaches the finalized head). If the chain has a
-`reconciliation_blocks` row with `scope='chain'`, the scanner is paused on purpose: follow
-[Chain frozen](chain-frozen.md) instead.
+**Impact:** new finalized transfers are not detected, so customers wait; rate locks on the chain
+cannot expire. Existing deposits continue. One chain and every route on it.
 
-## Impact and blast radius
-
-New finalized transfers are not detected, so customers wait. Existing rows can continue through
-the pump. Blast radius is one chain and every route on it.
-
-## First 5 minutes
+## First steps
 
 ```sh
 cast block finalized --json --rpc-url "$RPC_PROVIDER_A_URL" | jq '(.data // .) | {number,hash}'
 cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '(.data // .) | {number,hash}'
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT chain_id,scanned_block FROM cursors ORDER BY chain_id; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; COMMIT;"
-printf '%s' '{"scopes":["quotes","addresses"]}' > /tmp/pause.json
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/pause.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" --data-binary @/tmp/pause.json "$BASE_URL/v1/admin/routes/$ROUTE/pause"
 ```
 
-Pause address/quote issuance when lag is material; existing addresses remain valid and monitored.
+When the lag is material, pause issuance (existing addresses stay valid and watched):
+`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses"]}'`.
 
-## Decision tree
+## Decide
 
-- Both providers healthy and cursor static: inspect/restart the service loop.
-- One provider unhealthy: follow provider disagreement/config replacement.
-- Cursor advances but lag grows: provider rate limit or scan workload is insufficient. A rate limit
-  shows as `finalized chain scan failed transiently` warnings whose `error` field names the
-  throttling provider by its configured id:
+- A provider down, throttling, or behind: the scanner reads provider A; follow
+  [provider disagreement](provider-disagreement.md) and replace it through a route upgrade.
+- Both providers healthy: the scanner loop has stopped. **HUMAN-ONLY:** restart the CVM
+  (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`); the scanner resumes from its committed
+  cursor.
 
-  ```text
-  finalized head fetch failed for provider `<provider id>` (HTTP 429)
-  ```
+## Done when
 
-## Remediation
-
-Restart only the service container after preserving logs; scanner resumes from the committed cursor:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml logs --no-color --tail=300 topup
-docker compose -f deploy/docker-compose.staging.yml restart topup
-```
-
-Provider or batching changes require a reviewed attested config upgrade; never advance the cursor in
-SQL.
-
-## Verification
-
-Cursor catches the common finalized height, backfilled deposits appear once, duplicate logs do not
-create duplicate rows, and both providers agree. Resume addresses and quotes.
-
-## Rollback
-
-If restart worsens lag, re-pause issuance and redeploy the retained prior compose hash. The cursor
-must remain at its last committed value.
+`topup-scanner-<chain_id>` checks in again, deposits made during the lag appear (support lookup by
+`tx_hash`), and issuance is resumed.

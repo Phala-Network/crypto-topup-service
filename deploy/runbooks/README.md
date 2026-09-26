@@ -1,116 +1,111 @@
 # Operations runbooks
 
-These runbooks implement architecture sections 10-16 and plan work package D5. C12 (admin
-operations), C8 (reconciliation), C10 (rate locks), C7b (flush pause), and A2 (deterministic
-deployment) are on `main`. D3 backup and restore (#58) is covered by `deploy/RESTORE.md` and `deploy/local/restore-drill.sh`.
+Each runbook starts from a Sentry alert or Crons monitor ([deploy/README.md, "Sentry"](../README.md#sentry))
+and works only through the surfaces a production CVM offers: it has no SSH, no logs, and no
+database access. Run `make runbook-check` after editing a runbook: it checks every `topup` command
+against the CLI and every API call against `crates/topup/openapi.json`.
 
-## Required environment
+## Surfaces
 
-Use an application-role `DATABASE_URL`; every diagnostic transaction below also declares
-`READ ONLY`. Load operator values from the attested route and secret manager, never from chat or a
-ticket:
+| Surface | What it shows or does |
+|---|---|
+| Sentry | the issue: its `alert` tag and grouping tags (`route`, `state`, `check`, `chain`, `scope`), a `runbook` link, and the log line's fields (for example `deposit_id`, or a finding's `subjects`, `expected`, `observed`); at most one event per issue every 10 minutes. Crons monitors for every loop; an Uptime monitor on `/healthz` |
+| Daily report, admin-signed `GET /v1/admin/report/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic`, `open_rate_lock_exposure_atomic`, `rejected_holds_atomic`, `treasury_balance_atomic`, and `flush_planning` (`at`, `outcome`, `error`); globally `exposure_minor` and the last reconciliation round's `failed_checks` |
+| Support lookup, product-signed | `GET /v1/products/{p}/deposits?tx_hash=\|address=\|lock_ref=` and `GET /v1/products/{p}/deposits/{id}`: the deposit and its transition timeline with each step's evidence. Signed with the product's key, so run by the product's support tooling (staging: the reference product's seed) |
+| Attestation, `GET /v1/attestation?nonce=` | the settlement key and each chain's flusher operator address ([verification](../README.md#attestation-ingress-and-egress)) |
+| Chain | `cast` reads through both RPC providers: balances, nonces, roles, receipts, `addressOf` |
+| Admin actions, admin-signed | route `pause`/`resume` of the scopes `quotes`, `addresses`, `settlement`, `flush`, `refunds`; deposit `nudge`; refund `approve`/`record`; product issue |
+| Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
-```sh
-export BASE_URL=https://topup.example.internal
-export ROUTE=phala-cloud-sepolia-pha-usd
-export ROUTE_FILE=deploy/config/routes/phala-cloud-sepolia-pha.yaml
-export CHAIN_ID=11155111
-export RPC_PROVIDER_A_URL=https://provider-a.example
-export RPC_PROVIDER_B_URL=https://provider-b.example
-export FACTORY=0x...
-export IMPLEMENTATION=0x...
-export TREASURY=0x...
-export TOKEN=0x...
-export OPERATOR_ADDRESS=0x...
-export ADMIN_KEY_FILE=/run/secrets/topup-admin-ed25519.pem
-export ADMIN_KEY_ID=admin/v1
-# Inside the CVM: the password is derived there; psql in the postgres container needs none.
-export DATABASE_URL=postgresql://topup_service@/topup
-psql() { dc exec -T postgres psql "$@"; }
-```
+Database rows the API does not expose (reconciliation findings and blocks, flush rows, outbox
+rows, audit) and log lines other than the errors and alerts Sentry receives are not observable in
+production. A restore-check instance ([RESTORE.md](../RESTORE.md)) serves the same read API on a
+copy restored from backup and reports row counts and a full reconciliation round's findings on
+its `/healthz`.
 
-`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`: the service verifies `@target-uri`
-against that origin, so a signature over any other host or scheme fails with `401`.
+## Environment
 
-For an authenticated admin request, write the exact body to a file, sign those exact bytes, then
-pass the three returned headers to `curl`. Signatures are single-use and expire after five minutes:
+Load values from the attested route and the admin's key store, never from chat or a ticket.
+`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, or signatures fail with `401`.
 
 ```sh
-printf '%s' '{"scopes":["settlement"]}' > /tmp/topup-admin-body.json
-mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST \
-  "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/topup-admin-body.json \
-  "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
-  -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
-  --data-binary @/tmp/topup-admin-body.json \
-  "$BASE_URL/v1/admin/routes/$ROUTE/pause"
+export BASE_URL=https://<app_id>-8080.<gateway domain>
+export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
+export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
+export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x... OPERATOR_ADDRESS=0x...
+export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/v1
+# admin METHOD PATH [JSON BODY]: signs the exact body (single-use, valid five minutes) and sends it.
+admin() {
+  printf '%s' "${3:-}" > /tmp/topup-admin-body
+  mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh "$1" "$BASE_URL$2" \
+    /tmp/topup-admin-body "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
+  curl --fail-with-body -sS -X "$1" -H 'content-type: application/json' \
+    -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
+    --data-binary @/tmp/topup-admin-body "$BASE_URL$2"
+}
+admin GET /v1/admin/report/daily | jq
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["settlement"]}'
 ```
+
+A pause answers `200` with the route's `paused_scopes`; `resume` takes the same body. A flush
+already broadcast still confirms after a `flush` pause; an unsigned plan is voided and planned
+again after resume. Route config (providers, caps, thresholds, operator key version) is attested:
+changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../README.md#deploy)).
 
 ## Alert and symptom index
 
-Every alert is a Sentry issue ([deploy/README.md, "Sentry"](../README.md#sentry)). A `Topup…` or
-flusher alert name is the issue's `alert` tag, next to its grouping tags (`state:detected`) and a
-`runbook` tag linking the page below; a `topup-…` name is a Crons monitor that missed a check-in or
-checked in `error`; `/healthz` is watched by an Uptime monitor.
-
-| Alert or symptom | Runbook |
+| Alert, monitor, or symptom | Runbook |
 |---|---|
 | `TopupReconciliationMismatch` (`check:address_derivation`), `423 chain_frozen` | [Chain frozen](chain-frozen.md) |
-| `TopupReconciliationMismatch` (any other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
+| `TopupReconciliationMismatch` (other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
+| `TopupDepositStateAgeExceeded` (`state:detected` or `state:confirmed`) | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
+| `TopupDepositStateAgeExceeded` (`state:cleared`), `topup-pump-<n>` | [Stuck settlement](stuck-settlement.md) |
+| `TopupDepositStateAgeExceeded` (`state:credited`: not swept after 48 hours) | [Flush reverted or bisected](flush-reverted-or-bisected.md); a forwarder below the route's `min_flush_atomic` is never swept |
+| Settlement `422`, product reports a payload mismatch | [422 payload mismatch](payload-mismatch-422.md) |
 | `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
-| `TopupLockExpiryFailing`, `topup-lock-expiry`, `rate-lock expiry scan failed` issue, overdue open locks | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
+| `TopupLockExpiryFailing`, `topup-lock-expiry` | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
 | `topup-backup` | [Backup age](backup-age.md) |
-| `TopupOperatorGasReserveLow`, flush sends failing for gas | [Gas refill](gas-refill.md) |
-| `TopupDepositStateAgeExceeded` (`state:detected`), providers disagreeing | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
-| `TopupDepositStateAgeExceeded` (`state:confirmed`, sanctions screen retrying) | [Provider disagreement](provider-disagreement.md) |
-| `TopupDepositStateAgeExceeded` (`state:cleared`), repeated `processing`/`409` | [Stuck settlement](stuck-settlement.md) |
-| Settlement HTTP `422`, `resend_forbidden=true` | [422 payload mismatch](payload-mismatch-422.md) |
-| `Reverted`, `IsolatedAddress`, `PlanningExcluded`, `FeeCapReached`, `topup-flush-<route>` missed | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
-| Unflushed balance or `credited` deposits not swept after a flush schedule, `topup-flush-<route>` or `topup-reconciler` check-in `error` | Read the route's `flush_planning` and the report's `reconciliation.failed_checks` in `GET /v1/admin/report/daily` (production has no logs), then the runbook for the failing step: [Flush reverted or bisected](flush-reverted-or-bisected.md), [Reconciliation mismatch](reconciliation-mismatch.md), or [Provider disagreement](provider-disagreement.md) for RPC errors |
-| `topup-outbox-<n>`, undelivered outbox events piling up | [Outbox backlog](outbox-backlog.md) |
-| `topup-pump-<n>` | [Stuck settlement](stuck-settlement.md) |
-| `TopupUnsupportedInflows`, rejected funds reported at treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
-| Unauthorized operator transaction, consumed nonce without receipt | [Operator key compromise](operator-key-compromise.md) |
-| `OperatorRoleMissing` flusher alert, `flusher paused: the configured operator does not hold OPERATOR_ROLE` log | [Operator key compromise](operator-key-compromise.md): expected after an emergency revoke until the next key version is deployed; otherwise the new version was deployed before its grant |
-| Database loss or restore drill | [Restore](restore.md) |
+| `topup-outbox-<n>`, `outbox delivery poll failed`, product reports missing webhooks | [Outbox backlog](outbox-backlog.md) |
+| `Reverted`, `IsolatedAddress`, `PlanningExcluded`, `FeeCapReached`, `topup-flush-<route>`, `flush_planning.outcome` `failed` or `send_failed` | [Flush reverted or bisected](flush-reverted-or-bisected.md) |
+| `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
+| `OperatorRoleMissing`, `MissingConsumedReceipt`, unexplained operator transaction | [Operator key compromise](operator-key-compromise.md) |
+| `TopupUnsupportedInflows`, rejected funds at the treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
+| `NativeBalance` (native coin at a forwarder; the flusher never sweeps it) | No runbook: escalate to Finance and Engineering |
+| Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
+| Approved refund | [Refund execution](refund-execution.md) |
 | Approved treasury migration | [Treasury change](treasury-change.md) |
-| Approved refund ready for Safe execution | [Refund execution](refund-execution.md) |
-| Any customer-impacting incident | [Incident communication](incident-communication.md) |
-| User paid to their deposit address on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
+| Payment sent on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
+| Any customer-impacting incident | [Incident communication](incident-communication.md) |
 
 ## Exercise status
 
-Exercises ran against a task-scoped PostgreSQL 16 container (the setup now uses 18) and local Anvil, with real `topup` CLI
-invocations or the repository's PostgreSQL/Anvil integration tests. A box is checked only when the
-runbook's service-side procedure ran end to end with seeded, non-empty data. Human-only Safe,
-Compliance, and publication steps are never exercised locally, and alert firing is not evidence
-for any runbook.
+Local exercises ran against PostgreSQL and Anvil with the `topup` CLI or the integration tests;
+Safe, Compliance, and publication steps are human-only and were never exercised. Except the staging
+restore drill, every exercise ran the earlier, database-level form of these runbooks; none has run
+in its current form against a CVM.
 
-| Runbook | Local status | G2 exercised once |
-|---|---|---|
-| Operator key compromise | Partial: key-version rotation, role gate, and revoke while running covered by the Anvil integration test; Finance Safe execution is human-only | [ ] |
-| Provider disagreement | Partial: sanctions truth table; chain-evidence fixture missing | [ ] |
-| Price outage | Partial; blocked on controllable price-source fixtures | [ ] |
-| Stuck settlement | Partial: seeded nudge; blocked on a `processing`/`409` mock product | [ ] |
-| 422 payload mismatch | Complete: 422, no resend, GET-first adoption with the mock product | [x] |
-| Restore | Partial: local `deploy/local/restore-drill.sh` controlled and crash drills pass; first staging drill restored but was aborted on live routing (fixed), clean rerun pending | [ ] |
-| Treasury change | Partial; remaining steps are human-only Safe/deployment work | [ ] |
-| Gas refill | Partial; remaining transfer is human-only Safe work | [ ] |
-| Refund execution | Complete: request, approve, record, finality-checked confirm | [x] |
-| Rejected funds at treasury | Partial: seeded report; Compliance/Safe work remains | [ ] |
-| Outbox backlog | Partial; blocked on a seeded delivered event and receiver | [ ] |
-| Scanner lag | Partial; blocked on a controllable dual-provider chain fixture | [ ] |
-| Flush reverted or bisected | Complete: Anvil selective revert, fresh nonce, bisect, isolation | [x] |
-| Lock exposure near cap | Complete: seeded ledger query and C10 cap enforcement | [x] |
-| Lock expiry worker failure | Partial: running service, injected drift of the since-removed `lock_exposure` counter, owner repair while running | [ ] |
-| Reconciliation mismatch | Complete: `topup reconcile` findings, blocks, owner-only lift | [x] |
-| Chain frozen | Complete: freeze, dual-provider check, owner lift, re-freeze, clean pass | [x] |
-| Backup age | Partial: D3 archiving and local restore drills available | [ ] |
-| Incident communication | Partial; publication and role actions are human-only | [ ] |
-| Wrong-network deposit | Not exercised; every recovery step is human-only Finance and deployer work | [ ] |
-| Route or chain retirement | Not exercised; the upgrade itself is human-only Safe work | [ ] |
-
-Run `make runbook-check` after editing any runbook. Exercise evidence is under
-[`exercises/`](exercises/).
+| Runbook | Last run | Outcome | Evidence |
+|---|---|---|---|
+| Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Flush reverted or bisected | 2026-09-23, local | complete: selective revert, fresh nonce, bisection, isolation, pause voiding | [#83](https://github.com/Phala-Network/crypto-topup-service/pull/83) |
+| 422 payload mismatch | 2026-09-22, local | complete: 422, no resend, GET-first adoption | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Refund execution | 2026-09-22, local | complete: request, approve, record, finality-checked confirm | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Operator key compromise | 2026-09-22, local | partial: revoke, role gate, key-version rotation; Safe steps human-only | [#74](https://github.com/Phala-Network/crypto-topup-service/pull/74) |
+| Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/crypto-topup-service/pull/126) |
+| Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Provider disagreement | 2026-09-22, local | partial: sanctions truth table; no disagreeing-provider fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Stuck settlement | 2026-09-22, local | partial: nudge; no `processing`/`409` product fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Price outage | 2026-09-22, local | partial: route pause; no controllable price-source fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Rejected funds at treasury | 2026-09-22, local | partial: report; Compliance and Safe steps human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Gas refill | 2026-09-22, local | partial: balance and nonce reads; the transfer is human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Treasury change | 2026-09-22, local | partial: tooling refuses without Safe expectations; the rest is human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Outbox backlog | 2026-09-22, local | partial: no controllable webhook receiver | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Scanner lag | 2026-09-22, local | partial: no controllable finalized-chain fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Backup age | 2026-09-22, local | partial: predates encrypted backups; local restore drills cover archiving | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Incident communication | 2026-09-22, local | partial: publication and roles human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Wrong-network deposit | — | not exercised; every step is human-only | — |
+| Route or chain retirement | — | not exercised; the upgrade is human-only | — |

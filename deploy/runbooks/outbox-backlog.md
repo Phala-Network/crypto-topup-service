@@ -1,55 +1,30 @@
 # Outbox backlog
 
-## Trigger
+**Trigger:** the `topup-outbox-<n>` monitor missing its check-ins, `outbox delivery poll failed`
+issues, or a product reporting that webhooks stopped.
 
-Trigger on missed check-ins of the Sentry Crons monitor `topup-outbox-<n>`, `outbox delivery poll
-failed` Sentry issues, a growing undelivered count or attempts in the query below, or product
-reports that notifications stopped.
+**Impact:** deposit states stay authoritative; only notifications are late. Deliveries retry with
+backoff by themselves. One product's receiver or every product.
 
-## Impact and blast radius
+## First steps
 
-Ledger and deposit states remain authoritative, but product notifications are delayed. One product
-webhook or all products may be affected.
+1. Read the error of `outbox delivery poll failed` in Sentry: a database error stops every
+   delivery; a receiver's failures do not raise an issue.
+2. With the product, check its webhook endpoint, TLS, and signature verification. The product can
+   catch up at any time by fetching state (deposits, rate locks), which receivers must act on
+   anyway.
 
-## First 5 minutes
+Undelivered events and their attempts are not observable in production, and the `topup outbox
+replay` CLI needs a shell on the CVM, which production does not have.
 
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT id,event_type,attempts,created_at,next_attempt_at,response FROM outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 100; COMMIT;"
-curl --fail-with-body -sS "$BASE_URL/healthz"
-```
+## Decide
 
-Check the affected product webhook endpoint, TLS, and receiver status without exposing payloads or
-signing keys.
+- Receiver down or answering `5xx`: fix the receiver; deliveries resume by themselves.
+- Receiver rejects signatures (`4xx`): coordinate its settlement-key pinning.
+- Monitor silent with no error: the delivery worker stopped. **HUMAN-ONLY:** restart the CVM
+  (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).
 
-## Decision tree
+## Done when
 
-- Receiver down/5xx: wait for recovery and preserve automatic backoff.
-- 4xx/signature rejection: coordinate key/header verification before replay.
-- Delivery succeeded but local row pending: investigate persistence before forcing replay.
-
-## Remediation
-
-Replay one stable webhook ID after the receiver is ready:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup outbox replay --id "$EVENT_ID"
-```
-
-Replay a bounded time window only after counting it with SQL:
-
-```sh
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup outbox replay --since "$SINCE_RFC3339"
-```
-
-Use `--force` only **HUMAN-ONLY** after the receiver confirms idempotent handling of already
-delivered IDs.
-
-## Verification
-
-Pending age/count return to baseline, `delivered_at` is set, receiver logs show one logical event,
-and no product balance changes result from replay.
-
-## Rollback
-
-Replay scheduling is not reversible. Stop further manual replay, let idempotency absorb duplicates,
-and investigate the receiver before retrying.
+`topup-outbox-<n>` checks in again and the product receives new events; receivers deduplicate by
+webhook id.

@@ -1,47 +1,34 @@
 # Incident communication
 
-## Trigger
+**Trigger:** any customer-impacting pause, credit delayed beyond policy, custody or reconciliation
+mismatch, key compromise, restore, or material provider or price outage.
 
-Trigger for any customer-impacting pause, delayed credit beyond policy, custody/reconciliation
-mismatch, key compromise, restore, or material provider/price outage.
+**Impact:** poor communication causes repeated deposits, support load, and unsafe pressure on
+operators. State the affected routes, scopes, and customer effect; never publish keys, addresses
+tied to a customer, raw payloads, or internal reason codes.
 
-## Impact and blast radius
+## First steps
 
-Poor communication can cause repeated deposits, support load, and unsafe operator pressure. State
-the affected routes/scopes and customer effect; never publish keys, addresses tied to a customer,
-raw payloads, or internal reason codes.
+1. Collect the facts: `curl -fsS "$BASE_URL/healthz"`, the daily report
+   (`admin GET /v1/admin/report/daily`), the open Sentry issues, and the scopes you paused.
+2. **HUMAN-ONLY:** assign incident commander, operations lead, communications lead, and scribe;
+   publish an initial status update within the organizational target.
 
-## First 5 minutes
+## Decide
 
-```sh
-curl --fail-with-body -sS "$BASE_URL/healthz"
-export NONCE="$(openssl rand -hex 32)"
-docker compose -f deploy/docker-compose.staging.yml exec -T topup topup attest --nonce "$NONCE" > /tmp/topup-attestation.json
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<< "BEGIN TRANSACTION READ ONLY; SELECT state,count(*) FROM deposits GROUP BY state ORDER BY state; SELECT count(*) FILTER (WHERE delivered_at IS NULL) AS pending_outbox FROM outbox; SELECT route,paused_scopes FROM route_pauses ORDER BY route; COMMIT;"
-```
-
-**HUMAN-ONLY:** assign incident commander, operations lead, communications lead, and scribe. Publish
-an initial status update within the organizational target.
-
-## Decision tree
-
-- No customer impact and self-recovered within threshold: internal event, no public incident.
-- Delayed quotes/addresses/credits or refunds: public incident with affected route and scope.
+- No customer impact and recovered within threshold: internal event.
+- Delayed quotes, addresses, credits, or refunds: public incident naming the route and scope.
 - Custody, key, or reconciliation integrity risk: critical incident; involve Security, Finance,
-  Legal/Compliance before detailed claims.
+  and Legal/Compliance before detailed claims.
 
-## Remediation
+## Fix
 
-**HUMAN-ONLY:** status updates must include start time in UTC, affected route/network, observed
-customer effect, active pause scopes, what customers should do, and next update time. Link the
-technical runbook and incident ID. Do not estimate recovery until the owner accepts it.
+**HUMAN-ONLY:** each status update gives the start time in UTC, the affected route and network,
+the customer effect, active pause scopes, what customers should do, and the next update time. Do
+not estimate recovery until the owner accepts it.
 
-## Verification
+## Done when
 
-Before resolution, verify the technical runbook's exit criteria, all scopes intentionally resumed,
-backlogs recovered, Finance/Support briefed, and a final UTC timeline recorded.
-
-## Rollback
-
-If a resolution message is premature, immediately post a correction, re-open the incident, restore
-the prior severity, and reapply the relevant pause scopes.
+The technical runbook's exit criteria hold, every scope is intentionally resumed, Finance and
+Support are briefed, and a final UTC timeline is recorded. A premature resolution is corrected at
+once, with the incident reopened and its pauses re-applied.

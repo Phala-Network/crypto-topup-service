@@ -243,7 +243,7 @@ validate_operation() {
     return 1
 }
 
-# Checks curl and signing-helper invocations against OpenAPI method and path pairs.
+# Checks curl, signing-helper, and `admin` invocations against OpenAPI method and path pairs.
 validate_api() {
     local -a words
     local index method=GET fail=0
@@ -251,6 +251,10 @@ validate_api() {
     (( ${#words[@]} > 0 )) || return 0
     case "${words[0]}" in
         */sign-admin-request.sh)
+            validate_operation "${words[1]:-}" "${words[2]:-}" "$2" || fail=1
+            ;;
+        admin)
+            # The runbooks' `admin METHOD PATH [BODY]` helper (runbooks/README.md).
             validate_operation "${words[1]:-}" "${words[2]:-}" "$2" || fail=1
             ;;
         curl)
@@ -286,7 +290,7 @@ validate_commands() {
 }
 
 mapfile -t runbook_files < <(
-    find "$root/deploy/runbooks" "$root/deploy/runbooks/exercises" -maxdepth 1 -name '*.md' | sort
+    find "$root/deploy/runbooks" -maxdepth 1 -name '*.md' | sort
 )
 extract_commands "${runbook_files[@]}" > "$tmp/runbook.commands"
 validate_commands "$tmp/runbook.commands"
@@ -313,6 +317,7 @@ expected=(
     'unknown API operation: POST /v1/admin/not-a-route'
     'unknown API operation: GET /v1/admin/routes/r/pause'
     'unknown API operation: DELETE /v1/admin/report/daily'
+    'unknown API operation: PUT /v1/admin/products'
 )
 for message in "${expected[@]}"; do
     if ! grep -Fq -- "$message" "$tmp/negative.out"; then
