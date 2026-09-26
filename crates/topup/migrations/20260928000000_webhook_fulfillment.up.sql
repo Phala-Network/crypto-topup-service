@@ -1,4 +1,4 @@
--- Webhook fulfillment (docs/design/stripe-style-integration.md §3.3). A deposit that passes
+-- Webhook fulfillment (docs/architecture.md §7, §11). A deposit that passes
 -- screening is credited directly and the product is told with a `deposit.credited` webhook, so
 -- the `cleared` state and the settlement protocol are retired. History stays: `transitions` keeps
 -- `cleared`, `deposits.reason` keeps `product_refused`, and `settlements` stays as read-only audit.
@@ -34,7 +34,7 @@ BEFORE UPDATE OR DELETE ON settlements
 FOR EACH ROW EXECUTE FUNCTION reject_append_only_mutation();
 
 COMMENT ON TABLE settlements IS
-    'Read-only history of the retired settlement protocol (docs/design/stripe-style-integration.md); kept for the retention period.';
+    'Read-only history of the retired settlement protocol (docs/architecture.md §6); kept for the retention period.';
 
 COMMENT ON COLUMN accounts.closed_at IS
     'Time the workspace closed, for operators only. No service decision reads it: the product refuses a credit for a closed workspace by requesting its refund.';
