@@ -24,7 +24,8 @@ make image
 
 CI's `lint` job runs `make lint`. Its `test` job runs the whole workspace once with PostgreSQL and
 Foundry. There, database, Anvil, and conformance tests fail instead of skipping: the test helpers
-check `CI=true` and the conformance suite checks `CONFORMANCE_REQUIRE_TOOLS=1`.
+check `CI=true` and the conformance suite checks `CONFORMANCE_REQUIRE_TOOLS=1`. It then runs the
+suite against the Python staging reference product with `make product-conformance`.
 
 ## Branches and pull requests
 

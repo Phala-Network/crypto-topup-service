@@ -1,4 +1,4 @@
-"""The example's reference settlement endpoint stores only durable answers."""
+"""The reference product's settlement endpoint stores only durable answers."""
 
 from __future__ import annotations
 
@@ -12,9 +12,12 @@ from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import phala_cloud_integration as reference
+from reference_product.config import DRIVER_KEYID, ProductConfig
+from reference_product.ledger import ProductLedger
+from reference_product.server import AccountApi
+from reference_product.settlement import TRANSFER_TOPIC, Answer, JsonRpc, SettlementService
 from topup_sdk import RequestSigner, load_public_key
 from topup_sdk.addresses import deposit_id, forwarder_address, persistent_salt
 
@@ -28,7 +31,7 @@ AMOUNT = 25 * 10**18
 SETTLEMENT_SEED = bytes([3] * 32)
 PUBLIC_URL = "https://acme.example/topup"
 
-CONFIG = reference.SandboxConfig(
+CONFIG = ProductConfig(
     service_url="http://service.test",
     product_slug="acme",
     product_keyid="acme/v1",
@@ -54,7 +57,7 @@ def _log(**overrides: Any) -> dict[str, Any]:
         "logIndex": "0x0",
         "address": TOKEN,
         "topics": [
-            reference.TRANSFER_TOPIC,
+            TRANSFER_TOPIC,
             "0x" + "00" * 12 + "55" * 20,
             "0x" + "00" * 12 + ADDRESS[2:].lower(),
         ],
@@ -70,7 +73,7 @@ def _receipt(**overrides: Any) -> dict[str, Any]:
     return receipt
 
 
-class FakeRpc(reference.JsonRpc):
+class FakeRpc(JsonRpc):
     def __init__(
         self,
         receipt: dict[str, Any] | None,
@@ -91,17 +94,15 @@ class FakeRpc(reference.JsonRpc):
         return None if self.block_hash is None else {"hash": self.block_hash}
 
 
-def _service(rpc: reference.JsonRpc) -> reference.SettlementService:
-    ledger = reference.ProductLedger()
+def _service(rpc: JsonRpc) -> SettlementService:
+    ledger = ProductLedger()
     ledger.add_team(TEAM)
     ledger.record_address(ADDRESS, TEAM, version=1)
     signer = RequestSigner.from_seed("settlement/v1", SETTLEMENT_SEED)
-    return reference.SettlementService(
-        CONFIG, ledger, load_public_key(signer.public_key_base64()), rpc
-    )
+    return SettlementService(CONFIG, ledger, load_public_key(signer.public_key_base64()), rpc)
 
 
-def _post(service: reference.SettlementService) -> reference.Answer:
+def _post(service: SettlementService) -> Answer:
     payload = {
         "version": 1,
         "idempotency_key": KEY,
@@ -196,12 +197,12 @@ def test_verified_deposit_is_credited_once() -> None:
     assert service.ledger.credits_for(TEAM) == [(KEY, 115)]
 
 
-DRIVER = RequestSigner.from_seed(reference.DRIVER_KEYID, bytes([7] * 32))
+DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))
 
 
 def _account_call(
-    api: reference.AccountApi, method: str, path: str, body: bytes, signer: RequestSigner = DRIVER
-) -> reference.Answer:
+    api: AccountApi, method: str, path: str, body: bytes, signer: RequestSigner = DRIVER
+) -> Answer:
     target = "/topup" + path
     headers = signer.sign(method, "https://acme.example" + target, body)
     return api.handle(method, target, headers, body)
@@ -212,11 +213,9 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
 ) -> None:
     monkeypatch.delenv("ACME_SEED", raising=False)
     config = replace(CONFIG, product_seed_file=None, product_seed_env="ACME_SEED")
-    api = reference.AccountApi(
-        config, reference.ProductLedger(), load_public_key(DRIVER.public_key_base64())
-    )
+    api = AccountApi(config, ProductLedger(), load_public_key(DRIVER.public_key_base64()))
     register = json.dumps({"account_id": TEAM}).encode()
-    other = RequestSigner.from_seed(reference.DRIVER_KEYID, bytes([8] * 32))
+    other = RequestSigner.from_seed(DRIVER_KEYID, bytes([8] * 32))
     assert _account_call(api, "POST", "/accounts", register, other).status == 401
     unsigned = api.handle("POST", "/topup/accounts", {}, register)
     assert unsigned.status == 401
@@ -239,13 +238,13 @@ def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
             requested.append((deposit, to, amount))
             return SimpleNamespace(to_dict=lambda: {"id": "refund-1", "status": "requested"})
 
-    ledger = reference.ProductLedger()
+    ledger = ProductLedger()
     ledger.add_team(TEAM)
-    api = reference.AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
     api._client = Service()  # type: ignore[assignment]
     to = "0x" + "66" * 20
 
-    def refund(deposit: uuid.UUID | str, body: dict[str, Any]) -> reference.Answer:
+    def refund(deposit: uuid.UUID | str, body: dict[str, Any]) -> Answer:
         path = f"/accounts/{TEAM}/deposits/{deposit}/refunds"
         return _account_call(api, "POST", path, json.dumps(body).encode())
 

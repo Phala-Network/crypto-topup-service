@@ -19,11 +19,15 @@ import happy_path
 import harness
 import late_payment
 import overpayment
-import phala_cloud_integration as reference
 import product_refusal
 import restart_mid_flow
 import underpayment
 import unsupported_asset
+from reference_product.config import ProductConfig
+from reference_product.driver import Payer
+from reference_product.ledger import ProductLedger
+from reference_product.server import ProductServer, pin_settlement_key
+from reference_product.settlement import JsonRpc, WebhookReceiver
 
 SCENARIOS: dict[str, ModuleType] = {
     "happy_path": happy_path,
@@ -52,17 +56,14 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    config = reference.SandboxConfig.load(args.config)
-    rpc = reference.JsonRpc(config.rpc_url)
-    ledger = reference.ProductLedger()
+    config = ProductConfig.load(args.config)
+    ledger = ProductLedger()
     results: list[tuple[str, str, float, str]] = []
     with config.client() as client:
-        key = reference.pin_settlement_key(config)
-        settlement = harness.ScenarioSettlement(config, ledger, key, rpc)
-        with reference.ProductServer(settlement, reference.WebhookReceiver(ledger, key)):
-            context = harness.Context(
-                config, client, ledger, settlement, reference.Payer(config, rpc)
-            )
+        key = pin_settlement_key(config)
+        settlement = harness.ScenarioSettlement(config, ledger, key, JsonRpc(config.rpc_url))
+        with ProductServer(settlement, WebhookReceiver(ledger, key)):
+            context = harness.Context(config, client, ledger, settlement, Payer(config))
             for name in [name for name in args.names or SCENARIOS if name not in args.skip]:
                 results.append(_run(name, SCENARIOS[name].run, context))
 

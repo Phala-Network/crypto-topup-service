@@ -248,3 +248,13 @@ same storage again; the PostgreSQL case reconnects with a fresh pool.
 
 The production `Dockerfile` excludes both conformance binaries. They are integration and CI tools;
 the distroless runtime image contains only `/usr/local/bin/topup`.
+
+## Staging reference product
+
+`make product-conformance` ([deploy/product/conformance.sh](../deploy/product/conformance.sh)),
+run by CI, holds the product that settles staging, the Python
+[deploy/product/reference_product](../deploy/product/reference_product), to the same suite on a
+fresh Anvil. Its config comes from the manifest with `conformance: true`, which seeds the five
+default accounts (`conformance-refused` suspended), holds `conformance-processing` settlements as
+`processing`, and serves the ledger hook; the restart hook stops the product process and a
+supervisor loop starts it again on the same SQLite ledger. Never set `conformance` in production.

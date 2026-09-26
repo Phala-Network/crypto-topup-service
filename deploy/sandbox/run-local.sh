@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs the Python integration example and the sandbox scenarios against a disposable local
-# stack: the attested compose with the deploy/local overlay plus an Anvil chain
-# (docker-compose.local.yml). Everything it starts is removed on exit.
+# Runs the Python SDK example, the reference product (deploy/product), and the sandbox scenarios
+# against a disposable local stack: the attested compose with the deploy/local overlay plus an Anvil
+# chain (docker-compose.local.yml). Everything it starts is removed on exit.
 # Usage: deploy/sandbox/run-local.sh [SCENARIO ...]
 #
 # Requires docker compose, Foundry (forge, cast), jq, uv, curl, and OpenSSL 3. Prices come from the
@@ -17,9 +17,9 @@ done
 project="topup-sandbox-$$"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-sandbox.XXXXXX")
 compose=("$root/deploy/local/compose.sh" -p "$project" -f "$root/deploy/sandbox/docker-compose.local.yml")
-# The product side (example and scenarios) runs in this image on the compose network, so the
-# service reaches its endpoints as http://product:8089 even where a host firewall drops traffic
-# from containers to the host.
+# The product side (example, reference product, and scenarios) runs in this image on the compose
+# network, so the service reaches its endpoints as http://product:8089 even where a host firewall
+# drops traffic from containers to the host.
 client_image="ghcr.io/astral-sh/uv:0.12.18-python3.14-trixie-slim@sha256:00facf17b58b02b725155862c5cd637f688f906bf7eb5b5194647886d8805cf3"
 client="$project-product"
 
@@ -137,12 +137,15 @@ run_product() {
         --user "$(id -u):$(id -g)" "${socket[@]}" -v "$root:/repo:ro" -v "$tmp:/sandbox" \
         -e HOME=/sandbox/home -e UV_CACHE_DIR=/sandbox/uv-cache \
         -e UV_PROJECT_ENVIRONMENT=/sandbox/venv -e UV_PYTHON_DOWNLOADS=never \
-        -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$client_image" \
+        -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/repo/deploy/product -w /repo "$client_image" \
         uv run --locked --project sdk/python --quiet python "$@"
 }
 
-echo "== running the Phala Cloud integration example"
+echo "== running the SDK integration example"
 run_product sdk/examples/phala_cloud_integration.py --config /sandbox/sandbox.json
+
+echo "== serving the reference product and driving one deposit through it"
+run_product -m reference_product --config /sandbox/sandbox.json
 
 echo "== running sandbox scenarios"
 scenarios=(deploy/sandbox/scenarios/run.py --config /sandbox/sandbox.json)

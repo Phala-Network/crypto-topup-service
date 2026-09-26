@@ -1,6 +1,6 @@
 """Shared harness for sandbox scenarios.
 
-Scenarios run the reference product from sdk/examples/phala_cloud_integration.py as the
+Scenarios run the reference product from deploy/product/reference_product as the
 integrator's settlement and webhook endpoint, drive payments with the sandbox test token, and
 assert the deposit states and verified webhooks the service produces. Each scenario uses fresh
 workspaces, so scenarios are independent and can run against a shared sandbox.
@@ -22,9 +22,13 @@ from pathlib import Path
 from typing import Any
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPOSITORY / "sdk/examples"))
+sys.path.insert(0, str(REPOSITORY / "deploy/product"))
 
-import phala_cloud_integration as reference  # noqa: E402
+from reference_product.config import ProductConfig  # noqa: E402
+from reference_product.driver import Payer  # noqa: E402
+from reference_product.ledger import ProductLedger  # noqa: E402
+from reference_product.server import create_quote, register_team  # noqa: E402
+from reference_product.settlement import Answer, SettlementService  # noqa: E402
 from topup_client.models import DepositResponse, RateLockResponse  # noqa: E402
 from topup_sdk import TopupClient  # noqa: E402
 from topup_sdk.addresses import same_address  # noqa: E402
@@ -55,7 +59,7 @@ def credit(deposit: DepositResponse) -> int:
     return int(str(deposit.credit_minor))
 
 
-class ScenarioSettlement(reference.SettlementService):
+class ScenarioSettlement(SettlementService):
     """Reference settlement endpoint with request counters and one injectable fault."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -67,7 +71,7 @@ class ScenarioSettlement(reference.SettlementService):
         self.hold_lookups: set[str] = set()
         self._lock = threading.Lock()
 
-    def handle_post(self, target: str, headers: Mapping[str, str], body: bytes) -> reference.Answer:
+    def handle_post(self, target: str, headers: Mapping[str, str], body: bytes) -> Answer:
         answer = super().handle_post(target, headers, body)
         try:
             team = str(json.loads(body)["account_id"])
@@ -80,15 +84,15 @@ class ScenarioSettlement(reference.SettlementService):
         if lose:
             # The credit is committed; the answer is lost on the way back to the service.
             LOG.info("dropping the committed settlement answer for %s", team)
-            return reference.Answer(500)
+            return Answer(500)
         return answer
 
-    def handle_get(self, target: str, headers: Mapping[str, str]) -> reference.Answer:
+    def handle_get(self, target: str, headers: Mapping[str, str]) -> Answer:
         order = self.ledger.find_order(target.rsplit("/", 1)[-1])
         team = None if order is None else order.team_id
         with self._lock:
             if team is not None and team in self.hold_lookups:
-                return reference.Answer(503)
+                return Answer(503)
         answer = super().handle_get(target, headers)
         if team is not None:
             with self._lock:
@@ -98,24 +102,22 @@ class ScenarioSettlement(reference.SettlementService):
 
 @dataclass
 class Context:
-    config: reference.SandboxConfig
+    config: ProductConfig
     client: TopupClient
-    ledger: reference.ProductLedger
+    ledger: ProductLedger
     settlement: ScenarioSettlement
-    payer: reference.Payer
+    payer: Payer
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def team(self, name: str, *, suspended: bool = False) -> tuple[str, str]:
         """Registers a fresh workspace and returns `(team_id, persistent_address)`."""
         team = f"{name}-{self.run_id}"
-        address = reference.register_team(
-            self.config, self.client, self.ledger, team, suspended=suspended
-        )
+        address = register_team(self.config, self.client, self.ledger, team, suspended=suspended)
         return team, address
 
     def lock(self, team: str, amount_minor: int) -> tuple[str, RateLockResponse]:
         lock_ref = f"lock-{uuid.uuid4().hex[:12]}"
-        lock = reference.create_quote(
+        lock = create_quote(
             self.config,
             self.client,
             self.ledger,
@@ -131,10 +133,21 @@ class Context:
         return tx_hash
 
     def deposit(self, team: str, address: str, states: set[str] = FINAL_STATES) -> DepositResponse:
-        deposit: DepositResponse = reference.wait_for_deposit(
-            self.client, team, address, states, DEPOSIT_TIMEOUT_S
+        """Polls the account's deposits until one to `address` reaches one of `states`."""
+        deadline = time.monotonic() + DEPOSIT_TIMEOUT_S
+        last_state = None
+        while time.monotonic() < deadline:
+            for deposit in self.client.list_deposits(team):
+                if same_address(deposit.address, address):
+                    if deposit.state != last_state:
+                        LOG.info("deposit %s is %s", deposit.id, deposit.state)
+                        last_state = deposit.state
+                    if deposit.state in states:
+                        return deposit
+            time.sleep(2)
+        raise TimeoutError(
+            f"no deposit to {address} reached {sorted(states)} in {DEPOSIT_TIMEOUT_S:.0f}s"
         )
-        return deposit
 
     def event(self, event_type: str, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
         return self.ledger.wait_for_event(event_type, matches, EVENT_TIMEOUT_S)

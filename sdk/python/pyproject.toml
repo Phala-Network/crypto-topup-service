@@ -30,6 +30,9 @@ codegen = [
     "openapi-python-client==0.29.1",
     "ruff==0.16.8",
 ]
+product = [
+    "web3==8.0.0",
+]
 
 [build-system]
 requires = ["hatchling==1.32.4"]
@@ -39,12 +42,12 @@ build-backend = "hatchling.build"
 packages = ["src/topup_client", "src/topup_sdk"]
 
 [tool.uv]
-default-groups = ["dev"]
+default-groups = ["dev", "product"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests", "../examples", "../../deploy/sandbox/scenarios"]
+src = ["src", "tests", "../examples", "../../deploy/product", "../../deploy/sandbox/scenarios"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF", "PL", "PT"]
@@ -56,13 +59,14 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "src/topup_client/**" = ["ALL"]
 "tests/**" = ["S101", "PLR0915"]
-"../examples/**" = ["S101", "S603", "S607", "PLR0915", "PLR0912", "PLR0911", "PLC0415"]
+"../examples/**" = ["S101"]
+"../../deploy/product/**" = ["S101", "PLR0911", "PLR0912", "PLR0915"]
 "../../deploy/sandbox/scenarios/**" = ["S101", "S603", "S607", "PLR0915", "PLR0912", "PLR0911", "N818"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = ["src", "../examples", "../../deploy/sandbox/scenarios"]
+mypy_path = ["src", "../examples", "../../deploy/product", "../../deploy/sandbox/scenarios"]
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -75,5 +79,5 @@ module = ["Crypto.*", "http_sf.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "../../deploy/product/tests"]
 addopts = "-ra"

@@ -1,7 +1,7 @@
 name: Deploy staging product
 
 # Provisions or upgrades the staging reference-product CVM on Phala Cloud (deploy/README.md,
-# "Staging reference product"): sdk/examples/phala_cloud_integration.py in `serve` mode, the
+# "Staging reference product"): deploy/product/reference_product in `serve` mode, the
 # settlement endpoint and webhook receiver of the phala-cloud product on the Sepolia staging route.
 # It follows Deploy in the `staging` Environment (same controls, Phala CLI 1.1.22 behavior, and
 # runner constraints; see that workflow's header) with a smaller CVM:

@@ -1,0 +1,426 @@
+"""The product service: settlement endpoint, webhook receiver, and the product's account API.
+
+It pins the service's settlement key from attestation, keeps its ledger in SQLite, and serves its
+own account API, through which a user registers a workspace, gets a quote-first single-use
+address, and reads its deposits, credits, and webhook events. It holds the product key and calls
+the service on the user's behalf, as Phala Cloud's backend does.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import secrets
+import signal
+import threading
+import time
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import unquote, urlsplit
+
+import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from topup_client.models import AttestationResponse, RateLockResponse
+from topup_sdk import (
+    ApiError,
+    AttestationError,
+    SignatureError,
+    TopupClient,
+    load_public_key,
+    verify_attestation_binding,
+    verify_request,
+)
+from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
+
+from .config import (
+    CONFORMANCE_ACCOUNTS,
+    CONFORMANCE_REFUSED,
+    DRIVER_KEYID,
+    EVM_ADDRESS,
+    SETTLEMENT_KEYID,
+    MissingProductKeyError,
+    ProductConfig,
+)
+from .ledger import ProductLedger
+from .settlement import (
+    Answer,
+    JsonRpc,
+    SettlementService,
+    TransientError,
+    WebhookReceiver,
+    parse_decimal,
+)
+
+LOG = logging.getLogger(__name__)
+
+MAX_BODY_BYTES = 1024 * 1024
+# Workspace ids and lock references in the account API: URL path segments without escaping.
+ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+class ProductServer:
+    """Serves `POST /settlements`, `GET /settlements/{key}`, `POST /webhooks`, `GET /healthz`,
+    and, given an `AccountApi`, `/accounts`. With `conformance`, it also serves the test-only
+    ledger observation hook `GET /settlements/_conformance/ledger/{account_id}`."""
+
+    def __init__(
+        self,
+        settlement: SettlementService,
+        webhooks: WebhookReceiver,
+        accounts: AccountApi | None = None,
+    ) -> None:
+        self.settlement = settlement
+        self.webhooks = webhooks
+        self.accounts = accounts
+        config = settlement.config
+        base_path = urlsplit(config.public_url).path.rstrip("/")
+        ledger_hook = base_path + "/settlements/_conformance/ledger/"
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                body = self._body()
+                if body is None:
+                    return
+                headers = dict(self.headers.items())
+                if self.path == base_path + "/settlements":
+                    self._send(server.settlement.handle_post(self.path, headers, body))
+                elif self.path == base_path + "/webhooks":
+                    self._send(server.webhooks.handle(headers, body))
+                elif server.accounts is not None and server.accounts.handles(self.path):
+                    self._send(server.accounts.handle("POST", self.path, headers, body))
+                else:
+                    self._send(Answer(HTTPStatus.NOT_FOUND))
+
+            def do_GET(self) -> None:
+                headers = dict(self.headers.items())
+                if config.conformance and self.path.startswith(ledger_hook):
+                    self._send(server.ledger_view(unquote(self.path.removeprefix(ledger_hook))))
+                elif self.path.startswith(base_path + "/settlements/"):
+                    self._send(server.settlement.handle_get(self.path, headers))
+                elif self.path == base_path + "/healthz":
+                    self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
+                elif server.accounts is not None and server.accounts.handles(self.path):
+                    self._send(server.accounts.handle("GET", self.path, headers, b""))
+                else:
+                    self._send(Answer(HTTPStatus.NOT_FOUND))
+
+            def _body(self) -> bytes | None:
+                length = int(self.headers.get("content-length") or 0)
+                if length > MAX_BODY_BYTES:
+                    self._send(Answer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
+                    return None
+                return self.rfile.read(length)
+
+            def _send(self, answer: Answer) -> None:
+                payload = b"" if answer.body is None else json.dumps(answer.body).encode()
+                self.send_response(answer.status)
+                if answer.body is not None:
+                    self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                LOG.debug("%s %s", self.address_string(), format % args)
+
+        self._httpd = ThreadingHTTPServer((config.listen_host, config.listen_port), Handler)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+
+    def ledger_view(self, team: str) -> Answer:
+        """The conformance ledger observation hook's answer (docs/conformance.md)."""
+        credits = self.settlement.ledger.credits_for(team)
+        balance = sum(amount for _, amount in credits)
+        return Answer(HTTPStatus.OK, {"balance_minor": str(balance), "mutations": len(credits)})
+
+    def __enter__(self) -> ProductServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._thread.join()
+
+
+class AccountApi:
+    """The product's account API; the deposit driver uses it as a signed-in user would.
+
+    - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
+    - `POST /accounts/{id}/quotes` `{"lock_ref", "amount_minor"}` creates a quote-first lock
+      (`create_quote`) and returns the service's lock;
+    - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"to_address", "amount_atomic"}`
+      files a refund request for one of the workspace's deposits (`request_refund`);
+    - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
+      (from the ledger), and the verified webhook events for those deposits and its quotes.
+
+    The product calls the service with its own key on the user's behalf, as Phala Cloud's
+    backend does. Requests must carry an RFC 9421 signature by the pinned driver key
+    (`driver_public_key`, key id `driver/v1`), which stands in for user sessions and cannot sign
+    service requests. Replays are bounded only by the five-minute freshness window; every
+    operation is idempotent.
+    """
+
+    def __init__(self, config: ProductConfig, ledger: ProductLedger, driver_key: Ed25519PublicKey):
+        self.config = config
+        self.ledger = ledger
+        self.driver_key = driver_key
+        self.accounts_path = urlsplit(config.public_url).path.rstrip("/") + "/accounts"
+        self._client: TopupClient | None = None
+        self._client_lock = threading.Lock()
+
+    def handles(self, target: str) -> bool:
+        path = urlsplit(target).path
+        return path == self.accounts_path or path.startswith(self.accounts_path + "/")
+
+    def handle(self, method: str, target: str, headers: Mapping[str, str], body: bytes) -> Answer:
+        public = urlsplit(self.config.public_url)
+        try:
+            verify_request(
+                method=method,
+                target_uri=f"{public.scheme}://{public.netloc}{target}",
+                headers=headers,
+                body=body,
+                public_key=self.driver_key,
+                keyid=DRIVER_KEYID,
+                require_idempotency_key=False,
+            )
+        except SignatureError:
+            return Answer(HTTPStatus.UNAUTHORIZED)
+        parts = urlsplit(target).path.removeprefix(self.accounts_path).split("/")[1:]
+        try:
+            if method == "POST" and not parts:
+                team = _account_ref(_json_object(body).get("account_id"))
+                address = register_team(self.config, self._service(), self.ledger, team)
+                return Answer(HTTPStatus.OK, {"account_id": team, "address": address})
+            if len(parts) == 2 and parts[1] == "quotes" and method == "POST":
+                team = _account_ref(parts[0])
+                request = _json_object(body)
+                amount_minor = request.get("amount_minor")
+                if type(amount_minor) is not int or amount_minor <= 0:
+                    raise ValueError("amount_minor must be a positive integer")
+                if self.ledger.team_suspended(team) is None:
+                    return Answer(HTTPStatus.NOT_FOUND)
+                lock = create_quote(
+                    self.config,
+                    self._service(),
+                    self.ledger,
+                    team,
+                    lock_ref=_account_ref(request.get("lock_ref")),
+                    amount_minor=amount_minor,
+                )
+                return Answer(HTTPStatus.OK, lock.to_dict())
+            if (
+                len(parts) == 4
+                and parts[1] == "deposits"
+                and parts[3] == "refunds"
+                and method == "POST"
+            ):
+                team = _account_ref(parts[0])
+                deposit = uuid.UUID(parts[2])
+                request = _json_object(body)
+                to_address = request.get("to_address")
+                amount = parse_decimal(request.get("amount_atomic"))
+                if not isinstance(to_address, str) or not EVM_ADDRESS.fullmatch(to_address):
+                    raise ValueError("to_address must be a 0x-prefixed 20-byte address")
+                if amount is None or amount <= 0:
+                    raise ValueError("amount_atomic must be a positive decimal string")
+                if self.ledger.team_suspended(team) is None or not any(
+                    item.id == deposit for item in self._service().list_deposits(team)
+                ):
+                    return Answer(HTTPStatus.NOT_FOUND)
+                refund = self._service().request_refund(deposit, to_address, amount)
+                return Answer(HTTPStatus.OK, refund.to_dict())
+            if len(parts) == 1 and method == "GET":
+                team = _account_ref(parts[0])
+                if self.ledger.team_suspended(team) is None:
+                    return Answer(HTTPStatus.NOT_FOUND)
+                return Answer(HTTPStatus.OK, self._account_view(team))
+        except ValueError:
+            return Answer(HTTPStatus.BAD_REQUEST)
+        except MissingProductKeyError:
+            LOG.warning("account API unavailable: the product key is not configured")
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        except ApiError as error:
+            # The service's documented error code is public; nothing else is passed on.
+            LOG.warning("service answered %s %s", error.status_code, error.code)
+            return Answer(
+                HTTPStatus.BAD_GATEWAY,
+                {"service_status": error.status_code, "service_code": error.code},
+            )
+        except httpx.HTTPError:
+            LOG.warning("service unavailable for the account API")
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        except RuntimeError:
+            LOG.exception("account API request failed")
+            return Answer(HTTPStatus.INTERNAL_SERVER_ERROR)
+        return Answer(HTTPStatus.NOT_FOUND)
+
+    def _account_view(self, team: str) -> dict[str, Any]:
+        deposits = list(self._service().list_deposits(team))
+        ids = {str(deposit.id) for deposit in deposits}
+        return {
+            "account_id": team,
+            "deposits": [deposit.to_dict() for deposit in deposits],
+            "credits": [
+                {"provider_order_id": key, "amount_minor": amount}
+                for key, amount in self.ledger.credits_for(team)
+            ],
+            "events": [
+                event
+                for event in self.ledger.all_events()
+                if event["data"].get("deposit_id") in ids
+                or event["data"].get("external_id") == team
+            ],
+        }
+
+    def _service(self) -> TopupClient:
+        with self._client_lock:
+            if self._client is None:
+                self._client = self.config.client()
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            if self._client is not None:
+                self._client.close()
+
+
+def _account_ref(value: object) -> str:
+    if not isinstance(value, str) or not ACCOUNT_REF.fullmatch(value):
+        raise ValueError("expected 1-64 letters, digits, '.', '_', or '-'")
+    return value
+
+
+def _json_object(body: bytes) -> dict[str, Any]:
+    value = json.loads(body)
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
+def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519PublicKey:
+    """Returns the settlement key from attestation evidence bound to a fresh nonce.
+
+    `verify_attestation_binding` checks that the report data binds the nonce, the key, and the
+    flusher operators. Production integrators must also verify the TDX quote with the dstack
+    verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin `(keyid, public key)` in
+    configuration; a configured `settlement_public_key` skips the fetch. While the service is
+    unreachable this retries for up to `wait_s` seconds.
+    """
+    if config.settlement_public_key is not None:
+        return load_public_key(config.settlement_public_key)
+    deadline = time.monotonic() + wait_s
+    while True:
+        nonce = secrets.token_bytes(32)
+        try:
+            response = httpx.get(
+                config.service_url.rstrip("/") + "/v1/attestation",
+                params={"nonce": nonce.hex()},
+                timeout=30,
+            )
+            response.raise_for_status()
+            evidence = AttestationResponse.from_dict(response.json())
+            break
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            if time.monotonic() >= deadline:
+                raise TransientError("the service's attestation is unavailable") from error
+            LOG.warning(
+                "waiting for %s/v1/attestation: %s", config.service_url, type(error).__name__
+            )
+            time.sleep(5)
+    verify_attestation_binding(evidence, nonce)
+    if evidence.keyid != SETTLEMENT_KEYID:
+        raise AttestationError("attestation names an unexpected settlement key id")
+    LOG.warning("pinned settlement key from attestation; verify the quote before production")
+    return load_public_key(evidence.settlement_pubkey)
+
+
+def register_team(
+    config: ProductConfig,
+    client: TopupClient,
+    ledger: ProductLedger,
+    team: str,
+    *,
+    suspended: bool = False,
+) -> str:
+    """Registers a workspace and records its persistent address after recomputing it."""
+    ledger.add_team(team, suspended=suspended)
+    client.register_account(team)
+    address = client.create_deposit_address(team)
+    inputs = address.salt_inputs
+    salt = persistent_salt(inputs.product_slug, inputs.external_id, inputs.version)
+    expected = forwarder_address(config.factory, config.implementation, salt)
+    if inputs.product_slug != config.product_slug or inputs.external_id != team:
+        raise RuntimeError("address salt inputs name another account")
+    if not same_address(expected, address.address) or address.chain_id != config.chain_id:
+        raise RuntimeError("service returned an address the product cannot recompute")
+    ledger.record_address(address.address, team, version=inputs.version)
+    return address.address
+
+
+def create_quote(
+    config: ProductConfig,
+    client: TopupClient,
+    ledger: ProductLedger,
+    team: str,
+    *,
+    lock_ref: str,
+    amount_minor: int,
+) -> RateLockResponse:
+    """Creates a quote-first lock, recording its recomputed address before the request.
+
+    Recording first means a crash between the two steps never leaves a paid quote address the
+    product does not recognise; the service's answer must then match the recorded address.
+    """
+    expected = quote_address(config, team, lock_ref)
+    ledger.record_address(expected, team, lock_ref=lock_ref)
+    lock = client.create_rate_lock(team, lock_ref, amount_minor=amount_minor)
+    if not same_address(expected, lock.address):
+        raise RuntimeError("rate-lock address does not match the product's computation")
+    return lock
+
+
+def quote_address(config: ProductConfig, team: str, lock_ref: str) -> str:
+    return forwarder_address(
+        config.factory, config.implementation, lock_salt(config.product_slug, team, lock_ref)
+    )
+
+
+@contextmanager
+def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+    """Runs the product: settlement endpoint, webhook receiver, and account API."""
+    if config.driver_public_key is None:
+        raise ValueError("driver_public_key is required to serve the account API")
+    settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
+    ledger = ProductLedger(config.ledger_path)
+    if config.conformance:
+        for team in CONFORMANCE_ACCOUNTS:
+            ledger.add_team(team, suspended=team == CONFORMANCE_REFUSED)
+            salt = persistent_salt(config.product_slug, team, 1)
+            address = forwarder_address(config.factory, config.implementation, salt)
+            ledger.record_address(address, team, version=1)
+    settlement = SettlementService(config, ledger, settlement_key, JsonRpc(config.rpc_url))
+    accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
+    try:
+        with ProductServer(settlement, WebhookReceiver(ledger, settlement_key), accounts) as server:
+            LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
+            yield server
+    finally:
+        accounts.close()
+
+
+def serve(config: ProductConfig) -> None:
+    """Serves the product until SIGTERM or SIGINT."""
+    stop = threading.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: stop.set())
+    with product_service(config, pin_wait_s=600):
+        stop.wait()
+    LOG.info("product stopped")

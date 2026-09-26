@@ -719,10 +719,10 @@ settlement URL is a new route version.
 ## Staging reference product
 
 Staging settles deposits against a second, small CVM running the repository's reference
-product, [sdk/examples/phala_cloud_integration.py](../sdk/examples/phala_cloud_integration.py),
-as the `phala-cloud` product: `serve` mode is the settlement endpoint (all six product
-obligations), the webhook receiver, and the product's own account API, with its ledger in SQLite on
-the CVM's `ledger` volume; `deposit` mode, run from an operator's machine, plays a Phala Cloud user.
+product, [product/reference_product](product/reference_product), as the `phala-cloud` product:
+`serve` mode is the settlement endpoint (all six product obligations, held to the contract by the
+conformance suite: `make product-conformance`, run by CI), the webhook receiver, and the product's
+own account API, with its ledger in SQLite on the CVM's `ledger` volume; `deposit` mode, run from an operator's machine, plays a Phala Cloud user.
 The product holds the product signing key and calls topup on the user's behalf; the driver
 signs its account API requests with a separate driver key (`driver/v1`) that cannot sign topup
 requests.
@@ -804,7 +804,7 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
    (`0x8F40e7E99678F44c88158f049E62817580ab113B`) is the repository's `MockERC20`, whose
    `mint(address,uint256)` is public (checked with an `eth_call` from an arbitrary address), so
    the driver mints exactly the locked amount to the payer and then transfers it to the quote
-   address. Write `driver.json` with the `SandboxConfig` fields the driver reads:
+   address. Write `driver.json` with the `ProductConfig` fields the driver reads:
 
    ```json
    {
@@ -832,7 +832,7 @@ Each step is **HUMAN-ONLY** unless marked as a workflow run; nothing is deployed
    ```sh
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer   # cast wallet import staging-payer --interactive
    export ETH_PASSWORD=~/staging/payer.password             # file holding the keystore password
-   uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py deposit \
+   PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product deposit \
      --config driver.json --driver-seed-file ~/staging/driver.seed \
      --amount-minor <cents> --min-atomic 20000000000000000000000
    ```
@@ -892,7 +892,7 @@ usual flush gas, and the refund costs the Safe one ERC-20 transfer.
 export ETH_KEYSTORE=~/.foundry/keystores/staging-payer
 export ETH_PASSWORD=~/staging/payer.password
 rpc=$(jq -er .rpc_url driver.json)
-driver=(uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py
+driver=(env PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product
   deposit --config driver.json --driver-seed-file ~/staging/driver.seed --timeout 3600)
 # (a) underpayment: prints the --amount-minor needed if 97% of the quote is below 20000 PHA
 "${driver[@]}" --amount-minor <cents> --min-atomic 20000000000000000000000 --pay-bps 9700
