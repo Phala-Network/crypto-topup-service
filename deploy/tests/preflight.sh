@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Local (offline) preflight checks: the example env file, a zero-address route, a stale render,
-# the wrong variant, invalid settings, and an OS image other than the approved one must be
-# refused, and a complete env file with a filled route must pass.
+# Local (offline) preflight checks: the example env file, a zero-address route, a stale render, a
+# source that does not render, the wrong variant, invalid settings, and an OS image other than the
+# approved one must be refused, and a complete env file with a filled route must pass.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -65,6 +65,15 @@ expect_failure extra-name "names outside staging.env.example: EXTRA_SECRET" \
 # A render that does not match its source (stale or hand-edited) is refused.
 expect_failure stale-render "differs from a fresh render" \
     --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/zero-source.yml"
+# A source that does not render is reported with render-compose.sh's own error.
+grep -v '_RENDERED_SHA256:-' "$tmp/filled-source.yml" >"$tmp/unlabeled-source.yml"
+expect_failure bad-source "does not render with the settings of $tmp/filled-route.yml:" \
+    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/unlabeled-source.yml"
+grep -qF 'must carry exactly one ${..._RENDERED_SHA256:-} label' "$tmp/bad-source.err" || {
+    echo "preflight did not print render-compose.sh's error:" >&2
+    cat "$tmp/bad-source.err" >&2
+    exit 1
+}
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null

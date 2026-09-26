@@ -53,7 +53,7 @@ case "$command" in
         settled='.status == "running" and (.in_progress | not)
             and ((.compose_hash | '"$normal_hash"') != $previous)'
         for _ in $(seq 60); do
-            if cvm=$(phala cvms get "$1" --json 2>/dev/null) &&
+            if cvm=$(phala cvms get "$1" --json) &&
                 jq -e --arg previous "${2:-}" "$settled" <<<"$cvm" >/dev/null; then
                 printf '%s\n' "$cvm"
                 exit 0
@@ -66,7 +66,7 @@ case "$command" in
     attestation)
         attested=""
         for _ in $(seq 40); do
-            if attestation=$(phala cvms attestation "$1" --json 2>/dev/null) &&
+            if attestation=$(phala cvms attestation "$1" --json) &&
                 attested=$(jq -r '[.tcb_info.event_log[]? | select(.event == "compose-hash")
                     | .event_payload][0] // "" | '"$normal_hash" <<<"$attestation") &&
                 [[ "$attested" == "$2" ]]; then
