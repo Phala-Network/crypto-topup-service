@@ -7,6 +7,13 @@ webhook receivers must ignore unknown fields.
 
 ### Added
 
+- `POST /v1/products/{p}/accounts/{ext}/rate-locks` and `POST …/deposit-address` create the
+  account when it does not exist, so a quote or an address is one call; `POST …/accounts` is no
+  longer required. Reads (`GET`, rotate, cancel, pause) of an unknown account still answer `404`.
+
+- `DepositResponse` (deposits, deposit, and support lookup) carries `external_id`, the account
+  of the receiving address, and `price_source` (`lock` or `spot`).
+
 - `PUT /v1/admin/products/{slug} {public_key, webhook_url, reason}` (administrative API) replaces
   an issued product's verification key and webhook URL, which `POST /v1/admin/products` refuses
   with `409`. The key id stays the route's `destination.product_kid`. The cut is immediate: the
@@ -56,6 +63,11 @@ webhook receivers must ignore unknown fields.
   from servers that predate it.
 
 ### Changed
+
+- `POST /v1/products/{p}/deposits/{id}/refund-requests` accepts `credited` and `swept` deposits
+  too (still not `sanctioned`, still at least the route's `min_refund_atomic`): a product asks to
+  refund a credit it did not apply or has reversed, for example for a closed workspace; finance
+  approves every request (docs/design/stripe-style-integration.md §2.4).
 
 - **Settlement conformance:** the `unknown_get` case now requires `404` for `GET` of an unknown
   settlement key and fails `200 {"status":"unknown"}`, which it used to accept. The service

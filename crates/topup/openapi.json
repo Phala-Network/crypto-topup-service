@@ -2094,6 +2094,10 @@
             ],
             "description": "Product credit in minor units encoded as a decimal string."
           },
+          "external_id": {
+            "type": "string",
+            "description": "Product-owned identifier of the account the receiving address belongs to. This service\nalways sends it; it is optional in the schema so clients also parse responses from servers\nthat predate it."
+          },
           "from_address": {
             "type": "string",
             "description": "Canonical transfer sender address."
@@ -2122,6 +2126,13 @@
               "null"
             ],
             "description": "Eight-decimal scaled price encoded as a decimal string."
+          },
+          "price_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which price valued the deposit: `lock` (the quoted price) or `spot`."
           },
           "route": {
             "type": [

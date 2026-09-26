@@ -367,6 +367,28 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
+        // Reads need a known account; creating an address creates the account.
+        let implicit_path = format!(
+            "/v1/products/{}/accounts/implicit-001/deposit-address",
+            product.slug
+        );
+        let response = app
+            .clone()
+            .oneshot(signed_request(Method::GET, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now))
+            .await?;
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+        let response = app
+            .clone()
+            .oneshot(signed_request(Method::POST, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response_json(response).await?["salt_inputs"]["external_id"] == "implicit-001");
+        let response = app
+            .clone()
+            .oneshot(signed_request(Method::GET, &implicit_path, Vec::new(), PRODUCT_KID, &product_key, now + 1))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+
         let register_path = format!("/v1/products/{}/accounts", product.slug);
         let register_body = serde_json::to_vec(&json!({"external_id": "account-001"}))?;
         let first = app

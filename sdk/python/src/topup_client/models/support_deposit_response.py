@@ -41,8 +41,13 @@ class SupportDepositResponse:
         updated_at (datetime.datetime): Last processing update time.
         timeline (list[DepositTransitionResponse]): Transitions in ascending creation order.
         credit_minor (None | str | Unset): Product credit in minor units encoded as a decimal string.
+        external_id (str | Unset): Product-owned identifier of the account the receiving address belongs to. This
+            service
+            always sends it; it is optional in the schema so clients also parse responses from servers
+            that predate it.
         lock_ref (None | str | Unset): Rate-lock reference, when applicable.
         price_scaled (None | str | Unset): Eight-decimal scaled price encoded as a decimal string.
+        price_source (None | str | Unset): Which price valued the deposit: `lock` (the quoted price) or `spot`.
         route (None | str | Unset): Selected route.
         route_version (int | None | Unset): Selected route version.
         valuation_at (datetime.datetime | None | Unset): Valuation observation time.
@@ -67,8 +72,10 @@ class SupportDepositResponse:
     updated_at: datetime.datetime
     timeline: list[DepositTransitionResponse]
     credit_minor: None | str | Unset = UNSET
+    external_id: str | Unset = UNSET
     lock_ref: None | str | Unset = UNSET
     price_scaled: None | str | Unset = UNSET
+    price_source: None | str | Unset = UNSET
     route: None | str | Unset = UNSET
     route_version: int | None | Unset = UNSET
     valuation_at: datetime.datetime | None | Unset = UNSET
@@ -116,6 +123,8 @@ class SupportDepositResponse:
         else:
             credit_minor = self.credit_minor
 
+        external_id = self.external_id
+
         lock_ref: None | str | Unset
         if isinstance(self.lock_ref, Unset):
             lock_ref = UNSET
@@ -127,6 +136,12 @@ class SupportDepositResponse:
             price_scaled = UNSET
         else:
             price_scaled = self.price_scaled
+
+        price_source: None | str | Unset
+        if isinstance(self.price_source, Unset):
+            price_source = UNSET
+        else:
+            price_source = self.price_source
 
         route: None | str | Unset
         if isinstance(self.route, Unset):
@@ -177,10 +192,14 @@ class SupportDepositResponse:
         )
         if credit_minor is not UNSET:
             field_dict["credit_minor"] = credit_minor
+        if external_id is not UNSET:
+            field_dict["external_id"] = external_id
         if lock_ref is not UNSET:
             field_dict["lock_ref"] = lock_ref
         if price_scaled is not UNSET:
             field_dict["price_scaled"] = price_scaled
+        if price_source is not UNSET:
+            field_dict["price_source"] = price_source
         if route is not UNSET:
             field_dict["route"] = route
         if route_version is not UNSET:
@@ -240,6 +259,8 @@ class SupportDepositResponse:
 
         credit_minor = _parse_credit_minor(d.pop("credit_minor", UNSET))
 
+        external_id = d.pop("external_id", UNSET)
+
         def _parse_lock_ref(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -257,6 +278,15 @@ class SupportDepositResponse:
             return cast(None | str | Unset, data)
 
         price_scaled = _parse_price_scaled(d.pop("price_scaled", UNSET))
+
+        def _parse_price_source(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        price_source = _parse_price_source(d.pop("price_source", UNSET))
 
         def _parse_route(data: object) -> None | str | Unset:
             if data is None:
@@ -318,8 +348,10 @@ class SupportDepositResponse:
             updated_at=updated_at,
             timeline=timeline,
             credit_minor=credit_minor,
+            external_id=external_id,
             lock_ref=lock_ref,
             price_scaled=price_scaled,
+            price_source=price_source,
             route=route,
             route_version=route_version,
             valuation_at=valuation_at,

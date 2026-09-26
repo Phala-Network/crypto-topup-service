@@ -3,8 +3,9 @@
 **Trigger:** the product filed a refund request (`POST /v1/products/{p}/deposits/{id}/refund-requests`,
 status `requested`) and Finance approved it under architecture §15: a wrong token, below the
 minimum credit but at or above `min_refund_atomic`, rejected for any reason but sanctions, or
-funds that arrived after the workspace closed. Credited funds (including an overpayment beyond the
-lock tolerance) and dust below policy are not refundable.
+funds that arrived after the workspace closed; or a credited deposit whose credit the product
+did not apply or has reversed (confirm with the product before approving). Sanctioned funds and
+dust below policy are not refundable.
 
 **Impact:** one irreversible treasury transfer. Never default the destination to the deposit's
 sender, which may be an exchange hot wallet.

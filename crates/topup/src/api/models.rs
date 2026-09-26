@@ -91,6 +91,11 @@ pub struct DepositLookupQuery {
 pub struct DepositResponse {
     /// Deterministic deposit identifier.
     pub id: Uuid,
+    /// Product-owned identifier of the account the receiving address belongs to. This service
+    /// always sends it; it is optional in the schema so clients also parse responses from servers
+    /// that predate it.
+    #[schema(required = false)]
+    pub external_id: String,
     /// EVM chain identifier.
     pub chain_id: u64,
     /// Canonical transaction hash.
@@ -121,6 +126,8 @@ pub struct DepositResponse {
     pub valuation_at: Option<DateTime<Utc>>,
     /// Eight-decimal scaled price encoded as a decimal string.
     pub price_scaled: Option<String>,
+    /// Which price valued the deposit: `lock` (the quoted price) or `spot`.
+    pub price_source: Option<String>,
     /// Product credit in minor units encoded as a decimal string.
     pub credit_minor: Option<String>,
     /// Row creation time.
