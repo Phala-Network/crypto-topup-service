@@ -1200,17 +1200,19 @@ pub async fn daily_report(
         }
     }
 
-    let exposure_minor = sqlx::query_scalar::<_, String>(
-        "SELECT open_minor::text FROM lock_exposure WHERE scope_key = 'global'",
+    let exposure_minor = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(sum(credit_minor), 0)::text
+        FROM rate_locks
+        WHERE status = 'open' AND exposure_reserved
+        "#,
     )
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or_else(|| "0".to_owned());
-    let exposure_minor = Some(exposure_minor);
+    .fetch_one(pool)
+    .await?;
 
     Ok(DailyReportResponse {
         generated_at,
-        exposure_minor,
+        exposure_minor: Some(exposure_minor),
         routes: reports.into_values().collect(),
         reconciliation: None,
     })

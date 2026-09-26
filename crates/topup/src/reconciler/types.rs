@@ -23,13 +23,11 @@ pub enum CheckName {
     AddressDerivation,
     /// Post-restore product truth was absent or could not be adopted.
     PostRestoreSettlement,
-    /// A rate-lock exposure counter disagreed with its open reserved locks.
-    LockExposure,
 }
 
 impl CheckName {
     /// Every check, including the post-restore gate, in metric registration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::MissingDeposit,
         Self::SentSettlement,
         Self::CreditRecomputation,
@@ -37,7 +35,6 @@ impl CheckName {
         Self::CustodyBalance,
         Self::AddressDerivation,
         Self::PostRestoreSettlement,
-        Self::LockExposure,
     ];
 
     /// Returns the stable metric label value.
@@ -51,7 +48,6 @@ impl CheckName {
             Self::CustodyBalance => "custody_balance",
             Self::AddressDerivation => "address_derivation",
             Self::PostRestoreSettlement => "post_restore_settlement",
-            Self::LockExposure => "lock_exposure",
         }
     }
 }

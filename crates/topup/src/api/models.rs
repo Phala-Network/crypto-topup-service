@@ -521,9 +521,9 @@ impl From<crate::observability::ReconciliationStatus> for ReconciliationRoundRep
 pub struct DailyReportResponse {
     /// Report snapshot time.
     pub generated_at: DateTime<Utc>,
-    /// Open rate-lock credit across all products in destination minor units, from the global
-    /// exposure counter the global cap is enforced against. This service always sends it; it is
-    /// optional in the schema so clients also parse reports from servers that predate it.
+    /// Open rate-lock credit across all products in destination minor units: the sum the global
+    /// exposure cap is enforced against. This service always sends it; it is optional in the
+    /// schema so clients also parse reports from servers that predate it.
     pub exposure_minor: Option<String>,
     /// SQL-computed metrics for each configured route.
     pub routes: Vec<RouteDailyReport>,

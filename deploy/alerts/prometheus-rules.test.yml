@@ -132,25 +132,6 @@ tests:
             exp_annotations:
               summary: Successful backup marker is older than two minutes
 
-  - name: a repaired lock exposure drift alerts
-    interval: 1m
-    input_series:
-      - series: 'topup_lock_exposure_drift_total{scope="global",producer_enabled="true"}'
-        values: '0 0 1 1 1 1'
-    alert_rule_test:
-      - eval_time: 1m
-        alertname: TopupLockExposureDrift
-        exp_alerts: []
-      - eval_time: 3m
-        alertname: TopupLockExposureDrift
-        exp_alerts:
-          - exp_labels:
-              scope: global
-              producer_enabled: "true"
-              severity: page
-            exp_annotations:
-              summary: Reconciliation repaired a drifted rate-lock exposure counter
-
   - name: isolated lock expiry failures between successful scans do not page
     interval: 1m
     input_series:

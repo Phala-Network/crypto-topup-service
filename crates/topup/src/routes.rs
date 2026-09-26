@@ -98,7 +98,7 @@ impl RouteSet {
         for product in products {
             product_destination(&routes, product).map_err(|error| error.to_string())?;
         }
-        // Rate-lock exposure counters sum credit across routes, so every quote-first route must
+        // Rate-lock exposure caps sum credit across routes, so every quote-first route must
         // count credit in the same destination minor unit.
         let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
         if let Some(first) = lock_routes.next()

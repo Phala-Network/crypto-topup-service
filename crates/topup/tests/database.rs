@@ -463,7 +463,6 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("flush_exclusions", OPERATIONAL),
     ("deposits", OPERATIONAL),
     ("rate_locks", OPERATIONAL),
-    ("lock_exposure", OPERATIONAL),
     ("settlements", OPERATIONAL),
     ("outbox", OPERATIONAL),
     ("refunds", OPERATIONAL),

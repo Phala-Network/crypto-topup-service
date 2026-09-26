@@ -1003,8 +1003,8 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         seed_open_lock(&database.app_pool, product.id).await?;
         seed_expired_lock(&database.app_pool, product.id).await?;
         seed_refund_row(&database.app_pool, rejected, 20).await?;
-        // The report reads the global counter that lock creation maintains.
-        sqlx::query("INSERT INTO lock_exposure (scope_key, open_minor) VALUES ('global', 50)")
+        // The report sums the open reserved locks, as lock creation would have reserved them.
+        sqlx::query("UPDATE rate_locks SET exposure_reserved = true WHERE expires_at > now()")
             .execute(&database.app_pool)
             .await?;
 

@@ -316,18 +316,6 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             .bind(seed.address_id)
             .execute(&context.app_pool)
             .await?;
-            for key in [
-                format!("account:{}", seed.account_id),
-                format!("product:{}", seed.product_id),
-                "global".to_owned(),
-            ] {
-                sqlx::query(
-                    "INSERT INTO lock_exposure (scope_key, open_minor) VALUES ($1, 777)",
-                )
-                .bind(key)
-                .execute(&context.app_pool)
-                .await?;
-            }
             let first = db::get_deposit(&context.app_pool, first_id)
                 .await?
                 .context("first deposit")?;
@@ -387,19 +375,13 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             .fetch_one(&context.app_pool)
             .await?;
             ensure!(locked == 1);
-            let lock_status: String = sqlx::query_scalar(
-                "SELECT status FROM rate_locks WHERE address_id = $1",
+            let (lock_status, reserved): (String, bool) = sqlx::query_as(
+                "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
             )
             .bind(seed.address_id)
             .fetch_one(&context.app_pool)
             .await?;
-            ensure!(lock_status == "consumed");
-            let open_exposure: Vec<String> = sqlx::query_scalar(
-                "SELECT open_minor::text FROM lock_exposure ORDER BY scope_key",
-            )
-            .fetch_all(&context.app_pool)
-            .await?;
-            ensure!(open_exposure == ["0", "0", "0"]);
+            ensure!(lock_status == "consumed" && !reserved);
             Ok(())
         })
     })
@@ -454,23 +436,6 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                 .bind(expires_at)
                 .execute(&context.app_pool)
                 .await?;
-                for key in [
-                    format!("account:{}", seed.account_id),
-                    format!("product:{}", seed.product_id),
-                    "global".to_owned(),
-                ] {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO lock_exposure (scope_key, open_minor)
-                        VALUES ($1, 777)
-                        ON CONFLICT (scope_key) DO UPDATE
-                        SET open_minor = lock_exposure.open_minor + EXCLUDED.open_minor
-                        "#,
-                    )
-                    .bind(key)
-                    .execute(&context.app_pool)
-                    .await?;
-                }
 
                 let deposit = db::get_deposit(&context.app_pool, deposit_id)
                     .await?
@@ -496,22 +461,17 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                     stored.credit_minor == Some(MinorAmount::new(credit)),
                     "{name}"
                 );
-                let lock_status: String =
-                    sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
-                        .bind(seed.address_id)
-                        .fetch_one(&context.app_pool)
-                        .await?;
+                let (lock_status, reserved): (String, bool) = sqlx::query_as(
+                    "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
+                )
+                .bind(seed.address_id)
+                .fetch_one(&context.app_pool)
+                .await?;
                 ensure!(
                     lock_status == if consumed { "consumed" } else { "open" },
                     "{name}"
                 );
-                let account_open: String = sqlx::query_scalar(
-                    "SELECT open_minor::text FROM lock_exposure WHERE scope_key = $1",
-                )
-                .bind(format!("account:{}", seed.account_id))
-                .fetch_one(&context.app_pool)
-                .await?;
-                ensure!(account_open == if consumed { "0" } else { "777" }, "{name}");
+                ensure!(reserved != consumed, "{name}");
 
                 // The confirmed deposit stays claimable; move it out of the queue so the next
                 // case's pump cannot claim it ahead of that case's deposit on a slow setup.
@@ -559,16 +519,6 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             .bind(expires_at)
             .execute(&context.app_pool)
             .await?;
-            for key in [
-                format!("account:{}", seed.account_id),
-                format!("product:{}", seed.product_id),
-                "global".to_owned(),
-            ] {
-                sqlx::query("INSERT INTO lock_exposure (scope_key, open_minor) VALUES ($1, 777)")
-                    .bind(key)
-                    .execute(&context.app_pool)
-                    .await?;
-            }
 
             // The scanner has committed through a finalized block past the window, and with it
             // the in-window payment, which still awaits the confirm step.
@@ -600,17 +550,13 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
                 .context("confirmed expiry-race deposit")?;
             ensure!(stored.price_source.as_deref() == Some("lock"));
             ensure!(stored.credit_minor == Some(MinorAmount::new(777)));
-            let lock_status: String =
-                sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
-                    .bind(seed.address_id)
-                    .fetch_one(&context.app_pool)
-                    .await?;
-            ensure!(lock_status == "consumed");
-            let exposure: Vec<String> =
-                sqlx::query_scalar("SELECT open_minor::text FROM lock_exposure ORDER BY scope_key")
-                    .fetch_all(&context.app_pool)
-                    .await?;
-            ensure!(exposure == ["0", "0", "0"]);
+            let (lock_status, reserved): (String, bool) = sqlx::query_as(
+                "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
+            )
+            .bind(seed.address_id)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(lock_status == "consumed" && !reserved);
             ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
             let expired_events: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",

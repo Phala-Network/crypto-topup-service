@@ -23,7 +23,7 @@ the owner creates; no application table grants `TRUNCATE`. The initial schema na
 | `reconciliation_blocks` | `SELECT`, `INSERT` |
 | `reconciliation_deposit_cursors`, `reconciliation_custody_cursors` | `SELECT`, `INSERT`, `UPDATE` |
 | `_sqlx_migrations` | `SELECT` |
-| `products`, `accounts`, `route_pauses`, `seen_signatures`, `addresses`, `cursors`, `pending_transfers`, `flushes`, `flushed`, `flush_exclusions`, `deposits`, `rate_locks`, `lock_exposure`, `settlements`, `outbox`, `refunds`, `refund_payment_claims` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
+| `products`, `accounts`, `route_pauses`, `seen_signatures`, `addresses`, `cursors`, `pending_transfers`, `flushes`, `flushed`, `flush_exclusions`, `deposits`, `rate_locks`, `settlements`, `outbox`, `refunds`, `refund_payment_claims` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
 A migration adding a table that should not get the full operational grant must narrow it in the
 same migration. `topup_app` also has `USAGE, SELECT` on `heartbeat_id_seq`. The database test

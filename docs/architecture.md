@@ -525,7 +525,6 @@ from fetched state, never from webhook order.
 | Deposit with no `flush_id` but a confirmed `flushed` row at a later log position | link it (replay of stored events) |
 | Address balance ≠ Σ deposits − Σ `flushed.amount_atomic`; treasury inflow from our forwarders ≠ Σ `Flushed` events | alert |
 | `addressOf(salt)` on chain ≠ stored address | freeze chain, alert |
-| `lock_exposure` counter ≠ Σ `credit_minor` of its scope's open reserved locks | lock the counter row, recompute, correct it with an audit row in the same transaction; alert |
 | After a restore, with the service stopped: every deposit at or beyond `cleared` | `GET` each key before resuming; product answer wins (§11); refused while a service process is connected to this database; stopping the old instance remains the control |
 
 ## 14. Configuration and deployment
@@ -626,7 +625,7 @@ Spans carry `deposit_id`, `chain`, `state`, `attempt`. Metrics: scanner lag, dep
 state and age, provider disagreements, price deviation, settlement outcomes, outbox backlog,
 unflushed balance, operator gas, open lock exposure, backup age, reconciliation mismatches.
 Alerts on age in state, any mismatch, scanner lag, backup age > 2 min, stopped loop, gas
-reserve, lock exposure near cap, lock exposure drift, repeated lock-expiry failures.
+reserve, lock exposure near cap, repeated lock-expiry failures.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
 Foundry, route schema. Contracts: Foundry unit, fuzz, and invariant tests (`flush` can only

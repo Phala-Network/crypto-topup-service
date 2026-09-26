@@ -176,7 +176,7 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
             "chain-frozen.md"
         }
         "TopupReconciliationMismatch" => "reconciliation-mismatch.md",
-        "TopupLockExpiryFailing" | "TopupLockExposureDrift" => "lock-expiry-worker-failure.md",
+        "TopupLockExpiryFailing" => "lock-expiry-worker-failure.md",
         "TopupLockExposureNearCap" => "lock-exposure-near-cap.md",
         "TopupUnsupportedInflows" => "rejected-funds-at-treasury.md",
         "OperatorRoleMissing" | "MissingConsumedReceipt" => "operator-key-compromise.md",
@@ -538,9 +538,7 @@ mod tests {
                 "TopupReconciliationMismatch",
                 &[("check", "address_derivation")],
             ),
-            ("TopupReconciliationMismatch", &[("check", "lock_exposure")]),
             ("TopupLockExpiryFailing", &[]),
-            ("TopupLockExposureDrift", &[]),
             ("TopupLockExposureNearCap", &[]),
             ("TopupUnsupportedInflows", &[]),
             ("OperatorRoleMissing", &[]),
