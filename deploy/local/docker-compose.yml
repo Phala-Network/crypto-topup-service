@@ -1,7 +1,10 @@
 # Local overlay for the attested stack, applied by deploy/local/compose.sh after the compose
 # rendered with local settings (make up, the sandbox, and the restore drill). It adds
 # object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds the
-# images from this checkout, and replaces secrets, ports, and host paths with local values.
+# images from this checkout, and replaces secrets, ports, and host paths with local values. It
+# never starts dstack-ingress: tls-alpn-01 needs a public DNS name and Let's Encrypt connecting
+# through the dstack gateway (the upstream TESTING.md tests it only on a real CVM), so topup is
+# published on a loopback port with that port as its origin.
 # Everything else, including the PostgreSQL init script (an inline config), comes from the rendered
 # deploy/docker-compose.yml. Database credentials need no local value: `keys` derives them from
 # the simulator exactly as in a CVM.
@@ -90,6 +93,7 @@ services:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}
     environment:
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+      TOPUP_PUBLIC_ORIGIN: http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}
       # The attested file reads SENTRY_DSN from the shell; local stacks never report to Sentry.
       SENTRY_DSN: ""
     # Routes come from a directory so the sandbox and the restore drill can supply their own.
@@ -107,6 +111,10 @@ services:
     depends_on:
       dstack-simulator:
         condition: service_healthy
+
+  # A profile no local stack enables (see the header).
+  dstack-ingress:
+    profiles: [cvm]
 
   heartbeat:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-crypto-topup-service:local}

@@ -145,22 +145,37 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     while IFS=$'\t' read -r name value; do
         setting[$name]=$value
     done < <(jq -r '.services as $s | ($s.topup.environment + $s.postgres.environment) as $e
-        | (["TOPUP_ADMIN_KID", "TOPUP_ADMIN_PUBLIC_KEY", "TOPUP_PUBLIC_ORIGIN",
+        | ((["TOPUP_ADMIN_KID", "TOPUP_ADMIN_PUBLIC_KEY", "TOPUP_PUBLIC_ORIGIN",
             "TOPUP_RPC_PROVIDER_A_URL", "TOPUP_RPC_PROVIDER_B_URL", "TOPUP_SERVICE_ENABLED",
             "WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION", "AWS_S3_FORCE_PATH_STYLE",
             "TOPUP_RESTORE_FROM_BACKUP"][]
-            | [., ($e[.] // "" | strings)])
+            | [., ($e[.] // "" | strings)]),
+          (($s["dstack-ingress"].environment // {}) as $i | ["DOMAIN", "GATEWAY_DOMAIN"][]
+            | ["INGRESS_\(.)", ($i[.] // "" | strings)]))
         | @tsv' \
         "$tmp/compose.json")
+    # TOPUP_PUBLIC_ORIGIN is https://TOPUP_DOMAIN: the custom domain dstack-ingress serves, or the
+    # restore-check instance's gateway host.
+    hostname='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
     origin=${setting[TOPUP_PUBLIC_ORIGIN]-}
-    if [[ "$origin" =~ ^https://[a-z0-9.-]+(:[0-9]+)?$ ]]; then
-        if [[ "$origin" == *.invalid || "$origin" == *.invalid:* ]]; then
-            echo "note: TOPUP_PUBLIC_ORIGIN is provisional; Deploy replaces it with the" \
-                "gateway URL after provisioning (deploy/README.md)"
+    setting[TOPUP_DOMAIN]=${origin#https://}
+    if [[ "$origin" == https://* && "${setting[TOPUP_DOMAIN]}" =~ $hostname ]]; then
+        if [[ "$origin" == *.invalid ]]; then
+            echo "note: TOPUP_DOMAIN is provisional; the restore-check instance's gateway host" \
+                "replaces it (deploy/RESTORE.md)"
         fi
     else
-        fail "TOPUP_PUBLIC_ORIGIN must be https://HOST[:PORT] in lowercase with no path"
+        fail "TOPUP_DOMAIN must be a lowercase host name (TOPUP_PUBLIC_ORIGIN https://TOPUP_DOMAIN)"
     fi
+    setting[TOPUP_GATEWAY_DOMAIN]=${setting[INGRESS_GATEWAY_DOMAIN]-}
+    if ((${#variant[@]} == 0)); then
+        [[ "${setting[INGRESS_DOMAIN]-}" == "${setting[TOPUP_DOMAIN]}" ]] ||
+            fail "dstack-ingress must serve TOPUP_DOMAIN, the host of TOPUP_PUBLIC_ORIGIN"
+        [[ "${setting[TOPUP_GATEWAY_DOMAIN]}" =~ $hostname ]] ||
+            fail "TOPUP_GATEWAY_DOMAIN must be the dstack gateway's host name, for example" \
+                "gateway.dstack-pha-prod5.phala.network"
+    fi
+    unset 'setting[INGRESS_DOMAIN]' 'setting[INGRESS_GATEWAY_DOMAIN]' 'setting[TOPUP_PUBLIC_ORIGIN]'
     rpc_a=${setting[TOPUP_RPC_PROVIDER_A_URL]-} rpc_b=${setting[TOPUP_RPC_PROVIDER_B_URL]-}
     [[ "$rpc_a" == https://* && "$rpc_b" == https://* ]] ||
         fail "both RPC provider URLs must use https"

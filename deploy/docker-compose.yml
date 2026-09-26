@@ -2,7 +2,8 @@
 # settings"). A reference to an owner-sealed secret (staging.env.example) stays a reference to the
 # CVM's encrypted env; every other variable is a public setting written inline from the deploy
 # workflow's GitHub Environment (`staging` or `production`) variables, and the two mode switches, TOPUP_RESTORE_FROM_BACKUP and
-# TOPUP_SERVICE_ENABLED, come from the rendered variant (the service, or --restore-check).
+# TOPUP_SERVICE_ENABLED, come from the rendered variant (the service, or --restore-check). A block
+# after `# only-in: VARIANT` is rendered into that variant only.
 x-walg-environment: &walg-environment
   WALG_S3_PREFIX: "${WALG_S3_PREFIX:-}"
   AWS_ENDPOINT: "${AWS_ENDPOINT:-}"
@@ -14,9 +15,9 @@ x-walg-environment: &walg-environment
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
 services:
-  # The only container with the dstack socket besides topup: it derives the WAL-G key and the
-  # database credentials (deploy/README.md, "Database credentials") into three tmpfs volumes, so
-  # every other service mounts only the ones it needs.
+  # With topup, restore-check, and dstack-ingress, the only container with the dstack socket: it
+  # derives the WAL-G key and the database credentials (deploy/README.md, "Database credentials")
+  # into three tmpfs volumes, so every other service mounts only the ones it needs.
   keys:
     # Compose recreates a container only when its service definition changes, not when an inline
     # config's content does, and a restart keeps the old config file. The renderer sets this label
@@ -119,7 +120,9 @@ services:
       TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
       TOPUP_ADMIN_KID: "${TOPUP_ADMIN_KID:-}"
       TOPUP_ADMIN_PUBLIC_KEY: "${TOPUP_ADMIN_PUBLIC_KEY:-}"
-      TOPUP_PUBLIC_ORIGIN: "${TOPUP_PUBLIC_ORIGIN:-}"
+      # Every signed `@target-uri` is verified against it: the custom domain dstack-ingress serves,
+      # or the restore-check instance's gateway host (deploy/RESTORE.md).
+      TOPUP_PUBLIC_ORIGIN: "https://${TOPUP_DOMAIN:-}"
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       # Served on /healthz while TOPUP_SERVICE_ENABLED=read-only.
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
@@ -135,11 +138,12 @@ services:
     configs:
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
-    # The gateway routes `<app_id>-<port>` to whichever instance of the app accepts the TCP
-    # connection, so the restore-check variant publishes 8081 and never takes the service's 8080
-    # traffic (deploy/RESTORE.md, "Addressing the restore-check instance"). The renderer sets it.
+    # The service publishes no port: dstack-ingress is its only public ingress. The restore-check
+    # instance runs no ingress, so it never answers for TOPUP_DOMAIN; the gateway reaches it as
+    # `<app_id>-8081` (deploy/RESTORE.md, "Addressing the restore-check instance").
+    # only-in: restore-check
     ports:
-      - "${TOPUP_INGRESS_PORT:-}:8080"
+      - "8081:8080"
     healthcheck:
       test: ["CMD", "topup", "healthcheck"]
       interval: 30s
@@ -149,6 +153,34 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  # only-in: service
+  # The single public ingress (deploy/README.md, "Custom domain"): the official dstack-ingress
+  # (Dstack-TEE/dstack-examples tag dstack-ingress-v2.6, custom-domain/dstack-ingress) terminates
+  # TLS for TOPUP_DOMAIN inside the CVM and forwards the TCP stream to topup:8080. tls-alpn-01:
+  # Let's Encrypt validates through the gateway on 443, so the CVM holds no DNS credentials and the
+  # owner creates the records once. The ACME contact is unset: it would be published. The evidence
+  # server listens on the container's loopback only and is served at /evidences/ on 443. It starts
+  # once topup is up: HAProxy refuses a backend whose name does not resolve yet.
+  dstack-ingress:
+    labels: *rendered-labels
+    image: ghcr.io/dstack-tee/dstack-ingress:2.6@sha256:c212abb7bedec4d7b54a82bcf9972e58e39a4757cc811faeb6017eee6c0673b0
+    environment:
+      CHALLENGE_TYPE: tls-alpn-01
+      DOMAIN: "${TOPUP_DOMAIN:-}"
+      GATEWAY_DOMAIN: "${TOPUP_GATEWAY_DOMAIN:-}"
+      TARGET_ENDPOINT: topup:8080
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      # The ACME account (the CAA record may pin its URI) and the certificate.
+      - ingress_certs:/etc/letsencrypt
+      - ingress_evidences:/evidences
+    depends_on:
+      topup:
+        condition: service_started
     restart: unless-stopped
 
   heartbeat:
@@ -261,6 +293,8 @@ volumes:
       device: tmpfs
       o: uid=999,gid=999,mode=0700
   observability:
+  ingress_certs:
+  ingress_evidences:
 
 configs:
   postgres_init_topup_role:

@@ -6,8 +6,9 @@ set -eu
 # APP_ID and the replayed compose hash the SHA-256 of the attested app-compose, whose
 # docker_compose_file must be EXPECTED_COMPOSE byte for byte. Then the compose policy: without
 # ENV_EXAMPLE, the topup compose (allowed_envs from app-compose.example.json, which are also the only
-# variables the compose reads, credential isolation, the single topup ingress: 8080 for the
-# service variant, 8081 for the restore-check variant); with ENV_EXAMPLE and SERVICE:PORT (the
+# variables the compose reads, credential isolation, the single ingress: dstack-ingress on 443
+# serving the domain of TOPUP_PUBLIC_ORIGIN for the service variant, topup on 8081 and no
+# dstack-ingress for the restore-check variant); with ENV_EXAMPLE and SERVICE:PORT (the
 # reference product),
 # allowed_envs exactly ENV_EXAMPLE's names and SERVICE:PORT the only published port.
 #
@@ -108,21 +109,29 @@ cmp -s "$tmp/compose-variables" "$tmp/expected-envs" || {
     diff -u "$tmp/expected-envs" "$tmp/compose-variables" >&2 || true
     exit 1
 }
-# The restore-check variant (TOPUP_SERVICE_ENABLED=read-only) publishes 8081 so the gateway never
-# routes the service's 8080 to it (RESTORE.md, "Addressing the restore-check instance").
+# The service's only ingress is dstack-ingress on 443 (tls-alpn-01), terminating TLS for the domain
+# topup verifies signatures against. The restore-check variant (TOPUP_SERVICE_ENABLED=read-only)
+# runs no ingress and publishes topup on 8081, so it never answers for the live domain (RESTORE.md,
+# "Addressing the restore-check instance").
 jq -e '
-    (if .services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only" then "8081" else "8080" end)
-        as $published |
+    def only($service; $target; $port):
+        [.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == [$service]
+        and .services[$service].ports == [{
+            "mode": "ingress", "target": $target, "published": $port, "protocol": "tcp"}];
     (.services.topup.environment | has("MIGRATE_DATABASE_URL") | not) and
-    ([.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["topup"]) and
-    (.services.topup.ports == [{
-        "mode": "ingress",
-        "target": 8080,
-        "published": $published,
-        "protocol": "tcp"
-    }])
+    ([.services["dstack-ingress"].volumes[]?.source]
+        | any(. == "db_owner" or . == "db_app" or . == "walg_key") | not) and
+    if .services.topup.environment.TOPUP_SERVICE_ENABLED == "read-only" then
+        only("topup"; 8080; "8081")
+    else
+        only("dstack-ingress"; 443; "443")
+        and (.services["dstack-ingress"].environment as $ingress
+            | $ingress.CHALLENGE_TYPE == "tls-alpn-01" and $ingress.TARGET_ENDPOINT == "topup:8080"
+            and .services.topup.environment.TOPUP_PUBLIC_ORIGIN == "https://\($ingress.DOMAIN)")
+    end
 ' "$tmp/docker-compose.json" >/dev/null || {
-    echo "attested compose does not have the expected single topup ingress (8080, or 8081 for restore-check)" >&2
+    echo "attested compose does not have the expected single ingress (dstack-ingress on 443 for" \
+        "the domain of TOPUP_PUBLIC_ORIGIN, or topup on 8081 for restore-check)" >&2
     exit 1
 }
 echo "attested compose, allowed_envs, credential isolation, and ingress passed"

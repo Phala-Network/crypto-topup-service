@@ -16,7 +16,7 @@ export AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
 export AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres
 export TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
 export SENTRY_ENVIRONMENT=staging
-export TOPUP_PUBLIC_ORIGIN=https://pending.invalid
+export TOPUP_DOMAIN=crypto-topup-api-staging.phala.com TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network
 export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
 # A source compose whose inline route still has zero-address placeholders, as before the route PR.
 sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
@@ -87,6 +87,11 @@ expect_failure same-rpc "the two RPC provider URLs must be different providers" 
 sed 's|s3://topup-staging/postgres|s3://other/postgres|' "$tmp/filled-route.yml" >"$tmp/edited.yml"
 expect_failure edited "differs from a fresh render" \
     --env "$tmp/complete.env" --compose "$tmp/edited.yml" --source "$tmp/filled-source.yml"
+# The ingress must serve the domain topup verifies signatures against.
+sed 's|DOMAIN: "crypto-topup-api-staging.phala.com"|DOMAIN: "other.phala.com"|' \
+    "$tmp/filled-route.yml" >"$tmp/other-domain.yml"
+expect_failure other-domain "dstack-ingress must serve TOPUP_DOMAIN" \
+    --env "$tmp/complete.env" --compose "$tmp/other-domain.yml" --source "$tmp/filled-source.yml"
 
 # Only the approved production image passes; no Phala Cloud node offers dstack 0.6.0.
 for image in dstack-0.6.0-rc5 dstack-dev-0.5.9 dstack-nvidia-0.5.9 dstack-0.5.8; do

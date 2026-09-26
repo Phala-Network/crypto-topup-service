@@ -589,8 +589,9 @@ services:
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }
 ```
 
-`TOPUP_PUBLIC_ORIGIN` is the service's public scheme and authority behind the gateway (for
-example `https://<app-id>-8080.<gateway-domain>`, no path); `topup run` refuses to start without a
+`TOPUP_PUBLIC_ORIGIN` is the service's public scheme and authority, `https://<custom domain>`
+(no path), whose TLS the official dstack-ingress terminates inside the CVM with the certificate
+evidence published (`deploy/README.md`, "Custom domain"); `topup run` refuses to start without a
 valid value.
 
 Postgres on the CVM's encrypted disk; WAL-G daily base backups and continuous WAL with
@@ -606,7 +607,7 @@ ignores the repeat; a lock-priced deposit gets the same amount, while a spot-pri
 re-priced, and the product keeps its first credit and reports a differing amount (§11). The
 restore drill runs weekly in CI on a local stack; the staging drill restores staging's real
 backups. Addresses need no restore because salts derive from product data. Ingress via the
-dstack gateway; egress limited to providers, price sources, object storage, product URLs, and
+dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, product URLs, and
 Sentry. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
 it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI

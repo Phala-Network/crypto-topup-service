@@ -5,6 +5,12 @@
 # settings, inline configs, and healthchecks all come from the rendered file, and the secrets from a
 # `.env` shaped like staging.env.example.
 #
+# The exception is the custom domain: dstack-ingress does not run, because tls-alpn-01 needs the
+# public DNS records and Let's Encrypt connecting through the dstack gateway (the upstream
+# TESTING.md tests it only on a real CVM), and running it here would register ACME accounts from
+# every rehearsal. Clients call topup on the compose network instead, so that is its origin;
+# validate-compose.sh checks the ingress definition.
+#
 # Like the restore drill, nothing here bind-mounts a host path (CI's Docker daemon cannot see
 # the checkout) and the workload publishes no host port; only Anvil is published, on a loopback
 # port the script picks, so the contract scripts can deploy to it. `!override` and `!reset` need
@@ -48,16 +54,21 @@ services:
         condition: service_completed_successfully
 
   topup:
+    environment:
+      TOPUP_PUBLIC_ORIGIN: http://topup:8080
     volumes: !override
       - dstack_socket:/var/run
       - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
-    ports: !reset []
     depends_on:
       dstack-simulator:
         condition: service_healthy
       anvil:
         condition: service_healthy
+
+  # A profile the rehearsal never enables (see the header).
+  dstack-ingress:
+    profiles: [cvm]
 
   # Starts with every boot and, in the service variant, exits at once.
   restore-check:

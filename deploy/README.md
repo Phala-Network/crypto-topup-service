@@ -9,7 +9,7 @@ are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Inciden
 
 | Where | What | Deployed by |
 |---|---|---|
-| topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service on port 8080, or read-only on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
+| topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
 | Staging reference-product CVM | [product/docker-compose.yml](product/docker-compose.yml), port 8089 | Deploy, target `product` |
 | Object storage (Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | Sentry project `phala-network/crypto-topup-service` | errors, alerts, Crons and Uptime monitors | the service itself |
@@ -54,6 +54,8 @@ passwords: that is a key migration, not an image bump.
    | `PHALA_WORKSPACE` | display name of the API key's workspace (preflight checks it) |
    | `DSTACK_OS_IMAGE` | `dstack-0.5.9` |
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
+   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain): `crypto-topup-api-staging.phala.com` (`staging`), `crypto-topup-api.phala.com` (`production`) |
+   | `TOPUP_GATEWAY_DOMAIN` | the domain's CNAME target, a name under the dstack gateway domain of the CVM's node: `gateway.dstack-pha-prod5.phala.network`; Deploy refuses a CVM on another gateway |
    | `SENTRY_ENVIRONMENT` | the Environment's name; Deploy refuses any other value |
    | `AWS_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
    | `AWS_REGION` | `auto` for R2 |
@@ -64,14 +66,14 @@ passwords: that is a key migration, not an image bump.
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_RPC_URL`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
 
    All but the first three are [attested settings](#attested-settings). `TOPUP_PUBLIC_ORIGIN` is
-   not a variable: Deploy derives it from the CVM's gateway URL.
+   not a variable: the compose sets it to `https://$TOPUP_DOMAIN`.
 5. **Sentry** (project admin; the Crons monitors create themselves on their first check-in):
    - Settings > Security & Privacy: keep *Data Scrubber* and *Use Default Scrubbers* on; turn
      *Prevent Storing of IP Addresses* on.
    - An alert for the environments `staging` and `production` (not `*-restore`) that notifies the
      on-call owner when an issue is created or regresses, with no level filter (most alert lines are
      `warning` events). Confirm that the Crons and Uptime monitors are listed as connected.
-   - One Uptime monitor per Environment (UI only): `GET <TOPUP_PUBLIC_ORIGIN>/healthz`, interval
+   - One Uptime monitor per Environment (UI only): `GET https://<TOPUP_DOMAIN>/healthz`, interval
      1 minute, timeout 10 seconds, environment = `SENTRY_ENVIRONMENT`.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
@@ -101,8 +103,8 @@ every deploy, and uploads the rendered compose and the verification as the run's
 
 1. Merge the change to `main` and run Release images.
 2. First deployment: Deploy with `mode: provision`, then set `TOPUP_CVM_ID` (or, for the product,
-   `STAGING_PRODUCT_CVM_ID`) to the CVM id in the summary and [seal the
-   secrets](#sealing-the-secrets). If a provision run fails after the summary shows a CVM id, set
+   `STAGING_PRODUCT_CVM_ID`) to the CVM id in the summary, [seal the
+   secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. If a provision run fails after the summary shows a CVM id, set
    the variable, seal the secrets (an upgrade waits for `/healthz`), and re-run with `mode:
    upgrade` and the same release; never provision twice.
 3. Every later change: Deploy with `mode: upgrade`. An upgrade sends only the compose, so the
@@ -148,14 +150,66 @@ spaces, quotes, backslashes, or `$`:
 | Setting | Source |
 |---|---|
 | `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY`, `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL`, `SENTRY_ENVIRONMENT` | the Environment variables of the same name |
-| `TOPUP_PUBLIC_ORIGIN` | the CVM's `https://<app_id>-8080.<gateway domain>`, derived by Deploy |
+| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variables of the same name: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` |
 | `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE` | the release's digests; the image digest is also the Sentry release |
-| `TOPUP_RESTORE_FROM_BACKUP`, `TOPUP_SERVICE_ENABLED`, `TOPUP_INGRESS_PORT` | the variant: service `off`, `on`, `8080`; `--restore-check`: `on`, `read-only`, `8081` |
+| `TOPUP_RESTORE_FROM_BACKUP`, `TOPUP_SERVICE_ENABLED` | the variant: service `off`, `on`; `--restore-check`: `on`, `read-only` |
+| ingress | the variant: the service runs `dstack-ingress` on 443 and publishes no topup port; `--restore-check` runs no ingress and publishes topup on 8081 (blocks after `# only-in: VARIANT` in the compose) |
+| `dstack-ingress` image | pinned in [docker-compose.yml](docker-compose.yml) by digest ([Custom domain](#custom-domain)) |
 | route files (inline configs) | committed in [docker-compose.yml](docker-compose.yml), checked against `config/routes/` by [validate-compose.sh](validate-compose.sh) |
 
 Every service also carries the label `crypto-topup.rendered-sha256`, so any rendered change
 recreates it. To change a setting, change the variable (or the route, by PR) and run Deploy
 `upgrade`. [product/render-compose.sh](product/render-compose.sh) renders the product the same way.
+
+### Custom domain
+
+Products pin topup's origin in every signed `@target-uri`, so it is a stable name the owner
+controls, `https://$TOPUP_DOMAIN`, not the CVM's gateway URL, which changes with the node and the
+app id. The official [dstack-ingress](https://github.com/Dstack-TEE/dstack-examples/tree/dstack-ingress-v2.6/custom-domain/dstack-ingress)
+2.6 (`ghcr.io/dstack-tee/dstack-ingress`, pinned by the digest of its release notes; `gh
+attestation verify oci://ghcr.io/dstack-tee/dstack-ingress@sha256:c212abb7bedec4d7b54a82bcf9972e58e39a4757cc811faeb6017eee6c0673b0
+--owner Dstack-TEE` shows it was built from tag `dstack-ingress-v2.6`) publishes the compose's only
+port, 443. The gateway passes the TLS connection for the domain through to it, it terminates TLS
+inside the CVM, and forwards the stream to `topup:8080`. It gets the Let's Encrypt certificate
+with `tls-alpn-01` through that same port, so the CVM holds no DNS credentials; the ACME contact is
+unset because the account document is published. Like `keys` and `topup` it mounts the dstack
+socket (its instance id and the evidence quote), which is why it is pinned by digest and attested
+with the compose.
+
+**HUMAN-ONLY, owner of the domain's Cloudflare zone**, once per CVM instance. Every topup Deploy
+run lists the records, in the tls-alpn-01 format of the pinned README:
+
+| Type | Name | Content |
+|---|---|---|
+| CNAME | `$TOPUP_DOMAIN` | `$TOPUP_GATEWAY_DOMAIN` |
+| TXT | `_dstack-app-address.$TOPUP_DOMAIN` | `<instance_id>:443` |
+| CAA (optional) | `$TOPUP_DOMAIN` | `0 issue "letsencrypt.org;validationmethods=tls-alpn-01;accounturi=<ACME account>"` |
+
+- DNS only (grey cloud): a proxied name resolves to Cloudflare, so neither the CA nor a client
+  reaches the gateway.
+- The TXT names the instance, not the app: the CA's validation must reach the one instance that
+  holds the ACME order. An upgrade keeps the instance id; a new instance ([Resume](RESTORE.md#resume))
+  serves the domain only after the TXT carries its id.
+- Until both records resolve, dstack-ingress serves a self-signed placeholder and requests no
+  certificate, so Deploy's `/healthz` wait on the domain fails.
+- CAA is optional. An existing CAA record on the domain or `phala.com` must permit `tls-alpn-01`
+  (`phala.com` has none as of 2026-09-26). Pinning `accounturi` to the account that
+  [verify-ingress-evidence.sh](verify-ingress-evidence.sh) prints also means that losing the
+  `ingress_certs` volume (a new account) blocks renewal until the record is updated.
+
+**Certificate evidence.** dstack-ingress publishes, at `https://$TOPUP_DOMAIN/evidences/`, the
+ACME account, the certificate, `sha256sum.txt` over both, and a TDX quote whose `report_data` is
+the hash of `sha256sum.txt`. Its evidence server listens on the ingress container's loopback (port
+80) and is reached only through 443, where HAProxy routes `GET /evidences` to it, so there is no
+evidence port to publish. [verify-ingress-evidence.sh](verify-ingress-evidence.sh) checks the
+chain with the official verifier (the quote is app `APP_ID`'s and binds the files) and that the
+domain serves exactly that certificate; Deploy runs it after every topup upgrade:
+
+```sh
+deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+```
+
+The quote dates from the last issuance, so its compose hash can be an earlier compose of the app.
 
 ### Database credentials
 
@@ -214,16 +268,19 @@ npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
 deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml
-export TOPUP_PUBLIC_ORIGIN="https://${APP_ID#0x}-8080.$GATEWAY_DOMAIN"
+export TOPUP_PUBLIC_ORIGIN="https://$TOPUP_DOMAIN"
+deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
 ```
 
 [verify-attestation.sh](verify-attestation.sh) runs the official dstack verifier
 ([dstack-verifier.sh](dstack-verifier.sh), `dstacktee/dstack-verifier:0.5.9` pinned by digest:
 TDX quote and TCB, RTMR3 event-log replay, OS image measurements), requires TCB `UpToDate`, the
 app id, and a compose hash whose app-compose holds exactly the rendered compose, then checks the
-policy: `allowed_envs` equal to the sealed names and the only `topup` port 8080 (8081 for the
-restore-check variant). Never treat a hash from [render-app-compose.sh](render-app-compose.sh)
-as the deployed one; the Phala CLI builds the app-compose itself.
+policy: `allowed_envs` equal to the sealed names and the only published port `dstack-ingress` on
+443 (`tls-alpn-01`, forwarding to `topup:8080`, for the domain of `TOPUP_PUBLIC_ORIGIN`), or for
+the restore-check variant `topup` on 8081 and no ingress. Never treat a hash from
+[render-app-compose.sh](render-app-compose.sh) as the deployed one; the Phala CLI builds the
+app-compose itself.
 
 The settlement key and flusher operators come only from the public, nonce-bound attestation:
 
@@ -244,8 +301,9 @@ Then check that `report_data` binds the nonce, the `settlement/v1` key, and ever
 the Python SDK's `topup_sdk.verify_attestation_binding(response, nonce)` (architecture §14
 defines the construction; `TopupClient.attestation` runs it on every fetch).
 
-**Ingress**: the attested compose must publish only `topup` on 8080; confirm `/openapi.json` at
-`TOPUP_PUBLIC_ORIGIN` with a valid certificate and that PostgreSQL is unreachable. The service
+**Ingress**: the attested compose must publish only `dstack-ingress` on 443; confirm `/openapi.json`
+at `TOPUP_PUBLIC_ORIGIN` with a valid certificate, its [certificate
+evidence](#custom-domain), and that PostgreSQL and topup's port 8080 are unreachable. The service
 verifies every signed `@target-uri` against `TOPUP_PUBLIC_ORIGIN`, so a correctly signed request
 answered `401` usually means the URL differs from it. **Egress** (HUMAN-ONLY, cloud network
 authority; dstack has no hostname allow-list): restrict outbound traffic to the two RPC hosts,
@@ -316,9 +374,10 @@ Staging's `phala-cloud` product is a second CVM running
 fulfills each `deposit.credited` once (its tests are in `product/tests`) and an account API, with
 a SQLite ledger; `deposit` mode, run from an operator's machine, plays a Phala Cloud user and signs
 with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_SEED`
-([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (from `TOPUP_CVM_ID`),
-`PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and `PRODUCT_DRIVER_PUBLIC_KEY` are
-attested. At startup it pins topup's `settlement/v1` key from a verified attestation. Its preflight
+([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`,
+for its API calls), `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and
+`PRODUCT_DRIVER_PUBLIC_KEY` are attested. At startup it pins topup's `settlement/v1` key, which
+verifies the webhooks, from a verified attestation at `TOPUP_ORIGIN`. Its preflight
 ([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a Sepolia RPC; the
 deposit driver pays through it. Switching staging to Phala Cloud's backend is a
 `PUT /v1/admin/products/phala-cloud` with their key and webhook URL

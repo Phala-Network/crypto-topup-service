@@ -98,6 +98,11 @@ webhook receivers must ignore unknown fields.
   resending. `topup-conformance-reference --broken unknown-status` answers the old form and fails
   exactly that case.
 
+- **Breaking (base URL):** the service is served on a custom domain, `https://crypto-topup-api.phala.com`
+  (staging `https://crypto-topup-api-staging.phala.com`), with TLS terminated inside the CVM and
+  its certificate evidence at `/evidences/`. Sign `@target-uri` for that origin; the gateway URL
+  `https://<app_id>-8080.<gateway domain>` no longer answers.
+
 ### Removed
 
 - **Settlement conformance suite** (`topup-conformance`, `topup-conformance-reference`,

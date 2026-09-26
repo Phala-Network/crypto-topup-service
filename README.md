@@ -64,8 +64,9 @@ scanner poll interval, if shorter) for the pending view and wakes the finalized 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
 address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as
 `https://topup.example` (no path). Request signatures are verified against this origin plus the
-request path and query, so behind the dstack gateway it must be the gateway URL, not the internal
-address; `Host` and `X-Forwarded-*` headers are never trusted.
+request path and query, so behind an ingress it must be the public URL (in a CVM, the custom
+domain of `deploy/README.md`), not the internal address; `Host` and `X-Forwarded-*` headers are
+never trusted.
 
 ## Restore
 
