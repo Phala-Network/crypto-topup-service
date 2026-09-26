@@ -23,9 +23,9 @@ check-generated: generate
 	test -z "$$(git status --porcelain --untracked-files=all -- $(GENERATED))"
 
 lint:
-	$(UV) run --locked ruff check . ../examples ../../deploy/sandbox/scenarios
-	$(UV) run --locked ruff format --check . ../examples ../../deploy/sandbox/scenarios
-	$(UV) run --locked mypy src/topup_sdk tests ../examples ../../deploy/sandbox/scenarios
+	$(UV) run --locked ruff check . ../examples ../../deploy/product ../../deploy/sandbox/scenarios
+	$(UV) run --locked ruff format --check . ../examples ../../deploy/product ../../deploy/sandbox/scenarios
+	$(UV) run --locked mypy src/topup_sdk tests ../examples ../../deploy/product ../../deploy/sandbox/scenarios
 
 test:
 	$(UV) run --locked pytest

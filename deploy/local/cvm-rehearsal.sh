@@ -27,7 +27,7 @@
 #    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
 #    public URL (the container must be recreated with the new config), then the sealed product
 #    seed. One quote-first deposit, driven from another container with the deposit
-#    driver (sdk/examples/phala_cloud_integration.py deposit), is credited end to end and recorded
+#    driver (`python -m reference_product deposit`), is credited end to end and recorded
 #    once in the product's ledger. Then it removes everything and asserts that no container,
 #    volume, network, or image of the run is left.
 #
@@ -143,8 +143,8 @@ wait_for() {
 # Runs Python in the client container on the compose network.
 product_python() {
     docker exec -i -e UV_PROJECT_ENVIRONMENT=/opt/venv -e UV_PYTHON_DOWNLOADS=never \
-        -e PYTHONDONTWRITEBYTECODE=1 -w /opt/sdk "$client" \
-        uv run --locked --project python --quiet python "$@"
+        -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/opt/repo/deploy/product -w /opt/repo "$client" \
+        uv run --locked --project sdk/python --quiet python "$@"
 }
 
 echo "== building images and pushing them to a loopback registry"
@@ -183,9 +183,10 @@ install_anvil_multicall3 "$rpc_url"
 docker run -d --name "$client" --network "${project}_default" "$client_image" sleep infinity \
     >/dev/null
 # `docker cp` streams through the API, so this works where the daemon cannot see the checkout.
-docker exec "$client" mkdir /opt/sdk
-tar -C "$root/sdk" --exclude=.venv --exclude='*_cache' --exclude=__pycache__ -cf - python examples |
-    docker cp - "$client:/opt/sdk"
+docker exec "$client" mkdir /opt/repo
+tar -C "$root" --exclude=.venv --exclude='*_cache' --exclude=__pycache__ -cf - sdk/python \
+    deploy/product/reference_product |
+    docker cp - "$client:/opt/repo"
 
 echo "== deploying contracts with the A2 and sandbox scripts"
 export FOUNDRY_BROADCAST="$tmp/broadcast"
@@ -491,7 +492,7 @@ jq -n --arg factory "$factory" --arg implementation "$implementation" --arg toke
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
     docker exec -i "$client" sh -c 'cat >/opt/driver.json'
-product_python examples/phala_cloud_integration.py deposit --config /opt/driver.json \
+product_python -m reference_product deposit --config /opt/driver.json \
     --driver-seed-file /opt/driver.seed --amount-minor 2500 --timeout 420
 echo "ok: the deposit driver's quote-first deposit is credited once in the product's ledger"
 # The route prices only from Coin Metrics, Binance, and Kraken over HTTPS, so a priced lock proves

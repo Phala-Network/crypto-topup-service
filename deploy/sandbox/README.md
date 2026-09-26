@@ -25,16 +25,16 @@ is marked **HUMAN-ONLY**; agents and CI never run them.
 Requirements: Docker Compose, Foundry v1.8.3 (`forge`, `cast`), `jq`, `uv`, `curl`, and OpenSSL 3.
 
 ```sh
-deploy/sandbox/run-local.sh                 # example, then every scenario
-deploy/sandbox/run-local.sh happy_path      # example, then selected scenarios
+deploy/sandbox/run-local.sh                 # examples, then every scenario
+deploy/sandbox/run-local.sh happy_path      # examples, then selected scenarios
 ```
 
 The script builds the images, starts PostgreSQL, the dstack simulator, and an Anvil chain with
 Sepolia's chain id (one-second blocks, `finalized` eight blocks behind), deploys the forwarder
 factory and the sandbox test contracts, creates a product key, renders and validates the route
-with a 45-second rate-lock window, issues the product, starts the service, runs
-`sdk/examples/phala_cloud_integration.py`, and then `scenarios/run.py`. The example and the
-scenarios run in a pinned uv/Python 3.12 container on the compose network, where the service
+with a 45-second rate-lock window, issues the product, starts the service, runs the SDK example
+`sdk/examples/phala_cloud_integration.py`, the reference product (`deploy/product`) with one
+deposit driven through it, and then `scenarios/run.py`. They run in a pinned uv/Python 3.12 container on the compose network, where the service
 reaches the product endpoints as `http://product:8089`; this works even where a host firewall drops
 traffic from containers to the host. `restart_mid_flow` runs last in its own container, the
 only one given the Docker socket, which it uses to restart the local service
@@ -136,8 +136,8 @@ gas from a public faucet.
 
 ## Running the scenarios against Sepolia (integrators)
 
-Write a configuration file; the fields are those of `SandboxConfig` in
-`sdk/examples/phala_cloud_integration.py`:
+Write a configuration file; the fields are those of `ProductConfig` in
+`deploy/product/reference_product/config.py`:
 
 ```json
 {
@@ -166,18 +166,19 @@ Write a configuration file; the fields are those of `SandboxConfig` in
 - `payer_account` is a Foundry keystore account (`cast wallet import sandbox-payer --interactive`)
   holding a throwaway test key with Sepolia ETH; instead of it, `ETH_KEYSTORE` may name the
   keystore file. Export `ETH_PASSWORD` as the path of a mode-0600 file holding its keystore
-  password (Foundry reads the variable as a password file). `payer` (an unlocked address) is
-  only for Anvil.
-- Without a mode the example runs the product (`serve`) and one deposit (`deposit`) in one
-  process; the two modes also run separately, as for staging (deploy/README.md, "Staging
+  password (read as a password file, as Foundry does). `payer` (an unlocked address) is only for
+  Anvil.
+- Without a mode the reference product runs the product (`serve`) and one deposit (`deposit`) in
+  one process; the two modes also run separately, as for staging (deploy/README.md, "Staging
   reference product").
-- Set `settlement_public_key` (hex) after verifying the attestation quote; otherwise the example
+- Set `settlement_public_key` (hex) after verifying the attestation quote; otherwise the product
   checks only the attestation's nonce binding and warns.
 
 Then run:
 
 ```sh
 uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py --config sandbox.json
+PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product --config sandbox.json
 uv run --locked --project sdk/python python deploy/sandbox/scenarios/run.py --config sandbox.json
 ```
 
