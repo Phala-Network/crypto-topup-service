@@ -497,7 +497,12 @@ Developer check, no push and no credentials: the same two-build comparison runs 
 
 ```sh
 deploy/verify-image.sh   # or make verify-image
+DOCKERFILE=deploy/Dockerfile.reference-product deploy/verify-image.sh
 ```
+
+CI runs the reference-product check on every pull request. Every build uses `--no-cache`, but a
+race (such as parallel installs writing the same path) can still make two builds match by
+chance; a pass is evidence, not proof.
 
 Deploy renders literal, nonzero image digests and the settings into the compose; secret
 values remain `${NAME:-}` references ([Attested settings](#attested-settings)). To review a render

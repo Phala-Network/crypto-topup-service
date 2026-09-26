@@ -16,7 +16,12 @@ WORKDIR /opt/sdk
 COPY sdk/python/pyproject.toml sdk/python/uv.lock sdk/python/README.md sdk/python/.python-version ./
 # Runtime and product dependencies only, exactly as locked. The SDK itself is imported from source
 # (PYTHONPATH): installing the local project records build-time mtimes, so two builds differ.
-RUN uv sync --locked --no-default-groups --group product --no-install-project --no-cache
+# The eth-abi, eth-rlp, and hexbytes wheels each ship their Sphinx sources as a top-level `docs`
+# directory with different files at the same paths; uv installs wheels in parallel, so which copy
+# survives varies between builds (`--preview-features detect-module-conflicts` reports the race).
+# Nothing imports it; removing it keeps the layer reproducible.
+RUN uv sync --locked --no-default-groups --group product --no-install-project --no-cache && \
+    rm -r /opt/venv/lib/python3.14/site-packages/docs
 COPY sdk/python/src ./src
 COPY deploy/product/reference_product /opt/product/reference_product
 

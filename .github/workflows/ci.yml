@@ -127,6 +127,13 @@ jobs:
           docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             -f deploy/Dockerfile.reference-product -t crypto-topup-reference-product:ci .
           docker run --rm crypto-topup-reference-product:ci --help
+      # Release images publishes only after two matching builds; catch a nondeterministic
+      # dependency here rather than at release. The crypto-topup build is too slow to repeat per PR.
+      - name: Check the reference-product image is reproducible
+        env:
+          DOCKERFILE: deploy/Dockerfile.reference-product
+          TMPDIR: ${{ runner.temp }}
+        run: deploy/verify-image.sh
       - name: Validate the sandbox route template
         run: |
           route="$RUNNER_TEMP/sandbox-route.yaml"
