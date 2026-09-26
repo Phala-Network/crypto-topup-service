@@ -394,7 +394,7 @@ The staging route file has 47 leaf values.
 | `chain.flush.max_gas_ratio_bps` | default 200 | Same everywhere; 2% of value. |
 | `chain.flush.max_fee_per_gas_wei` | default 500 gwei | A runaway-fee guard, far above normal Ethereum and Base fees. |
 | `chain.flush.replacement_bps` | default 12 500 | A 25% bump satisfies every client's replacement rule (geth needs 10%). |
-| `chain.flush.min_operator_balance_wei` | default 0.05 ETH | The mainnet example's value; staging, today 0.01 ETH, either funds to 0.05 ETH or overrides. |
+| `chain.flush.min_operator_balance_wei` | default 0.05 ETH | The mainnet example's value; staging overrides it with today's 0.01 ETH (§9). |
 | `rate_lock.enabled` | removed | Quotes are the only flow; stopping them is the `quotes` pause scope. |
 | `rate_lock.window_s` | default 900 | Today's value in both route files; about one Ethereum finality delay, long enough to pay from a wallet. |
 | `rate_lock.spread_bps` | default 50 | Finance's pilot number; served in `/v1/config`. A different spread for one route is an override. |
@@ -402,7 +402,8 @@ The staging route file has 47 leaf values.
 | `rate_lock.max_creations_per_minute` | default 10 | Abuse bound per account; no UI needs more. |
 | `alerts.stuck_after_s.*` | default 1800 / 1800 / 172 800 | Detected and confirmed normally clear in minutes; credited waits for the next flush (6 h schedule, gas-ratio gated), so two days. |
 
-Result: 20 leaf values for staging (19 on mainnet, which uses the default oracle), down from 47.
+Result: 21 leaf values for staging (19 on mainnet, which uses the default oracle and the default
+gas reserve), down from 47.
 
 ```yaml
 # deploy/config/routes/phala-cloud-sepolia-pha.yaml
@@ -414,6 +415,8 @@ chain:
   forwarder_factory: "0x2407bE5Be2b632F5b166872A49E4946a70CCa531"
   treasury: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
   sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6"   # no Chainalysis oracle on Sepolia
+  flush:
+    min_operator_balance_wei: "10000000000000000"   # 0.01 ETH; the operator holds about 0.02 ETH
 asset:
   symbol: pha
   contract: "0x8F40e7E99678F44c88158f049E62817580ab113B"
@@ -429,7 +432,7 @@ limits:
 ```
 
 The route's `version` becomes 2, because the resolved route changes (for example
-`min_flush_atomic` 20 000 PHA → 0 and `min_operator_balance_wei` 0.01 → 0.05 ETH). Deposits
+`min_flush_atomic` 20 000 PHA → 0 and `min_deposit_atomic` 20 PHA → 0). Deposits
 keep version 1; the route-retirement runbook applies to version 1 as usual.
 
 ### 4.3 GitHub Environment variables
@@ -568,7 +571,7 @@ Estimates from the current files; the implementation PRs report the actual numbe
 | `topup_client` (generated) | 10 428 lines → ~6 500 | |
 | `topup_sdk`, examples, reference product, scenarios | ~450 | ~300 |
 | Docs (integration, architecture, runbooks, Phala Cloud PR) | ~500 | ~350 |
-| Route file | 47 → 20 values | |
+| Route file | 47 → 21 values (staging) | |
 | GitHub variables | 17 → 10 (staging), 8 (production) | |
 
 Net: about 4 500 lines of hand-written code and docs removed and 3 300 added, plus about 5 000
@@ -593,14 +596,16 @@ sections they change. No staging deploy until PR 6 is merged.
 Then one release: deploy topup and the reference product to staging, run the deposit driver's
 abnormal paths, and update #2196.
 
-## 9. Decisions for the owner
+## 9. Decisions
 
-The design takes a position on each; a different answer changes only the named PR.
+Approved by the owner with these answers:
 
-1. Drop `deposit.pending` and `deposit.confirmed` (PR 6). Alternative: keep a
-   `quote.payment_detected` notification.
-2. Prefixed ids `dep_`/`qt_`/`re_`/`evt_` (PR 3). Alternative: bare UUIDs, which spares the
-   reference product's key migration but departs from Stripe.
-3. Drop token-denominated quotes and the per-account dynamic limits endpoint (PR 3).
-4. Default `min_deposit_atomic` and `min_flush_atomic` to 0 (PR 1); both are policy numbers that
-   finance set, so finance confirms.
+1. `deposit.pending` and `deposit.confirmed` are dropped; UI progress comes from
+   `GET /v1/quotes/{id}` (PR 6).
+2. Ids are prefixed `qt_`/`dep_`/`re_`/`evt_` (PR 3).
+3. Quoting by token amount and the dynamic limits endpoint are dropped (PR 3).
+4. `min_deposit_atomic` and `min_flush_atomic` default to 0: the gas-ratio rule governs flush
+   economics and `min_credit_minor` still rejects dust (PR 1). **Finance confirms these numbers,
+   and every other default of §4.2, before production.**
+5. Staging overrides `chain.flush.min_operator_balance_wei` to 0.01 ETH: its operator holds about
+   0.02 ETH, so the 0.05 ETH default would alert at once (PR 1).
