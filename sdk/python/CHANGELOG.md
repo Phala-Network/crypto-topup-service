@@ -1,8 +1,8 @@
 # Changelog
 
 All notable changes to `crypto-topup-sdk` are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/sdk.md`; versions
-follow [Semantic Versioning](https://semver.org/).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
+(section 9); versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
