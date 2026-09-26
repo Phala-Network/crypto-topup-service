@@ -14,7 +14,7 @@ x-walg-environment: &walg-environment
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
 services:
-  # The only container with the dstack socket besides topup: it derives the WAL-G keys and the
+  # The only container with the dstack socket besides topup: it derives the WAL-G key and the
   # database credentials (deploy/README.md, "Database credentials") into three tmpfs volumes, so
   # every other service mounts only the ones it needs.
   keys:
@@ -34,10 +34,6 @@ services:
       - /run/db-owner
       - --app-dir
       - /run/db-app
-      - --version
-      - "${TOPUP_BACKUP_KEY_VERSION:-}"
-      - --fallback-versions
-      - "${TOPUP_BACKUP_KEY_FALLBACK_VERSIONS:-}"
       - --hold
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
@@ -60,7 +56,6 @@ services:
       POSTGRES_DB: topup
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/db-owner/postgres.password
-      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
       # An empty data directory is restored from the newest base backup in WALG_S3_PREFIX, or
       # initialized when the prefix provably holds none (deploy/RESTORE.md). `on` only in the
       # restore-check variant: a backup is required and archiving is off.
@@ -189,7 +184,6 @@ services:
       PGUSER: postgres
       PGPASSFILE: /run/db-owner/postgres.pgpass
       WALG_RETENTION_FULL: "7"
-      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
       TOPUP_RESTORE_FROM_BACKUP: "${TOPUP_RESTORE_FROM_BACKUP:-}"
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
     volumes:
@@ -213,7 +207,6 @@ services:
     environment:
       <<: *walg-environment
       PGDATA: /var/lib/postgresql/data
-      TOPUP_BACKUP_KEY_VERSION: "${TOPUP_BACKUP_KEY_VERSION:-}"
     volumes:
       - pgdata:/var/lib/postgresql
       - walg_key:/run/wal-g:ro

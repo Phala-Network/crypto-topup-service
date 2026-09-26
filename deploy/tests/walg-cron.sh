@@ -23,31 +23,28 @@ printf '%s\n' "$output" | grep -F \
     'parsed schedule: minute=0 hour=3 day-of-month=* month=* day-of-week=*' >/dev/null
 printf '%s\n' "$output" | grep -F 'next WAL-G base backup at ' >/dev/null
 printf '%s\n' "$output" | grep -F \
-    'dry-run: walg-base-backup /var/lib/postgresql/data' >/dev/null
+    'dry-run: wal-g backup-push /var/lib/postgresql/data' >/dev/null
 printf '%s\n' "$output" | grep -F \
     'dry-run: wal-g delete retain FULL 3 --use-sentinel-time --confirm' >/dev/null
 
-mkdir -p "$tmp/bin" "$tmp/marker" "$tmp/keys"
+mkdir -p "$tmp/bin" "$tmp/marker"
 cat > "$tmp/bin/wal-g" <<'FAKE'
 #!/bin/sh
 set -eu
-printf 'KEY=%s ARGS=%s\n' "${WALG_LIBSODIUM_KEY_PATH:-}" "$*" >> "$WALG_TEST_CALL"
+printf '%s\n' "$*" >> "$WALG_TEST_CALL"
 if [ "$1" = wal-push ] && [ -n "${WALG_TEST_FAIL_PUSH:-}" ]; then
     exit 1
 fi
 FAKE
 chmod +x "$tmp/bin/wal-g"
-touch "$tmp/segment" "$tmp/keys/backup-v1.key"
-# archive_command delegates to the key-versioned walg-wal-push, then refreshes the marker.
+touch "$tmp/segment"
+# archive_command runs wal-push, then refreshes the marker.
 PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
     AWS_ACCESS_KEY_ID=test \
-    WALG_KEY_DIR="$tmp/keys" \
-    TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment"
-grep -F "KEY=$tmp/keys/backup-v1.key ARGS=wal-push $tmp/segment" "$tmp/wal-g.call" >/dev/null
-grep -F "key-versions/wal/segment.json" "$tmp/wal-g.call" >/dev/null
+grep -Fx "wal-push $tmp/segment" "$tmp/wal-g.call" >/dev/null
 grep -E '^[0-9]+$' "$tmp/marker/last-success" >/dev/null
 [ "$(stat -c %a "$tmp/marker/last-success")" = 644 ]
 
@@ -57,8 +54,6 @@ if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
     WALG_TEST_FAIL_PUSH=1 \
     AWS_ACCESS_KEY_ID=test \
-    WALG_KEY_DIR="$tmp/keys" \
-    TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
     echo "failed WAL upload unexpectedly succeeded" >&2
@@ -71,8 +66,6 @@ fi
 if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
     AWS_ACCESS_KEY_ID= \
-    WALG_KEY_DIR="$tmp/keys" \
-    TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
     echo "WAL archiving without S3 credentials unexpectedly succeeded" >&2
@@ -96,8 +89,6 @@ if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
     WALG_TEST_CALL="$tmp/wal-g.call" \
     TOPUP_RESTORE_FROM_BACKUP=on \
     AWS_ACCESS_KEY_ID=test \
-    WALG_KEY_DIR="$tmp/keys" \
-    TOPUP_BACKUP_KEY_VERSION=1 \
     TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
     "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
     echo "WAL archiving while TOPUP_RESTORE_FROM_BACKUP=on unexpectedly succeeded" >&2
@@ -114,14 +105,13 @@ FAKE
 cat >"$tmp/timeline-bin/wal-g" <<'FAKE'
 #!/bin/sh
 set -eu
-test "$*" = "backup-list --json"
-printf '%s\n' "$TEST_BACKUP_LIST"
+case "$*" in
+    "backup-list --json") printf '%s\n' "$TEST_BACKUP_LIST" ;;
+    "backup-push "*) printf '%s\n' "$2" >>"$TEST_BASE_BACKUP_CALL" ;;
+    *) exit 70 ;;
+esac
 FAKE
-cat >"$tmp/timeline-bin/walg-base-backup" <<'FAKE'
-#!/bin/sh
-printf '%s\n' "$1" >>"$TEST_BASE_BACKUP_CALL"
-FAKE
-chmod +x "$tmp/timeline-bin/psql" "$tmp/timeline-bin/wal-g" "$tmp/timeline-bin/walg-base-backup"
+chmod +x "$tmp/timeline-bin/psql" "$tmp/timeline-bin/wal-g"
 timeline_backup() {
     : >"$tmp/base-backup.call"
     set +e

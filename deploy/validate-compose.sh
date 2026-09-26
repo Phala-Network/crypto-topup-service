@@ -26,7 +26,7 @@ render() {
         AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto \
         AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres \
         TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
-        TOPUP_BACKUP_KEY_VERSION=1 TOPUP_BACKUP_KEY_FALLBACK_VERSIONS=0 SENTRY_ENVIRONMENT=staging \
+        SENTRY_ENVIRONMENT=staging \
         TOPUP_PUBLIC_ORIGIN=https://topup.example TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example \
         TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example "$root/deploy/render-compose.sh" "$@"
 }

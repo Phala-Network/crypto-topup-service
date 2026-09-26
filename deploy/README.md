@@ -106,7 +106,6 @@ not an OS image bump.
    | `AWS_S3_FORCE_PATH_STYLE` | variable, attested | `false` (or `true` for a path-style endpoint) |
    | `WALG_S3_PREFIX` | variable, attested | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)), and production a bucket or prefix staging's keys cannot reach |
    | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | variable, attested | from `topup-sdk keygen`, a separate key per Environment; the private key stays with the admin |
-   | `TOPUP_BACKUP_KEY_VERSION`, `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` | variable, attested | `1` and `0` |
    | `SENTRY_ENVIRONMENT` | variable, attested | the Environment's name, `staging` or `production` ([Sentry](#sentry)); Deploy refuses any other value |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | variable, attested | keyless public HTTPS RPC URLs of the route's chain (Sepolia for staging, Ethereum mainnet for production) from two different providers (staging's are also used by Verify contracts and Deploy staging product); they are published with the compose, so never a URL with an embedded key. The chain must carry the canonical Multicall3 (`0xcA11bde05977b3631167028862bE2a173976CA11`, [`contracts/multicall3.json`](contracts/multicall3.json)): balance and `addressOf` reads are aggregated through it, and `topup run` refuses to start without it |
    | `PHALA_WORKSPACE` | variable | display name of the API key's Phala Cloud workspace (`staging`: `kingsley's projects`) |
@@ -185,11 +184,11 @@ The same steps deploy `staging` and `production`; `ENV` below is the Environment
 
    Without `--unsealed`, preflight requires the S3 keys. The CVM restarts, PostgreSQL finds the
    prefix empty and initializes a new cluster, and `/healthz` answers. Backups have started when
-   the WAL key-version marker, rewritten by every archived segment, is younger than two minutes
-   (the `heartbeat` service forces one segment a minute):
+   the newest archived WAL segment is younger than two minutes (the `heartbeat` service forces one
+   segment a minute):
 
    ```sh
-   aws s3 ls "${WALG_S3_PREFIX%/}/key-versions/current.json" --endpoint-url "$AWS_ENDPOINT"
+   aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1
    ```
 
    Re-seal the same way whenever a secret must change; a setting changes only through `upgrade`.
@@ -405,14 +404,14 @@ requires adding that route to `restore-check` and to the `topup run` command in 
 
 PostgreSQL runs inside the CVM, so its passwords are derived there like every other key, never
 supplied. The `keys` service (`topup keys`, the only container besides `topup` with the dstack
-socket) derives the WAL-G keys and, as the lowercase hex of `get_key("db/owner/v1")` and
+socket) derives the WAL-G key (`get_key("backup/v1")`) and, as the lowercase hex of `get_key("db/owner/v1")` and
 `get_key("db/app/v1")` (secp256k1), the owner and application passwords. It writes them to three
 tmpfs volumes and holds them mounted; its `--check` healthcheck gates PostgreSQL. Each service
 mounts, read-only, only the volumes it needs:
 
 | Volume (path) | Files | Mounted by |
 |---|---|---|
-| `walg_key` (`/run/wal-g`) | `backup.key`, `backup-vN.key` | `postgres`, `backup`, `restore` |
+| `walg_key` (`/run/wal-g`) | `backup.key` | `postgres`, `backup`, `restore` |
 | `db_owner` (`/run/db-owner`) | `postgres.password` (`POSTGRES_PASSWORD_FILE`), `postgres.pgpass` | `postgres`, `migrate`, `backup`, `restore-check` |
 | `db_app` (`/run/db-app`) | `topup_service.pgpass` | `postgres` (the init script reads its password field), `topup`, `heartbeat` |
 
@@ -421,12 +420,12 @@ read libpq's standard `PGPASSFILE`. Every file is mode `0600`, owned by uid 999,
 database client runs as; isolation is by mount, and `deploy/validate-compose.sh` requires that
 `topup` and `heartbeat` mount neither `db_owner` nor `walg_key`. The same app id derives the same
 passwords, so a replacement or restored CVM logs in unchanged
-([RESTORE.md](RESTORE.md#backup-key-and-metadata)). The version is part of the path; rotating
+([RESTORE.md](RESTORE.md#backup-key)). The version is part of the path; rotating
 means an `ALTER ROLE` to a `db/*/v2` value inside the CVM and a new compose.
 
 ## Backup age marker contract
 
-After a successful `walg-wal-push` (key-versioned WAL upload and metadata) or `walg-base-backup`,
+After a successful `wal-g wal-push` or `wal-g backup-push`,
 `walg-cron` atomically writes the current Unix timestamp as decimal ASCII plus a newline to
 `TOPUP_BACKUP_TIMESTAMP_FILE` with mode `0644`; the marker is operational metadata and contains no
 secret. PostgreSQL uses `walg-cron wal-push %p` as its archive command, so the 60-second

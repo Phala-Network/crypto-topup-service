@@ -14,8 +14,8 @@ write_marker() {
     mv "$marker_tmp" "$marker"
 }
 
-# PostgreSQL archive_command: the key-versioned D3 wrapper uploads and annotates the segment, and
-# the backup-age marker is refreshed only after both succeeded.
+# PostgreSQL archive_command: WAL-G uploads the segment, and the backup-age marker is refreshed only
+# after it succeeded.
 if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
     # The entrypoint already sets archive_mode=off for a restore; refuse a stray call as well.
     if [ "${TOPUP_RESTORE_FROM_BACKUP:-off}" = on ]; then
@@ -29,7 +29,7 @@ if [ "${1:-}" = "wal-push" ] && [ "$#" -eq 2 ]; then
         echo "WAL archiving waits for sealed object-storage credentials" >&2
         exit 1
     fi
-    walg-wal-push "$2"
+    wal-g wal-push "$2"
     write_marker
     exit 0
 fi
@@ -86,7 +86,7 @@ if [ "${WALG_CRON_DRY_RUN:-0}" = "1" ]; then
         run_at=$(date -u -d "tomorrow $hour:$minute:00" +%s)
     fi
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
-    echo "dry-run: walg-base-backup ${PGDATA:-/var/lib/postgresql/data}"
+    echo "dry-run: wal-g backup-push ${PGDATA:-/var/lib/postgresql/data}"
     echo "dry-run: wal-g delete retain FULL $retention --use-sentinel-time --confirm"
     exit 0
 fi
@@ -141,7 +141,7 @@ while :; do
     delay=$((run_at - now))
     echo "next WAL-G base backup at $(date -u -d "@$run_at" +%FT%TZ)"
     sleep "$delay"
-    walg-base-backup "${PGDATA:-/var/lib/postgresql/data}"
+    wal-g backup-push "${PGDATA:-/var/lib/postgresql/data}"
     write_marker
     wal-g delete retain FULL "$retention" --use-sentinel-time --confirm
 done

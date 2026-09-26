@@ -123,7 +123,7 @@ dry_run=$(dc run --rm --no-deps \
     -e WALG_CRON_DRY_RUN=1 backup walg-cron backup-push "0 3 * * *")
 printf '%s\n' "$dry_run"
 printf '%s\n' "$dry_run" | grep -F \
-    'dry-run: walg-base-backup /var/lib/postgresql/data' >/dev/null
+    'dry-run: wal-g backup-push /var/lib/postgresql/data' >/dev/null
 printf '%s\n' "$dry_run" | grep -F \
     'dry-run: wal-g delete retain FULL 2 --use-sentinel-time --confirm' >/dev/null
 echo "backup helper dry-run passed"

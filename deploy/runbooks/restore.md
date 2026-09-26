@@ -48,7 +48,7 @@ its dedicated tools service with owner credentials and checks the same migration
 ## Remediation
 
 **HUMAN-ONLY:** execute `deploy/RESTORE.md`: create a new instance of the original app id with the
-restore-check variant of the compose. It derives the retained backup keys, restores the newest base backup,
+restore-check variant of the compose. It derives the backup key, restores the newest base backup,
 replays encrypted WAL, promotes, and runs the restore check at boot; its report is on the
 instance's `/healthz`. This runbook delegates restore execution to that procedure.
 

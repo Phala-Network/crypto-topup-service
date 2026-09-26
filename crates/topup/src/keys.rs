@@ -2,20 +2,20 @@
 //!
 //! Every file is published atomically with mode `0600`; the database passwords are the lowercase
 //! hex of the `db/owner/v1` and `db/app/v1` keys, so every CVM of one application derives the same
-//! credentials. Backup keys, owner credentials, and application credentials go to three directories
-//! (separate tmpfs volumes), so each consumer mounts only its own. The files are never returned in
-//! an error or written to stdout/stderr.
+//! credentials. The backup key, owner credentials, and application credentials go to three
+//! directories (separate tmpfs volumes), so each consumer mounts only its own. The files are never
+//! returned in an error or written to stdout/stderr.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use topup_core::SecretKey32;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// Current WAL-G key, read through `WALG_LIBSODIUM_KEY_PATH`.
+/// WAL-G key, read through `WALG_LIBSODIUM_KEY_PATH`.
 pub const BACKUP_KEY_FILE: &str = "backup.key";
 /// Owner password, read through the PostgreSQL image's `POSTGRES_PASSWORD_FILE`.
 pub const OWNER_PASSWORD_FILE: &str = "postgres.password";
@@ -24,7 +24,7 @@ pub const OWNER_PGPASS_FILE: &str = "postgres.pgpass";
 /// libpq password file of the application login; the init script also reads its password field.
 pub const APP_PGPASS_FILE: &str = "topup_service.pgpass";
 
-/// Writes a WAL-G libsodium key (hex) as `backup.key` or `backup-vN.key`.
+/// Writes the WAL-G libsodium key (hex).
 pub fn write_backup_key(path: &Path, key: &SecretKey32) -> io::Result<()> {
     write_secret(path, &hex(key))
 }
@@ -71,12 +71,6 @@ pub fn check(backup_dir: &Path, owner_dir: &Path, app_dir: &Path) -> io::Result<
     Ok(())
 }
 
-/// Returns the path of one retained backup key version in `dir`.
-#[must_use]
-pub fn versioned_key_path(dir: &Path, version: u32) -> PathBuf {
-    dir.join(format!("backup-v{version}.key"))
-}
-
 fn hex(key: &SecretKey32) -> Zeroizing<String> {
     Zeroizing::new(hex::encode(key.expose_secret()))
 }
@@ -113,6 +107,8 @@ fn write_temporary(path: &Path, contents: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -155,9 +151,9 @@ mod tests {
             names.sort();
             names
         };
+        assert_eq!(names(&backup), [BACKUP_KEY_FILE]);
         assert_eq!(names(&app_dir), [APP_PGPASS_FILE]);
         assert_eq!(names(&owner_dir), [OWNER_PASSWORD_FILE, OWNER_PGPASS_FILE]);
-        assert_eq!(versioned_key_path(&backup, 7), backup.join("backup-v7.key"));
         fs::remove_dir_all(root).expect("temporary directory should be removed");
     }
 }

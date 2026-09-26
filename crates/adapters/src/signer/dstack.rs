@@ -17,8 +17,8 @@ use std::time::Duration;
 use dstack_sdk::dstack_client::DstackClient;
 use tokio::time::timeout;
 use topup_core::{
-    Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32, SignedTx, Signer,
-    SignerError, TxRequest, operator_key_domain,
+    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32,
+    SignedTx, Signer, SignerError, TxRequest, operator_key_domain,
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -93,20 +93,12 @@ impl DstackSigner {
         self
     }
 
-    /// Derives the `backup/v1` secp256k1 key for backup encryption.
+    /// Derives the WAL-G backup-encryption key from [`BACKUP_KEY_DOMAIN`].
     pub async fn derive_backup_key(&self) -> Result<SecretKey32, SignerError> {
-        self.derive_backup_key_version(1).await
+        self.derive_secret(BACKUP_KEY_DOMAIN).await
     }
 
-    /// Derives a versioned `backup/vN` secp256k1 key for backup restore or rotation.
-    pub async fn derive_backup_key_version(
-        &self,
-        version: u32,
-    ) -> Result<SecretKey32, SignerError> {
-        self.derive_secret(&format!("backup/v{version}")).await
-    }
-
-    /// Derives the secp256k1 key for a secret domain such as `backup/vN` or `db/owner/v1`.
+    /// Derives the secp256k1 key for a secret domain such as `backup/v1` or `db/owner/v1`.
     ///
     /// Every secret is a secp256k1 key, so a secret domain never needs a second algorithm.
     pub async fn derive_secret(&self, domain: &str) -> Result<SecretKey32, SignerError> {

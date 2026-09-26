@@ -12,49 +12,33 @@ compose, creates the instance, and verifies it only through its `/healthz` and r
 8081 of the app's gateway URL, which only a restore-check instance serves
 ([Addressing the restore-check instance](#addressing-the-restore-check-instance)).
 
-## Backup key and metadata
+## Backup key
 
-`keys` derives the current `backup/vN` dstack key plus the comma-separated retained versions
-in `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (and the database credentials, into their own volumes; see
-[README](README.md#database-credentials)). It writes backup keys only to the Compose `walg_key`
-tmpfs:
+WAL-G encrypts every base backup and WAL segment with one libsodium key per backup prefix. `keys`
+derives it from the fixed dstack path `backup/v1` (and the database credentials, into their own
+volumes; see [README](README.md#database-credentials)) and writes it only to the Compose `walg_key`
+tmpfs as `/run/wal-g/backup.key`, atomically, as UID/GID `999:999`, mode `0600`, in a mode `0700`
+directory. WAL-G reads it through `WALG_LIBSODIUM_KEY_PATH`; the backup and restore commands are
+WAL-G's own. No key value appears in an image, environment variable, command line, object
+metadata, or log.
 
-```text
-/run/wal-g/backup.key       current version used for new uploads
-/run/wal-g/backup-v1.key    retained version 1
-/run/wal-g/backup-v0.key    retained version 0
-```
+A replacement CVM of the same app id derives the same key and database passwords that the
+restored cluster's roles already carry, so it needs no secret; a failed fetch or login on the
+restored cluster means the app identity is wrong (stop as for a key mismatch).
 
-Every file is atomically published as UID/GID `999:999`, mode `0600`; the directory is mode `0700`.
-WAL-G receives the path through `WALG_LIBSODIUM_KEY_PATH`. No key value appears in an image,
-environment variable, command line, object metadata, or log.
+### Rotating the backup key
 
-A replacement CVM of the same app id derives the same database passwords that the restored
-cluster's roles already carry, so it needs no database secret; a failed login on the restored
-cluster means the app identity is wrong (stop as for a key mismatch).
+A prefix never changes its key. Rotation is WAL-G's standard new prefix: one upgrade changes
+`BACKUP_KEY_DOMAIN` (`crates/core/src/signer.rs`, for example to `backup/v2`) and sets a new
+`WALG_S3_PREFIX`. The upgraded instance keeps its data directory, and `backup` finds no base backup
+of its timeline in the new prefix, so it takes one at once (`walg-timeline-backup`); the new prefix
+is restorable once that backup is listed. Keep the old prefix until the new one holds
+`WALG_RETENTION_FULL` (7) base backups, then delete it; until then it restores with the
+[restore-check variant](#the-restore-check-variant) rendered from the last commit before the
+change, with that commit's images and the old prefix.
 
-Every successful upload writes an unencrypted, uncompressed metadata object containing only the
-integer key version:
-
-```text
-key-versions/base/<backup-name>.json
-key-versions/wal/<wal-segment>.json
-key-versions/current.json
-```
-
-`walg-base-backup` records base-backup metadata and `walg-wal-push` records every WAL segment.
-`walg-backup-fetch` selects the base key from its metadata. `walg-restore-command` selects each WAL
-key independently, so one recovery range may cross key rotations. Keep all listed `backup/vN`
-domains until the corresponding base backups and WAL have expired.
-
-`walg-wal-push` sets `WALG_UPLOAD_CONCURRENCY=1` and `TOTAL_BG_UPLOADED_LIMIT=1` for `wal-push`.
-WAL-G otherwise starts a background uploader that archives adjacent `.ready` segments with
-`WALG_UPLOAD_CONCURRENCY - 1` workers, up to `TOTAL_BG_UPLOADED_LIMIT - 1` files, and those
-objects would have no key-version metadata. With either value at `1` the background uploader is
-disabled, so every WAL object is uploaded and annotated by its own `archive_command` call.
-`walg-restore-command` likewise sets `WALG_DOWNLOAD_CONCURRENCY=1` so `wal-fetch` never prefetches
-an adjacent segment with the wrong key. Base backups keep WAL-G's default concurrency. Do not relax
-the wrapper values without replacing the per-object metadata protocol.
+The staging prefix still holds `key-versions/` objects from the former per-object key-version
+metadata. Nothing reads them; the owner can delete them with their own storage credentials.
 
 `wal-g backup-list` does not decrypt backup data. Never use it as a key test. A key is verified only
 by fetching the selected base backup into an empty volume and checking the extracted `PG_VERSION`.
@@ -75,11 +59,9 @@ natural `archive_timeout=60` upload, continues writing, kills PostgreSQL without
 reports observed loss. The output separates two server-side measurements: `archive_wait_seconds`
 runs from the first drill write into the WAL segment until PostgreSQL closes it (its
 `archive_status/<segment>.ready` mtime), and `upload_latency_seconds` runs from that close until
-the object store's `LastModified` for the uploaded WAL object. Controlled mode also builds a WAL backlog under
-key v1 while object storage is down, archives one segment with a single v1 wrapper call and proves
-no adjacent segment was uploaded, rotates PostgreSQL to v2 while the rest are pending, lets the
-archiver finish them under v2, decrypts every rotation segment with its recorded key version (and
-proves the other version fails), and restores across the rotation boundary.
+the object store's `LastModified` for the uploaded WAL object. Both modes also require that
+`walg-restore-command` returns `126` for the last archived segment under a wrong key, and restores
+it with the backup key.
 
 Both modes start the source from an empty object store, so its PostgreSQL must list the prefix and
 initialize a new cluster. They then destroy the source database and its key volumes and boot the
@@ -109,7 +91,7 @@ The PostgreSQL entrypoint (`deploy/scripts/postgres-walg-entrypoint.sh`) bootstr
 directory on every boot of every instance, from `WALG_S3_PREFIX`:
 
 - It lists the base backups (`wal-g backup-list --json`). If the prefix holds any, it selects the
-  newest (latest `time`), fetches it with `walg-backup-fetch` beside the data directory, and moves
+  newest (latest `time`), fetches it with `wal-g backup-fetch` beside the data directory, and moves
   it into place only when complete, with `recovery.signal`. PostgreSQL then replays every archived
   segment through `walg-restore-command` and promotes at the end of the archive.
 - Only a listing that succeeds and is empty (`[]`) lets PostgreSQL initialize a new cluster.
@@ -146,9 +128,7 @@ attested differences, so a verification instance is identifiable by its compose 
   ([Addressing the restore-check instance](#addressing-the-restore-check-instance)).
 
 Every other setting is the service's, rendered from the same values (for staging, the `staging`
-Environment variables), including `TOPUP_BACKUP_KEY_VERSION` and
-`TOPUP_BACKUP_KEY_FALLBACK_VERSIONS` (current version first, then every retained version), except
-`TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation: the gateway domain of the node that
+Environment variables), except `TOPUP_PUBLIC_ORIGIN=https://pending.invalid` at creation: the gateway domain of the node that
 runs the instance is known only afterwards
 ([Verify the restored instance](#verify-the-restored-instance)). Render it from the
 commit of the live compose, with the live images and every attested setting
@@ -220,7 +200,7 @@ rm -rf "$RESTORE_ENV_DIR"
 
 ## Create the replacement instance
 
-A replacement derives the same `backup/vN` keys and database passwords only under the original
+A replacement derives the same backup key and database passwords only under the original
 dstack application identity: the same app id and KMS, with an allowed attested compose. It is a new
 instance of that app, never a new app, created with the `restore-check.yml` rendered
 [above](#the-restore-check-variant). `phala instances add` accepts a compose of its own for the new
@@ -391,8 +371,7 @@ same three names). Require:
 - `backup` finds no base backup on the promoted timeline and takes one at once (`walg-timeline-backup`);
   until it completes the new timeline cannot be restored, so nothing resumes before a
   `base_<timeline>…` backup newer than the switch is listed and new WAL segments of that timeline
-  appear with their `key-versions/wal/<segment>.json` objects (list them with the owner's own
-  storage credentials);
+  appear under `wal_005/` (list them with the owner's own storage credentials);
 - a healthy `topup` attestation, and `topup_backup_last_success_unixtime_seconds` scraped from the
   new instance and less than 120 seconds old. Only then remove the restore-window alert silences.
 
@@ -402,10 +381,10 @@ separate restore because their salts are deterministic from product data.
 ## Staging restore drill
 
 The staging drill restores the staging app's real backups into a throwaway instance of the staging
-app (a staging-copy app id has a different identity and cannot derive the staging backup keys) and
+app (a staging-copy app id has a different identity and cannot derive the staging backup key) and
 never leaves [Verify the restored instance](#verify-the-restored-instance). The drill instance must
 never write to the source WAL prefix: after promotion it is on a new timeline, and its `.history`
-file, segments, and `key-versions/current.json` would make a later real restore follow
+file and segments would make a later real restore follow
 `recovery_target_timeline=latest` onto the drill's timeline. It must also never run `backup`
 (`wal-g delete retain` on the shared prefix) or the full `topup` (the live application's keys, next
 to the live instance). The restore-check variant guarantees all three, and it never receives the
@@ -456,14 +435,11 @@ live URL's traffic because it publishes 8081, not 8080
 - **App id, KMS, compose, or attestation mismatch:** stop. Create the instance under the original
   app id again; never copy key files between CVMs.
 - **`/healthz` never answers, or `restore_check` stays `null` past the RTO:** the base backup
-  could not be listed (or the prefix is empty), fetched, or decrypted, or recovery failed (the WAL wrapper returns `126` on
-  decryption, metadata, and storage errors, so PostgreSQL aborts instead of promoting). Delete the
-  instance, verify object-storage access, integrity, and the retained version list with the
+  could not be listed (or the prefix is empty), fetched, or decrypted, or recovery failed
+  (`walg-restore-command` returns `126` on decryption and storage errors, so PostgreSQL aborts
+  instead of promoting). Delete the instance, verify object-storage access and integrity with the
   owner's credentials, and retry with a new instance. `backup-list` success is not evidence of a
   correct key.
-- **WAL metadata spans versions:** keep every referenced version in
-  `TOPUP_BACKUP_KEY_FALLBACK_VERSIONS`. The restore wrapper selects each segment's version; never
-  rewrite old metadata to the current version.
 - **`restore_check.status` is `failed` or `incomplete`:** do not resume. Product state wins, but an
   unsafe reverse transition or failed lookup requires an incident repair and another complete
   check.
