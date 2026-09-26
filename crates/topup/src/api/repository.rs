@@ -22,9 +22,11 @@ use crate::db::{Account, Address, AddressKind, Product};
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
-    AdminRefundResponse, DailyReportResponse, DepositListQuery, DepositLookupQuery,
-    DepositResponse, DepositTransitionResponse, DepositsResponse, NudgeResponse, RefundResponse,
-    RouteDailyReport, SupportDepositResponse, SupportDepositsResponse,
+    AdminRefundResponse, DailyReportResponse, DepositEventResponse, DepositListQuery,
+    DepositLookupQuery, DepositResponse, DepositTransitionResponse, DepositsResponse,
+    NudgeResponse, OutboxReplayResponse, ReconciliationBlockLiftResponse,
+    ReconciliationBlockReport, RefundResponse, RouteDailyReport, SupportDepositResponse,
+    SupportDepositsResponse,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -631,6 +633,124 @@ pub async fn nudge_deposit(
     })
 }
 
+/// Lifts a reconciliation block and appends an audit row, carrying the block, in the same
+/// transaction.
+///
+/// Lifting is manual (architecture §13): the service does not re-check the finding first. If it
+/// still reproduces, the reconciler writes the block again on its next round. A repeated lift of
+/// a lifted block returns the first lift without another audit row.
+pub async fn lift_reconciliation_block(
+    pool: &PgPool,
+    block_key: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<ReconciliationBlockLiftResponse, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let subject = format!("reconciliation_block:{block_key}");
+    let lifted = sqlx::query_as::<_, ReconciliationBlockRow>(
+        r#"
+        DELETE FROM reconciliation_blocks
+        WHERE block_key = $1
+        RETURNING block_key, scope, chain_id, address_id, check_name, reason, created_at
+        "#,
+    )
+    .bind(block_key)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some(block) = lifted {
+        let evidence = serde_json::json!({
+            "reason": reason,
+            "block": {
+                "scope": block.scope,
+                "chain_id": block.chain_id,
+                "address_id": block.address_id,
+                "check": block.check_name,
+                "reason": block.reason,
+                "created_at": block.created_at,
+            },
+        });
+        insert_audit_tx_with_reason(
+            &mut transaction,
+            actor,
+            "reconciliation_block.lift",
+            &subject,
+            &evidence.to_string(),
+        )
+        .await?;
+    }
+    let lifted_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        SELECT created_at FROM audit
+        WHERE action = 'reconciliation_block.lift' AND subject = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&subject)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    transaction.commit().await?;
+    Ok(ReconciliationBlockLiftResponse {
+        block_key: block_key.to_owned(),
+        lifted_at,
+    })
+}
+
+/// Queues one webhook event for delivery again and appends an audit row in the same transaction.
+///
+/// A delivered event is marked undelivered and a pending one becomes due now; the event's
+/// identifier and payload never change. Repeating the request while the event is already due
+/// changes nothing and writes no audit row.
+pub async fn replay_outbox_event(
+    pool: &PgPool,
+    event_id: Uuid,
+    actor: &str,
+    reason: &str,
+) -> Result<OutboxReplayResponse, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT event_type, next_attempt_at,
+               delivered_at IS NULL AND next_attempt_at <= now() AS due
+        FROM outbox
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let mut next_attempt_at: DateTime<Utc> = row.try_get("next_attempt_at")?;
+    if !row.try_get::<bool, _>("due")? {
+        next_attempt_at = sqlx::query_scalar(
+            r#"
+            UPDATE outbox SET next_attempt_at = now(), delivered_at = NULL
+            WHERE id = $1
+            RETURNING next_attempt_at
+            "#,
+        )
+        .bind(event_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        insert_audit_tx_with_reason(
+            &mut transaction,
+            actor,
+            "outbox.replay",
+            &format!("event:{event_id}"),
+            reason,
+        )
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(OutboxReplayResponse {
+        event_id,
+        event_type: row.try_get("event_type")?,
+        next_attempt_at,
+    })
+}
+
 /// Adds or removes account pause scopes and appends an audit row in the same transaction.
 pub async fn mutate_account_scopes(
     pool: &PgPool,
@@ -840,6 +960,53 @@ impl From<DepositTransitionRow> for DepositTransitionResponse {
 }
 
 #[derive(FromRow)]
+struct DepositEventRow {
+    id: Uuid,
+    deposit_id: Uuid,
+    event_type: String,
+    created_at: DateTime<Utc>,
+    delivered_at: Option<DateTime<Utc>>,
+}
+
+impl From<DepositEventRow> for DepositEventResponse {
+    fn from(row: DepositEventRow) -> Self {
+        Self {
+            id: row.id,
+            event_type: row.event_type,
+            created_at: row.created_at,
+            delivered_at: row.delivered_at,
+        }
+    }
+}
+
+#[derive(FromRow)]
+struct ReconciliationBlockRow {
+    block_key: String,
+    scope: String,
+    chain_id: i64,
+    address_id: Option<Uuid>,
+    check_name: String,
+    reason: String,
+    created_at: DateTime<Utc>,
+}
+
+impl TryFrom<ReconciliationBlockRow> for ReconciliationBlockReport {
+    type Error = ApiError;
+
+    fn try_from(row: ReconciliationBlockRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            block_key: row.block_key,
+            scope: row.scope,
+            chain_id: count_u64(row.chain_id)?,
+            address_id: row.address_id,
+            check: row.check_name,
+            reason: row.reason,
+            created_at: row.created_at,
+        })
+    }
+}
+
+#[derive(FromRow)]
 struct RefundResponseRow {
     id: Uuid,
     deposit_id: Uuid,
@@ -995,6 +1162,25 @@ async fn fetch_support_page(
             .or_default()
             .push(transition.into());
     }
+    let events = sqlx::query_as::<_, DepositEventRow>(
+        r#"
+        SELECT id, (payload ->> 'deposit_id')::uuid AS deposit_id, event_type, created_at,
+               delivered_at
+        FROM outbox
+        WHERE payload ->> 'deposit_id' = ANY($1)
+        ORDER BY created_at, id
+        "#,
+    )
+    .bind(ids.iter().map(Uuid::to_string).collect::<Vec<_>>())
+    .fetch_all(pool)
+    .await?;
+    let mut events_by_deposit = BTreeMap::<Uuid, Vec<DepositEventResponse>>::new();
+    for event in events {
+        events_by_deposit
+            .entry(event.deposit_id)
+            .or_default()
+            .push(event.into());
+    }
     let next_cursor = has_more
         .then(|| deposits.last().map(encode_support_cursor))
         .flatten()
@@ -1003,6 +1189,7 @@ async fn fetch_support_page(
         .into_iter()
         .map(|deposit| SupportDepositResponse {
             timeline: by_deposit.remove(&deposit.id).unwrap_or_default(),
+            events: events_by_deposit.remove(&deposit.id).unwrap_or_default(),
             deposit,
         })
         .collect();
@@ -1210,11 +1397,25 @@ pub async fn daily_report(
     .fetch_one(pool)
     .await?;
 
+    let reconciliation_blocks = sqlx::query_as::<_, ReconciliationBlockRow>(
+        r#"
+        SELECT block_key, scope, chain_id, address_id, check_name, reason, created_at
+        FROM reconciliation_blocks
+        ORDER BY block_key
+        "#,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(TryInto::try_into)
+    .collect::<Result<_, _>>()?;
+
     Ok(DailyReportResponse {
         generated_at,
         exposure_minor: Some(exposure_minor),
         routes: reports.into_values().collect(),
         reconciliation: None,
+        reconciliation_blocks,
     })
 }
 

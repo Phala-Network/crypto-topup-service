@@ -19,10 +19,11 @@ use super::attestation::AttestationError;
 use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
-    AccountResponse, AdminRefundResponse, AttestationQuery, AttestationResponse,
-    DailyReportResponse, DepositAddressResponse, DepositListQuery, DepositLookupQuery,
-    DepositResponse, DepositsResponse, LimitsResponse, NudgeResponse, PauseRequest, PauseResponse,
-    PersistentSaltInputs, ProductResponse, RecordRefundRequest, RefundRequest, RefundResponse,
+    AccountResponse, AdminReasonRequest, AdminRefundResponse, AttestationQuery,
+    AttestationResponse, DailyReportResponse, DepositAddressResponse, DepositListQuery,
+    DepositLookupQuery, DepositResponse, DepositsResponse, LimitsResponse, NudgeResponse,
+    OutboxReplayResponse, PauseRequest, PauseResponse, PersistentSaltInputs, ProductResponse,
+    ReconciliationBlockLiftResponse, RecordRefundRequest, RefundRequest, RefundResponse,
     RegisterAccountRequest, RegisterProductRequest, RotateDepositAddressRequest,
     RoutePauseResponse, SupportDepositsResponse,
 };
@@ -498,6 +499,66 @@ pub(crate) async fn record_refund(
 }
 
 #[utoipa::path(
+    post,
+    path = "/v1/admin/reconciliation-blocks/{block_key}/lift",
+    params(("block_key" = String, Path, description = "`chain:{chain_id}` or `address:{address_id}`, as listed in the daily report")),
+    request_body = AdminReasonRequest,
+    responses(
+        (status = 200, description = "OK: lifted, or already lifted", body = ReconciliationBlockLiftResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found: no active or lifted block has this key", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+pub(crate) async fn lift_reconciliation_block(
+    State(state): State<AppState>,
+    Path(block_key): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> ApiResult<Json<ReconciliationBlockLiftResponse>> {
+    validate_reason(&request.reason)?;
+    Ok(Json(
+        repository::lift_reconciliation_block(
+            &state.pool,
+            &block_key,
+            &admin_actor(&state),
+            &request.reason,
+        )
+        .await?,
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/outbox/{event_id}/replay",
+    params(("event_id" = Uuid, Path, description = "Event identifier, the `webhook-id` header")),
+    request_body = AdminReasonRequest,
+    responses(
+        (status = 200, description = "OK: queued for delivery", body = OutboxReplayResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+pub(crate) async fn replay_outbox_event(
+    State(state): State<AppState>,
+    Path(event_id): Path<Uuid>,
+    Json(request): Json<AdminReasonRequest>,
+) -> ApiResult<Json<OutboxReplayResponse>> {
+    validate_reason(&request.reason)?;
+    Ok(Json(
+        repository::replay_outbox_event(
+            &state.pool,
+            event_id,
+            &admin_actor(&state),
+            &request.reason,
+        )
+        .await?,
+    ))
+}
+
+#[utoipa::path(
     get,
     path = "/v1/admin/report/daily",
     responses((status = 200, description = "OK", body = DailyReportResponse)),
@@ -716,6 +777,13 @@ fn validate_external_id(external_id: &str) -> ApiResult<()> {
         return Err(ApiError::bad_request(
             "external_id must contain 1 to 255 bytes",
         ));
+    }
+    Ok(())
+}
+
+fn validate_reason(reason: &str) -> ApiResult<()> {
+    if reason.trim().is_empty() || reason.len() > 1024 {
+        return Err(ApiError::bad_request("reason must contain 1 to 1024 bytes"));
     }
     Ok(())
 }

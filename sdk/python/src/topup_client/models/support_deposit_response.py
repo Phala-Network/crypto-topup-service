@@ -14,6 +14,7 @@ from uuid import UUID
 import datetime
 
 if TYPE_CHECKING:
+    from ..models.deposit_event_response import DepositEventResponse
     from ..models.deposit_transition_response import DepositTransitionResponse
 
 
@@ -45,6 +46,10 @@ class SupportDepositResponse:
         route (None | str | Unset): Selected route.
         route_version (int | None | Unset): Selected route version.
         valuation_at (datetime.datetime | None | Unset): Valuation observation time.
+        events (list[DepositEventResponse] | Unset): Webhook events about the deposit in ascending creation order. This
+            service always sends
+            it; it is optional in the schema so clients also parse responses from servers that predate
+            it.
     """
 
     address: str
@@ -67,9 +72,11 @@ class SupportDepositResponse:
     route: None | str | Unset = UNSET
     route_version: int | None | Unset = UNSET
     valuation_at: datetime.datetime | None | Unset = UNSET
+    events: list[DepositEventResponse] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.deposit_event_response import DepositEventResponse  # noqa: PLC0415
         from ..models.deposit_transition_response import DepositTransitionResponse  # noqa: PLC0415
 
         address = self.address
@@ -141,6 +148,13 @@ class SupportDepositResponse:
         else:
             valuation_at = self.valuation_at
 
+        events: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.events, Unset):
+            events = []
+            for events_item_data in self.events:
+                events_item = events_item_data.to_dict()
+                events.append(events_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -173,11 +187,14 @@ class SupportDepositResponse:
             field_dict["route_version"] = route_version
         if valuation_at is not UNSET:
             field_dict["valuation_at"] = valuation_at
+        if events is not UNSET:
+            field_dict["events"] = events
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.deposit_event_response import DepositEventResponse  # noqa: PLC0415
         from ..models.deposit_transition_response import DepositTransitionResponse  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -276,6 +293,15 @@ class SupportDepositResponse:
 
         valuation_at = _parse_valuation_at(d.pop("valuation_at", UNSET))
 
+        _events = d.pop("events", UNSET)
+        events: list[DepositEventResponse] | Unset = UNSET
+        if _events is not UNSET:
+            events = []
+            for events_item_data in _events:
+                events_item = DepositEventResponse.from_dict(events_item_data)
+
+                events.append(events_item)
+
         support_deposit_response = cls(
             address=address,
             amount_atomic=amount_atomic,
@@ -297,6 +323,7 @@ class SupportDepositResponse:
             route=route,
             route_version=route_version,
             valuation_at=valuation_at,
+            events=events,
         )
 
         support_deposit_response.additional_properties = d

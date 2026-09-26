@@ -924,6 +924,18 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
                 .fetch_all(&pool)
                 .await?;
         ensure!(scopes == ["address", "chain"]);
+
+        // Lifting is manual: a lifted block whose mismatch still reproduces is written again by
+        // the next round.
+        sqlx::query("DELETE FROM reconciliation_blocks")
+            .execute(&pool)
+            .await?;
+        let _ = reconciler.run_once().await?;
+        let scopes: Vec<String> =
+            sqlx::query_scalar("SELECT scope FROM reconciliation_blocks ORDER BY scope")
+                .fetch_all(&pool)
+                .await?;
+        ensure!(scopes == ["address", "chain"]);
         Ok(())
     })
     .await
@@ -1020,7 +1032,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
 }
 
 #[tokio::test]
-async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<()> {
+async fn application_role_cannot_rewrite_findings_or_blocks() -> Result<()> {
     with_database(|pool| async move {
         let checks = [
             ("reconciliation_findings", "SELECT", true),
@@ -1030,7 +1042,8 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
             ("reconciliation_findings", "TRUNCATE", false),
             ("reconciliation_blocks", "INSERT", true),
             ("reconciliation_blocks", "UPDATE", false),
-            ("reconciliation_blocks", "DELETE", false),
+            // The admin lift endpoint deletes a block; nothing may rewrite one.
+            ("reconciliation_blocks", "DELETE", true),
             ("reconciliation_blocks", "TRUNCATE", false),
             ("reconciliation_deposit_cursors", "UPDATE", true),
             ("reconciliation_deposit_cursors", "DELETE", false),
@@ -1057,25 +1070,20 @@ async fn application_role_cannot_rewrite_findings_or_delete_blocks() -> Result<(
         )
         .execute(&pool)
         .await?;
-        for statement in [
-            "DELETE FROM reconciliation_blocks",
-            "UPDATE reconciliation_blocks SET chain_id = 1",
-        ] {
-            let denied = sqlx::query(statement)
-                .execute(&pool)
-                .await
-                .err()
-                .and_then(|error| {
-                    error
-                        .as_database_error()
-                        .and_then(|error| error.code())
-                        .map(|code| code.into_owned())
-                });
-            ensure!(
-                denied.as_deref() == Some("42501"),
-                "{statement} must be denied"
-            );
-        }
+        let denied = sqlx::query("UPDATE reconciliation_blocks SET chain_id = 1")
+            .execute(&pool)
+            .await
+            .err()
+            .and_then(|error| {
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .map(|code| code.into_owned())
+            });
+        ensure!(
+            denied.as_deref() == Some("42501"),
+            "rewriting a block must be denied"
+        );
         ensure!(frozen_chains(&pool, &*route_set(route()?)?).await? == BTreeSet::from([CHAIN_ID]));
         Ok(())
     })

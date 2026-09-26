@@ -10,18 +10,18 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Surface | What it shows or does |
 |---|---|
 | Sentry | the issue: its `alert` tag and grouping tags (`route`, `state`, `check`, `chain`, `scope`), a `runbook` link, and the log line's fields (for example `deposit_id`, or a finding's `subjects`, `expected`, `observed`); at most one event per issue every 10 minutes. Crons monitors for every loop; an Uptime monitor on `/healthz` |
-| Daily report, admin-signed `GET /v1/admin/report/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic`, `open_rate_lock_exposure_atomic`, `rejected_holds_atomic`, `treasury_balance_atomic`, and `flush_planning` (`at`, `outcome`, `error`); globally `exposure_minor` and the last reconciliation round's `failed_checks` |
-| Support lookup, product-signed | `GET /v1/products/{p}/deposits?tx_hash=\|address=\|lock_ref=` and `GET /v1/products/{p}/deposits/{id}`: the deposit and its transition timeline with each step's evidence. Signed with the product's key, so run by the product's support tooling (staging: the reference product's seed) |
+| Daily report, admin-signed `GET /v1/admin/report/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic`, `open_rate_lock_exposure_atomic`, `rejected_holds_atomic`, `treasury_balance_atomic`, and `flush_planning` (`at`, `outcome`, `error`); globally `exposure_minor`, the last reconciliation round's `failed_checks`, and the active `reconciliation_blocks` (`block_key`, `scope`, `check`, `reason`) |
+| Support lookup, product-signed | `GET /v1/products/{p}/deposits?tx_hash=\|address=\|lock_ref=`: each deposit with its transition timeline (each step's evidence) and its webhook `events` (`id`, `event_type`, `delivered_at`); `GET /v1/products/{p}/deposits/{id}`: the deposit. Signed with the product's key, so run by the product's support tooling (staging: the reference product's seed) |
 | Attestation, `GET /v1/attestation?nonce=` | the settlement key and each chain's flusher operator address ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, roles, receipts, `addressOf` |
-| Admin actions, admin-signed | route `pause`/`resume` of the scopes `quotes`, `addresses`, `settlement`, `flush`, `refunds`; deposit `nudge`; refund `approve`/`record`; product issue |
+| Admin actions, admin-signed | route `pause`/`resume` of the scopes `quotes`, `addresses`, `settlement`, `flush`, `refunds`; deposit `nudge`; refund `approve`/`record`; product issue; reconciliation block `lift`; outbox event `replay` |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
-Database rows the API does not expose (reconciliation findings and blocks, flush rows, outbox
-rows, audit) and log lines other than the errors and alerts Sentry receives are not observable in
-production. A restore-check instance ([RESTORE.md](../RESTORE.md)) serves the same read API on a
-copy restored from backup and reports row counts and a full reconciliation round's findings on
-its `/healthz`.
+Database rows the API does not expose (reconciliation findings, flush rows, delivery attempts,
+events not about a deposit, audit) and log lines other than the errors and alerts Sentry receives
+are not observable in production. A restore-check instance ([RESTORE.md](../RESTORE.md)) serves
+the same read API on a copy restored from backup and reports row counts and a full reconciliation
+round's findings on its `/healthz`.
 
 ## Environment
 

@@ -39,9 +39,14 @@ observation once. Safe repairs raise no alert. By check:
 
 ## Fix
 
-Fix the cause, not the finding. An address block can be lifted only by the database owner, which a
-production CVM does not offer; escalate to Engineering. While the mismatch persists, every round
-blocks again.
+Fix the cause, not the finding. Once it is fixed and signed off, lift the address block; the daily
+report's `reconciliation_blocks` lists it as `address:<address_id>`, the finding's `address_id`:
+
+```sh
+admin POST "/v1/admin/reconciliation-blocks/address:$ADDRESS_ID/lift" '{"reason":"INC-123: credit confirmed with Finance"}'
+```
+
+The lift does not re-check: while the mismatch persists, every round blocks again.
 
 ## Done when
 
