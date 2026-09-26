@@ -1,7 +1,7 @@
 """A token with no route is sent to a persistent address.
 
 Expect: the deposit is `rejected` with `deposit.rejected` reason `unsupported_asset`, and the
-product is never asked to settle it.
+product never receives `deposit.credited` for it.
 """
 
 from __future__ import annotations
@@ -18,5 +18,5 @@ def run(ctx: Context) -> None:
     check(deposit.state == "rejected", f"deposit is {deposit.state}, not rejected")
     rejected = ctx.deposit_event("deposit.rejected", deposit)
     check(rejected["reason"] == "unsupported_asset", f"reason is {rejected['reason']}")
-    check(ctx.ledger.find_order(f"deposit:{deposit.id}") is None, "product was asked to settle")
-    check(ctx.settlement.posts[team] == 0, "product received a settlement request")
+    check(ctx.ledger.find_order(f"deposit:{deposit.id}") is None, "product recorded an order")
+    check(ctx.fulfillment.deliveries[team] == 0, "product received deposit.credited")

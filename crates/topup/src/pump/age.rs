@@ -39,7 +39,6 @@ impl AgeAlertConfig {
         match state {
             DepositState::Detected => Some(stuck_after.detected),
             DepositState::Confirmed => Some(stuck_after.confirmed),
-            DepositState::Cleared => Some(stuck_after.cleared),
             DepositState::Credited => Some(stuck_after.credited),
             DepositState::Swept | DepositState::Rejected => None,
         }
@@ -162,7 +161,6 @@ const fn state_code(state: DepositState) -> &'static str {
     match state {
         DepositState::Detected => "detected",
         DepositState::Confirmed => "confirmed",
-        DepositState::Cleared => "cleared",
         DepositState::Credited => "credited",
         DepositState::Swept => "swept",
         DepositState::Rejected => "rejected",
@@ -182,7 +180,6 @@ fn parse_active_state(state: &str) -> Option<DepositState> {
     match state {
         "detected" => Some(DepositState::Detected),
         "confirmed" => Some(DepositState::Confirmed),
-        "cleared" => Some(DepositState::Cleared),
         "credited" => Some(DepositState::Credited),
         "swept" | "rejected" => None,
         _ => None,

@@ -2998,7 +2998,7 @@
       },
       "RegisterProductRequest": {
         "type": "object",
-        "description": "Administrative product registration body. The product's key id and settlement URL are not\npart of it: the attested route is their only source.",
+        "description": "Administrative product registration body. The product's key id is not part of it: the\nattested route is its only source.",
         "required": [
           "slug",
           "public_key",
@@ -3015,7 +3015,7 @@
           },
           "webhook_url": {
             "type": "string",
-            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the product's\nattested settlement URL also uses `http` (local stacks)."
+            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
           }
         }
       },
@@ -3046,7 +3046,8 @@
           "open_rate_lock_exposure_atomic",
           "rejected_holds_atomic",
           "deposits_by_state",
-          "settlements_by_status",
+          "credited_undelivered",
+          "credited_undelivered_max_age_seconds",
           "refunds_by_status",
           "age_in_state_max_seconds"
         ],
@@ -3071,6 +3072,18 @@
             "type": "integer",
             "format": "int64",
             "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "credited_undelivered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credited deposits whose `deposit.credited` webhook the product has not acknowledged yet.",
+            "minimum": 0
+          },
+          "credited_undelivered_max_age_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Age in seconds of the oldest of those events; zero when every one was delivered.",
             "minimum": 0
           },
           "deposits_by_state": {
@@ -3119,18 +3132,6 @@
           "route": {
             "type": "string",
             "description": "Stable route name."
-          },
-          "settlements_by_status": {
-            "type": "object",
-            "description": "Settlement counts keyed by status.",
-            "additionalProperties": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "propertyNames": {
-              "type": "string"
-            }
           },
           "treasury_balance_atomic": {
             "type": [
@@ -3243,7 +3244,7 @@
           },
           "webhook_url": {
             "type": "string",
-            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the product's\nattested settlement URL also uses `http` (local stacks)."
+            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
           }
         }
       }

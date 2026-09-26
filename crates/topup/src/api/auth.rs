@@ -169,78 +169,10 @@ fn product_slug_from_path(path: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
-    use std::num::NonZeroUsize;
-    use std::time::Duration;
 
-    use alloy_primitives::Address;
-    use ed25519_dalek::{Signer as _, SigningKey};
-    use serde_json::json;
-    use topup_adapters::settlement::http::{SettlementClient, SettlementRequest};
-    use topup_adapters::signer::actor::SignerHandle;
-    use topup_core::{
-        Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SignedTx, Signer, SignerError,
-        TxRequest,
-    };
+    use ed25519_dalek::SigningKey;
 
     use super::*;
-
-    struct TestSigner(SigningKey);
-
-    impl Signer for TestSigner {
-        async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
-            Err(SignerError::SigningFailed)
-        }
-
-        async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
-            Ok(Ed25519Signature(self.0.sign(payload).to_bytes()))
-        }
-
-        async fn operator_address(&self) -> Result<Address, SignerError> {
-            Err(SignerError::KeyUnavailable)
-        }
-
-        async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
-            Ok(Ed25519PublicKey(self.0.verifying_key().to_bytes()))
-        }
-    }
-
-    #[tokio::test]
-    async fn settlement_client_signature_verifies_without_network() -> Result<(), Box<dyn Error>> {
-        let signing_key = SigningKey::from_bytes(&[11; 32]);
-        let encoded_key = STANDARD.encode(signing_key.verifying_key().as_bytes());
-        let key = VerificationKey::from_base64(SETTLEMENT_KEY_DOMAIN.to_owned(), &encoded_key)?;
-        let signer = SignerHandle::spawn(
-            TestSigner(signing_key),
-            NonZeroUsize::new(2).ok_or("queue capacity")?,
-            Duration::from_secs(1),
-        )?;
-        let client = SettlementClient::new(
-            "http://api.test/settlements",
-            signer,
-            Duration::from_secs(1),
-        )?;
-        let signed = client
-            .signed_post_request(&SettlementRequest {
-                idempotency_key: "deposit:test".to_owned(),
-                payload: json!({"version": 1, "idempotency_key": "deposit:test"}),
-            })
-            .await?;
-        let body = signed
-            .body()
-            .and_then(reqwest::Body::as_bytes)
-            .ok_or("signed request body must be buffered")?
-            .to_vec();
-        let mut request = Request::builder()
-            .method(signed.method().clone())
-            .uri(signed.url().as_str())
-            .body(Body::from(body))?;
-        *request.headers_mut() = signed.headers().clone();
-
-        verify_request(&mut request, &PublicOrigin::parse("http://api.test")?, &key)
-            .await
-            .map_err(|()| "settlement signature must verify")?;
-        Ok(())
-    }
 
     fn signed_message<'a>(
         vector: &'a serde_json::Value,

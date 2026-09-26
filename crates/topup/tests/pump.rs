@@ -2,7 +2,6 @@
 
 mod support;
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -14,18 +13,15 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
-use topup::db::{
-    self, AddressKind, NewDeposit, OutboxEvent, SettlementIntent, StoredValuation,
-    TransitionEffects,
-};
+use topup::db::{self, AddressKind, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects};
 use topup::jitter::JitterSource;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
-use topup::steps::confirm::{ConfirmStep, ProductAnswer, ProductLookup, ProductLookupError};
+use topup::steps::confirm::ConfirmStep;
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
-use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
+use topup_core::deposit::{DepositState, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
@@ -108,7 +104,7 @@ async fn late_step_result_is_stale_after_the_lease_is_reclaimed() -> Result<()> 
 }
 
 #[tokio::test]
-async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> Result<()> {
+async fn a_dead_workers_lease_expires_and_the_deposit_is_reclaimed() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 3).await?;
@@ -118,16 +114,6 @@ async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> R
                 .await?
                 .context("dead worker should claim the deposit")?;
             ensure!(claimed.id == id);
-            db::upsert_intent(
-                &context.app_pool,
-                &SettlementIntent {
-                    deposit_id: id,
-                    product_id: seed.product_id,
-                    key: format!("deposit:{id}"),
-                    payload: json!({"deposit_id": id}),
-                },
-            )
-            .await?;
 
             let second = test_pump(
                 &context.app_pool,
@@ -141,13 +127,6 @@ async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> R
                 0,
             )?;
             ensure!(second.run_once().await? == RunOnceResult::Idle);
-            let intents: i64 =
-                sqlx::query("SELECT count(*) FROM settlements WHERE deposit_id = $1")
-                    .bind(id)
-                    .fetch_one(&context.app_pool)
-                    .await?
-                    .try_get(0)?;
-            ensure!(intents == 1);
 
             sqlx::query(
                 "UPDATE deposits SET lease_until = now() - interval '1 second' WHERE id = $1",
@@ -164,64 +143,6 @@ async fn intent_survives_a_dead_worker_lease_and_the_deposit_is_reclaimed() -> R
                     .attempt
                     == 0
             );
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn product_accepted_answer_is_adopted_as_credited() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let seed = seed_account(&context.app_pool, 8).await?;
-            let accepted_id = insert_deposit(&context.app_pool, seed, 11).await?;
-            let accepted = test_pump(
-                &context.app_pool,
-                static_steps(StepOutcome::AdoptProductAnswer { credited: true }),
-                PumpConfig::default(),
-                0,
-            )?;
-            ensure!(
-                accepted.run_once().await?
-                    == RunOnceResult::Applied {
-                        deposit_id: accepted_id
-                    }
-            );
-            let accepted_deposit = db::get_deposit(&context.app_pool, accepted_id)
-                .await?
-                .context("accepted deposit")?;
-            ensure!(accepted_deposit.state == DepositState::Credited);
-            ensure!(accepted_deposit.reason.is_none());
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn product_rejected_answer_is_adopted_as_product_refused() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let seed = seed_account(&context.app_pool, 10).await?;
-            let rejected_id = insert_deposit(&context.app_pool, seed, 12).await?;
-            let rejected = test_pump(
-                &context.app_pool,
-                static_steps(StepOutcome::AdoptProductAnswer { credited: false }),
-                PumpConfig::default(),
-                0,
-            )?;
-            ensure!(
-                rejected.run_once().await?
-                    == RunOnceResult::Applied {
-                        deposit_id: rejected_id
-                    }
-            );
-            let rejected_deposit = db::get_deposit(&context.app_pool, rejected_id)
-                .await?
-                .context("rejected deposit")?;
-            ensure!(rejected_deposit.state == DepositState::Rejected);
-            ensure!(rejected_deposit.reason == Some(RejectReason::ProductRefused));
             Ok(())
         })
     })
@@ -253,7 +174,6 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                         credit_minor: MinorAmount::new(1_234),
                         quote: json!({"primary": {"source": "test"}}),
                     }),
-                    settlement_adoption: None,
                     lock_consumption: None,
                 },
             };
@@ -331,7 +251,6 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
                 confirm_steps(
                     &context.app_pool,
                     logs,
-                    Arc::new(ProductAnswers::default()),
                     Some(Arc::new(Barrier::new(4))),
                 ),
                 PumpConfig::default(),
@@ -445,7 +364,6 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                     confirm_steps(
                         &context.app_pool,
                         vec![transfer_log(&deposit, evm_address(number))],
-                        Arc::new(ProductAnswers::default()),
                         None,
                     ),
                     PumpConfig::default(),
@@ -537,7 +455,6 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
                 confirm_steps(
                     &context.app_pool,
                     vec![transfer_log(&deposit, evm_address(23))],
-                    Arc::new(ProductAnswers::default()),
                     None,
                 ),
                 PumpConfig::default(),
@@ -603,7 +520,6 @@ async fn cancelled_lock_payment_is_credited_at_spot() -> Result<()> {
                 confirm_steps(
                     &context.app_pool,
                     vec![transfer_log(&deposit, evm_address(18))],
-                    Arc::new(ProductAnswers::default()),
                     None,
                 ),
                 PumpConfig::default(),
@@ -622,108 +538,6 @@ async fn cancelled_lock_payment_is_credited_at_spot() -> Result<()> {
 }
 
 #[tokio::test]
-async fn restored_lock_answer_consumes_lock_before_a_second_payment() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let seed = seed_account(&context.app_pool, 16).await?;
-            sqlx::query(
-                "UPDATE addresses SET kind = 'lock', lock_ref = 'restore-lock' WHERE id = $1",
-            )
-            .bind(seed.address_id)
-            .execute(&context.app_pool)
-            .await?;
-            let restored_id = insert_deposit(&context.app_pool, seed, 16).await?;
-            let second_id = insert_deposit(&context.app_pool, seed, 17).await?;
-            sqlx::query(
-                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
-            )
-            .bind(second_id)
-            .execute(&context.app_pool)
-            .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO rate_locks (
-                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
-                )
-                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
-                        now() + interval '15 minutes')
-                "#,
-            )
-            .bind(seed.address_id)
-            .execute(&context.app_pool)
-            .await?;
-            let second = db::get_deposit(&context.app_pool, second_id)
-                .await?
-                .context("second deposit")?;
-            let product_answers = ProductAnswers(BTreeMap::from([(
-                format!("deposit:{restored_id}"),
-                ProductAnswer {
-                    accepted: true,
-                    destination_tx_id: Some("credit-restored".to_owned()),
-                    payload: json!({
-                        "amount_minor": "777",
-                        "evidence": {
-                            "price_scaled": "9000000",
-                            "valuation_at": "2026-09-22T00:00:00Z",
-                            "lock_ref": "restore-lock"
-                        }
-                    }),
-                },
-            )]));
-            let restore_pump = test_pump(
-                &context.app_pool,
-                confirm_steps(
-                    &context.app_pool,
-                    vec![transfer_log(&second, evm_address(16))],
-                    Arc::new(product_answers),
-                    None,
-                ),
-                PumpConfig::default(),
-                0,
-            )?;
-            ensure!(
-                restore_pump.run_once().await?
-                    == RunOnceResult::Applied {
-                        deposit_id: restored_id
-                    }
-            );
-            let consumed_by: Uuid =
-                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
-                    .bind(seed.address_id)
-                    .fetch_one(&context.app_pool)
-                    .await?;
-            ensure!(consumed_by == restored_id);
-
-            sqlx::query(
-                "UPDATE deposits SET next_attempt_at = now() + interval '1 hour' WHERE id = $1",
-            )
-            .bind(restored_id)
-            .execute(&context.app_pool)
-            .await?;
-            sqlx::query(
-                "UPDATE deposits SET next_attempt_at = now() - interval '1 second' WHERE id = $1",
-            )
-            .bind(second_id)
-            .execute(&context.app_pool)
-            .await?;
-            ensure!(
-                restore_pump.run_once().await?
-                    == RunOnceResult::Applied {
-                        deposit_id: second_id
-                    }
-            );
-            let second = db::get_deposit(&context.app_pool, second_id)
-                .await?
-                .context("confirmed second payment")?;
-            ensure!(second.price_source.as_deref() == Some("spot"));
-            ensure!(second.credit_minor == Some(MinorAmount::new(100)));
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
 async fn step_timeout_is_persisted_as_a_retry() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
@@ -731,7 +545,6 @@ async fn step_timeout_is_persisted_as_a_retry() -> Result<()> {
             let id = insert_deposit(&context.app_pool, seed, 10).await?;
             let steps = StepSet::new(
                 Box::new(SlowStep),
-                Box::new(StaticStep(step_result(StepOutcome::Advance))),
                 Box::new(StaticStep(step_result(StepOutcome::Advance))),
                 Box::new(StaticStep(step_result(StepOutcome::Advance))),
             );
@@ -1012,7 +825,6 @@ fn result_steps(result: StepResult) -> StepSet {
     StepSet::new(
         Box::new(StaticStep(result.clone())),
         Box::new(StaticStep(result.clone())),
-        Box::new(StaticStep(result.clone())),
         Box::new(StaticStep(result)),
     )
 }
@@ -1024,7 +836,6 @@ fn step_result(outcome: StepOutcome) -> StepResult {
 fn blocking_steps(control: Arc<StepControl>, outcome: StepOutcome) -> StepSet {
     StepSet::new(
         Box::new(BlockingStep { control, outcome }),
-        Box::new(StaticStep(step_result(outcome))),
         Box::new(StaticStep(step_result(outcome))),
         Box::new(StaticStep(step_result(outcome))),
     )
@@ -1088,22 +899,7 @@ impl PriceSource for FixedPrice {
     }
 }
 
-#[derive(Default)]
-struct ProductAnswers(BTreeMap<String, ProductAnswer>);
-
-#[async_trait]
-impl ProductLookup for ProductAnswers {
-    async fn get_by_key(&self, key: &str) -> Result<Option<ProductAnswer>, ProductLookupError> {
-        Ok(self.0.get(key).cloned())
-    }
-}
-
-fn confirm_steps(
-    pool: &PgPool,
-    logs: Vec<TransferLog>,
-    product_lookup: Arc<dyn ProductLookup>,
-    barrier: Option<Arc<Barrier>>,
-) -> StepSet {
+fn confirm_steps(pool: &PgPool, logs: Vec<TransferLog>, barrier: Option<Arc<Barrier>>) -> StepSet {
     let chain = ConfirmChain {
         logs: Arc::new(logs),
         barrier,
@@ -1126,7 +922,6 @@ fn confirm_steps(
         price("primary", 10_000_000),
         Some(price("check", 10_000_000)),
         Some(price("fx", 100_000_000)),
-        product_lookup,
     );
     static_steps(StepOutcome::Wait {
         reason: WaitReason::Paused,
@@ -1161,7 +956,6 @@ fn transfer_log(deposit: &db::Deposit, recipient: Address) -> TransferLog {
 
 #[derive(Clone, Copy)]
 struct Seed {
-    product_id: Uuid,
     account_id: Uuid,
     address_id: Uuid,
 }
@@ -1195,7 +989,6 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
     };
     seed::insert_address(pool, &address).await?;
     Ok(Seed {
-        product_id: product.id,
         account_id: account.id,
         address_id: address.id,
     })

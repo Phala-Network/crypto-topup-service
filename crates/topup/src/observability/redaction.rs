@@ -6,15 +6,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use topup_adapters::chain::evm::{EvmClient, FinalizedReader};
-    use topup_adapters::settlement::http::SettlementAnswer;
     use topup_core::route::RouteFile;
     use tracing_test::traced_test;
 
-    use crate::reconciler::{
-        CheckName, Reconciler, ReconciliationChain, ReconciliationError, SettlementLookup,
-    };
+    use crate::reconciler::{CheckName, Reconciler, ReconciliationChain};
     use crate::routes::RouteSet;
 
     use super::Redacted;
@@ -62,7 +58,6 @@ mod tests {
             pool,
             Arc::new(RouteSet::new(vec![route]).expect("route loads")),
             BTreeMap::from([(chain_id, Arc::new(chain) as Arc<dyn ReconciliationChain>)]),
-            Arc::new(NoSettlement),
         );
 
         reconciler
@@ -90,18 +85,5 @@ mod tests {
             }
             Ok(())
         });
-    }
-
-    struct NoSettlement;
-
-    #[async_trait]
-    impl SettlementLookup for NoSettlement {
-        async fn get_by_key(
-            &self,
-            _settlement_url: &str,
-            _key: &str,
-        ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-            Ok(None)
-        }
     }
 }

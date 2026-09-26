@@ -1,5 +1,5 @@
-# Staging reference product CVM (deploy/README.md, "Staging reference product"): the settlement
-# endpoint, webhook receiver, and account API of deploy/product/reference_product for the
+# Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
+# receiver with fulfillment and the account API of deploy/product/reference_product for the
 # phala-cloud product on the Sepolia staging route. Deploy (target `product`) renders this file with
 # deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
 # (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they

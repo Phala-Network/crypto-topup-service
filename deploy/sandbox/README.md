@@ -45,7 +45,7 @@ and temporary files are removed on exit.
 ## Scenarios
 
 Each scenario registers fresh workspaces, pays with the test token, and asserts the deposit state
-from the product API, the verified webhooks, and the product ledger of the reference endpoint.
+from the product API, the verified webhooks, and the product ledger of the reference receiver.
 
 | Scenario | Payment | Expected |
 |---|---|---|
@@ -53,13 +53,12 @@ from the product API, the verified webhooks, and the product ledger of the refer
 | `late_payment` | Exact locked amount after `rate_lock.expired` | `credited` at spot; lock stays `expired`. |
 | `underpayment` | 97% of the locked amount (tolerance is 1%) | `credited` at spot below the quote; lock not consumed; cancel is refused (`409 pending_payment` while the lock is open). |
 | `overpayment` | +0.5%, then +5% on a second lock | Within tolerance: lock price, exact quoted credit, `consumed`. Beyond: spot for the full amount, lock not consumed. |
-| `unsupported_asset` | A token without a route to a persistent address | `rejected`, `deposit.rejected` reason `unsupported_asset`; the product is never asked to settle. |
-| `product_refusal` | Payment for a suspended workspace | Product records `rejected` without credit; deposit `rejected`, `deposit.rejected` reason `product_refused` with the product's reason. |
-| `restart_mid_flow` | The product commits the credit but its answer is lost, then the service restarts | After restart the service `GET`s the key before any resend and adopts the answer; exactly one ledger credit. Needs `restart_command`, so it is skipped on Sepolia unless an operator runs it. |
+| `unsupported_asset` | A token without a route to a persistent address | `rejected`, `deposit.rejected` reason `unsupported_asset`; the product never receives `deposit.credited`. |
+| `product_refusal` | Payment for a suspended workspace | Deposit `credited`; the product holds it without a ledger credit (`account_suspended`) and requests its refund, which stays `requested` for finance. |
+| `restart_mid_flow` | The product fulfills the credit but its acknowledgement is lost, then the service restarts | The restarted service delivers the same `deposit.credited` again; exactly one ledger credit. Needs `restart_command`, so it is skipped on Sepolia unless an operator runs it. |
 
-They cover, from the service side: business
-refusal is a typed `200 rejected`, unknown results are resolved by `GET` before resending, and a
-key is credited once.
+They cover, from the service side: a refusal is a hold and a refund request, delivery is retried
+until the product acknowledges it, and a deposit is credited once.
 
 ## Obtaining sandbox credentials (integrators)
 
@@ -78,7 +77,7 @@ Credential issuance is a human step on both sides.
    freshness window against another deployment that shares the same public origin.
 2. Send the operator, through the agreed support channel: the product slug you want (lowercase
    letters, digits, and dashes), the printed key id and public key, and public HTTPS URLs for
-   your settlement endpoint and webhook receiver. Never send the seed.
+   your webhook receiver. Never send the seed.
 3. The operator returns the sandbox service URL, your route name, the chain id, the forwarder
    factory and implementation addresses, the test token and unsupported-token addresses, and the
    attestation instructions for pinning the settlement key (`keyid = settlement/v1`).
@@ -98,12 +97,11 @@ gas from a public faucet.
    ```
 
 2. Render and validate the integrator's route (one route per product). The route is the only
-   source of the product's key id and settlement URL; its slug must match the issued product:
+   source of the product's key id; its slug must match the issued product:
 
    ```sh
    FORWARDER_FACTORY=0x... IMPLEMENTATION=0x... TREASURY=0x... TEST_TOKEN=0x... \
      SANCTIONS_ORACLE=0x... PRODUCT_SLUG=acme PRODUCT_KID=acme/v1 \
-     SETTLEMENT_URL=https://acme.example/topup/settlements \
      deploy/sandbox/render-route.sh > sandbox-acme.yaml
    docker run --rm -v "$PWD/sandbox-acme.yaml:/route.yaml:ro" "$TOPUP_IMAGE" \
      topup route validate /route.yaml
@@ -132,7 +130,7 @@ gas from a public faucet.
    [Product credentials](../README.md#product-credentials) describes: the integrator's slug (the
    route's `destination.product`), public key, and HTTPS webhook URL. The request is audited; a
    repeat with the same values returns the same product, and different values for an issued slug
-   are refused with `409`. The key id and settlement URL come only from the route.
+   are refused with `409`. The key id comes only from the route.
 
 ## Running the scenarios against Sepolia (integrators)
 
@@ -187,6 +185,6 @@ scenario names to run a subset. The sandbox route's rate-lock window is 120 seco
 payment scenario waits at least that long. `restart_mid_flow` is reported as `SKIP` without a
 `restart_command`.
 
-Staging settles with its own product CVM, so the scenarios do not run there; the deposit
+Staging credits its own product CVM, so the scenarios do not run there; the deposit
 driver's options play their payments through that product instead (deploy/README.md,
 "Abnormal paths").

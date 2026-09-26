@@ -1,7 +1,7 @@
 """Shared harness for sandbox scenarios.
 
 Scenarios run the reference product from deploy/product/reference_product as the
-integrator's settlement and webhook endpoint, drive payments with the sandbox test token, and
+integrator's webhook receiver, drive payments with the sandbox test token, and
 assert the deposit states and verified webhooks the service produces. Each scenario uses fresh
 workspaces, so scenarios are independent and can run against a shared sandbox.
 """
@@ -26,9 +26,9 @@ sys.path.insert(0, str(REPOSITORY / "deploy/product"))
 
 from reference_product.config import ProductConfig  # noqa: E402
 from reference_product.driver import Payer  # noqa: E402
+from reference_product.fulfillment import Answer, Fulfillment  # noqa: E402
 from reference_product.ledger import ProductLedger  # noqa: E402
 from reference_product.server import create_quote, register_team  # noqa: E402
-from reference_product.settlement import Answer, SettlementService  # noqa: E402
 from topup_client.models import DepositResponse, RateLockResponse  # noqa: E402
 from topup_sdk import TopupClient  # noqa: E402
 from topup_sdk.addresses import same_address  # noqa: E402
@@ -59,44 +59,33 @@ def credit(deposit: DepositResponse) -> int:
     return int(str(deposit.credit_minor))
 
 
-class ScenarioSettlement(SettlementService):
-    """Reference settlement endpoint with request counters and one injectable fault."""
+class ScenarioFulfillment(Fulfillment):
+    """Reference webhook receiver with per-team delivery counters and one injectable fault."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.posts: Counter[str] = Counter()
-        self.gets: Counter[str] = Counter()
-        self.lose_answer_once: set[str] = set()
-        # Teams whose GET-by-key answers 503 until released, so a lookup cannot happen early.
-        self.hold_lookups: set[str] = set()
+        self.deliveries: Counter[str] = Counter()
+        # Teams whose `deposit.credited` is fulfilled but answered 500 until released, as if the
+        # product's acknowledgement were lost on the way back.
+        self.lose_acks: set[str] = set()
         self._lock = threading.Lock()
 
-    def handle_post(self, target: str, headers: Mapping[str, str], body: bytes) -> Answer:
-        answer = super().handle_post(target, headers, body)
+    def handle(self, headers: Mapping[str, str], body: bytes) -> Answer:
+        answer = super().handle(headers, body)
         try:
-            team = str(json.loads(body)["account_id"])
+            envelope = json.loads(body)
+            team = str(envelope["data"]["external_id"])
+            credited = envelope["type"] == "deposit.credited"
         except (ValueError, KeyError, TypeError):
             return answer
+        if not credited:
+            return answer
         with self._lock:
-            self.posts[team] += 1
-            lose = answer.status == 200 and team in self.lose_answer_once
-            self.lose_answer_once.discard(team)
+            self.deliveries[team] += 1
+            lose = answer.status == 204 and team in self.lose_acks
         if lose:
-            # The credit is committed; the answer is lost on the way back to the service.
-            LOG.info("dropping the committed settlement answer for %s", team)
+            LOG.info("dropping the acknowledgement of a fulfilled credit for %s", team)
             return Answer(500)
-        return answer
-
-    def handle_get(self, target: str, headers: Mapping[str, str]) -> Answer:
-        order = self.ledger.find_order(target.rsplit("/", 1)[-1])
-        team = None if order is None else order.team_id
-        with self._lock:
-            if team is not None and team in self.hold_lookups:
-                return Answer(503)
-        answer = super().handle_get(target, headers)
-        if team is not None:
-            with self._lock:
-                self.gets[team] += 1
         return answer
 
 
@@ -105,7 +94,7 @@ class Context:
     config: ProductConfig
     client: TopupClient
     ledger: ProductLedger
-    settlement: ScenarioSettlement
+    fulfillment: ScenarioFulfillment
     payer: Payer
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 

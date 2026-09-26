@@ -1,4 +1,4 @@
-//! Periodic custody and settlement reconciliation.
+//! Periodic custody and credit reconciliation.
 //!
 //! Every §13 check runs on every round, independently of the others. Per-deposit failures are
 //! recorded as findings; a check that cannot complete is reported in
@@ -13,29 +13,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
-use async_trait::async_trait;
-use chrono::Utc;
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
-use topup_adapters::settlement::http::{SettlementAnswer, SettlementClient, SettlementClientError};
-use topup_adapters::signer::actor::SignerHandle;
-use topup_core::deposit::{DepositState, StepOutcome, TransitionKind, next};
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
-use crate::db::{self, ApplyTransitionError, ApplyTransitionResult, ScanAddress};
-use crate::pump::StepResult;
+use crate::db::{self, ApplyTransitionError, ScanAddress};
 use crate::routes::RouteSet;
 use crate::scanner::{
     ChainRoutes, MAX_SCAN_WINDOW, ScannerError, chain_routes, resolve_logs_for_reconciliation,
 };
-use crate::steps::settle::{SettleStepError, adopt_answer, validate_answer_identity};
 
-use store::{CustodyCursor, state_code};
+use store::CustodyCursor;
 
 pub use chain::ReconciliationChain;
 pub use store::{
@@ -47,10 +40,9 @@ pub use types::{CheckName, Finding, ReconciliationReport};
 const MAX_WINDOWS_PER_ROUND: usize = 64;
 
 /// Order in which a round runs its checks; derivation runs first so a freeze lands early.
-const REGULAR_CHECKS: [CheckName; 6] = [
+const REGULAR_CHECKS: [CheckName; 5] = [
     CheckName::AddressDerivation,
     CheckName::MissingDeposit,
-    CheckName::SentSettlement,
     CheckName::CreditRecomputation,
     CheckName::MissingFlushLink,
     CheckName::CustodyBalance,
@@ -65,9 +57,6 @@ pub enum ReconciliationError {
     /// A chain adapter failed.
     #[error("{0}")]
     Chain(String),
-    /// A product settlement lookup failed.
-    #[error("{0}")]
-    Settlement(String),
     /// PostgreSQL failed an operation.
     #[error("{0}")]
     Database(#[from] sqlx::Error),
@@ -89,7 +78,6 @@ impl ReconciliationError {
         match self {
             Self::Configuration(_) => "configuration",
             Self::Chain(_) => "chain_unavailable",
-            Self::Settlement(_) => "settlement_lookup_failed",
             Self::Database(_) => "database",
             Self::Encode(_) => "encode",
             Self::Invariant(message) => message,
@@ -119,74 +107,8 @@ impl From<ApplyTransitionError> for ReconciliationError {
     }
 }
 
-/// Product GET boundary used by normal and post-restore reconciliation.
-#[async_trait]
-pub trait SettlementLookup: Send + Sync {
-    /// Fetches one product answer from the configured settlement endpoint.
-    async fn get_by_key(
-        &self,
-        settlement_url: &str,
-        key: &str,
-    ) -> Result<Option<SettlementAnswer>, ReconciliationError>;
-}
-
-struct SignedSettlementLookup {
-    signer: SignerHandle,
-    timeout: Duration,
-}
-
-#[async_trait]
-impl SettlementLookup for SignedSettlementLookup {
-    async fn get_by_key(
-        &self,
-        settlement_url: &str,
-        key: &str,
-    ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-        let client = SettlementClient::new(settlement_url, self.signer.clone(), self.timeout)
-            .map_err(map_settlement)?;
-        topup_adapters::settlement::http::SettlementApi::get_by_key(&client, key)
-            .await
-            .map_err(map_settlement)
-    }
-}
-
-fn map_settlement(error: SettlementClientError) -> ReconciliationError {
-    ReconciliationError::Settlement(error.to_string())
-}
-
 /// Finalized heads read once per chain and shared by every check in a round.
 type FinalizedHeads = BTreeMap<u64, u64>;
-
-/// Product decision carried by a terminal settlement answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProductDecision {
-    Credited,
-    Rejected,
-}
-
-impl ProductDecision {
-    const fn code(self) -> &'static str {
-        match self {
-            Self::Credited => "credited",
-            Self::Rejected => "rejected",
-        }
-    }
-
-    const fn agrees_with(self, state: DepositState) -> bool {
-        match self {
-            Self::Credited => matches!(state, DepositState::Credited | DepositState::Swept),
-            Self::Rejected => matches!(state, DepositState::Rejected),
-        }
-    }
-
-    const fn target(self, deposit: &db::Deposit) -> DepositState {
-        match self {
-            Self::Credited if deposit.flush_id.is_some() => DepositState::Swept,
-            Self::Credited => DepositState::Credited,
-            Self::Rejected => DepositState::Rejected,
-        }
-    }
-}
 
 /// Runs every §13 check against configured routes and dependencies.
 pub struct Reconciler {
@@ -194,16 +116,11 @@ pub struct Reconciler {
     routes: Arc<RouteSet>,
     scanner_routes: BTreeMap<u64, ChainRoutes>,
     chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
-    settlement: Arc<dyn SettlementLookup>,
 }
 
 impl Reconciler {
     /// Builds production reconciliation dependencies on each chain's provider A.
-    pub fn from_routes(
-        pool: PgPool,
-        routes: Arc<RouteSet>,
-        signer: SignerHandle,
-    ) -> Result<Self, ReconciliationError> {
+    pub fn from_routes(pool: PgPool, routes: Arc<RouteSet>) -> Result<Self, ReconciliationError> {
         let mut chains = BTreeMap::<u64, Arc<dyn ReconciliationChain>>::new();
         for chain_id in routes.chain_ids() {
             let client = routes.provider(chain_id, 0).map_err(|error| {
@@ -211,11 +128,7 @@ impl Reconciler {
             })?;
             chains.insert(chain_id, Arc::new(FinalizedReader::new(Arc::clone(client))));
         }
-        let settlement = Arc::new(SignedSettlementLookup {
-            signer,
-            timeout: Duration::from_secs(30),
-        });
-        Ok(Self::with_dependencies(pool, routes, chains, settlement))
+        Ok(Self::with_dependencies(pool, routes, chains))
     }
 
     /// Builds a reconciler with explicit dependencies for integration tests.
@@ -224,7 +137,6 @@ impl Reconciler {
         pool: PgPool,
         routes: Arc<RouteSet>,
         chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
-        settlement: Arc<dyn SettlementLookup>,
     ) -> Self {
         let scanner_routes = chain_routes(&routes)
             .into_iter()
@@ -235,7 +147,6 @@ impl Reconciler {
             routes,
             scanner_routes,
             chains,
-            settlement,
         }
     }
 
@@ -247,11 +158,11 @@ impl Reconciler {
         Ok(self.run_checks(false).await)
     }
 
-    /// Runs the restore gate: every regular check plus authoritative product GETs.
+    /// Runs the post-restore round: every regular check, on the restored ledger alone.
     ///
-    /// The gate preempts restored deposit leases, so it refuses to run while any process holds
-    /// the [`LeaseOwnerLock`]. [`ReconciliationReport::incomplete`] is driven only by the
-    /// product GETs.
+    /// The service is authoritative for its credits, so a restore asks the product nothing. The
+    /// round refuses to run while any process holds the [`LeaseOwnerLock`], so no pump works on
+    /// the restored ledger meanwhile.
     pub async fn post_restore_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
         let lock = store::exclusive_lease_owner_lock(&self.pool).await?;
         let report = self.run_checks(true).await;
@@ -263,8 +174,8 @@ impl Reconciler {
 
     /// Runs one check without persisting its findings.
     ///
-    /// Safe repairs still apply: `missing_deposit`, `missing_flush_link`, and `sent_settlement`
-    /// write the ledger exactly as a full round does.
+    /// Safe repairs still apply: `missing_deposit` and `missing_flush_link` write the ledger
+    /// exactly as a full round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
         let mut findings = Vec::new();
         self.run_check(check, &mut FinalizedHeads::new(), &mut findings)
@@ -275,12 +186,7 @@ impl Reconciler {
     async fn run_checks(&self, post_restore: bool) -> ReconciliationReport {
         let mut heads = FinalizedHeads::new();
         let mut report = ReconciliationReport::default();
-        let checks = REGULAR_CHECKS
-            .into_iter()
-            // The post-restore GETs cover every sent settlement at or beyond `cleared`.
-            .filter(|check| !(post_restore && *check == CheckName::SentSettlement))
-            .chain(post_restore.then_some(CheckName::PostRestoreSettlement));
-        for check in checks {
+        for check in REGULAR_CHECKS {
             let mut findings = Vec::new();
             let mut result = self.run_check(check, &mut heads, &mut findings).await;
             for finding in &findings {
@@ -296,11 +202,7 @@ impl Reconciler {
             }
             report.findings.extend(findings);
         }
-        report.incomplete = report.findings.iter().any(|finding| finding.incomplete)
-            || (post_restore
-                && report
-                    .failed_checks
-                    .contains(&CheckName::PostRestoreSettlement));
+        report.incomplete = report.findings.iter().any(|finding| finding.incomplete);
         if report.succeeded() {
             tracing::info!(
                 findings = report.findings.len(),
@@ -327,11 +229,9 @@ impl Reconciler {
         match check {
             CheckName::AddressDerivation => self.address_derivation(findings).await,
             CheckName::MissingDeposit => self.missing_deposits(heads, findings).await,
-            CheckName::SentSettlement => self.sent_settlements(findings).await,
             CheckName::CreditRecomputation => self.credit_recomputation(findings).await,
             CheckName::MissingFlushLink => self.missing_flush_links(findings).await,
             CheckName::CustodyBalance => self.custody_balances(heads, findings).await,
-            CheckName::PostRestoreSettlement => self.post_restore_settlements(findings).await,
         }
     }
 
@@ -523,326 +423,6 @@ impl Reconciler {
             cursor = Some(next_block);
         }
         Ok(())
-    }
-
-    /// Adopts product answers for sent settlements under a deposit lease.
-    async fn sent_settlements(
-        &self,
-        findings: &mut Vec<Finding>,
-    ) -> Result<(), ReconciliationError> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT s.deposit_id
-            FROM settlements s
-            JOIN deposits d ON d.id = s.deposit_id
-            WHERE s.status = 'sent' AND d.state = 'cleared'
-            ORDER BY s.deposit_id
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        for id in ids {
-            self.push_settlement_result(id, false, findings).await?;
-        }
-        Ok(())
-    }
-
-    /// GETs every deposit at or beyond cleared before a restored service resumes.
-    async fn post_restore_settlements(
-        &self,
-        findings: &mut Vec<Finding>,
-    ) -> Result<(), ReconciliationError> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM deposits
-            WHERE state IN ('cleared', 'credited', 'swept')
-               OR (state = 'rejected' AND reason = 'product_refused')
-            ORDER BY id
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        for id in ids {
-            self.push_settlement_result(id, true, findings).await?;
-        }
-        Ok(())
-    }
-
-    async fn push_settlement_result(
-        &self,
-        deposit_id: Uuid,
-        post_restore: bool,
-        findings: &mut Vec<Finding>,
-    ) -> Result<(), ReconciliationError> {
-        match self.reconcile_settlement(deposit_id, post_restore).await {
-            Ok(Some(finding)) => findings.push(finding),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(%deposit_id, %error, "settlement reconciliation failed for deposit");
-                findings.push(Finding::new(
-                    settlement_check(post_restore),
-                    subjects([("deposit_id", deposit_id.to_string())]),
-                    json!({"product_answer": "reconciled"}),
-                    json!({"error": error.code()}),
-                    false,
-                    post_restore,
-                )?);
-            }
-        }
-        Ok(())
-    }
-
-    async fn reconcile_settlement(
-        &self,
-        deposit_id: Uuid,
-        post_restore: bool,
-    ) -> Result<Option<Finding>, ReconciliationError> {
-        let lease_token = Uuid::new_v4();
-        if !store::claim_deposit(&self.pool, deposit_id, lease_token, post_restore).await? {
-            if post_restore {
-                return Ok(Some(Finding::new(
-                    CheckName::PostRestoreSettlement,
-                    subjects([("deposit_id", deposit_id.to_string())]),
-                    json!({"deposit_lease": "claimed"}),
-                    json!({"deposit_lease": "busy"}),
-                    false,
-                    true,
-                )?));
-            }
-            tracing::debug!(%deposit_id, "deposit is leased elsewhere; settlement adoption skipped");
-            return Ok(None);
-        }
-        let result = self
-            .reconcile_claimed_settlement(deposit_id, lease_token, post_restore)
-            .await;
-        let released = store::release_lease(&self.pool, deposit_id, lease_token).await;
-        let finding = result?;
-        released?;
-        Ok(finding)
-    }
-
-    /// Fetches the product answer from the product's attested route destination.
-    async fn settlement_answer(
-        &self,
-        product: &str,
-        key: &str,
-    ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-        let destination = self.routes.destination(product).ok_or_else(|| {
-            ReconciliationError::Configuration(format!("no loaded route names product `{product}`"))
-        })?;
-        self.settlement
-            .get_by_key(&destination.settlement_url, key)
-            .await
-    }
-
-    async fn reconcile_claimed_settlement(
-        &self,
-        deposit_id: Uuid,
-        lease_token: Uuid,
-        post_restore: bool,
-    ) -> Result<Option<Finding>, ReconciliationError> {
-        let deposit = db::get_deposit(&self.pool, deposit_id).await?.ok_or(
-            ReconciliationError::Invariant("settlement deposit is missing"),
-        )?;
-        let row = sqlx::query(
-            r#"
-            SELECT a.external_id, a.product_id, p.slug AS product,
-                   COALESCE(s.key, 'deposit:' || d.id::text) AS key,
-                   s.status AS settlement_status
-            FROM deposits d
-            JOIN accounts a ON a.id = d.account_id
-            JOIN products p ON p.id = a.product_id
-            LEFT JOIN settlements s ON s.deposit_id = d.id
-            WHERE d.id = $1
-            "#,
-        )
-        .bind(deposit_id)
-        .fetch_one(&self.pool)
-        .await?;
-        let external_id: String = row.try_get("external_id")?;
-        let product_id: Uuid = row.try_get("product_id")?;
-        let product: String = row.try_get("product")?;
-        let key: String = row.try_get("key")?;
-        let settlement_status: Option<String> = row.try_get("settlement_status")?;
-        let local = state_code(deposit.state);
-        // Only the post-restore gate reaches deposits beyond `cleared`.
-        let locally_terminal = deposit.state != DepositState::Cleared;
-        let check = settlement_check(post_restore);
-        let finding = |expected, observed, repair_applied, incomplete| {
-            Finding::new(
-                check,
-                subjects([("deposit_id", deposit_id.to_string()), ("key", key.clone())]),
-                expected,
-                observed,
-                repair_applied,
-                incomplete,
-            )
-        };
-
-        let answer = match self.settlement_answer(&product, &key).await {
-            Ok(answer) => answer,
-            Err(error) => {
-                tracing::warn!(%deposit_id, %error, "product settlement lookup failed");
-                return Ok(Some(finding(
-                    json!({"product_answer": "available"}),
-                    json!({"local_state": local, "error": error.code()}),
-                    false,
-                    post_restore,
-                )?));
-            }
-        };
-        let Some(answer) = answer else {
-            if !locally_terminal {
-                // The settle step GETs before any resend, so a cleared deposit is complete.
-                tracing::debug!(%deposit_id, "product has no settlement record yet");
-                return Ok(None);
-            }
-            return Ok(Some(finding(
-                json!({"product_answer": "terminal"}),
-                json!({"local_state": local, "product_answer": null}),
-                false,
-                true,
-            )?));
-        };
-        let answer_kind = settlement_answer_kind(&answer);
-        if let Err(error) = validate_answer_identity(&deposit, &external_id, &answer) {
-            return Ok(Some(finding(
-                json!({"product_answer": "identity_verified"}),
-                json!({"product_answer": answer_kind, "error": error.code()}),
-                false,
-                post_restore,
-            )?));
-        }
-        let decision = match &answer {
-            SettlementAnswer::Accepted { .. } => ProductDecision::Credited,
-            SettlementAnswer::Rejected { .. } => ProductDecision::Rejected,
-            SettlementAnswer::Processing { .. } | SettlementAnswer::Conflict409 => {
-                if !locally_terminal {
-                    tracing::debug!(%deposit_id, "product is still processing the settlement");
-                    return Ok(None);
-                }
-                return Ok(Some(finding(
-                    json!({"product_answer": "terminal"}),
-                    json!({"local_state": local, "product_answer": answer_kind}),
-                    false,
-                    true,
-                )?));
-            }
-            SettlementAnswer::PayloadMismatch422 | SettlementAnswer::Unknown { .. } => {
-                return Ok(Some(finding(
-                    json!({"product_answer": "terminal"}),
-                    json!({"local_state": local, "product_answer": answer_kind}),
-                    false,
-                    post_restore,
-                )?));
-            }
-        };
-        if settlement_status.is_none()
-            && let Some(payload) = answer_payload(&answer)
-        {
-            db::upsert_intent(
-                &self.pool,
-                &db::SettlementIntent {
-                    deposit_id,
-                    product_id,
-                    key: key.clone(),
-                    payload,
-                },
-            )
-            .await?;
-        }
-        let result =
-            match adopt_answer(&self.pool, &deposit, product_id, &external_id, answer).await {
-                Ok(result) => result,
-                Err(SettleStepError::Database(error)) => return Err(error.into()),
-                Err(error) => {
-                    return Ok(Some(finding(
-                        json!({"product_answer": "adopted"}),
-                        json!({"product_answer": answer_kind, "error": error.code()}),
-                        false,
-                        post_restore,
-                    )?));
-                }
-            };
-        let expected = json!({"local_state": decision.code()});
-        let observed = json!({"local_state": local, "product_answer": answer_kind});
-        if decision.agrees_with(deposit.state) {
-            let settlement_adopted =
-                !matches!(settlement_status.as_deref(), Some("accepted" | "rejected"));
-            return settlement_adopted
-                .then(|| finding(expected, observed, true, false))
-                .transpose()
-                .map_err(Into::into);
-        }
-        let applied = if deposit.state == DepositState::Cleared {
-            self.apply_answer_transition(&deposit, lease_token, &result)
-                .await?
-        } else if post_restore {
-            store::apply_product_answer(
-                &self.pool,
-                &deposit,
-                lease_token,
-                decision.target(&deposit),
-                &result.evidence,
-                &result.events,
-            )
-            .await?
-        } else {
-            false
-        };
-        Ok(Some(finding(
-            expected,
-            observed,
-            applied,
-            post_restore && !applied,
-        )?))
-    }
-
-    /// Applies an adopted answer to a leased `cleared` deposit through `core::next`.
-    async fn apply_answer_transition(
-        &self,
-        deposit: &db::Deposit,
-        lease_token: Uuid,
-        result: &StepResult,
-    ) -> Result<bool, ReconciliationError> {
-        let transition = next(deposit.state, &result.outcome).map_err(|_| {
-            ReconciliationError::Invariant("adopted product answer is not a valid transition")
-        })?;
-        let update = db::TransitionUpdate {
-            transition,
-            rejection_reason: match result.outcome {
-                StepOutcome::Reject(reason) => Some(reason),
-                _ => None,
-            },
-            attempt: match transition.kind {
-                TransitionKind::Advanced => 0,
-                TransitionKind::Rejected | TransitionKind::Retry | TransitionKind::Wait => {
-                    deposit.attempt
-                }
-            },
-            next_attempt_at: Utc::now(),
-        };
-        let mut transaction = self.pool.begin().await?;
-        let applied = db::apply_transition(
-            &mut transaction,
-            deposit.id,
-            deposit.state,
-            lease_token,
-            update,
-            db::TransitionWrites {
-                evidence: &result.evidence,
-                effects: &result.effects,
-                outbox_events: &result.events,
-            },
-        )
-        .await?;
-        if applied == ApplyTransitionResult::Applied {
-            transaction.commit().await?;
-            Ok(true)
-        } else {
-            transaction.rollback().await?;
-            Ok(false)
-        }
     }
 
     /// Recomputes stored credit and blocks flushing for every mismatching address.
@@ -1216,14 +796,6 @@ fn log_finding(finding: &Finding, inserted: bool) {
     }
 }
 
-const fn settlement_check(post_restore: bool) -> CheckName {
-    if post_restore {
-        CheckName::PostRestoreSettlement
-    } else {
-        CheckName::SentSettlement
-    }
-}
-
 fn first_created_block(addresses: &[ScanAddress]) -> Option<u64> {
     addresses.iter().map(|address| address.created_block).min()
 }
@@ -1295,26 +867,4 @@ async fn treasury_inflow(
         .try_fold(U256::ZERO, |total, log| {
             checked_add(total, log.amount.value())
         })
-}
-
-fn answer_payload(answer: &SettlementAnswer) -> Option<serde_json::Value> {
-    match answer {
-        SettlementAnswer::Accepted { payload, .. }
-        | SettlementAnswer::Processing { payload }
-        | SettlementAnswer::Rejected { payload, .. } => Some(payload.clone()),
-        SettlementAnswer::Conflict409
-        | SettlementAnswer::PayloadMismatch422
-        | SettlementAnswer::Unknown { .. } => None,
-    }
-}
-
-fn settlement_answer_kind(answer: &SettlementAnswer) -> &'static str {
-    match answer {
-        SettlementAnswer::Accepted { .. } => "accepted",
-        SettlementAnswer::Processing { .. } => "processing",
-        SettlementAnswer::Conflict409 => "conflict",
-        SettlementAnswer::Rejected { .. } => "rejected",
-        SettlementAnswer::PayloadMismatch422 => "payload_mismatch",
-        SettlementAnswer::Unknown { .. } => "unknown",
-    }
 }

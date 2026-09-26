@@ -42,7 +42,6 @@ from .route_daily_report import RouteDailyReport
 from .route_daily_report_age_in_state_max_seconds import RouteDailyReportAgeInStateMaxSeconds
 from .route_daily_report_deposits_by_state import RouteDailyReportDepositsByState
 from .route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatus
-from .route_daily_report_settlements_by_status import RouteDailyReportSettlementsByStatus
 from .route_pause_response import RoutePauseResponse
 from .support_deposit_response import SupportDepositResponse
 from .support_deposits_response import SupportDepositsResponse
@@ -91,7 +90,6 @@ __all__ = (
     "RouteDailyReportAgeInStateMaxSeconds",
     "RouteDailyReportDepositsByState",
     "RouteDailyReportRefundsByStatus",
-    "RouteDailyReportSettlementsByStatus",
     "RoutePauseResponse",
     "SupportDepositResponse",
     "SupportDepositsResponse",

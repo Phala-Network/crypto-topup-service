@@ -176,19 +176,6 @@ pub struct StoredValuation {
     pub quote: Value,
 }
 
-/// Authoritative product answer adopted during restore recovery.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SettlementAdoption {
-    /// Deterministic product idempotency key.
-    pub key: String,
-    /// Original immutable payload returned by the product.
-    pub payload: Value,
-    /// Whether the product accepted the credit.
-    pub accepted: bool,
-    /// Product ledger transaction identifier, when accepted.
-    pub destination_tx_id: Option<String>,
-}
-
 /// Conditional single-use rate-lock consumption.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LockConsumption {
@@ -205,8 +192,6 @@ pub struct TransitionEffects {
     pub canonical_evidence: Option<CanonicalEvidence>,
     /// Optional valuation columns.
     pub valuation: Option<StoredValuation>,
-    /// Optional authoritative product settlement record.
-    pub settlement_adoption: Option<SettlementAdoption>,
     /// Optional conditional rate-lock consumption.
     pub lock_consumption: Option<LockConsumption>,
 }
@@ -216,7 +201,7 @@ pub struct TransitionEffects {
 pub struct TransitionWrites<'a> {
     /// Evidence appended to the transition timeline.
     pub evidence: &'a Value,
-    /// Structured deposit, settlement, and lock writes.
+    /// Structured deposit and lock writes.
     pub effects: &'a TransitionEffects,
     /// Outbox rows inserted after the state compare-and-swap succeeds.
     pub outbox_events: &'a [OutboxEvent],
@@ -449,34 +434,6 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
     record.map(TryInto::try_into).transpose()
 }
 
-/// Replaces local pricing fields with the product's authoritative original settlement inputs.
-pub async fn adopt_settlement_pricing(
-    pool: &PgPool,
-    id: Uuid,
-    credit_minor: u64,
-    price_scaled: u64,
-    valuation_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        UPDATE deposits
-        SET credit_minor = $2::text::numeric,
-            price_scaled = $3::text::numeric,
-            valuation_at = $4,
-            updated_at = now()
-        WHERE id = $1
-        RETURNING id
-        "#,
-    )
-    .bind(id)
-    .bind(credit_minor.to_string())
-    .bind(price_scaled.to_string())
-    .bind(valuation_at)
-    .fetch_one(pool)
-    .await?;
-    Ok(())
-}
-
 /// Claims one due non-terminal deposit with a five-minute lease.
 pub async fn claim_deposit(
     pool: &PgPool,
@@ -645,39 +602,6 @@ pub async fn apply_transition(
         .await?;
     }
 
-    if let Some(adoption) = &writes.effects.settlement_adoption {
-        let status = if adoption.accepted {
-            "accepted"
-        } else {
-            "rejected"
-        };
-        sqlx::query(
-            r#"
-            INSERT INTO settlements (
-                deposit_id, product_id, key, payload, status, destination_tx_id, receipt
-            )
-            SELECT $1, product.id, $2, $3, $4, $5, $6
-            FROM deposits AS deposit
-            JOIN accounts AS account ON account.id = deposit.account_id
-            JOIN products AS product ON product.id = account.product_id
-            WHERE deposit.id = $1
-            ON CONFLICT (deposit_id) DO UPDATE
-            SET payload = EXCLUDED.payload,
-                status = EXCLUDED.status,
-                destination_tx_id = EXCLUDED.destination_tx_id,
-                receipt = EXCLUDED.receipt
-            "#,
-        )
-        .bind(deposit_id)
-        .bind(&adoption.key)
-        .bind(&adoption.payload)
-        .bind(status)
-        .bind(&adoption.destination_tx_id)
-        .bind(serde_json::json!({"adopted": true}))
-        .execute(&mut **transaction)
-        .await?;
-    }
-
     sqlx::query!(
         r#"
         INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
@@ -698,6 +622,7 @@ pub async fn apply_transition(
             r#"
             INSERT INTO outbox (id, event_type, payload, next_attempt_at)
             VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO NOTHING
             "#,
             event.id,
             event.event_type,

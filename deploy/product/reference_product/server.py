@@ -1,4 +1,4 @@
-"""The product service: settlement endpoint, webhook receiver, and the product's account API.
+"""The product service: webhook receiver with fulfillment, and the product's account API.
 
 It pins the service's settlement key from attestation, keeps its ledger in SQLite, and serves its
 own account API, through which a user registers a workspace, gets a quote-first single-use
@@ -45,15 +45,8 @@ from .config import (
     MissingProductKeyError,
     ProductConfig,
 )
+from .fulfillment import Answer, Fulfillment, TransientError, parse_decimal
 from .ledger import ProductLedger
-from .settlement import (
-    Answer,
-    JsonRpc,
-    SettlementService,
-    TransientError,
-    WebhookReceiver,
-    parse_decimal,
-)
 
 LOG = logging.getLogger(__name__)
 
@@ -63,19 +56,12 @@ ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 class ProductServer:
-    """Serves `POST /settlements`, `GET /settlements/{key}`, `POST /webhooks`, `GET /healthz`,
-    and, given an `AccountApi`, `/accounts`."""
+    """Serves `POST /webhooks`, `GET /healthz`, and, given an `AccountApi`, `/accounts`."""
 
-    def __init__(
-        self,
-        settlement: SettlementService,
-        webhooks: WebhookReceiver,
-        accounts: AccountApi | None = None,
-    ) -> None:
-        self.settlement = settlement
-        self.webhooks = webhooks
+    def __init__(self, fulfillment: Fulfillment, accounts: AccountApi | None = None) -> None:
+        self.fulfillment = fulfillment
         self.accounts = accounts
-        config = settlement.config
+        config = fulfillment.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
         server = self
 
@@ -85,10 +71,8 @@ class ProductServer:
                 if body is None:
                     return
                 headers = dict(self.headers.items())
-                if self.path == base_path + "/settlements":
-                    self._send(server.settlement.handle_post(self.path, headers, body))
-                elif self.path == base_path + "/webhooks":
-                    self._send(server.webhooks.handle(headers, body))
+                if self.path == base_path + "/webhooks":
+                    self._send(server.fulfillment.handle(headers, body))
                 elif server.accounts is not None and server.accounts.handles(self.path):
                     self._send(server.accounts.handle("POST", self.path, headers, body))
                 else:
@@ -96,9 +80,7 @@ class ProductServer:
 
             def do_GET(self) -> None:
                 headers = dict(self.headers.items())
-                if self.path.startswith(base_path + "/settlements/"):
-                    self._send(server.settlement.handle_get(self.path, headers))
-                elif self.path == base_path + "/healthz":
+                if self.path == base_path + "/healthz":
                     self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
                 elif server.accounts is not None and server.accounts.handles(self.path):
                     self._send(server.accounts.handle("GET", self.path, headers, b""))
@@ -260,6 +242,7 @@ class AccountApi:
                 {"provider_order_id": key, "amount_minor": amount}
                 for key, amount in self.ledger.credits_for(team)
             ],
+            "orders": self.ledger.orders_for(team),
             "events": [
                 event
                 for event in self.ledger.all_events()
@@ -383,15 +366,15 @@ def quote_address(config: ProductConfig, team: str, lock_ref: str) -> str:
 
 @contextmanager
 def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
-    """Runs the product: settlement endpoint, webhook receiver, and account API."""
+    """Runs the product: webhook receiver with fulfillment, and account API."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
     settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
     ledger = ProductLedger(config.ledger_path)
-    settlement = SettlementService(config, ledger, settlement_key, JsonRpc(config.rpc_url))
+    fulfillment = Fulfillment(config, ledger, settlement_key)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
     try:
-        with ProductServer(settlement, WebhookReceiver(ledger, settlement_key), accounts) as server:
+        with ProductServer(fulfillment, accounts) as server:
             LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
             yield server
     finally:

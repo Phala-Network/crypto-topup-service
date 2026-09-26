@@ -5777,7 +5777,6 @@ dependencies = [
  "topup-core",
  "tracing",
  "url",
- "uuid",
  "zeroize",
 ]
 

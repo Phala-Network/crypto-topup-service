@@ -14,17 +14,13 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, Row};
-use tokio::sync::Mutex;
 use topup::db::{
     self, AddressKind, ApplyTransitionResult, FlushedEvent, NewDeposit, NewFlush, OutboxEvent,
-    SettlementIntent, TransitionUpdate,
+    TransitionUpdate,
 };
-use topup::reconciler::{
-    CheckName, Reconciler, ReconciliationChain, ReconciliationError, SettlementLookup,
-};
+use topup::reconciler::{CheckName, Reconciler, ReconciliationChain, ReconciliationError};
 use topup::{heartbeat, restore};
 use topup_adapters::chain::evm::TransferLog;
-use topup_adapters::settlement::http::SettlementAnswer;
 use topup_core::deposit::{DepositState, StepOutcome, WaitReason, next};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
@@ -63,8 +59,7 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
         Box::pin(async move {
             let heartbeat = heartbeat::record(&context.app_pool).await?;
 
-            let lookup = Arc::new(RestoreLookup::default());
-            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let reconciler = restore_reconciler(&context.owner_pool)?;
             let expectations = restore_expectations(&heartbeat);
             let report = restore::check(&context.owner_pool, &expectations, &reconciler)
                 .await
@@ -89,7 +84,6 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
                     .iter()
                     .any(|finding| finding.incomplete)
             );
-            ensure!(lookup.requested_keys.lock().await.is_empty());
             Ok(())
         })
     })
@@ -101,8 +95,7 @@ async fn restore_check_without_a_source_lsn_flags_heartbeat_only_rpo() -> Result
     with_database(|context| {
         Box::pin(async move {
             let heartbeat = heartbeat::record(&context.app_pool).await?;
-            let lookup = Arc::new(RestoreLookup::default());
-            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let reconciler = restore_reconciler(&context.owner_pool)?;
             let expectations = restore::RestoreExpectations {
                 expected_heartbeat_at: Some(heartbeat.recorded_at),
                 expected_lsn: None,
@@ -125,8 +118,7 @@ async fn restore_check_at_boot_reports_an_unanchored_rpo() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let heartbeat = heartbeat::record(&context.app_pool).await?;
-            let lookup = Arc::new(RestoreLookup::default());
-            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let reconciler = restore_reconciler(&context.owner_pool)?;
             let expectations = restore::RestoreExpectations {
                 expected_heartbeat_at: None,
                 expected_lsn: None,
@@ -171,31 +163,6 @@ async fn application_role_can_only_append_heartbeats() -> Result<()> {
         })
     })
     .await
-}
-
-/// Product GET double for the library post-restore reconciliation round.
-#[derive(Default)]
-struct RestoreLookup {
-    answers: Mutex<BTreeMap<String, SettlementAnswer>>,
-    requested_keys: Mutex<Vec<String>>,
-}
-
-#[async_trait]
-impl SettlementLookup for RestoreLookup {
-    async fn get_by_key(
-        &self,
-        _settlement_url: &str,
-        key: &str,
-    ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-        self.requested_keys.lock().await.push(key.to_owned());
-        self.answers
-            .lock()
-            .await
-            .get(key)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| ReconciliationError::Settlement("product unavailable".to_owned()))
-    }
 }
 
 /// Chain double for a restore check run without chain access; only alert-only checks use it.
@@ -250,11 +217,9 @@ impl ReconciliationChain for UnavailableChain {
     }
 }
 
-fn restore_reconciler(pool: &PgPool, lookup: &Arc<RestoreLookup>) -> Result<Reconciler> {
+fn restore_reconciler(pool: &PgPool) -> Result<Reconciler> {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
-    // Settlement lookups resolve the product's attested destination: name the seeded product.
-    route.destination.product = "product-3".to_owned();
     route.chain.rpc_providers = vec![
         "http://127.0.0.1:8546".to_owned(),
         "http://localhost:8546".to_owned(),
@@ -267,29 +232,24 @@ fn restore_reconciler(pool: &PgPool, lookup: &Arc<RestoreLookup>) -> Result<Reco
             chain_id,
             Arc::new(UnavailableChain) as Arc<dyn ReconciliationChain>,
         )]),
-        Arc::clone(lookup) as Arc<dyn SettlementLookup>,
     ))
 }
 
 #[tokio::test]
-async fn restore_check_runs_the_post_restore_reconciliation_gate() -> Result<()> {
+async fn restore_check_asks_the_product_nothing_and_keeps_recorded_credits() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let heartbeat = heartbeat::record(&context.app_pool).await?;
             let seed = seed_account(&context.app_pool, 3).await?;
-            let accepted = insert_restore_settlement(&context.app_pool, &seed, 3).await?;
-            let mut authoritative = accepted.2.clone();
-            authoritative["amount_minor"] = json!("275");
-            authoritative["evidence"]["price_scaled"] = json!("27500000");
-            let lookup = Arc::new(RestoreLookup::default());
-            lookup.answers.lock().await.insert(
-                accepted.1.clone(),
-                SettlementAnswer::Accepted {
-                    destination_tx_id: "restored-credit".to_owned(),
-                    payload: authoritative,
-                },
-            );
-            let reconciler = restore_reconciler(&context.owner_pool, &lookup)?;
+            let credited = insert_numbered_deposit(&context.app_pool, &seed, 3).await?;
+            sqlx::query(
+                "UPDATE deposits SET state = 'credited', valuation_at = now(), \
+                 price_scaled = 25000000, price_source = 'spot', credit_minor = 250 WHERE id = $1",
+            )
+            .bind(credited)
+            .execute(&context.owner_pool)
+            .await?;
+            let reconciler = restore_reconciler(&context.owner_pool)?;
             let expectations = restore_expectations(&heartbeat);
 
             let report = restore::check(&context.owner_pool, &expectations, &reconciler)
@@ -308,26 +268,70 @@ async fn restore_check_runs_the_post_restore_reconciliation_gate() -> Result<()>
                     .failed_checks
                     .contains(&CheckName::CustodyBalance)
             );
-            ensure!(*lookup.requested_keys.lock().await == std::slice::from_ref(&accepted.1));
-            let deposit = db::get_deposit(&context.app_pool, accepted.0)
+            let deposit = db::get_deposit(&context.app_pool, credited)
                 .await?
-                .context("accepted deposit")?;
+                .context("credited deposit")?;
             ensure!(deposit.state == DepositState::Credited);
-            ensure!(deposit.credit_minor.map(|value| value.value()) == Some(275));
-            ensure!(deposit.price_scaled == Some(27_500_000));
+            ensure!(deposit.credit_minor.map(|value| value.value()) == Some(250));
+            Ok(())
+        })
+    })
+    .await
+}
 
-            // An unverifiable deposit keeps the service stopped.
-            let unreachable = insert_restore_settlement(&context.app_pool, &seed, 4).await?;
-            let report = restore::check(&context.owner_pool, &expectations, &reconciler)
-                .await
-                .map_err(anyhow::Error::msg)?;
-            ensure!(report.status == "incomplete");
-            ensure!(report.post_restore_reconciliation.status == "incomplete");
-            let expected = format!(
-                "post-restore reconciliation is incomplete for deposit {}",
-                unreachable.0
+#[tokio::test]
+async fn fulfillment_migration_returns_cleared_deposits_to_confirmed_with_history() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            // Recreate the pre-migration schema, where `cleared` still existed.
+            sqlx::raw_sql(include_str!(
+                "../migrations/20260928000000_webhook_fulfillment.down.sql"
+            ))
+            .execute(&context.owner_pool)
+            .await?;
+            let seed = seed_account(&context.app_pool, 5).await?;
+            let cleared = insert_numbered_deposit(&context.app_pool, &seed, 5).await?;
+            sqlx::query(
+                "UPDATE deposits SET state = 'cleared', attempt = 3, valuation_at = now(), \
+                 price_scaled = 25000000, price_source = 'lock', credit_minor = 250 WHERE id = $1",
+            )
+            .bind(cleared)
+            .execute(&context.owner_pool)
+            .await?;
+
+            sqlx::raw_sql(include_str!(
+                "../migrations/20260928000000_webhook_fulfillment.up.sql"
+            ))
+            .execute(&context.owner_pool)
+            .await?;
+
+            let deposit = db::get_deposit(&context.app_pool, cleared)
+                .await?
+                .context("migrated deposit")?;
+            ensure!(deposit.state == DepositState::Confirmed);
+            ensure!(deposit.attempt == 0);
+            ensure!(deposit.credit_minor.map(|value| value.value()) == Some(250));
+            ensure!(deposit.price_source.as_deref() == Some("lock"));
+            let transition = sqlx::query(
+                "SELECT from_state, to_state, evidence FROM transitions WHERE deposit_id = $1",
+            )
+            .bind(cleared)
+            .fetch_one(&context.app_pool)
+            .await?;
+            ensure!(transition.try_get::<String, _>("from_state")? == "cleared");
+            ensure!(transition.try_get::<String, _>("to_state")? == "confirmed");
+            ensure!(
+                transition.try_get::<serde_json::Value, _>("evidence")?
+                    == json!({"migration": "webhook_fulfillment"})
             );
-            ensure!(report.failures == [expected]);
+            assert_sqlstate(
+                sqlx::query("UPDATE deposits SET state = 'cleared' WHERE id = $1")
+                    .bind(cleared)
+                    .execute(&context.owner_pool)
+                    .await
+                    .err(),
+                "23514",
+            )?;
             Ok(())
         })
     })
@@ -451,6 +455,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
         &["SELECT", "INSERT", "UPDATE"],
     ),
     ("_sqlx_migrations", &["SELECT"]),
+    ("settlements", &["SELECT"]),
     ("products", OPERATIONAL),
     ("accounts", OPERATIONAL),
     ("route_pauses", OPERATIONAL),
@@ -463,7 +468,6 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("flush_exclusions", OPERATIONAL),
     ("deposits", OPERATIONAL),
     ("rate_locks", OPERATIONAL),
-    ("settlements", OPERATIONAL),
     ("outbox", OPERATIONAL),
     ("refunds", OPERATIONAL),
     ("refund_payment_claims", OPERATIONAL),
@@ -545,12 +549,24 @@ async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() 
                 "trigger test",
             )
             .await?;
+            // Only the owner can still write the retired settlement protocol's history.
+            sqlx::query(
+                "INSERT INTO settlements (deposit_id, product_id, key, payload, status) \
+                 VALUES ($1, $2, $3, '{}'::jsonb, 'accepted')",
+            )
+            .bind(deposit_id)
+            .bind(seed.product_id)
+            .bind(format!("deposit:{deposit_id}"))
+            .execute(&context.owner_pool)
+            .await?;
 
             for (statement, id) in [
                 ("UPDATE transitions SET evidence = '{}'::jsonb WHERE id = $1", transition_id),
                 ("DELETE FROM transitions WHERE id = $1", transition_id),
                 ("UPDATE audit SET reason = 'changed' WHERE id = $1", audit_id),
                 ("DELETE FROM audit WHERE id = $1", audit_id),
+                ("UPDATE settlements SET status = 'rejected' WHERE deposit_id = $1", deposit_id),
+                ("DELETE FROM settlements WHERE deposit_id = $1", deposit_id),
             ] {
                 assert_sqlstate(
                     sqlx::query(statement)
@@ -855,18 +871,20 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
             );
             transaction.commit().await?;
 
-            let duplicate_event = Uuid::new_v4();
+            // The second event cannot be stored (jsonb refuses NUL), after the state, transition,
+            // and first event were written: none of them may survive.
+            let first_event = Uuid::new_v4();
             let events = [
                 OutboxEvent {
-                    id: duplicate_event,
+                    id: first_event,
                     event_type: "deposit.confirmed".to_owned(),
                     payload: json!({"sequence": 1}),
                     next_attempt_at: Utc::now(),
                 },
                 OutboxEvent {
-                    id: duplicate_event,
+                    id: Uuid::new_v4(),
                     event_type: "deposit.confirmed".to_owned(),
-                    payload: json!({"sequence": 2}),
+                    payload: json!({"sequence": "\u{0}"}),
                     next_attempt_at: Utc::now(),
                 },
             ];
@@ -893,50 +911,40 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                 .context("deposit must exist")?;
             ensure!(stored.state == DepositState::Detected);
             ensure!(count_where(&context.app_pool, "transitions", "deposit_id", id).await? == 0);
-            ensure!(count_where(&context.app_pool, "outbox", "id", duplicate_event).await? == 0);
-            Ok(())
-        })
-    })
-    .await
-}
+            ensure!(count_where(&context.app_pool, "outbox", "id", first_event).await? == 0);
 
-#[tokio::test]
-async fn settlement_destination_ids_are_unique_per_product() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let first = seed_account(&context.app_pool, 60).await?;
-            let second = seed_account(&context.app_pool, 61).await?;
-            let third = seed_account(&context.app_pool, 62).await?;
-            let first_id = insert_numbered_deposit(&context.app_pool, &first, 60).await?;
-            let second_id = insert_numbered_deposit(&context.app_pool, &first, 61).await?;
-            let third_id = insert_numbered_deposit(&context.app_pool, &second, 62).await?;
-            let fourth_id = insert_numbered_deposit(&context.app_pool, &third, 63).await?;
-
-            for (deposit_id, product_id) in [
-                (first_id, first.product_id),
-                (second_id, first.product_id),
-                (third_id, second.product_id),
-                (fourth_id, third.product_id),
-            ] {
-                db::upsert_intent(
-                    &context.app_pool,
-                    &SettlementIntent {
-                        deposit_id,
-                        product_id,
-                        key: format!("deposit:{deposit_id}"),
-                        payload: json!({"deposit_id": deposit_id}),
+            // A repeated event id is written once: deterministic ids make re-emission a no-op.
+            let repeated = Uuid::new_v4();
+            let events = [1, 2].map(|sequence| OutboxEvent {
+                id: repeated,
+                event_type: "deposit.credited".to_owned(),
+                payload: json!({"sequence": sequence}),
+                next_attempt_at: Utc::now(),
+            });
+            let mut transaction = context.app_pool.begin().await?;
+            ensure!(
+                db::apply_transition(
+                    &mut transaction,
+                    id,
+                    DepositState::Detected,
+                    claimed.lease_token.context("claim must have a token")?,
+                    update,
+                    db::TransitionWrites {
+                        evidence: &json!({}),
+                        effects: &db::TransitionEffects::default(),
+                        outbox_events: &events,
                     },
                 )
-                .await?;
-            }
-            set_destination(&context.app_pool, first_id, "credit-1").await?;
-            assert_unique(
-                set_destination(&context.app_pool, second_id, "credit-1")
-                    .await
-                    .err(),
-            )?;
-            set_destination(&context.app_pool, third_id, "credit-1").await?;
-            set_destination(&context.app_pool, fourth_id, "credit-1").await?;
+                .await?
+                    == ApplyTransitionResult::Applied
+            );
+            transaction.commit().await?;
+            let payloads: Vec<serde_json::Value> =
+                sqlx::query_scalar("SELECT payload FROM outbox WHERE id = $1")
+                    .bind(repeated)
+                    .fetch_all(&context.app_pool)
+                    .await?;
+            ensure!(payloads == [json!({"sequence": 1})]);
             Ok(())
         })
     })
@@ -1136,65 +1144,6 @@ async fn insert_numbered_deposit(pool: &PgPool, seed: &Seed, number: u8) -> Resu
     Ok(id)
 }
 
-async fn insert_restore_settlement(
-    pool: &PgPool,
-    seed: &Seed,
-    number: u8,
-) -> Result<(Uuid, String, serde_json::Value)> {
-    let mut deposit = new_deposit(seed.address_id, seed.account_id, 1, number, 0);
-    deposit.state = DepositState::Cleared;
-    let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
-    ensure!(db::insert_deposit(pool, &deposit).await?);
-    let valuation_at = Utc::now();
-    sqlx::query(
-        "UPDATE deposits SET valuation_at = $2, price_scaled = 25000000, price_source = 'spot', credit_minor = 250 WHERE id = $1",
-    )
-    .bind(deposit_id)
-    .bind(valuation_at)
-    .execute(pool)
-    .await?;
-    let key = format!("deposit:{deposit_id}");
-    let account = db::get_account(pool, seed.account_id)
-        .await?
-        .context("restore account")?;
-    let address = db::get_address(pool, seed.address_id)
-        .await?
-        .context("restore address")?;
-    let payload = json!({
-        "version": 1,
-        "idempotency_key": key,
-        "account_id": account.external_id,
-        "unit": "USD",
-        "amount_minor": "250",
-        "source": "crypto_deposit",
-        "evidence": {
-            "chain_id": deposit.chain_id,
-            "asset_contract": format!("{:#x}", deposit.asset_contract),
-            "route": deposit.route.context("restore route")?,
-            "route_version": deposit.route_version.context("restore route version")?,
-            "tx_hash": format!("{:#x}", deposit.tx_hash),
-            "log_index": deposit.log_index,
-            "to": format!("{:#x}", address.address),
-            "amount_atomic": deposit.amount_atomic.value().to_string(),
-            "price_scaled": "25000000",
-            "price_scale": topup_core::money::PRICE_SCALE,
-            "valuation_at": valuation_at,
-            "lock_ref": address.lock_ref,
-        },
-    });
-    db::upsert_intent(
-        pool,
-        &SettlementIntent {
-            deposit_id,
-            product_id: seed.product_id,
-            key: key.clone(),
-            payload: payload.clone(),
-        },
-    )
-    .await?;
-    Ok((deposit_id, key, payload))
-}
-
 /// Failure point exactly as an operator reads it from the last heartbeat log line.
 fn restore_expectations(heartbeat: &heartbeat::Heartbeat) -> restore::RestoreExpectations {
     restore::RestoreExpectations {
@@ -1242,19 +1191,6 @@ async fn insert_rate_lock(
     .bind(closed_at)
     .execute(pool)
     .await?;
-    Ok(())
-}
-
-async fn set_destination(
-    pool: &PgPool,
-    deposit_id: Uuid,
-    destination: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE settlements SET destination_tx_id = $2 WHERE deposit_id = $1")
-        .bind(deposit_id)
-        .bind(destination)
-        .execute(pool)
-        .await?;
     Ok(())
 }
 

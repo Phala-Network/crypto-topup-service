@@ -89,7 +89,7 @@ uv run --locked --project "$root/sdk/python" topup-sdk keygen --keyid "$keyid" \
 FORWARDER_FACTORY="$factory" IMPLEMENTATION="$implementation" TREASURY="$owner" \
     TEST_TOKEN=$(jq -er .test_token "$tmp/contracts.json") \
     SANCTIONS_ORACLE=$(jq -er .sanctions_oracle "$tmp/contracts.json") \
-    PRODUCT_SLUG="$slug" PRODUCT_KID="$keyid" SETTLEMENT_URL="$public_url/settlements" \
+    PRODUCT_SLUG="$slug" PRODUCT_KID="$keyid" \
     RATE_LOCK_WINDOW_S=45 \
     "$root/deploy/sandbox/render-route.sh" >"$TOPUP_LOCAL_ROUTES_DIR/sandbox.yaml"
 "${compose[@]}" run --rm --no-deps topup topup route validate /etc/topup/routes/sandbox.yaml

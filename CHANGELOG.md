@@ -64,6 +64,29 @@ webhook receivers must ignore unknown fields.
 
 ### Changed
 
+- **Breaking: webhook fulfillment replaces the settlement protocol**
+  (docs/design/stripe-style-integration.md). A deposit that passes screening is `credited`
+  directly (`confirmed → credited`; the `cleared` state is gone), and `deposit.credited` is the
+  fulfillment event: the product credits `amount_minor` to `external_id` once per deposit id and
+  answers `2xx`. Its payload is now `product_id`, `external_id`, `deposit_id`, `state`, `unit`,
+  `amount_minor`, `price_source`, `price_scaled`, `price_scale`, `valuation_at`,
+  `product_lock_ref` (the receiving address's lock, also for spot-priced payments), `address`,
+  `route`, `route_version`, `chain_id`, `asset_contract`, `tx_hash`, `log_index`, and
+  `amount_atomic` (no `destination_tx_id`), and its `webhook-id` is
+  `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:<deposit_id>")`, the same on every delivery and
+  after a restore. Deliveries retry until `2xx`. The service no longer sends
+  `POST {settlement_url}` or `GET {settlement_url}/{key}`, and no deposit becomes
+  `rejected(product_refused)` any more: a product refuses a credit by holding it and requesting a
+  refund. Allowed inside `/v1` without a deprecation window because no product consumed the
+  settlement protocol in production (owner decision on #143).
+
+- The attested route's `destination.settlement_url` is removed (routes that set it no longer
+  load). A product's `webhook_url` may be `http` only when the service's own public origin is.
+
+- `GET /v1/admin/report/daily` route entries replace `settlements_by_status` with
+  `credited_undelivered` and `credited_undelivered_max_age_seconds`: `deposit.credited` events the
+  product has not acknowledged yet (administrative API).
+
 - `POST /v1/products/{p}/deposits/{id}/refund-requests` accepts `credited` and `swept` deposits
   too (still not `sanctioned`, still at least the route's `min_refund_atomic`): a product asks to
   refund a credit it did not apply or has reversed, for example for a closed workspace; finance

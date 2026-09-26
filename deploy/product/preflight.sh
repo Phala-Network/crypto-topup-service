@@ -2,17 +2,15 @@
 # Preflight for the staging reference-product CVM (deploy/README.md, "Staging reference product").
 # Read-only against remote systems, like deploy/preflight.sh: it reads the env file, the compose
 # rendered by deploy/product/render-compose.sh (which holds the public settings), the image in its
-# registry, the product's RPC, topup's RPC providers, topup's attestation endpoint, and the Phala
-# Cloud account the CLI is logged in to.
+# registry, the product's RPC, topup's attestation endpoint, and the Phala Cloud account the CLI is
+# logged in to.
 #
 # Usage: deploy/product/preflight.sh --env FILE --compose FILE --workspace NAME --os-image NAME
 #          [--offline] [--unsealed]
 #
 # --offline runs only the local checks (env file and compose). --unsealed accepts an empty
 # PRODUCT_SEED: Deploy (target `product`) provisions without it and the owner seals it from their own
-# machine. The online checks compare the product RPC's finalized block with topup's providers,
-# TOPUP_RPC_PROVIDER_A_URL and TOPUP_RPC_PROVIDER_B_URL from the environment. Output never prints
-# an RPC URL. Every failure is reported; the exit status is 1 if any.
+# machine. Output never prints an RPC URL. Every failure is reported; the exit status is 1 if any.
 set -euo pipefail
 source "$(dirname -- "$0")/../contracts/common.sh"
 source "$(dirname -- "$0")/../preflight-phala.sh"
@@ -21,9 +19,6 @@ root="$REPO_ROOT"
 example="$root/deploy/product/staging.env.example"
 source_compose="$root/deploy/product/docker-compose.yml"
 approved_os_image=dstack-0.5.9
-# The product answers a settlement 503 until its RPC has finalized the deposit's block, so an RPC
-# whose finalized block trails topup's providers by more than this stalls every settlement.
-max_finalized_lag=64
 
 usage() {
     echo "usage: $0 --env FILE --compose FILE --workspace NAME --os-image NAME [--offline] [--unsealed]" >&2
@@ -156,34 +151,6 @@ echo "== product RPC and topup (no RPC URL is printed)"
 require_command cast
 chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>/dev/null) || chain_id=error
 [[ "$chain_id" == 11155111 ]] || fail "PRODUCT_RPC_URL reports chain id $chain_id, not Sepolia"
-# finalized_block URL: the number of the RPC's finalized block, in decimal.
-finalized_block() {
-    local number
-    number=$(ETH_RPC_URL=$1 cast rpc eth_getBlockByNumber finalized false 2>/dev/null |
-        jq -er '.number | select(test("^0x[0-9a-f]{1,16}$"))' 2>/dev/null) || return 1
-    echo $((number))
-}
-reference=0
-for name in TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL; do
-    if [[ -z "${!name:-}" ]]; then
-        fail "$name (topup's provider, the finality reference) is not set in the environment"
-    elif number=$(finalized_block "${!name}"); then
-        ((number > reference)) && reference=$number
-    else
-        fail "$name does not answer its finalized block"
-    fi
-done
-if ! product_finalized=$(finalized_block "$rpc"); then
-    fail "PRODUCT_RPC_URL does not answer its finalized block"
-elif ((reference > 0)); then
-    lag=$((reference - product_finalized))
-    if ((lag > max_finalized_lag)); then
-        fail "PRODUCT_RPC_URL's finalized block $product_finalized trails topup's providers ($reference)" \
-            "by $lag blocks (at most $max_finalized_lag): the product would defer every settlement"
-    else
-        ok "PRODUCT_RPC_URL's finalized block is within $max_finalized_lag blocks of topup's providers"
-    fi
-fi
 # The product pins the settlement key from this endpoint at startup and checks its binding.
 nonce=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 if curl -fsS --max-time 30 "${setting[TOPUP_ORIGIN]}/v1/attestation?nonce=$nonce" >"$tmp/attestation.json" &&

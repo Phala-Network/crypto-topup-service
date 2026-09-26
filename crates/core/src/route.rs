@@ -130,10 +130,6 @@ impl RouteFile {
             self.alerts.stuck_after_s.confirmed,
         )?;
         validate_positive(
-            "alerts.stuck_after_s.cleared",
-            self.alerts.stuck_after_s.cleared,
-        )?;
-        validate_positive(
             "alerts.stuck_after_s.credited",
             self.alerts.stuck_after_s.credited,
         )?;
@@ -227,16 +223,14 @@ pub struct DestinationConfig {
     pub product: String,
     /// Number of USD minor-unit decimal places.
     pub unit_decimals: u8,
-    /// Signed settlement endpoint.
-    pub settlement_url: String,
     /// Product signing key identifier.
     pub product_kid: String,
 }
 
 /// Returns the attested destination of `product`, or `None` when no route names it.
 ///
-/// Settlement calls and product request verification read the destination from here, so every
-/// loaded route that names the product must agree on its settlement URL and key identifier.
+/// Product request verification reads the destination from here, so every loaded route that
+/// names the product must agree on its key identifier.
 pub fn product_destination<'a>(
     routes: impl IntoIterator<Item = &'a RouteFile>,
     product: &str,
@@ -250,12 +244,6 @@ pub fn product_destination<'a>(
             destination = Some(&route.destination);
             continue;
         };
-        if first.settlement_url != route.destination.settlement_url {
-            return Err(RouteError::validation(
-                "destination.settlement_url",
-                format!("routes for product `{product}` must use one settlement URL"),
-            ));
-        }
         if first.product_kid != route.destination.product_kid {
             return Err(RouteError::validation(
                 "destination.product_kid",
@@ -386,8 +374,6 @@ pub struct StuckAfterConfig {
     pub detected: u64,
     /// Confirmed-state threshold.
     pub confirmed: u64,
-    /// Cleared-state threshold.
-    pub cleared: u64,
     /// Credited-state threshold.
     pub credited: u64,
 }

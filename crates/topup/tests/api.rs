@@ -654,8 +654,9 @@ async fn admin_product_registration() -> Result<()> {
                    "webhook_url": "https://product.test/webhooks"}),
             json!({"slug": "phala-cloud", "public_key": "AAAA",
                    "webhook_url": "https://product.test/webhooks"}),
+            // The test origin is `http`, so only non-HTTP schemes are refused here.
             json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
-                   "webhook_url": "http://product.test/webhooks"}),
+                   "webhook_url": "ftp://product.test/webhooks"}),
             json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
                    "webhook_url": "https://user:secret@product.test/webhooks"}),
             json!({"slug": "unrouted", "public_key": public_key_base64(&product_key),
@@ -791,7 +792,7 @@ async fn admin_product_key_replacement() -> Result<()> {
         let mut invalid = Vec::new();
         for (field, value) in [
             ("public_key", json!("AAAA")),
-            ("webhook_url", json!("http://product.test/rotated")),
+            ("webhook_url", json!("ftp://product.test/rotated")),
             ("reason", json!(" ")),
         ] {
             let mut body = valid.clone();

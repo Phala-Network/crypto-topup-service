@@ -11,23 +11,21 @@ use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::db::{self, AddressKind, Deposit, FlushedEvent, NewDeposit, NewFlush, SettlementIntent};
+use topup::db::{self, AddressKind, Deposit, FlushedEvent, NewDeposit, NewFlush};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
-    SettlementLookup, frozen_chains, hold_lease_owner_lock,
+    frozen_chains, hold_lease_owner_lock,
 };
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
-use topup_adapters::settlement::http::SettlementAnswer;
-use topup_core::deposit::{DepositState, RejectReason, StepOutcome};
+use topup_core::deposit::{DepositState, StepOutcome};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
-use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::TestDatabase;
@@ -143,42 +141,6 @@ impl ReconciliationChain for MockChain {
     }
 }
 
-#[derive(Default)]
-struct MockSettlement {
-    answers: Mutex<BTreeMap<String, Option<SettlementAnswer>>>,
-    failing: Mutex<BTreeSet<String>>,
-}
-
-impl MockSettlement {
-    fn answer(&self, deposit_id: Uuid, answer: Option<SettlementAnswer>) {
-        self.answers
-            .lock()
-            .unwrap()
-            .insert(format!("deposit:{deposit_id}"), answer);
-    }
-
-    fn fail(&self, deposit_id: Uuid) {
-        self.failing
-            .lock()
-            .unwrap()
-            .insert(format!("deposit:{deposit_id}"));
-    }
-}
-
-#[async_trait]
-impl SettlementLookup for MockSettlement {
-    async fn get_by_key(
-        &self,
-        _settlement_url: &str,
-        key: &str,
-    ) -> Result<Option<SettlementAnswer>, ReconciliationError> {
-        if self.failing.lock().unwrap().contains(key) {
-            return Err(ReconciliationError::Settlement("GET timed out".to_owned()));
-        }
-        Ok(self.answers.lock().unwrap().get(key).cloned().flatten())
-    }
-}
-
 struct Seed {
     account_id: Uuid,
     address_id: Uuid,
@@ -202,7 +164,7 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
             seed.address,
             500,
         ));
-        let reconciler = reconciler(&pool, route.clone(), chain.clone(), Arc::default())?;
+        let reconciler = reconciler(&pool, route.clone(), chain.clone())?;
         scanned_through(&pool, 5).await?;
 
         let missing = reconciler.check(CheckName::MissingDeposit).await?;
@@ -261,7 +223,7 @@ async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
             seed.address,
             500,
         ));
-        let reconciler = reconciler(&pool, route, chain.clone(), Arc::default())?;
+        let reconciler = reconciler(&pool, route, chain.clone())?;
 
         // Nothing is compared before the scanner commits a range.
         ensure!(
@@ -310,7 +272,7 @@ async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
             &pool,
             &route,
             &seed,
-            DepositSeed::new(22, DepositState::Cleared),
+            DepositSeed::new(22, DepositState::Confirmed),
         )
         .await?;
         let flush_id = seed_confirmed_flush(&pool, &route, &seed, 101, 1, 1_000).await?;
@@ -318,10 +280,9 @@ async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
             &pool,
             route,
             Arc::new(MockChain::at(0)),
-            Arc::default(),
         )?);
 
-        // A settle step commits `cleared → credited` while linkage is waiting on the row.
+        // The screen step commits `confirmed → credited` while linkage is waiting on the row.
         let mut advance = pool.begin().await?;
         sqlx::query("UPDATE deposits SET state = 'credited' WHERE id = $1")
             .bind(deposit_id)
@@ -351,197 +312,6 @@ async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
 }
 
 #[tokio::test]
-#[traced_test]
-async fn sent_settlements_are_adopted_under_a_lease_and_waits_are_quiet() -> Result<()> {
-    with_database(|pool| async move {
-        let route = route()?;
-        let accepted = seed_sent(&pool, &route, 31).await?;
-        let processing = seed_sent(&pool, &route, 32).await?;
-        let conflict = seed_sent(&pool, &route, 33).await?;
-        let leased = seed_sent(&pool, &route, 34).await?;
-        let foreign = seed_sent(&pool, &route, 35).await?;
-        let settlement = Arc::new(MockSettlement::default());
-        settlement.answer(accepted, Some(accepted_answer(&pool, accepted).await?));
-        settlement.answer(
-            processing,
-            Some(SettlementAnswer::Processing {
-                payload: settlement_payload(&pool, processing).await?,
-            }),
-        );
-        settlement.answer(conflict, Some(SettlementAnswer::Conflict409));
-        settlement.answer(leased, Some(accepted_answer(&pool, leased).await?));
-        let mut wrong_account = settlement_payload(&pool, foreign).await?;
-        wrong_account["account_id"] = json!("another-workspace");
-        settlement.answer(
-            foreign,
-            Some(SettlementAnswer::Accepted {
-                destination_tx_id: "credit-35".to_owned(),
-                payload: wrong_account,
-            }),
-        );
-        let pump_lease = Uuid::new_v4();
-        sqlx::query(
-            "UPDATE deposits SET lease_token = $2, lease_until = now() + interval '5 minutes' WHERE id = $1",
-        )
-        .bind(leased)
-        .bind(pump_lease)
-        .execute(&pool)
-        .await?;
-        let reconciler = Reconciler::with_dependencies(
-            pool.clone(),
-            route_set(route)?,
-            BTreeMap::from([(
-                CHAIN_ID,
-                Arc::new(MockChain::at(0)) as Arc<dyn ReconciliationChain>,
-            )]),
-            settlement,
-        );
-
-        let findings = reconciler.check(CheckName::SentSettlement).await?;
-        ensure!(findings.len() == 2, "unexpected findings: {findings:?}");
-        ensure!(findings.iter().any(|finding| {
-            finding.subjects["deposit_id"] == accepted.to_string() && finding.repair_applied
-        }));
-        ensure!(findings.iter().any(|finding| {
-            finding.subjects["deposit_id"] == foreign.to_string()
-                && !finding.repair_applied
-                && finding.observed["error"] == json!("settlement_product_payload_invalid")
-        }));
-
-        let credited = deposit(&pool, accepted).await?;
-        ensure!(credited.state == DepositState::Credited && credited.lease_token.is_none());
-        let transitions: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM transitions WHERE deposit_id = $1 AND from_state = 'cleared' AND to_state = 'credited'",
-        )
-        .bind(accepted)
-        .fetch_one(&pool)
-        .await?;
-        ensure!(transitions == 1);
-        let credited_events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM outbox WHERE event_type = 'deposit.credited' AND payload->>'deposit_id' = $1",
-        )
-        .bind(accepted.to_string())
-        .fetch_one(&pool)
-        .await?;
-        ensure!(credited_events == 1);
-
-        for waiting in [processing, conflict] {
-            let row = deposit(&pool, waiting).await?;
-            ensure!(row.state == DepositState::Cleared && row.lease_token.is_none());
-        }
-        let untouched = deposit(&pool, leased).await?;
-        ensure!(untouched.state == DepositState::Cleared);
-        ensure!(untouched.lease_token == Some(pump_lease));
-        let leased_status: String =
-            sqlx::query_scalar("SELECT status FROM settlements WHERE deposit_id = $1")
-                .bind(leased)
-                .fetch_one(&pool)
-                .await?;
-        ensure!(leased_status == "sent");
-
-        let report = reconciler.run_once().await?;
-        ensure!(
-            !report
-                .findings
-                .iter()
-                .any(|finding| finding.check == CheckName::SentSettlement
-                    && [processing, conflict, leased]
-                        .iter()
-                        .any(|id| finding.subjects["deposit_id"] == id.to_string()))
-        );
-        ensure!(logs_contain("TopupReconciliationMismatch"));
-        ensure!(logs_contain("tags.check=\"sent_settlement\""));
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-async fn post_restore_completes_when_product_truth_is_adopted() -> Result<()> {
-    with_database(|pool| async move {
-        let route = route()?;
-        let unsent = seed_identity(&pool, &route, 41).await?;
-        let refused = seed_identity(&pool, &route, 42).await?;
-        let swept = seed_identity(&pool, &route, 43).await?;
-        let mispriced = seed_identity(&pool, &route, 44).await?;
-        let unsent_id = seed_deposit(
-            &pool,
-            &route,
-            &unsent,
-            DepositSeed::new(41, DepositState::Cleared),
-        )
-        .await?;
-        let refused_id = seed_deposit(
-            &pool,
-            &route,
-            &refused,
-            DepositSeed::new(42, DepositState::Credited),
-        )
-        .await?;
-        let swept_id = seed_deposit(
-            &pool,
-            &route,
-            &swept,
-            DepositSeed::new(43, DepositState::Swept),
-        )
-        .await?;
-        seed_deposit(
-            &pool,
-            &route,
-            &mispriced,
-            DepositSeed::new(44, DepositState::Confirmed).credit(101),
-        )
-        .await?;
-        let settlement = Arc::new(MockSettlement::default());
-        settlement.answer(unsent_id, None);
-        settlement.answer(
-            refused_id,
-            Some(SettlementAnswer::Rejected {
-                reason: "account_closed".to_owned(),
-                payload: settlement_payload(&pool, refused_id).await?,
-            }),
-        );
-        settlement.answer(swept_id, Some(accepted_answer(&pool, swept_id).await?));
-        let chain = Arc::new(MockChain::at(150));
-        chain.derive(&[&unsent, &refused, &swept, &mispriced]);
-        let reconciler = reconciler(&pool, route, chain, settlement)?;
-
-        let report = reconciler.post_restore_once().await?;
-        ensure!(!report.incomplete, "restore must complete: {report:?}");
-        ensure!(report.succeeded());
-        // Alert-only findings are present but never gate the restore.
-        ensure!(has_check(&report, CheckName::CreditRecomputation));
-        ensure!(has_check(&report, CheckName::CustodyBalance));
-        ensure!(!report.findings.iter().any(|finding| {
-            finding.subjects.get("deposit_id") == Some(&unsent_id.to_string())
-                && finding.check == CheckName::PostRestoreSettlement
-        }));
-        ensure!(deposit(&pool, unsent_id).await?.state == DepositState::Cleared);
-
-        let rejected = deposit(&pool, refused_id).await?;
-        ensure!(rejected.state == DepositState::Rejected);
-        ensure!(rejected.reason == Some(RejectReason::ProductRefused));
-        let product_wins: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM transitions WHERE deposit_id = $1 AND from_state = 'credited' AND to_state = 'rejected' AND evidence->>'source' = 'post_restore_product_answer'",
-        )
-        .bind(refused_id)
-        .fetch_one(&pool)
-        .await?;
-        ensure!(product_wins == 1);
-
-        ensure!(deposit(&pool, swept_id).await?.state == DepositState::Swept);
-        let swept_settlement: String =
-            sqlx::query_scalar("SELECT status FROM settlements WHERE deposit_id = $1")
-                .bind(swept_id)
-                .fetch_one(&pool)
-                .await?;
-        ensure!(swept_settlement == "accepted");
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
 async fn post_restore_refuses_to_preempt_a_running_lease_owner() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
@@ -561,11 +331,9 @@ async fn post_restore_refuses_to_preempt_a_running_lease_owner() -> Result<()> {
         .bind(lease_token)
         .execute(&pool)
         .await?;
-        let settlement = Arc::new(MockSettlement::default());
-        settlement.answer(deposit_id, Some(accepted_answer(&pool, deposit_id).await?));
         let chain = Arc::new(MockChain::at(150));
         chain.derive(&[&seed]);
-        let reconciler = reconciler(&pool, route, chain, settlement)?;
+        let reconciler = reconciler(&pool, route, chain)?;
 
         let service = hold_lease_owner_lock(&pool).await?;
         let second_service = hold_lease_owner_lock(&pool).await?;
@@ -580,7 +348,8 @@ async fn post_restore_refuses_to_preempt_a_running_lease_owner() -> Result<()> {
 
         let report = reconciler.post_restore_once().await?;
         ensure!(!report.incomplete, "restore must complete: {report:?}");
-        ensure!(deposit(&pool, deposit_id).await?.lease_token.is_none());
+        // The round asks the product nothing and leaves the deposit to its own lease.
+        ensure!(deposit(&pool, deposit_id).await?.lease_token == Some(lease_token));
         hold_lease_owner_lock(&pool).await?.release().await?;
         Ok(())
     })
@@ -597,7 +366,7 @@ async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
         let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
         let pump = Pump::new(
             pool.clone(),
-            Arc::new(StepSet::new(step(), step(), step(), step())),
+            Arc::new(StepSet::new(step(), step(), step())),
             PumpConfig::default(),
         )?;
         let pump_shutdown = shutdown.child_token();
@@ -617,69 +386,6 @@ async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
         ensure!(watched.is_err());
         ensure!(shutdown.is_cancelled());
         tokio::time::timeout(StdDuration::from_secs(10), pump_task).await??;
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-async fn post_restore_stays_incomplete_without_verified_product_truth() -> Result<()> {
-    with_database(|pool| async move {
-        let route = route()?;
-        let unknown = seed_identity(&pool, &route, 51).await?;
-        let unreachable = seed_identity(&pool, &route, 52).await?;
-        let foreign = seed_identity(&pool, &route, 53).await?;
-        let unknown_id = seed_deposit(
-            &pool,
-            &route,
-            &unknown,
-            DepositSeed::new(51, DepositState::Swept),
-        )
-        .await?;
-        let unreachable_id = seed_deposit(
-            &pool,
-            &route,
-            &unreachable,
-            DepositSeed::new(52, DepositState::Credited),
-        )
-        .await?;
-        let foreign_id = seed_deposit(
-            &pool,
-            &route,
-            &foreign,
-            DepositSeed::new(53, DepositState::Cleared),
-        )
-        .await?;
-        let settlement = Arc::new(MockSettlement::default());
-        settlement.answer(unknown_id, None);
-        settlement.fail(unreachable_id);
-        let mut wrong_account = settlement_payload(&pool, foreign_id).await?;
-        wrong_account["account_id"] = json!("another-workspace");
-        settlement.answer(
-            foreign_id,
-            Some(SettlementAnswer::Accepted {
-                destination_tx_id: "credit-53".to_owned(),
-                payload: wrong_account,
-            }),
-        );
-        let chain = Arc::new(MockChain::at(0));
-        chain.derive(&[&unknown, &unreachable, &foreign]);
-        let reconciler = reconciler(&pool, route, chain, settlement)?;
-
-        let report = reconciler.post_restore_once().await?;
-        ensure!(report.incomplete && report.succeeded());
-        for id in [unknown_id, unreachable_id, foreign_id] {
-            ensure!(
-                report.findings.iter().any(|finding| {
-                    finding.check == CheckName::PostRestoreSettlement
-                        && finding.incomplete
-                        && finding.subjects.get("deposit_id") == Some(&id.to_string())
-                }),
-                "deposit {id} must gate the restore"
-            );
-        }
-        ensure!(deposit(&pool, unknown_id).await?.state == DepositState::Swept);
-        ensure!(deposit(&pool, foreign_id).await?.state == DepositState::Cleared);
         Ok(())
     })
     .await
@@ -715,7 +421,6 @@ async fn checks_are_independent_and_a_failed_round_recovers() -> Result<()> {
             pool.clone(),
             route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
-            Arc::new(MockSettlement::default()),
         );
 
         let failed = reconciler.run_once().await?;
@@ -822,7 +527,7 @@ async fn custody_balances_use_the_finalized_block_and_incremental_totals() -> Re
                 999,
             ));
         }
-        let reconciler = reconciler(&pool, route.clone(), chain.clone(), Arc::default())?;
+        let reconciler = reconciler(&pool, route.clone(), chain.clone())?;
 
         ensure!(
             reconciler
@@ -888,7 +593,6 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             pool.clone(),
             route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
-            Arc::new(MockSettlement::default()),
         );
         let first = reconciler.run_once().await?;
         ensure!(has_check(&first, CheckName::CreditRecomputation));
@@ -1006,7 +710,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
         let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
         let pump = Pump::new(
             pool.clone(),
-            Arc::new(StepSet::new(step(), step(), step(), step())),
+            Arc::new(StepSet::new(step(), step(), step())),
             PumpConfig::default(),
         )?;
         ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id });
@@ -1103,7 +807,6 @@ async fn loop_respects_cancellation() -> Result<()> {
             pool.clone(),
             route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
-            Arc::new(MockSettlement::default()),
         ));
         let cancellation = CancellationToken::new();
         let task = tokio::spawn({
@@ -1139,7 +842,6 @@ async fn loop_publishes_failed_checks_for_the_daily_report() -> Result<()> {
             pool.clone(),
             route_set(route)?,
             BTreeMap::from([(CHAIN_ID, Arc::clone(&chain) as Arc<dyn ReconciliationChain>)]),
-            Arc::new(MockSettlement::default()),
         );
         let cancellation = CancellationToken::new();
         // The first tick is immediate; no other test completes a loop round in this binary.
@@ -1192,17 +894,11 @@ fn route() -> Result<RouteFile> {
     Ok(route)
 }
 
-fn reconciler(
-    pool: &PgPool,
-    route: RouteFile,
-    chain: Arc<MockChain>,
-    settlement: Arc<MockSettlement>,
-) -> Result<Reconciler> {
+fn reconciler(pool: &PgPool, route: RouteFile, chain: Arc<MockChain>) -> Result<Reconciler> {
     Ok(Reconciler::with_dependencies(
         pool.clone(),
         route_set(route)?,
         BTreeMap::from([(CHAIN_ID, chain as Arc<dyn ReconciliationChain>)]),
-        settlement,
     ))
 }
 
@@ -1439,71 +1135,6 @@ async fn seed_confirmed_flush(
     )
     .await?;
     Ok(flush_id)
-}
-
-async fn seed_sent(pool: &PgPool, route: &RouteFile, number: u8) -> Result<Uuid> {
-    let seed = seed_identity(pool, route, number).await?;
-    let id = seed_deposit(
-        pool,
-        route,
-        &seed,
-        DepositSeed::new(number, DepositState::Cleared),
-    )
-    .await?;
-    let account = db::get_account(pool, seed.account_id)
-        .await?
-        .context("account must exist")?;
-    db::upsert_intent(
-        pool,
-        &SettlementIntent {
-            deposit_id: id,
-            product_id: account.product_id,
-            key: format!("deposit:{id}"),
-            payload: settlement_payload(pool, id).await?,
-        },
-    )
-    .await?;
-    db::mark_sent(pool, id).await?;
-    Ok(id)
-}
-
-async fn accepted_answer(pool: &PgPool, id: Uuid) -> Result<SettlementAnswer> {
-    Ok(SettlementAnswer::Accepted {
-        destination_tx_id: format!("credit-{id}"),
-        payload: settlement_payload(pool, id).await?,
-    })
-}
-
-async fn settlement_payload(pool: &PgPool, id: Uuid) -> Result<Value> {
-    let deposit = deposit(pool, id).await?;
-    let account = db::get_account(pool, deposit.account_id)
-        .await?
-        .context("account must exist")?;
-    let address = db::get_address(pool, deposit.address_id)
-        .await?
-        .context("address must exist")?;
-    Ok(json!({
-        "version": 1,
-        "idempotency_key": format!("deposit:{id}"),
-        "account_id": account.external_id,
-        "unit": "USD",
-        "amount_minor": deposit.credit_minor.context("credit")?.value().to_string(),
-        "source": "crypto_deposit",
-        "evidence": {
-            "chain_id": deposit.chain_id,
-            "asset_contract": format!("{:#x}", deposit.asset_contract),
-            "route": deposit.route.context("route")?,
-            "route_version": deposit.route_version.context("route version")?,
-            "tx_hash": format!("{:#x}", deposit.tx_hash),
-            "log_index": deposit.log_index,
-            "to": format!("{:#x}", address.address),
-            "amount_atomic": deposit.amount_atomic.value().to_string(),
-            "price_scaled": deposit.price_scaled.context("price")?.to_string(),
-            "price_scale": 8,
-            "valuation_at": deposit.valuation_at.context("valuation")?,
-            "lock_ref": null
-        }
-    }))
 }
 
 fn route_set(route: RouteFile) -> Result<Arc<topup::routes::RouteSet>> {

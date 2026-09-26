@@ -200,42 +200,12 @@ VALUES (
     '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     '0xcccccccccccccccccccccccccccccccccccccccc',
     1000,
-    'cleared',
+    'credited',
     now(),
     '2026-09-22T00:00:00Z',
     25000000,
     'spot',
     250
-);
-INSERT INTO settlements (deposit_id, product_id, key, payload, status, sent_at)
-VALUES (
-    '44444444-4444-4444-4444-444444444444',
-    '11111111-1111-1111-1111-111111111111',
-    'deposit:44444444-4444-4444-4444-444444444444',
-    jsonb_build_object(
-        'version', 1,
-        'idempotency_key', 'deposit:44444444-4444-4444-4444-444444444444',
-        'account_id', 'restore-drill-account',
-        'unit', 'USD',
-        'amount_minor', '250',
-        'source', 'crypto_deposit',
-        'evidence', jsonb_build_object(
-            'chain_id', 1,
-            'asset_contract', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            'route', 'restore-drill',
-            'route_version', 1,
-            'tx_hash', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-            'log_index', 0,
-            'to', '0xdddddddddddddddddddddddddddddddddddddddd',
-            'amount_atomic', '1000',
-            'price_scaled', '25000000',
-            'price_scale', 8,
-            'valuation_at', '2026-09-22T00:00:00Z',
-            'lock_ref', NULL
-        )
-    ),
-    'sent',
-    now()
 );
 INSERT INTO heartbeat DEFAULT VALUES;
 INSERT INTO restore_drill_marker(mode) VALUES ('base');
@@ -377,11 +347,9 @@ test_restore_failures_are_fatal() {
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 
 routes_dir=$(mktemp -d)
-# The seeded deposit belongs to the `restore-drill` product; the attested route is the only source
-# of its settlement endpoint, so the drill route names that product and the mock product.
+# The seeded deposit belongs to the `restore-drill` product, so the drill route names it.
 sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
     -e 's|^  product: .*|  product: restore-drill|' \
-    -e 's|^  settlement_url: .*|  settlement_url: "http://mock-product:8081/settlements"|' \
     -e 's|^  product_kid: .*|  product_kid: product/restore-drill|' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
@@ -556,7 +524,8 @@ restored_pricing=$(psql_value \
 rto_elapsed=$(( $(date +%s) - rto_started ))
 
 test "$reconciliation" = complete
-test "$restored_pricing" = 'credited|275|27500000'
+# The service's own record is authoritative: the restore asks the product nothing and keeps it.
+test "$restored_pricing" = 'credited|250|25000000'
 test "$measured_rpo" -le "$allowed_rpo"
 test "$rto_elapsed" -le 3600
 if [ "$mode" = controlled ]; then

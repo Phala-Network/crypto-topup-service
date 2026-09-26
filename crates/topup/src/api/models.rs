@@ -403,8 +403,8 @@ pub struct RefundResponse {
     pub status: String,
 }
 
-/// Administrative product registration body. The product's key id and settlement URL are not
-/// part of it: the attested route is their only source.
+/// Administrative product registration body. The product's key id is not part of it: the
+/// attested route is its only source.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct RegisterProductRequest {
     /// Product slug named by a loaded route's `destination.product`; matches
@@ -412,8 +412,8 @@ pub struct RegisterProductRequest {
     pub slug: String,
     /// Standard base64 of the product's 32-byte ed25519 request-verification public key.
     pub public_key: String,
-    /// Absolute `https` URL of the product's webhook receiver; `http` only when the product's
-    /// attested settlement URL also uses `http` (local stacks).
+    /// Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+    /// own public origin uses `http` (local stacks).
     pub webhook_url: String,
 }
 
@@ -423,8 +423,8 @@ pub struct RegisterProductRequest {
 pub struct UpdateProductRequest {
     /// Standard base64 of the product's new 32-byte ed25519 request-verification public key.
     pub public_key: String,
-    /// Absolute `https` URL of the product's webhook receiver; `http` only when the product's
-    /// attested settlement URL also uses `http` (local stacks).
+    /// Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+    /// own public origin uses `http` (local stacks).
     pub webhook_url: String,
     /// Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
     pub reason: String,
@@ -515,8 +515,10 @@ pub struct RouteDailyReport {
     pub rejected_holds_atomic: String,
     /// Deposit counts keyed by state.
     pub deposits_by_state: std::collections::BTreeMap<String, u64>,
-    /// Settlement counts keyed by status.
-    pub settlements_by_status: std::collections::BTreeMap<String, u64>,
+    /// Credited deposits whose `deposit.credited` webhook the product has not acknowledged yet.
+    pub credited_undelivered: u64,
+    /// Age in seconds of the oldest of those events; zero when every one was delivered.
+    pub credited_undelivered_max_age_seconds: u64,
     /// Refund counts keyed by status.
     pub refunds_by_status: std::collections::BTreeMap<String, u64>,
     /// Maximum age in seconds keyed by current deposit state.

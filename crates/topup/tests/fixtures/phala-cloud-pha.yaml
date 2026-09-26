@@ -28,7 +28,6 @@ asset:
 destination:
   product: phala-cloud
   unit_decimals: 2
-  settlement_url: "https://cloud-api.phala.network/internal/crypto-topup/settlements"
   product_kid: phala-cloud/v1
 
 pricing:
@@ -54,4 +53,4 @@ rate_lock:
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
 
 alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }
+  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }

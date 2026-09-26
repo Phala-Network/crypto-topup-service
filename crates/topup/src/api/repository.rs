@@ -1374,20 +1374,26 @@ pub async fn daily_report(
                    deposit.route,
                    'unrouted:' || deposit.chain_id::text || ':' || deposit.asset_contract
                ) AS report_key,
-               settlement.status, count(*)::bigint AS count
-        FROM settlements AS settlement
-        JOIN deposits AS deposit ON deposit.id = settlement.deposit_id
-        GROUP BY report_key, settlement.status
+               count(*)::bigint AS count,
+               COALESCE(
+                   max(extract(epoch FROM ($1 - outbox.created_at)))::bigint, 0
+               ) AS max_age_seconds
+        FROM outbox
+        JOIN deposits AS deposit ON deposit.id::text = outbox.payload ->> 'deposit_id'
+        WHERE outbox.event_type = 'deposit.credited' AND outbox.delivered_at IS NULL
+        GROUP BY report_key
         "#,
     )
+    .bind(generated_at)
     .fetch_all(pool)
     .await?
     {
         let route: String = row.try_get("report_key")?;
-        let status: String = row.try_get("status")?;
         let count = count_u64(row.try_get("count")?)?;
+        let max_age = count_u64(row.try_get::<i64, _>("max_age_seconds")?.max(0))?;
         if let Some(report) = reports.get_mut(&route) {
-            report.settlements_by_status.insert(status, count);
+            report.credited_undelivered = count;
+            report.credited_undelivered_max_age_seconds = max_age;
         }
     }
 
@@ -1490,20 +1496,13 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
-        deposits_by_state: zero_counts(&[
-            "detected",
-            "confirmed",
-            "cleared",
-            "credited",
-            "swept",
-            "rejected",
-        ]),
-        settlements_by_status: zero_counts(&["intent", "sent", "accepted", "rejected"]),
+        deposits_by_state: zero_counts(&["detected", "confirmed", "credited", "swept", "rejected"]),
+        credited_undelivered: 0,
+        credited_undelivered_max_age_seconds: 0,
         refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),
         age_in_state_max_seconds: zero_counts(&[
             "detected",
             "confirmed",
-            "cleared",
             "credited",
             "swept",
             "rejected",
@@ -1522,20 +1521,13 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
-        deposits_by_state: zero_counts(&[
-            "detected",
-            "confirmed",
-            "cleared",
-            "credited",
-            "swept",
-            "rejected",
-        ]),
-        settlements_by_status: zero_counts(&["intent", "sent", "accepted", "rejected"]),
+        deposits_by_state: zero_counts(&["detected", "confirmed", "credited", "swept", "rejected"]),
+        credited_undelivered: 0,
+        credited_undelivered_max_age_seconds: 0,
         refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),
         age_in_state_max_seconds: zero_counts(&[
             "detected",
             "confirmed",
-            "cleared",
             "credited",
             "swept",
             "rejected",

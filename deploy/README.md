@@ -23,8 +23,9 @@ from the public endpoints, the admin API, Sentry, and the chain.
 
 Every CVM uses Phala Cloud's KMS (`--kms phala`, owner decision): no `DstackApp` contract and no
 on-chain compose-hash approval. Fund safety does not depend on upgrade governance (forwarders pay
-only the immutable treasury), nor does credit safety (the product verifies every settlement
-against its own node). A malicious upgrade could cause downtime or read service data; the compose
+only the immutable treasury). Credits are what the attested service signs, and products pin its
+key from attestation and may cap or verify credits on their own node. A malicious upgrade could
+cause downtime, read service data, or sign false credits up to the product's caps; the compose
 hash in the attestation, verified after every deploy, makes it detectable.
 
 ### OS image
@@ -248,7 +249,7 @@ defines the construction; `TopupClient.attestation` runs it on every fetch).
 verifies every signed `@target-uri` against `TOPUP_PUBLIC_ORIGIN`, so a correctly signed request
 answered `401` usually means the URL differs from it. **Egress** (HUMAN-ONLY, cloud network
 authority; dstack has no hostname allow-list): restrict outbound traffic to the two RPC hosts,
-the price sources, the object storage host, the product's settlement host, the Sentry ingest
+the price sources, the object storage host, the product's webhook host, the Sentry ingest
 host, DNS, and the Phala/dstack platform endpoints, and record the rules.
 
 ### Flusher operator
@@ -278,9 +279,8 @@ revoke the old role once none of its flushes is in flight. Emergency revocation:
 ## Product credentials
 
 `POST /v1/admin/products {"slug", "public_key", "webhook_url"}` is the only way to issue a
-product. The key id and settlement URL come only from the attested route
-(`destination.product_kid`, `destination.settlement_url`), so the slug must be named by a loaded
-route and the route change comes first. `public_key` is the base64 key the integrator printed with
+product. The key id comes only from the attested route (`destination.product_kid`), so the slug
+must be named by a loaded route and the route change comes first. `public_key` is the base64 key the integrator printed with
 `topup-sdk keygen`; `webhook_url` is an absolute `https` URL. The answer is `200` (also for a repeat
 with the same values), `409` for the same slug with a different key or URL, or `400`.
 
@@ -311,17 +311,18 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 
 ## Staging reference product
 
-Staging settles against a second CVM running [product/reference_product](product/reference_product)
-as the `phala-cloud` product: `serve` mode is the settlement endpoint (held to the six product
-obligations by its tests in `product/tests`), the webhook receiver, and an account API, with a
-SQLite ledger; `deposit` mode, run from an operator's machine, plays a Phala Cloud user and signs
+Staging's `phala-cloud` product is a second CVM running
+[product/reference_product](product/reference_product): `serve` mode is the webhook receiver that
+fulfills each `deposit.credited` once (its tests are in `product/tests`) and an account API, with
+a SQLite ledger; `deposit` mode, run from an operator's machine, plays a Phala Cloud user and signs
 with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_SEED`
 ([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (from `TOPUP_CVM_ID`),
 `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and `PRODUCT_DRIVER_PUBLIC_KEY` are
 attested. At startup it pins topup's `settlement/v1` key from a verified attestation. Its preflight
-([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL`, a keyless Sepolia RPC
-preferably from a provider topup does not use, to be within 64 finalized blocks of topup's
-providers, since the product defers every settlement until its own RPC has finalized it. A product
+([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a Sepolia RPC; the
+deposit driver pays through it. Switching staging to Phala Cloud's backend is a
+`PUT /v1/admin/products/phala-cloud` with their key and webhook URL
+([Product credentials](#product-credentials)); the route stays as it is. A product
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`
 with only `PRODUCT_SEED`, then Deploy `upgrade`, once.
 
@@ -342,10 +343,7 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    Until then the account API answers 503.
 3. Register `phala-cloud` in topup ([Product credentials](#product-credentials)) with the
    `phala-cloud/v1` public key and `<product URL>/webhooks`.
-4. A reviewed PR sets the route's `settlement_url` to `<product URL>/settlements` in
-   `config/routes/phala-cloud-sepolia-pha.yaml` and the inline copy in `docker-compose.yml`; then
-   Deploy topup `upgrade`.
-5. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the
+4. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the locked amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),
    `product_slug`, `product_keyid`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`,

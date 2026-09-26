@@ -64,19 +64,25 @@ differences, so a verification instance has its own compose hash:
 
 After PostgreSQL promotes (its health check passes only out of recovery; the start period is the
 one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: migration checksums,
-WAL state, row counts, then a full reconciliation round in which every deposit in `cleared`,
-`credited`, or `swept`, or rejected by the product after `cleared`, is looked up by signed product
-`GET` and the product's answer is adopted (architecture §13). The read-only `topup` serves the
-report on `/healthz`:
+WAL state, row counts, then a full reconciliation round on the restored ledger alone: the
+service's record is authoritative for its credits, so nothing asks the product anything and the
+restore does not depend on the product being reachable. The read-only `topup` serves the report
+on `/healthz`:
 
 ```json
 {"mode":"read-only","restore_check":{"status":"ok","failures":[],"rpo_basis":"unanchored","restored_heartbeat_at":"…","latest_migration":…,"row_counts":{…},"post_restore_reconciliation":{"status":"complete","failed_checks":[],"findings":[…]},…}}
 ```
 
-`restore_check` is `null` until the check finishes. A product lookup that fails, is not found, is
-still processing, fails identity verification, or would need an unsafe transition makes the
-status `incomplete` and is listed in `failures`; a check that could not run reports `failed`.
-Other reconciliation findings and `failed_checks` are reported but do not gate resume.
+`restore_check` is `null` until the check finishes. A finding left unverified makes the status
+`incomplete` and is listed in `failures`; a check that could not run reports `failed`. Other
+reconciliation findings and `failed_checks` are reported but do not gate resume.
+
+**Credits inside the RPO window.** A deposit credited in the last minute before the loss is
+rebuilt from the chain and credited again after resume. Its `deposit.credited` carries the same
+event id and deposit id, so the product ignores the repeat. A lock-priced deposit gets the same
+amount; a spot-priced one is re-priced, and if the amount differs the product keeps its first
+credit and reports the difference. After resume, ask the product for those reports and record each
+deposit and both amounts in the incident.
 
 **Sentry during a real restore.** The replacement runs no loop and reports as
 `<environment>-restore`, so every Crons monitor of the environment misses its check-ins and the
@@ -263,9 +269,8 @@ bootstrap tests on pull requests and pushes to `main`.
   decryption and storage errors, so PostgreSQL aborts instead of promoting). Delete the instance,
   check storage access and integrity with the owner's credentials, and retry with a new instance.
 - **Backup list empty, stale, or unverifiable:** do not resume; escalate the data-loss risk.
-- **`restore_check.status` is `failed` or `incomplete`:** do not resume. The product's answer
-  wins; an unsafe reverse transition or failed lookup needs an incident repair and another
-  complete check.
+- **`restore_check.status` is `failed` or `incomplete`:** do not resume. An unverified finding
+  needs an incident repair and another complete check.
 - **RTO over 3600 seconds:** escalate even if the restore then passes.
 - **`live_isolated` fails during a drill:** delete the drill instance by its `vm_uuid`, confirm
   `live_isolated` passes again, and do not rerun until the rendered compose is confirmed to publish

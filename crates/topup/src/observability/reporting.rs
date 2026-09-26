@@ -161,7 +161,6 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
     match alert {
         "TopupDepositStateAgeExceeded" => match tag("state") {
             Some("detected" | "confirmed") => "provider-disagreement.md",
-            Some("cleared") => "stuck-settlement.md",
             _ => "README.md#alert-and-symptom-index",
         },
         "TopupReconciliationMismatch" if tag("check") == Some("address_derivation") => {
@@ -425,7 +424,7 @@ mod tests {
                         tracing::warn!(
                             tags.alert = "TopupDepositStateAgeExceeded",
                             tags.route = "route-a",
-                            tags.state = "cleared",
+                            tags.state = "confirmed",
                             deposit_id = deposit,
                             account_id = "customer-1",
                             "deposit has exceeded its state-age threshold"
@@ -446,14 +445,14 @@ mod tests {
                 "topup-alert",
                 "TopupDepositStateAgeExceeded",
                 "route=route-a",
-                "state=cleared"
+                "state=confirmed"
             ]
         );
         assert_eq!(
             alert.tags.get("runbook").map(String::as_str),
             Some(
                 "https://github.com/Phala-Network/crypto-topup-service/blob/main/deploy/runbooks/\
-                 stuck-settlement.md"
+                 provider-disagreement.md"
             )
         );
         let rendered = format!("{events:?}");
@@ -524,7 +523,7 @@ mod tests {
         };
         for (alert, pairs) in [
             ("TopupDepositStateAgeExceeded", &[("state", "detected")][..]),
-            ("TopupDepositStateAgeExceeded", &[("state", "cleared")]),
+            ("TopupDepositStateAgeExceeded", &[("state", "confirmed")]),
             ("TopupDepositStateAgeExceeded", &[("state", "credited")]),
             (
                 "TopupReconciliationMismatch",

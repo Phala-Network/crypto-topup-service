@@ -1023,15 +1023,16 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .bind([rejected, credited])
             .execute(&database.app_pool)
             .await?;
+        // The credited deposit's fulfillment event is still waiting for the product.
         sqlx::query(
             r#"
-            INSERT INTO settlements (deposit_id, product_id, key, payload, status, destination_tx_id)
-            VALUES ($1, $2, $3, '{}', 'accepted', 'destination-1')
+            INSERT INTO outbox (id, event_type, payload, next_attempt_at, created_at)
+            VALUES ($1, 'deposit.credited', jsonb_build_object('deposit_id', $2::text), now(),
+                    now() - interval '1 hour')
             "#,
         )
-        .bind(credited)
-        .bind(product.id)
-        .bind(format!("deposit:{credited}"))
+        .bind(Uuid::new_v4())
+        .bind(credited.to_string())
         .execute(&database.app_pool)
         .await?;
         seed_open_lock(&database.app_pool, product.id).await?;
@@ -1105,7 +1106,13 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(route["rejected_holds_atomic"] == "100");
         ensure!(route["deposits_by_state"]["rejected"] == 1);
         ensure!(route["deposits_by_state"]["credited"] == 1);
-        ensure!(route["settlements_by_status"]["accepted"] == 1);
+        ensure!(route["credited_undelivered"] == 1);
+        ensure!(
+            route["credited_undelivered_max_age_seconds"]
+                .as_u64()
+                .context("undelivered age")?
+                >= 3_600
+        );
         ensure!(route["refunds_by_status"]["requested"] == 1);
         ensure!(route["age_in_state_max_seconds"]["credited"].as_u64().context("credited age")? >= 7_000);
         ensure!(route["flush_planning"]["outcome"] == "failed");

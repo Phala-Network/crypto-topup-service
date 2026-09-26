@@ -1,18 +1,20 @@
 # Outbox backlog
 
 **Trigger:** the `topup-outbox-<n>` monitor missing its check-ins, `outbox delivery poll failed`
-issues, or a product reporting that webhooks stopped.
+issues, a non-zero `credited_undelivered` in the daily report (`GET /v1/admin/report/daily`), or
+a product reporting that webhooks or credits stopped.
 
-**Impact:** deposit states stay authoritative; only notifications are late. Deliveries retry with
-backoff by themselves. One product's receiver or every product.
+**Impact:** `deposit.credited` is how the product learns it owes a credit, so an undelivered one
+means a user not credited yet. Deposit states stay authoritative and deliveries retry with backoff
+forever by themselves. One product's receiver or every product.
 
 ## First steps
 
 1. Read the error of `outbox delivery poll failed` in Sentry: a database error stops every
    delivery; a receiver's failures do not raise an issue.
-2. With the product, check its webhook endpoint, TLS, and signature verification. The product can
-   catch up at any time by fetching state (deposits, rate locks), which receivers must act on
-   anyway.
+2. With the product, check its webhook endpoint, TLS, and signature verification. Report
+   `credited_undelivered` and `credited_undelivered_max_age_seconds` per route. The product credits
+   only from signed events, so it cannot catch up by fetching state alone.
 3. For a missing event, the product's signed support lookup lists each deposit's `events`: `id`
    (the `webhook-id`), `event_type`, and `delivered_at` (`null` while undelivered). Delivery
    attempts are not observable in production.

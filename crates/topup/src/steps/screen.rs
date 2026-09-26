@@ -1,4 +1,7 @@
-//! Confirmed-to-cleared screening step.
+//! Confirmed-to-credited screening step.
+//!
+//! A deposit that passes screening is credited: its USD value is final and owed to the product,
+//! which learns it from the `deposit.credited` webhook written in the same transaction.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,6 +13,8 @@ use serde_json::json;
 use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
+use topup_core::identity::credited_event_id;
+use topup_core::money::PRICE_SCALE;
 use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
 use uuid::Uuid;
 
@@ -209,10 +214,94 @@ impl Step for ScreenStep {
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
         };
         let (product_id, pause_scopes) = pauses;
-        screening_route
+        let mut result = screening_route
             .evaluate(deposit, product_id, pause_scopes)
-            .await
+            .await;
+        if result.outcome == StepOutcome::Advance {
+            let credit = match credit_context(&self.pool, deposit.id).await {
+                Ok(Some(credit)) => credit,
+                Ok(None) => {
+                    return invariant_result("credit_context_missing", deposit.block_number);
+                }
+                Err(_) => {
+                    return transient_result("credit_context_load_failed", deposit.block_number);
+                }
+            };
+            match credited_event(deposit, product_id, &credit) {
+                Ok(event) => result.events.push(event),
+                Err(error) => return invariant_result(error, deposit.block_number),
+            }
+        }
+        result
     }
+}
+
+/// The account and receiving address a credit is owed for.
+#[derive(sqlx::FromRow)]
+struct CreditContext {
+    external_id: String,
+    address: String,
+    lock_ref: Option<String>,
+}
+
+async fn credit_context(
+    pool: &PgPool,
+    deposit_id: Uuid,
+) -> Result<Option<CreditContext>, sqlx::Error> {
+    sqlx::query_as::<_, CreditContext>(
+        r#"
+        SELECT account.external_id, address.address, address.lock_ref
+        FROM deposits AS deposit
+        JOIN accounts AS account ON account.id = deposit.account_id
+        JOIN addresses AS address ON address.id = deposit.address_id
+        WHERE deposit.id = $1
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The fulfillment event: everything the product needs to credit the deposit once, keyed by a
+/// `webhook-id` derived from the deposit id.
+fn credited_event(
+    deposit: &Deposit,
+    product_id: Uuid,
+    credit: &CreditContext,
+) -> Result<OutboxEvent, &'static str> {
+    let credit_minor = deposit.credit_minor.ok_or("credit_minor_missing")?;
+    let price_scaled = deposit.price_scaled.ok_or("price_scaled_missing")?;
+    let price_source = deposit
+        .price_source
+        .as_deref()
+        .ok_or("price_source_missing")?;
+    let valuation_at = deposit.valuation_at.ok_or("valuation_at_missing")?;
+    Ok(OutboxEvent {
+        id: credited_event_id(deposit.id),
+        event_type: "deposit.credited".to_owned(),
+        payload: json!({
+            "product_id": product_id,
+            "external_id": credit.external_id,
+            "deposit_id": deposit.id,
+            "state": "credited",
+            "unit": "USD",
+            "amount_minor": credit_minor.value().to_string(),
+            "price_source": price_source,
+            "price_scaled": price_scaled.to_string(),
+            "price_scale": PRICE_SCALE,
+            "valuation_at": valuation_at,
+            "product_lock_ref": credit.lock_ref,
+            "address": credit.address,
+            "route": deposit.route.as_deref(),
+            "route_version": deposit.route_version,
+            "chain_id": deposit.chain_id,
+            "asset_contract": format!("{:#x}", deposit.asset_contract),
+            "tx_hash": format!("{:#x}", deposit.tx_hash),
+            "log_index": deposit.log_index,
+            "amount_atomic": deposit.amount_atomic.value().to_string(),
+        }),
+        next_attempt_at: Utc::now(),
+    })
 }
 
 fn screening_evidence(

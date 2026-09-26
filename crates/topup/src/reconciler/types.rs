@@ -11,8 +11,6 @@ use uuid::Uuid;
 pub enum CheckName {
     /// A finalized transfer was absent from the deposit ledger.
     MissingDeposit,
-    /// A sent settlement needed authoritative product lookup.
-    SentSettlement,
     /// Stored credit disagreed with deterministic recomputation.
     CreditRecomputation,
     /// A deposit was not linked to a later confirmed flush.
@@ -21,20 +19,16 @@ pub enum CheckName {
     CustodyBalance,
     /// The factory-derived address disagreed with stored address data.
     AddressDerivation,
-    /// Post-restore product truth was absent or could not be adopted.
-    PostRestoreSettlement,
 }
 
 impl CheckName {
-    /// Every check, including the post-restore gate, in metric registration order.
-    pub const ALL: [Self; 7] = [
+    /// Every check, in metric registration order.
+    pub const ALL: [Self; 5] = [
         Self::MissingDeposit,
-        Self::SentSettlement,
         Self::CreditRecomputation,
         Self::MissingFlushLink,
         Self::CustodyBalance,
         Self::AddressDerivation,
-        Self::PostRestoreSettlement,
     ];
 
     /// Returns the stable metric label value.
@@ -42,12 +36,10 @@ impl CheckName {
     pub const fn code(self) -> &'static str {
         match self {
             Self::MissingDeposit => "missing_deposit",
-            Self::SentSettlement => "sent_settlement",
             Self::CreditRecomputation => "credit_recomputation",
             Self::MissingFlushLink => "missing_flush_link",
             Self::CustodyBalance => "custody_balance",
             Self::AddressDerivation => "address_derivation",
-            Self::PostRestoreSettlement => "post_restore_settlement",
         }
     }
 }

@@ -33,7 +33,6 @@ asset:
 destination:
   product: ${PRODUCT_SLUG}
   unit_decimals: 2
-  settlement_url: "${SETTLEMENT_URL}"
   product_kid: "${PRODUCT_KID}"
 
 pricing:
@@ -60,4 +59,4 @@ rate_lock:
   max_open_minor: { account: 50000, product: 200000, global: 200000 }
 
 alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, cleared: 1800, credited: 172800 }
+  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }
