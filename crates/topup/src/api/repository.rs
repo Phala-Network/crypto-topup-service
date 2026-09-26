@@ -117,7 +117,8 @@ pub async fn register_product(
             .ok_or_else(ApiError::internal)?;
             if existing.pubkey != pubkey || existing.webhook_url != webhook_url {
                 return Err(ApiError::conflict(
-                    "product slug is already registered with a different public key or webhook URL",
+                    "product slug is already registered with a different public key or webhook \
+                     URL; replace them with PUT /v1/admin/products/{slug}",
                 ));
             }
             existing
@@ -125,6 +126,60 @@ pub async fn register_product(
     };
     transaction.commit().await?;
     Ok(product.into())
+}
+
+/// Replaces an issued product's verification key and webhook URL and appends an audit row,
+/// carrying the reason and the replaced values, in the same transaction.
+///
+/// Product requests read the key on every request, so the replaced key stops verifying when this
+/// commits: a hard cut, with no overlap (the attested route names one key id per product).
+/// Repeating the request with the stored values changes nothing and writes no audit row.
+pub async fn update_product(
+    pool: &PgPool,
+    slug: &str,
+    pubkey: &str,
+    webhook_url: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<Product, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let existing = sqlx::query_as::<_, ProductRow>(
+        "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE slug = $1 FOR UPDATE",
+    )
+    .bind(slug)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    if existing.pubkey == pubkey && existing.webhook_url == webhook_url {
+        transaction.commit().await?;
+        return Ok(existing.into());
+    }
+    let updated = sqlx::query_as::<_, ProductRow>(
+        r#"
+        UPDATE products SET pubkey = $2, webhook_url = $3
+        WHERE id = $1
+        RETURNING id, slug, webhook_url, pubkey, paused_scopes
+        "#,
+    )
+    .bind(existing.id)
+    .bind(pubkey)
+    .bind(webhook_url)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let evidence = serde_json::json!({
+        "reason": reason,
+        "replaced": {"public_key": existing.pubkey, "webhook_url": existing.webhook_url},
+    });
+    insert_audit_tx_with_reason(
+        &mut transaction,
+        actor,
+        "product.update",
+        &format!("product:{slug}"),
+        &evidence.to_string(),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(updated.into())
 }
 
 /// Registers an account or returns the existing account with the same product identifier.

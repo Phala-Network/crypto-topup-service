@@ -96,8 +96,7 @@ Send the operator the printed `keyid` and `public_key`, your settlement URL, and
    webhook_url}` ([deploy/README.md](../deploy/README.md#product-credentials)).
 
 A repeat with the same values returns the same product; a different key or webhook URL for an
-issued slug is refused with `409`, and changing either is not supported yet, so agree the values
-before registration.
+issued slug is refused with `409`, because changing them is a replacement (§3.4).
 
 ### 3.3 Pin the service's settlement key
 
@@ -135,6 +134,23 @@ print(response.settlement_pubkey)  # hex; pin it together with the keyid
 
 `TopupClient.attestation(nonce)` fetches and runs the same binding check. The binding alone is
 worthless without the verifier step: it proves only that the response is self-consistent.
+
+### 3.4 Rotate the product key
+
+The key id is attested in the route and stays the same; a rotation replaces only the public key
+the service stores for your slug:
+
+1. Generate a new key under the same key id (§3.1) and send the operator its `public_key`.
+2. The operator stores it with the admin-signed `PUT /v1/admin/products/phala-cloud {public_key,
+   webhook_url, reason}` ([deploy/README.md](../deploy/README.md#product-credentials)); the same
+   call changes your webhook URL.
+3. Switch your signer to the new seed.
+
+The cut is immediate: from step 2 the old key gets `401`, and the new key gets `401` before it.
+There is no overlap window, because the service verifies a product against one stored key under the
+one key id its routes name. Agree a time for step 2 and switch right after it; `TopupClient` does
+not retry `401`. For a leaked seed, tell the operator at once: they follow the
+[product key compromise runbook](../deploy/runbooks/product-key-compromise.md).
 
 ## 4. Calling the API
 

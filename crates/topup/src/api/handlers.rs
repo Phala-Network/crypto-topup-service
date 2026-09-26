@@ -25,7 +25,7 @@ use super::models::{
     OutboxReplayResponse, PauseRequest, PauseResponse, PersistentSaltInputs, ProductResponse,
     ReconciliationBlockLiftResponse, RecordRefundRequest, RefundRequest, RefundResponse,
     RegisterAccountRequest, RegisterProductRequest, RotateDepositAddressRequest,
-    RoutePauseResponse, SupportDepositsResponse,
+    RoutePauseResponse, SupportDepositsResponse, UpdateProductRequest,
 };
 use super::repository;
 
@@ -361,7 +361,7 @@ pub(crate) async fn get_attestation(
         (status = 200, description = "OK: registered, or already registered with the same values", body = ProductResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 409, description = "Conflict: the slug is registered with different values", body = ErrorResponse)
+        (status = 409, description = "Conflict: the slug is registered with different values; `PUT /v1/admin/products/{slug}` replaces them", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -370,17 +370,12 @@ pub(crate) async fn register_product(
     State(state): State<AppState>,
     Json(request): Json<RegisterProductRequest>,
 ) -> ApiResult<Json<ProductResponse>> {
-    validate_product_slug(&request.slug)?;
-    VerificationKey::from_base64(String::new(), &request.public_key).map_err(|_| {
-        ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
-    })?;
-    // The key id and settlement URL come only from the attested route, so a product no loaded
-    // route names could never authenticate.
-    let destination = state
-        .routes
-        .destination(&request.slug)
-        .ok_or_else(|| ApiError::bad_request("no loaded route names this product slug"))?;
-    validate_webhook_url(&request.webhook_url, &destination.settlement_url)?;
+    validate_product_credentials(
+        &state,
+        &request.slug,
+        &request.public_key,
+        &request.webhook_url,
+    )?;
     let product = repository::register_product(
         &state.pool,
         &request.slug,
@@ -389,13 +384,40 @@ pub(crate) async fn register_product(
         &admin_actor(&state),
     )
     .await?;
-    Ok(Json(ProductResponse {
-        id: product.id,
-        slug: product.slug,
-        public_key: product.pubkey,
-        webhook_url: product.webhook_url,
-        paused_scopes: product.paused_scopes,
-    }))
+    Ok(Json(product_response(product)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/admin/products/{slug}",
+    params(("slug" = String, Path, description = "Product slug")),
+    request_body = UpdateProductRequest,
+    responses(
+        (status = 200, description = "OK: replaced, or already holding these values", body = ProductResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no product is issued with this slug", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+pub(crate) async fn update_product(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Json(request): Json<UpdateProductRequest>,
+) -> ApiResult<Json<ProductResponse>> {
+    validate_product_credentials(&state, &slug, &request.public_key, &request.webhook_url)?;
+    validate_reason(&request.reason)?;
+    let product = repository::update_product(
+        &state.pool,
+        &slug,
+        &request.public_key,
+        &request.webhook_url,
+        &admin_actor(&state),
+        &request.reason,
+    )
+    .await?;
+    Ok(Json(product_response(product)))
 }
 
 #[utoipa::path(
@@ -803,6 +825,26 @@ fn validate_product_slug(slug: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Validates a product's credentials against the attested route that names its slug. The key id
+/// and settlement URL come only from that route, so a product no loaded route names could never
+/// authenticate.
+fn validate_product_credentials(
+    state: &AppState,
+    slug: &str,
+    public_key: &str,
+    webhook_url: &str,
+) -> ApiResult<()> {
+    validate_product_slug(slug)?;
+    VerificationKey::from_base64(String::new(), public_key).map_err(|_| {
+        ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
+    })?;
+    let destination = state
+        .routes
+        .destination(slug)
+        .ok_or_else(|| ApiError::bad_request("no loaded route names this product slug"))?;
+    validate_webhook_url(webhook_url, &destination.settlement_url)
+}
+
 /// Requires an absolute `https` URL without credentials or fragment. `http` is accepted only
 /// when the product's attested settlement URL is itself `http`, which only local stacks use.
 fn validate_webhook_url(webhook_url: &str, settlement_url: &str) -> ApiResult<()> {
@@ -868,6 +910,16 @@ fn account_response(account: Account) -> AccountResponse {
         external_id: account.external_id,
         status: account.status,
         paused_scopes: account.paused_scopes,
+    }
+}
+
+fn product_response(product: Product) -> ProductResponse {
+    ProductResponse {
+        id: product.id,
+        slug: product.slug,
+        public_key: product.pubkey,
+        webhook_url: product.webhook_url,
+        paused_scopes: product.paused_scopes,
     }
 }
 

@@ -7,6 +7,13 @@ webhook receivers must ignore unknown fields.
 
 ### Added
 
+- `PUT /v1/admin/products/{slug} {public_key, webhook_url, reason}` (administrative API) replaces
+  an issued product's verification key and webhook URL, which `POST /v1/admin/products` refuses
+  with `409`. The key id stays the route's `destination.product_kid`. The cut is immediate: the
+  old key stops verifying when the change commits, with no overlap. The `audit` row
+  (`product.update`) carries the reason and the replaced values; a repeat with the stored values
+  changes nothing. An unknown slug is `404`, an unrouted slug or invalid value `400`.
+
 - `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` lifts a reconciliation block
   (`chain:{chain_id}` or `address:{address_id}`), which production could not do without a database
   owner session. Lifting is manual: the reconciler blocks again if the finding still reproduces.

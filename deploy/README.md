@@ -282,8 +282,14 @@ product. The key id and settlement URL come only from the attested route
 (`destination.product_kid`, `destination.settlement_url`), so the slug must be named by a loaded
 route and the route change comes first. `public_key` is the base64 key the integrator printed with
 `topup-sdk keygen`; `webhook_url` is an absolute `https` URL. The answer is `200` (also for a repeat
-with the same values), `409` for the same slug with a different key or URL (changing either is not
-supported yet), or `400`.
+with the same values), `409` for the same slug with a different key or URL, or `400`.
+
+`PUT /v1/admin/products/{slug} {"public_key", "webhook_url", "reason"}` replaces an issued
+product's key and webhook URL: a hard cut, since requests are verified against the one stored key
+under the route's key id, which stays the same (architecture §15, Rotation). The answer is `200`
+with the stored values (a repeat changes nothing), `404` for a slug never issued, or `400`; the
+`audit` row `product.update` records the reason and the replaced values. A compromised key:
+[product key compromise](runbooks/product-key-compromise.md).
 
 **HUMAN-ONLY, admin key holder**, after [attestation](#attestation-ingress-and-egress): convert the
 admin seed to PEM once, then sign and send the exact body:

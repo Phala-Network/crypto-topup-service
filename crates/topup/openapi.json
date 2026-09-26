@@ -167,7 +167,83 @@
             }
           },
           "409": {
-            "description": "Conflict: the slug is registered with different values",
+            "description": "Conflict: the slug is registered with different values; `PUT /v1/admin/products/{slug}` replaces them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/products/{slug}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "update_product",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Product slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProductRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: replaced, or already holding these values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found: no product is issued with this slug",
             "content": {
               "application/json": {
                 "schema": {
@@ -3134,6 +3210,29 @@
               "null"
             ],
             "description": "Cursor for the next page, or `null` when exhausted."
+          }
+        }
+      },
+      "UpdateProductRequest": {
+        "type": "object",
+        "description": "Administrative replacement of an issued product's verification key and webhook URL. The key id\nstays the route's `destination.product_kid`.",
+        "required": [
+          "public_key",
+          "webhook_url",
+          "reason"
+        ],
+        "properties": {
+          "public_key": {
+            "type": "string",
+            "description": "Standard base64 of the product's new 32-byte ed25519 request-verification public key."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on."
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the product's\nattested settlement URL also uses `http` (local stacks)."
           }
         }
       }
