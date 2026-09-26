@@ -1,6 +1,5 @@
 //! Provider URL and transport-error redaction shared by external adapters.
 
-use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
@@ -180,7 +179,8 @@ impl Display for Failure {
 /// A provider failure safe to format in production logs.
 ///
 /// It retains only the operation, the endpoint's redacted label, and the failure reason.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, thiserror::Error)]
+#[error("{operation} failed for {endpoint} ({failure})")]
 pub struct RedactedTransportError {
     operation: &'static str,
     endpoint: String,
@@ -197,23 +197,11 @@ impl RedactedTransportError {
     }
 }
 
-impl Display for RedactedTransportError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} failed for {} ({})",
-            self.operation, self.endpoint, self.failure
-        )
-    }
-}
-
 impl Debug for RedactedTransportError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(self, formatter)
     }
 }
-
-impl Error for RedactedTransportError {}
 
 /// Keeps a node-supplied message readable on one log line and bounded in length.
 fn node_message(message: &str) -> String {

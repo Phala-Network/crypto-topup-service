@@ -1,8 +1,6 @@
 //! Serde schemas and pure validation for attested chain and route files.
 
 use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt;
 use std::num::NonZeroU32;
 
 use alloy_primitives::Address;
@@ -387,9 +385,10 @@ pub struct StuckAfterConfig {
 }
 
 /// Route validation failure.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RouteError {
     /// A parsed field violated a domain constraint.
+    #[error("invalid route field `{field}`: {message}")]
     Validation {
         /// Dotted path to the invalid field.
         field: &'static str,
@@ -406,18 +405,6 @@ impl RouteError {
         }
     }
 }
-
-impl fmt::Display for RouteError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Validation { field, message } => {
-                write!(formatter, "invalid route field `{field}`: {message}")
-            }
-        }
-    }
-}
-
-impl Error for RouteError {}
 
 fn validate_address(field: &'static str, address: Address) -> Result<(), RouteError> {
     if address.is_zero() {

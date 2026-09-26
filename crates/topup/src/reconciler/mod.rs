@@ -9,8 +9,6 @@ mod store;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,21 +60,28 @@ const REGULAR_CHECKS: [CheckName; 6] = [
 ];
 
 /// Reconciliation failure which prevents one check or one subject from completing.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReconciliationError {
     /// Runtime configuration is invalid or incomplete.
+    #[error("{0}")]
     Configuration(String),
     /// A chain adapter failed.
+    #[error("{0}")]
     Chain(String),
     /// A product settlement lookup failed.
+    #[error("{0}")]
     Settlement(String),
     /// PostgreSQL failed an operation.
-    Database(sqlx::Error),
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
     /// A finding could not be encoded.
-    Encode(serde_json::Error),
+    #[error("{0}")]
+    Encode(#[from] serde_json::Error),
     /// Durable data violated an internal invariant.
+    #[error("{0}")]
     Invariant(&'static str),
     /// The lease-owner lock is held in a conflicting mode by another process.
+    #[error("{0}")]
     LeaseOwnerLock(&'static str),
 }
 
@@ -93,47 +98,6 @@ impl ReconciliationError {
             Self::Invariant(message) => message,
             Self::LeaseOwnerLock(_) => "lease_owner_lock_held",
         }
-    }
-}
-
-impl Display for ReconciliationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Configuration(message) | Self::Chain(message) | Self::Settlement(message) => {
-                formatter.write_str(message)
-            }
-            Self::Database(error) => Display::fmt(error, formatter),
-            Self::Encode(error) => Display::fmt(error, formatter),
-            Self::Invariant(message) | Self::LeaseOwnerLock(message) => {
-                formatter.write_str(message)
-            }
-        }
-    }
-}
-
-impl Error for ReconciliationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Encode(error) => Some(error),
-            Self::Configuration(_)
-            | Self::Chain(_)
-            | Self::Settlement(_)
-            | Self::Invariant(_)
-            | Self::LeaseOwnerLock(_) => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for ReconciliationError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<serde_json::Error> for ReconciliationError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Encode(error)
     }
 }
 

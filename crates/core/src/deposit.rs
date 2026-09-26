@@ -1,8 +1,5 @@
 //! Deposit states and their valid transitions.
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-
 use serde::{Deserialize, Serialize};
 
 /// The durable processing state of a deposit.
@@ -172,25 +169,14 @@ pub struct Transition {
 }
 
 /// An outcome that is not valid for the supplied deposit state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("outcome {outcome:?} is invalid for deposit state {state:?}")]
 pub struct InvalidTransition {
     /// The state for which the outcome was invalid.
     pub state: DepositState,
     /// The invalid outcome category.
     pub outcome: StepOutcomeKind,
 }
-
-impl Display for InvalidTransition {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "outcome {:?} is invalid for deposit state {:?}",
-            self.outcome, self.state
-        )
-    }
-}
-
-impl Error for InvalidTransition {}
 
 /// Applies a step outcome and returns the only valid target state for it.
 ///

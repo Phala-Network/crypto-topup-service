@@ -9,7 +9,6 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -41,16 +40,9 @@ const EVENT_REPEAT_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const CHECK_IN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Invalid `SENTRY_DSN`; the value is never included.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("SENTRY_DSN is not a valid Sentry DSN")]
 pub struct ReportingError;
-
-impl Display for ReportingError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SENTRY_DSN is not a valid Sentry DSN")
-    }
-}
-
-impl std::error::Error for ReportingError {}
 
 /// Starts Sentry reporting from `SENTRY_DSN`; returns `None`, binding nothing, when it is unset
 /// or empty.

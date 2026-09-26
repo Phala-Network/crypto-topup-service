@@ -1,7 +1,5 @@
 //! Signing boundary types shared by service adapters.
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU32;
 
 use alloy_primitives::{Address, Bytes, U256};
@@ -100,28 +98,18 @@ pub struct SignedTx {
 }
 
 /// A signer boundary failure safe to expose to service callers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SignerError {
     /// Key derivation or retrieval failed.
+    #[error("signing key is unavailable")]
     KeyUnavailable,
     /// Returned key material had an invalid shape or scalar.
+    #[error("signing key is invalid")]
     InvalidKey,
     /// The cryptographic signing operation failed.
+    #[error("signing operation failed")]
     SigningFailed,
 }
-
-impl Display for SignerError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::KeyUnavailable => "signing key is unavailable",
-            Self::InvalidKey => "signing key is invalid",
-            Self::SigningFailed => "signing operation failed",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for SignerError {}
 
 /// Signs operator transactions and product settlement payloads.
 ///

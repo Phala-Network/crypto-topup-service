@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Context as _, anyhow, bail, ensure};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -230,39 +231,49 @@ async fn main() -> ExitCode {
                 sentry_enabled = reporting.is_some(),
                 "error reporting configured"
             );
-            return run(&args).await;
+            run(&args).await
         }
-        TopupCommand::Migrate => return migrate().await,
+        TopupCommand::Migrate => migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
         TopupCommand::Outbox {
             command: OutboxCommand::Replay { id, since, force },
-        } => return replay_outbox(id, since.as_deref(), force).await,
-        TopupCommand::Reconcile(args) => return reconcile(&args).await,
-        TopupCommand::Attest(args) => attest(&args).await,
-        TopupCommand::Keys(args) => return keys(&args).await,
-        TopupCommand::Heartbeat(args) => return heartbeat(&args).await,
+        } => replay_outbox(id, since.as_deref(), force).await,
+        TopupCommand::Reconcile(args) => reconcile(&args).await,
+        TopupCommand::Attest(args) => {
+            return match attest(&args).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        TopupCommand::Keys(args) => keys(&args).await,
+        TopupCommand::Heartbeat(args) => heartbeat(&args).await,
         TopupCommand::Healthcheck(args) => return healthcheck(&args).await,
-        TopupCommand::RestoreCheck(args) => return restore_check(&args).await,
+        TopupCommand::RestoreCheck(args) => restore_check(&args).await,
     };
 
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("{message}");
-            ExitCode::FAILURE
+    result.unwrap_or_else(|error| {
+        // The outermost context is the message; the error it wraps, if any, the `error` field.
+        match error.source() {
+            Some(cause) => tracing::error!(error = %cause, "{error}"),
+            None => tracing::error!("{error}"),
         }
-    }
+        ExitCode::FAILURE
+    })
 }
 
-async fn keys(args: &KeysArgs) -> ExitCode {
+async fn keys(args: &KeysArgs) -> anyhow::Result<ExitCode> {
     if args.check {
-        return if topup::keys::check(&args.backup_dir, &args.owner_dir, &args.app_dir).is_ok() {
+        let checked = topup::keys::check(&args.backup_dir, &args.owner_dir, &args.app_dir);
+        return Ok(if checked.is_ok() {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
-        };
+        });
     }
 
     let signer = DstackSigner::new();
@@ -271,29 +282,21 @@ async fn keys(args: &KeysArgs) -> ExitCode {
         signer.derive_secret(DB_OWNER_KEY_DOMAIN),
         signer.derive_secret(DB_APP_KEY_DOMAIN),
     ) else {
-        tracing::error!("failed to derive the backup key and database credentials");
-        return ExitCode::FAILURE;
+        bail!("failed to derive the backup key and database credentials");
     };
     let backup_key = args.backup_dir.join(topup::keys::BACKUP_KEY_FILE);
-    if topup::keys::write_backup_key(&backup_key, &backup).is_err() {
-        tracing::error!(path = %backup_key.display(), "failed to write backup key file");
-        return ExitCode::FAILURE;
-    }
-    if topup::keys::write_database_credentials(&args.owner_dir, &args.app_dir, &owner, &app)
-        .is_err()
-    {
-        tracing::error!("failed to write database credential files");
-        return ExitCode::FAILURE;
-    }
+    topup::keys::write_backup_key(&backup_key, &backup)
+        .with_context(|| format!("failed to write backup key file {}", backup_key.display()))?;
+    topup::keys::write_database_credentials(&args.owner_dir, &args.app_dir, &owner, &app)
+        .context("failed to write database credential files")?;
     tracing::info!("key files are ready");
     if args.hold {
-        if wait_for_shutdown_signal().await.is_err() {
-            tracing::error!("failed to listen for key holder shutdown signal");
-            return ExitCode::FAILURE;
-        }
+        wait_for_shutdown_signal()
+            .await
+            .context("failed to listen for key holder shutdown signal")?;
         tracing::info!("key holder stopped");
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `TOPUP_SERVICE_ENABLED` of a replacement CVM that boots for a restore (`deploy/RESTORE.md`).
@@ -306,12 +309,12 @@ enum ServiceMode {
 }
 
 impl ServiceMode {
-    fn from_env() -> Result<Self, String> {
+    fn from_env() -> anyhow::Result<Self> {
         match std::env::var("TOPUP_SERVICE_ENABLED").as_deref() {
             Err(_) | Ok("on") => Ok(Self::On),
             Ok("read-only") => Ok(Self::ReadOnly),
             Ok("off") => Ok(Self::Off),
-            Ok(_) => Err("TOPUP_SERVICE_ENABLED must be on, read-only, or off".to_owned()),
+            Ok(_) => bail!("TOPUP_SERVICE_ENABLED must be on, read-only, or off"),
         }
     }
 
@@ -325,57 +328,45 @@ impl ServiceMode {
 }
 
 /// Refuses a command in any `TOPUP_SERVICE_ENABLED` mode it does not run in.
-fn service_enabled(command: &str, allowed: &[ServiceMode]) -> Result<ServiceMode, String> {
+fn service_enabled(command: &str, allowed: &[ServiceMode]) -> anyhow::Result<ServiceMode> {
     let mode = ServiceMode::from_env()?;
-    if allowed.contains(&mode) {
-        Ok(mode)
-    } else {
-        Err(format!(
-            "{command} is disabled while TOPUP_SERVICE_ENABLED={}",
-            mode.name()
-        ))
-    }
+    ensure!(
+        allowed.contains(&mode),
+        "{command} is disabled while TOPUP_SERVICE_ENABLED={}",
+        mode.name()
+    );
+    Ok(mode)
 }
 
-async fn heartbeat(args: &HeartbeatArgs) -> ExitCode {
-    if let Err(error) = service_enabled("heartbeat", &[ServiceMode::On]) {
-        tracing::error!(%error, "heartbeat refused to start");
-        return ExitCode::FAILURE;
-    }
-    let pool = match connect("DATABASE_URL", "heartbeat", 1).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
-    };
+async fn heartbeat(args: &HeartbeatArgs) -> anyhow::Result<ExitCode> {
+    service_enabled("heartbeat", &[ServiceMode::On]).context("heartbeat refused to start")?;
+    let pool = connect("DATABASE_URL", "heartbeat", 1)
+        .await
+        .context("failed to connect to database")?;
     let mut interval = tokio::time::interval(Duration::from_secs(args.interval_s));
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                match topup::heartbeat::record(&pool).await {
-                    Ok(record) => tracing::info!(
-                        heartbeat_id = record.id,
-                        // RFC 3339, so the value can be passed to --expected-heartbeat-at as is.
-                        recorded_at = %record
-                            .recorded_at
-                            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-                        rpo_seconds = record.rpo_seconds,
-                        wal_lsn = %record.wal_lsn,
-                        "restore heartbeat recorded"
-                    ),
-                    Err(_) => {
-                        tracing::error!("failed to record restore heartbeat");
-                        return ExitCode::FAILURE;
-                    }
-                }
+                let record = topup::heartbeat::record(&pool)
+                    .await
+                    .context("failed to record restore heartbeat")?;
+                tracing::info!(
+                    heartbeat_id = record.id,
+                    // RFC 3339, so the value can be passed to --expected-heartbeat-at as is.
+                    recorded_at = %record
+                        .recorded_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                    rpo_seconds = record.rpo_seconds,
+                    wal_lsn = %record.wal_lsn,
+                    "restore heartbeat recorded"
+                );
             }
             signal = &mut shutdown => {
-                if signal.is_err() {
-                    tracing::error!("failed to listen for heartbeat shutdown signal");
-                    return ExitCode::FAILURE;
-                }
+                signal.context("failed to listen for heartbeat shutdown signal")?;
                 tracing::info!("heartbeat stopped");
-                return ExitCode::SUCCESS;
+                return Ok(ExitCode::SUCCESS);
             }
         }
     }
@@ -407,77 +398,57 @@ async fn healthcheck(args: &HealthcheckArgs) -> ExitCode {
     }
 }
 
-async fn restore_check(args: &RestoreCheckArgs) -> ExitCode {
+async fn restore_check(args: &RestoreCheckArgs) -> anyhow::Result<ExitCode> {
     // In the compose, restore-check starts with every boot; it runs only after a restore.
     match std::env::var("TOPUP_RESTORE_FROM_BACKUP").as_deref() {
         Err(_) | Ok("on") => {}
         Ok("off") => {
             tracing::info!("restore-check skipped: TOPUP_RESTORE_FROM_BACKUP=off");
-            return ExitCode::SUCCESS;
+            return Ok(ExitCode::SUCCESS);
         }
-        Ok(_) => {
-            tracing::error!("TOPUP_RESTORE_FROM_BACKUP must be on or off");
-            return ExitCode::FAILURE;
-        }
+        Ok(_) => bail!("TOPUP_RESTORE_FROM_BACKUP must be on or off"),
     }
     let result = run_restore_check(args).await;
     let encoded = match &result {
-        Ok(report) => serde_json::to_value(report),
-        Err(message) => Ok(json!({ "status": "failed", "failures": [message] })),
-    };
-    let Ok(encoded) = encoded else {
-        tracing::error!("failed to encode restore check report");
-        return ExitCode::FAILURE;
+        Ok(report) => {
+            serde_json::to_value(report).context("failed to encode restore check report")?
+        }
+        Err(error) => json!({ "status": "failed", "failures": [error.to_string()] }),
     };
     if let Some(path) = std::env::var_os("TOPUP_RESTORE_REPORT_FILE") {
         let path = PathBuf::from(path);
-        if let Err(error) = write_restore_report(&path, &encoded) {
-            tracing::error!(%error, path = %path.display(), "failed to write restore check report");
-            return ExitCode::FAILURE;
-        }
+        write_restore_report(&path, &encoded)
+            .with_context(|| format!("failed to write restore check report {}", path.display()))?;
     }
-    match result {
-        Ok(report) => {
-            println!("{encoded}");
-            if report.status == "ok" {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
-        Err(message) => {
-            tracing::error!(%message, "restore check failed");
-            ExitCode::FAILURE
-        }
-    }
+    let report = result?;
+    println!("{encoded}");
+    Ok(if report.status == "ok" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
+/// Runs the post-restore gate; each error's outermost context is the report's failure.
 async fn run_restore_check(
     args: &RestoreCheckArgs,
-) -> Result<topup::restore::RestoreReport, String> {
-    let routes = load_routes(&args.routes).map_err(|error| {
-        tracing::error!(%error, "failed to load route configuration");
-        "failed to load route configuration".to_owned()
-    })?;
+) -> anyhow::Result<topup::restore::RestoreReport> {
+    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
     // The post-restore gate reads and repairs with owner credentials, never the service login.
     let pool = connect("MIGRATE_DATABASE_URL", "restore-check", 4)
         .await
-        .map_err(|_| "failed to connect to the restored database".to_owned())?;
-    let signer = spawn_signer(None).map_err(|error| {
-        tracing::error!(%error, "failed to start restore-check signer actor");
-        "failed to start the signer".to_owned()
-    })?;
+        .context("failed to connect to the restored database")?;
+    let signer = spawn_signer(None).context("failed to start the signer")?;
     let reconciler =
         topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer)
-            .map_err(|error| {
-                tracing::error!(%error, "failed to configure post-restore reconciler");
-                "failed to configure the post-restore reconciler".to_owned()
-            })?;
+            .context("failed to configure the post-restore reconciler")?;
     let expectations = topup::restore::RestoreExpectations {
         expected_heartbeat_at: args.expected_heartbeat_at,
         expected_lsn: args.expected_lsn.clone(),
     };
-    topup::restore::check(&pool, &expectations, &reconciler).await
+    topup::restore::check(&pool, &expectations, &reconciler)
+        .await
+        .map_err(anyhow::Error::msg)
 }
 
 /// Publishes the report atomically, so a reader never sees a partial file.
@@ -496,7 +467,7 @@ async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
         Vec::new()
     } else {
         load_routes(&args.routes)
-            .and_then(|routes| routes.operator_keys())
+            .and_then(|routes| routes.operator_keys().map_err(anyhow::Error::msg))
             .map_err(|error| {
                 tracing::error!(%error, "invalid route configuration");
                 "failed to load the route configuration"
@@ -600,80 +571,38 @@ fn print_attestation(
     Ok(())
 }
 
-async fn run(args: &RunArgs) -> ExitCode {
-    let routes = match load_routes(&args.routes) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::error!(%error, "failed to load route configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let age_config = match AgeAlertConfig::from_routes(routes.routes()) {
-        Ok(config) => config,
-        Err(error) => {
-            tracing::error!(%error, "invalid age alert configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let rate_lock_quotes = match topup::locks::ConfiguredQuoteProvider::from_routes(routes.routes())
-    {
-        Ok(provider) => Arc::new(provider) as Arc<dyn topup::locks::QuoteProvider>,
-        Err(error) => {
-            tracing::error!(%error, "invalid rate-lock pricing configuration");
-            return ExitCode::FAILURE;
-        }
-    };
+async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
+    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
+    let age_config =
+        AgeAlertConfig::from_routes(routes.routes()).context("invalid age alert configuration")?;
+    let rate_lock_quotes: Arc<dyn topup::locks::QuoteProvider> = Arc::new(
+        topup::locks::ConfiguredQuoteProvider::from_routes(routes.routes())
+            .map_err(anyhow::Error::msg)
+            .context("invalid rate-lock pricing configuration")?,
+    );
     let pump_config = PumpConfig {
         step_timeout: STEP_TIMEOUT,
         wait_interval: Duration::from_secs(args.wait_interval_s),
         ..PumpConfig::default()
     };
     // Checked before the on-chain contract check; `connect` reads it again below.
-    let mode = match service_enabled("run", &[ServiceMode::On, ServiceMode::ReadOnly])
+    let mode = service_enabled("run", &[ServiceMode::On, ServiceMode::ReadOnly])
         .and_then(|mode| required_env("DATABASE_URL").map(|_| mode))
-    {
-        Ok(mode) => mode,
-        Err(error) => {
-            tracing::error!(%error, "missing runtime configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let admin_kid = match required_env("TOPUP_ADMIN_KID") {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(%error, "missing runtime configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let admin_public_key = match required_env("TOPUP_ADMIN_PUBLIC_KEY") {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(%error, "missing runtime configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let admin_key = match topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key) {
-        Ok(key) => key,
-        Err(error) => {
-            tracing::error!(%error, "invalid administrative verification key");
-            return ExitCode::FAILURE;
-        }
-    };
-    let public_origin = match required_env("TOPUP_PUBLIC_ORIGIN").and_then(|value| {
-        topup::api::PublicOrigin::parse(&value).map_err(|error| error.to_string())
-    }) {
-        Ok(origin) => origin,
-        Err(error) => {
-            tracing::error!(%error, "invalid TOPUP_PUBLIC_ORIGIN");
-            return ExitCode::FAILURE;
-        }
-    };
+        .context("missing runtime configuration")?;
+    let admin_kid = required_env("TOPUP_ADMIN_KID").context("missing runtime configuration")?;
+    let admin_public_key =
+        required_env("TOPUP_ADMIN_PUBLIC_KEY").context("missing runtime configuration")?;
+    let admin_key = topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key)
+        .map_err(anyhow::Error::msg)
+        .context("invalid administrative verification key")?;
+    let public_origin = required_env("TOPUP_PUBLIC_ORIGIN")
+        .and_then(|value| Ok(topup::api::PublicOrigin::parse(&value)?))
+        .context("invalid TOPUP_PUBLIC_ORIGIN")?;
     if mode == ServiceMode::ReadOnly {
         let state = topup::api::AppState {
-            pool: match connect("DATABASE_URL", "run", 4).await {
-                Ok(pool) => pool,
-                Err(code) => return code,
-            },
+            pool: connect("DATABASE_URL", "run", 4)
+                .await
+                .context("failed to connect to database")?,
             routes: Arc::new(routes),
             admin_key,
             public_origin,
@@ -684,123 +613,73 @@ async fn run(args: &RunArgs) -> ExitCode {
     }
     // Architecture §4: before the database is touched, every provider must show the route's
     // factory, implementation, and treasury, so nothing issues addresses or moves funds otherwise.
-    if let Err(error) = topup::contracts::verify_routes(&routes).await {
-        tracing::error!(%error, "on-chain contract check failed");
-        return ExitCode::FAILURE;
-    }
+    topup::contracts::verify_routes(&routes)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("on-chain contract check failed")?;
     let routes = Arc::new(routes);
     let scanner_count = routes.chain_ids().count();
     let route_count = routes.routes().len();
-    let connection_count = match u32::try_from(PUMPS)
+    let connection_count = u32::try_from(PUMPS)
         .ok()
         .zip(u32::try_from(scanner_count).ok())
         .zip(u32::try_from(route_count).ok())
         .and_then(|((pumps, scanners), routes)| pumps.checked_add(scanners)?.checked_add(routes))
         .and_then(|count| count.checked_add(3))
-    {
-        Some(count) => count,
-        None => {
-            tracing::error!("route count is too large");
-            return ExitCode::FAILURE;
-        }
+        .context("route count is too large")?;
+    let pool = connect("DATABASE_URL", "run", connection_count)
+        .await
+        .context("failed to connect to database")?;
+    let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
+        return Ok(ExitCode::SUCCESS);
     };
-    let pool = match connect("DATABASE_URL", "run", connection_count).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
-    };
-    let lease_owner = match wait_for_lease_owner_lock(&pool).await {
-        Ok(lock) => lock,
-        Err(code) => return code,
-    };
-    let signer = match spawn_signer(None) {
-        Ok(signer) => signer,
-        Err(error) => {
-            tracing::error!(%error, "failed to start signer actor");
-            return ExitCode::FAILURE;
-        }
-    };
-    let delivery_worker = match topup::outbox::DeliveryWorker::new(
+    let signer = spawn_signer(None).context("failed to start signer actor")?;
+    let delivery_worker = topup::outbox::DeliveryWorker::new(
         pool.clone(),
         Arc::new(signer.clone()),
         topup::outbox::DeliveryConfig::default(),
-    ) {
-        Ok(worker) => worker,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure webhook delivery");
-            return ExitCode::FAILURE;
-        }
-    };
-    match topup::reconciler::frozen_chains(&pool, &routes).await {
-        Ok(frozen) => {
-            for chain_id in frozen {
-                tracing::error!(
-                    chain_id,
-                    "reconciliation froze configured chain; its scanner, pumps, flusher, and \
-                     address issuance stay paused until the block is removed"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::error!(%error, "failed to load reconciliation blocks");
-            return ExitCode::FAILURE;
-        }
+    )
+    .context("failed to configure webhook delivery")?;
+    let frozen = topup::reconciler::frozen_chains(&pool, &routes)
+        .await
+        .context("failed to load reconciliation blocks")?;
+    for chain_id in frozen {
+        tracing::error!(
+            chain_id,
+            "reconciliation froze configured chain; its scanner, pumps, flusher, and \
+             address issuance stay paused until the block is removed"
+        );
     }
-    let reconciler = match topup::reconciler::Reconciler::from_routes(
-        pool.clone(),
-        Arc::clone(&routes),
-        signer.clone(),
-    ) {
-        Ok(reconciler) => Arc::new(reconciler),
-        Err(error) => {
-            tracing::error!(%error, "failed to configure reconciler");
-            return ExitCode::FAILURE;
-        }
-    };
+    let reconciler = Arc::new(
+        topup::reconciler::Reconciler::from_routes(
+            pool.clone(),
+            Arc::clone(&routes),
+            signer.clone(),
+        )
+        .context("failed to configure reconciler")?,
+    );
     let flusher_tasks =
-        match topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
+        topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
             spawn_signer(Some(version))
-        }) {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::error!(%error, "invalid flusher runtime configuration");
-                return ExitCode::FAILURE;
-            }
-        };
-    let listener = match tokio::net::TcpListener::bind(args.bind).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!(%error, bind = %args.bind, "failed to bind API listener");
-            return ExitCode::FAILURE;
-        }
-    };
-    let metrics_listener = match tokio::net::TcpListener::bind(args.metrics_bind).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!(%error, bind = %args.metrics_bind, "failed to bind metrics listener");
-            return ExitCode::FAILURE;
-        }
-    };
+        })
+        .map_err(anyhow::Error::msg)
+        .context("invalid flusher runtime configuration")?;
+    let listener = tokio::net::TcpListener::bind(args.bind)
+        .await
+        .with_context(|| format!("failed to bind API listener on {}", args.bind))?;
+    let metrics_listener = tokio::net::TcpListener::bind(args.metrics_bind)
+        .await
+        .with_context(|| format!("failed to bind metrics listener on {}", args.metrics_bind))?;
     let product_lookup = SettlementProductLookup::new(
         pool.clone(),
         Arc::clone(&routes),
         signer.clone(),
         Duration::from_secs(30),
     );
-    let confirm_step =
-        match ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(product_lookup)) {
-            Ok(step) => step,
-            Err(error) => {
-                tracing::error!(%error, "invalid confirm-step configuration");
-                return ExitCode::FAILURE;
-            }
-        };
-    let screen_step = match ScreenStep::from_routes(pool.clone(), &routes) {
-        Ok(step) => step,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure screening step");
-            return ExitCode::FAILURE;
-        }
-    };
+    let confirm_step = ConfirmStep::from_routes(pool.clone(), &routes, Arc::new(product_lookup))
+        .context("invalid confirm-step configuration")?;
+    let screen_step = ScreenStep::from_routes(pool.clone(), &routes)
+        .context("failed to configure screening step")?;
     let steps = Arc::new(StepSet::new(
         Box::new(confirm_step),
         Box::new(screen_step),
@@ -812,33 +691,18 @@ async fn run(args: &RunArgs) -> ExitCode {
         )),
         Box::new(topup::flusher::SweepStep),
     ));
-    let pump = match Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config) {
-        Ok(pump) => pump,
-        Err(error) => {
-            tracing::error!(%error, "invalid pump configuration");
-            return ExitCode::FAILURE;
-        }
-    };
+    let pump = Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config)
+        .context("invalid pump configuration")?;
     let refund_config = topup::refunds::RefundConfirmationConfig::default();
-    let refund_reader = match topup::refunds::EvmRefundChainReader::from_routes(&routes) {
-        Ok(reader) => reader,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure refund confirmation chain reader");
-            return ExitCode::FAILURE;
-        }
-    };
-    let refund_worker = match topup::refunds::RefundConfirmationWorker::new(
+    let refund_reader = topup::refunds::EvmRefundChainReader::from_routes(&routes)
+        .context("failed to configure refund confirmation chain reader")?;
+    let refund_worker = topup::refunds::RefundConfirmationWorker::new(
         pool.clone(),
         refund_reader,
         routes.routes(),
         refund_config,
-    ) {
-        Ok(worker) => worker,
-        Err(error) => {
-            tracing::error!(%error, "failed to configure refund confirmation worker");
-            return ExitCode::FAILURE;
-        }
-    };
+    )
+    .context("failed to configure refund confirmation worker")?;
     let mut tasks = ServiceTasks::new();
     let state = topup::api::AppState {
         pool: pool.clone(),
@@ -981,25 +845,24 @@ async fn run(args: &RunArgs) -> ExitCode {
     pool.close().await;
     tracing::info!("topup service stopped");
 
-    if clean_shutdown {
+    Ok(if clean_shutdown {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
+    })
 }
 
 /// Serves only the read API of a database restored from backup (`deploy/RESTORE.md`), so the
 /// operator can verify it through the product-signed lookups: no lease-owner lock, scanner, pump,
 /// flusher, webhook delivery, reconciler, or signer runs, and every non-GET request is refused.
-async fn serve_read_only(bind: std::net::SocketAddr, state: topup::api::AppState) -> ExitCode {
+async fn serve_read_only(
+    bind: std::net::SocketAddr,
+    state: topup::api::AppState,
+) -> anyhow::Result<ExitCode> {
     let pool = state.pool.clone();
-    let listener = match tokio::net::TcpListener::bind(bind).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!(%error, %bind, "failed to bind API listener");
-            return ExitCode::FAILURE;
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("failed to bind API listener on {bind}"))?;
     let report = std::env::var_os("TOPUP_RESTORE_REPORT_FILE").map(PathBuf::from);
     let application = topup::api::read_only_router(state, report);
     tracing::warn!(%bind, "API listening read-only while TOPUP_SERVICE_ENABLED=read-only");
@@ -1011,45 +874,20 @@ async fn serve_read_only(bind: std::net::SocketAddr, state: topup::api::AppState
         })
         .await;
     pool.close().await;
-    match served {
-        Ok(()) => {
-            tracing::info!("read-only API stopped");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            tracing::error!(%error, "read-only API failed");
-            ExitCode::FAILURE
-        }
-    }
+    served.context("read-only API failed")?;
+    tracing::info!("read-only API stopped");
+    Ok(ExitCode::SUCCESS)
 }
 
-async fn reconcile(args: &ReconcileArgs) -> ExitCode {
-    let routes = match load_routes(&args.routes) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::error!(%error, "failed to load route configuration");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match connect("DATABASE_URL", "reconcile", 4).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
-    };
-    let signer = match spawn_signer(None) {
-        Ok(signer) => signer,
-        Err(error) => {
-            tracing::error!(%error, "failed to start signer actor");
-            return ExitCode::FAILURE;
-        }
-    };
+async fn reconcile(args: &ReconcileArgs) -> anyhow::Result<ExitCode> {
+    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
+    let pool = connect("DATABASE_URL", "reconcile", 4)
+        .await
+        .context("failed to connect to database")?;
+    let signer = spawn_signer(None).context("failed to start signer actor")?;
     let reconciler =
-        match topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer) {
-            Ok(reconciler) => reconciler,
-            Err(error) => {
-                tracing::error!(%error, "failed to configure reconciler");
-                return ExitCode::FAILURE;
-            }
-        };
+        topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes), signer)
+            .context("failed to configure reconciler")?;
     let result = match topup::reconciler::hold_lease_owner_lock(&pool).await {
         Ok(lease_owner) => {
             let result = reconciler.run_once().await;
@@ -1061,24 +899,17 @@ async fn reconcile(args: &ReconcileArgs) -> ExitCode {
         Err(error) => Err(error),
     };
     pool.close().await;
-    match result {
-        Ok(report) if !report.succeeded() => {
-            tracing::error!(
-                findings = report.findings.len(),
-                failed_checks = report.failed_checks.len(),
-                "reconciliation completed with failed checks"
-            );
-            ExitCode::FAILURE
-        }
-        Ok(report) => {
-            tracing::info!(findings = report.findings.len(), "reconciliation completed");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            tracing::error!(%error, "reconciliation failed");
-            ExitCode::FAILURE
-        }
+    let report = result.context("reconciliation failed")?;
+    if !report.succeeded() {
+        tracing::error!(
+            findings = report.findings.len(),
+            failed_checks = report.failed_checks.len(),
+            "reconciliation completed with failed checks"
+        );
+        return Ok(ExitCode::FAILURE);
     }
+    tracing::info!(findings = report.findings.len(), "reconciliation completed");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Long-running service tasks sharing one cancellation token.
@@ -1187,18 +1018,19 @@ impl ServiceTasks {
 /// Interval between liveness pings on the lease-owner lock connection.
 const LEASE_OWNER_PING: Duration = Duration::from_secs(5);
 
-/// Takes the lease-owner lock, retrying with backoff while the post-restore gate holds it.
+/// Takes the lease-owner lock, retrying with backoff while the post-restore gate holds it;
+/// `None` means shutdown was requested first.
 ///
 /// Waiting instead of exiting keeps a restart policy from crash-looping during a restore.
 async fn wait_for_lease_owner_lock(
     pool: &sqlx::PgPool,
-) -> Result<topup::reconciler::LeaseOwnerLock, ExitCode> {
+) -> anyhow::Result<Option<topup::reconciler::LeaseOwnerLock>> {
     let mut delay = Duration::from_secs(1);
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
     loop {
         match topup::reconciler::hold_lease_owner_lock(pool).await {
-            Ok(lock) => return Ok(lock),
+            Ok(lock) => return Ok(Some(lock)),
             Err(topup::reconciler::ReconciliationError::LeaseOwnerLock(reason)) => {
                 tracing::warn!(
                     reason,
@@ -1206,20 +1038,12 @@ async fn wait_for_lease_owner_lock(
                     "waiting for the lease-owner lock before processing deposits"
                 );
             }
-            Err(error) => {
-                tracing::error!(%error, "failed to take the lease-owner lock");
-                return Err(ExitCode::FAILURE);
-            }
+            Err(error) => return Err(error).context("failed to take the lease-owner lock"),
         }
         tokio::select! {
             signal = &mut shutdown => {
-                return Err(match signal {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        tracing::error!(%error, "failed to listen for shutdown signal");
-                        ExitCode::FAILURE
-                    }
-                });
+                signal.context("failed to listen for shutdown signal")?;
+                return Ok(None);
             }
             () = tokio::time::sleep(delay) => {}
         }
@@ -1246,24 +1070,24 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-fn load_routes(paths: &[PathBuf]) -> Result<RouteSet, String> {
+fn load_routes(paths: &[PathBuf]) -> anyhow::Result<RouteSet> {
     let routes = paths
         .iter()
         .map(|path| {
             let yaml = std::fs::read_to_string(path)
-                .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+                .map_err(|error| anyhow!("failed to read `{}`: {error}", path.display()))?;
             route::parse_and_validate(&yaml, false)
-                .map_err(|error| format!("invalid route `{}`: {error}", path.display()))
+                .map_err(|error| anyhow!("invalid route `{}`: {error}", path.display()))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    RouteSet::new(routes)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    RouteSet::new(routes).map_err(anyhow::Error::msg)
 }
 
-fn required_env(name: &'static str) -> Result<String, String> {
+fn required_env(name: &'static str) -> anyhow::Result<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{name} is required for run"))
+        .with_context(|| format!("{name} is required for run"))
 }
 
 /// Connects a pool of at most `max_connections` to the database URL in `environment`.
@@ -1271,22 +1095,15 @@ async fn connect(
     environment: &'static str,
     command: &'static str,
     max_connections: u32,
-) -> Result<PgPool, ExitCode> {
-    let Some(url) = std::env::var(environment)
+) -> anyhow::Result<PgPool> {
+    let url = std::env::var(environment)
         .ok()
         .filter(|value| !value.is_empty())
-    else {
-        tracing::error!("{environment} is required for {command}");
-        return Err(ExitCode::FAILURE);
-    };
-    PgPoolOptions::new()
+        .with_context(|| format!("{environment} is required for {command}"))?;
+    Ok(PgPoolOptions::new()
         .max_connections(max_connections)
         .connect(&url)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, command, "failed to connect to database");
-            ExitCode::FAILURE
-        })
+        .await?)
 }
 
 /// Queue depth of every dstack signer actor.
@@ -1304,53 +1121,44 @@ fn spawn_signer(operator_key_version: Option<NonZeroU32>) -> std::io::Result<Sig
     SignerHandle::spawn(signer, SIGNER_QUEUE, SIGNER_TIMEOUT)
 }
 
-async fn replay_outbox(id: Option<Uuid>, since: Option<&str>, force: bool) -> ExitCode {
+async fn replay_outbox(
+    id: Option<Uuid>,
+    since: Option<&str>,
+    force: bool,
+) -> anyhow::Result<ExitCode> {
     let selector = match (id, since) {
         (Some(id), None) => topup::outbox::ReplaySelector::Id(id),
-        (None, Some(since)) => match DateTime::parse_from_rfc3339(since) {
-            Ok(value) => topup::outbox::ReplaySelector::Since(value.with_timezone(&Utc)),
-            Err(_) => {
-                tracing::error!("--since must be an RFC 3339 timestamp");
-                return ExitCode::FAILURE;
-            }
-        },
-        _ => {
-            tracing::error!("exactly one of --id or --since is required");
-            return ExitCode::FAILURE;
-        }
+        (None, Some(since)) => topup::outbox::ReplaySelector::Since(
+            DateTime::parse_from_rfc3339(since)
+                .context("--since must be an RFC 3339 timestamp")?
+                .with_timezone(&Utc),
+        ),
+        _ => bail!("exactly one of --id or --since is required"),
     };
-    let pool = match connect("DATABASE_URL", "outbox replay", 1).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
-    };
+    let pool = connect("DATABASE_URL", "outbox replay", 1)
+        .await
+        .context("failed to connect to database")?;
     let reason = if force {
         "manual CLI replay with delivered state reset"
     } else {
         "manual CLI replay of pending events"
     };
-    match topup::outbox::replay(&pool, selector, force, "cli", reason).await {
-        Ok(count) => {
-            tracing::info!(count, force, "outbox replay scheduled");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            tracing::error!(%error, "failed to schedule outbox replay");
-            ExitCode::FAILURE
-        }
-    }
+    let count = topup::outbox::replay(&pool, selector, force, "cli", reason)
+        .await
+        .context("failed to schedule outbox replay")?;
+    tracing::info!(count, force, "outbox replay scheduled");
+    Ok(ExitCode::SUCCESS)
 }
 
-async fn migrate() -> ExitCode {
-    let pool = match connect("MIGRATE_DATABASE_URL", "migrate", 1).await {
-        Ok(pool) => pool,
-        Err(code) => return code,
-    };
-    if let Err(error) = topup::db::migrate(&pool).await {
-        tracing::error!(%error, "failed to apply database migrations");
-        return ExitCode::FAILURE;
-    }
+async fn migrate() -> anyhow::Result<ExitCode> {
+    let pool = connect("MIGRATE_DATABASE_URL", "migrate", 1)
+        .await
+        .context("failed to connect to database")?;
+    topup::db::migrate(&pool)
+        .await
+        .context("failed to apply database migrations")?;
     tracing::info!("database migrations applied");
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 fn validate_route(file: &Path, template: bool) -> ExitCode {

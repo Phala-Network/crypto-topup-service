@@ -1,8 +1,6 @@
 //! The attested route set, validated once at startup and shared by every consumer.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use alloy_primitives::Address;
@@ -33,9 +31,10 @@ struct ChainEntry {
 }
 
 /// A provider entry that cannot be used.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ProviderError {
     /// The provider id's environment variable is unset or empty.
+    #[error("{environment} is required for `{label}`")]
     MissingUrl {
         /// Log-safe provider label.
         label: String,
@@ -43,11 +42,13 @@ pub enum ProviderError {
         environment: String,
     },
     /// The resolved value is not a URL.
+    #[error("provider `{label}` has an invalid URL")]
     InvalidUrl {
         /// Log-safe provider label.
         label: String,
     },
     /// No loaded route configures this chain or provider position.
+    #[error("chain {chain_id} has no RPC provider {index}")]
     Unconfigured {
         /// EVM chain identifier.
         chain_id: u64,
@@ -55,24 +56,6 @@ pub enum ProviderError {
         index: usize,
     },
 }
-
-impl Display for ProviderError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingUrl { label, environment } => {
-                write!(formatter, "{environment} is required for `{label}`")
-            }
-            Self::InvalidUrl { label } => {
-                write!(formatter, "provider `{label}` has an invalid URL")
-            }
-            Self::Unconfigured { chain_id, index } => {
-                write!(formatter, "chain {chain_id} has no RPC provider {index}")
-            }
-        }
-    }
-}
-
-impl Error for ProviderError {}
 
 impl RouteSet {
     /// Validates the loaded routes and creates one client per chain provider.

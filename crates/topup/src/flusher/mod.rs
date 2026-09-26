@@ -7,9 +7,6 @@ pub mod runtime;
 mod sweep;
 mod types;
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-
 use topup_core::SignerError;
 
 pub use engine::{Flusher, OperatorRole, RunResult};
@@ -23,64 +20,32 @@ pub use types::{
 };
 
 /// Failure while running a flusher operation.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FlusherError {
     /// PostgreSQL operation failed.
-    Database(sqlx::Error),
+    #[error("database operation failed: {0}")]
+    Database(#[from] sqlx::Error),
     /// Chain RPC operation failed.
-    Chain(ChainError),
+    #[error("chain operation failed: {0}")]
+    Chain(#[source] ChainError),
     /// Price lookup failed.
-    Price(PriceError),
+    #[error("price lookup failed: {0}")]
+    Price(#[source] PriceError),
     /// Operator signing failed.
-    Signer(SignerError),
+    #[error("operator signing failed: {0}")]
+    Signer(#[source] SignerError),
     /// Stored JSON could not be encoded or decoded.
-    Json(serde_json::Error),
+    #[error("flush evidence JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
     /// Stored evidence violated its expected shape.
+    #[error("stored flush evidence: {0}")]
     StoredEvidence(&'static str),
     /// Checked integer arithmetic exceeded its representation.
+    #[error("flush arithmetic is out of range")]
     Arithmetic,
     /// An internal or external invariant was violated.
+    #[error("flusher invariant violated: {0}")]
     Invariant(&'static str),
-}
-
-impl Display for FlusherError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "database operation failed: {error}"),
-            Self::Chain(error) => write!(formatter, "chain operation failed: {error}"),
-            Self::Price(error) => write!(formatter, "price lookup failed: {error}"),
-            Self::Signer(error) => write!(formatter, "operator signing failed: {error}"),
-            Self::Json(error) => write!(formatter, "flush evidence JSON failed: {error}"),
-            Self::StoredEvidence(message) => write!(formatter, "stored flush evidence: {message}"),
-            Self::Arithmetic => formatter.write_str("flush arithmetic is out of range"),
-            Self::Invariant(message) => write!(formatter, "flusher invariant violated: {message}"),
-        }
-    }
-}
-
-impl Error for FlusherError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Chain(error) => Some(error),
-            Self::Price(error) => Some(error),
-            Self::Signer(error) => Some(error),
-            Self::Json(error) => Some(error),
-            Self::StoredEvidence(_) | Self::Arithmetic | Self::Invariant(_) => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for FlusherError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<serde_json::Error> for FlusherError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
 }
 
 fn map_chain(error: ChainError) -> FlusherError {

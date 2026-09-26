@@ -1,6 +1,3 @@
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-
 use alloy_primitives::{Address, B256};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -237,36 +234,14 @@ pub enum ApplyTransitionResult {
 }
 
 /// Failure while validating or persisting a transition.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApplyTransitionError {
     /// The caller supplied fields inconsistent with the core transition.
+    #[error("{0}")]
     InvalidInput(&'static str),
     /// PostgreSQL rejected or failed the operation.
-    Database(sqlx::Error),
-}
-
-impl Display for ApplyTransitionError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(message) => formatter.write_str(message),
-            Self::Database(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl Error for ApplyTransitionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidInput(_) => None,
-            Self::Database(error) => Some(error),
-        }
-    }
-}
-
-impl From<sqlx::Error> for ApplyTransitionError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Debug)]

@@ -1,8 +1,6 @@
 //! Detected-to-confirmed deposit step.
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,16 +42,9 @@ pub struct ProductAnswer {
 }
 
 /// Product lookup failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("product answer lookup failed")]
 pub struct ProductLookupError;
-
-impl Display for ProductLookupError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("product answer lookup failed")
-    }
-}
-
-impl Error for ProductLookupError {}
 
 /// Minimal GET-by-idempotency-key boundary shared with the settlement client.
 #[async_trait]
@@ -188,16 +179,9 @@ struct RouteRuntime {
 }
 
 /// Invalid detected-step runtime configuration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
 pub struct ConfirmConfigError(String);
-
-impl Display for ConfirmConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl Error for ConfirmConfigError {}
 
 /// Two-provider finality, quote validation, and credit computation for detected deposits.
 pub struct ConfirmStep {

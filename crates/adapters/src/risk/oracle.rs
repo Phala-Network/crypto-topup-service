@@ -1,7 +1,5 @@
 //! Direct sanctions-list checks through an EVM oracle contract.
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use alloy::eips::BlockId;
@@ -25,24 +23,15 @@ pub trait SanctionsSource: Send + Sync {
 }
 
 /// Invalid sanctions-oracle client configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SanctionsOracleConfigError {
     /// Provider A is not an HTTP URL.
+    #[error("provider A RPC URL is invalid")]
     InvalidProviderAUrl,
     /// Provider B is not an HTTP URL.
+    #[error("provider B RPC URL is invalid")]
     InvalidProviderBUrl,
 }
-
-impl Display for SanctionsOracleConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidProviderAUrl => formatter.write_str("provider A RPC URL is invalid"),
-            Self::InvalidProviderBUrl => formatter.write_str("provider B RPC URL is invalid"),
-        }
-    }
-}
-
-impl Error for SanctionsOracleConfigError {}
 
 /// Checks the same oracle call through a chain's first two providers.
 #[derive(Debug)]

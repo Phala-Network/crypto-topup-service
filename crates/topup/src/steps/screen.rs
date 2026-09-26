@@ -1,8 +1,6 @@
 //! Confirmed-to-cleared screening step.
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use alloy_primitives::Address;
@@ -88,9 +86,10 @@ impl ScreenRoute {
 }
 
 /// Failure while constructing the route-to-screening registry.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ScreenStepConfigError {
     /// One of the route's first two RPC providers is unusable.
+    #[error("route `{route}` version {version}: {source}")]
     Provider {
         /// Stable route name.
         route: String,
@@ -100,6 +99,7 @@ pub enum ScreenStepConfigError {
         source: ProviderError,
     },
     /// A route's sanctions-oracle client could not be configured.
+    #[error("route `{route}` version {version} has invalid sanctions configuration: {source}")]
     InvalidOracle {
         /// Stable route name.
         route: String,
@@ -109,45 +109,13 @@ pub enum ScreenStepConfigError {
         source: SanctionsOracleConfigError,
     },
     /// Two supplied route files used the same name and version.
+    #[error("duplicate route `{route}` version {version}")]
     DuplicateRoute {
         /// Stable route name.
         route: String,
         /// Immutable route version.
         version: u64,
     },
-}
-
-impl Display for ScreenStepConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Provider {
-                route,
-                version,
-                source,
-            } => write!(formatter, "route `{route}` version {version}: {source}"),
-            Self::InvalidOracle {
-                route,
-                version,
-                source,
-            } => write!(
-                formatter,
-                "route `{route}` version {version} has invalid sanctions configuration: {source}"
-            ),
-            Self::DuplicateRoute { route, version } => {
-                write!(formatter, "duplicate route `{route}` version {version}")
-            }
-        }
-    }
-}
-
-impl Error for ScreenStepConfigError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Provider { source, .. } => Some(source),
-            Self::InvalidOracle { source, .. } => Some(source),
-            Self::DuplicateRoute { .. } => None,
-        }
-    }
 }
 
 /// Real screening step backed by PostgreSQL pause scopes and route-specific oracle clients.

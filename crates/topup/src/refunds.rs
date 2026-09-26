@@ -1,8 +1,7 @@
 //! Treasury refund transaction confirmation.
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,32 +72,21 @@ pub enum RefundObservation {
 }
 
 /// Chain-read failure while checking a refund transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RefundReadError {
     /// No RPC reader is configured for the chain.
+    #[error("no refund reader for chain {0}")]
     UnknownChain(u64),
     /// The chain's provider A is unusable.
+    #[error("refund RPC configuration: {0}")]
     Configuration(String),
     /// The RPC request failed during the named operation.
+    #[error("refund RPC failed during {0}")]
     Rpc(&'static str),
     /// The RPC response omitted a required field.
+    #[error("refund RPC omitted `{0}`")]
     MissingField(&'static str),
 }
-
-impl Display for RefundReadError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownChain(chain_id) => {
-                write!(formatter, "no refund reader for chain {chain_id}")
-            }
-            Self::Configuration(error) => write!(formatter, "refund RPC configuration: {error}"),
-            Self::Rpc(operation) => write!(formatter, "refund RPC failed during {operation}"),
-            Self::MissingField(field) => write!(formatter, "refund RPC omitted `{field}`"),
-        }
-    }
-}
-
-impl Error for RefundReadError {}
 
 /// Finality-aware chain access used by the refund confirmation worker.
 #[async_trait]

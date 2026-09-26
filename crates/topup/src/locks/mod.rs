@@ -3,8 +3,6 @@
 pub mod pricing;
 
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -173,73 +171,47 @@ impl QuoteProvider for UnavailableQuoteProvider {
 }
 
 /// Rate-lock lifecycle failure mapped by the API boundary.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RateLockError {
     /// Request amount or reference is invalid.
+    #[error("{0}")]
     InvalidInput(&'static str),
     /// Quote-first creation is disabled for the route.
+    #[error("rate locks are disabled")]
     Disabled,
     /// Current validated pricing is unavailable.
+    #[error("validated pricing is unavailable")]
     PricingUnavailable,
     /// The per-account rolling creation limit was reached.
+    #[error("rate-lock creation limit exceeded")]
     RateLimited,
     /// An open exposure cap would be exceeded.
+    #[error("{0} exposure cap exceeded")]
     ExposureCap(&'static str),
     /// The tenant-scoped lock does not exist.
+    #[error("rate lock not found")]
     NotFound,
     /// The lock can no longer be cancelled.
+    #[error("rate lock is not open")]
     NotOpen,
     /// The lock is still open but its payment window has closed, so it cannot be cancelled.
+    #[error("payment window has closed")]
     WindowClosed,
     /// The lock address already received a deposit, so it cannot be cancelled.
+    #[error("rate lock address already received a payment")]
     PendingPayment,
     /// A replay of an existing reference stated a different amount.
+    #[error("rate-lock reference was reused with a different amount")]
     IdempotencyMismatch,
     /// Money arithmetic could not be represented.
+    #[error("rate-lock arithmetic is out of range")]
     Arithmetic,
     /// Persisted data violated an internal invariant.
+    #[error("rate-lock database invariant failed")]
     DatabaseInvariant,
     /// PostgreSQL rejected or failed the operation.
-    Database(sqlx::Error),
-}
-
-impl Display for RateLockError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(message) => formatter.write_str(message),
-            Self::Disabled => formatter.write_str("rate locks are disabled"),
-            Self::PricingUnavailable => formatter.write_str("validated pricing is unavailable"),
-            Self::RateLimited => formatter.write_str("rate-lock creation limit exceeded"),
-            Self::ExposureCap(scope) => write!(formatter, "{scope} exposure cap exceeded"),
-            Self::NotFound => formatter.write_str("rate lock not found"),
-            Self::NotOpen => formatter.write_str("rate lock is not open"),
-            Self::WindowClosed => formatter.write_str("payment window has closed"),
-            Self::PendingPayment => {
-                formatter.write_str("rate lock address already received a payment")
-            }
-            Self::IdempotencyMismatch => {
-                formatter.write_str("rate-lock reference was reused with a different amount")
-            }
-            Self::Arithmetic => formatter.write_str("rate-lock arithmetic is out of range"),
-            Self::DatabaseInvariant => formatter.write_str("rate-lock database invariant failed"),
-            Self::Database(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl Error for RateLockError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for RateLockError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Creates a lock or returns the existing row for the same account reference.

@@ -1,7 +1,6 @@
 //! Settlement endpoint conformance runner.
 
 use std::collections::BTreeSet;
-use std::fmt::{self, Display, Formatter};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -218,16 +217,9 @@ impl Ledger {
 }
 
 /// Marks a case whose required observation is unavailable; reported as `incomplete`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct Incomplete(pub String);
-
-impl Display for Incomplete {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Incomplete {}
 
 /// Runs every case and returns a machine-readable report.
 pub async fn run(config: SuiteConfig) -> Result<Report> {
