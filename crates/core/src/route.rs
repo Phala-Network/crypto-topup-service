@@ -113,6 +113,12 @@ impl RouteFile {
         }
         validate_bps("quote.spread_bps", self.rate_lock.spread_bps)?;
         validate_bps("quote.tolerance_bps", self.rate_lock.lock_tolerance_bps)?;
+        if self.rate_lock.amount_decimals > self.asset.decimals {
+            return Err(RouteError::validation(
+                "quote.amount_decimals",
+                "must be at most asset.decimals",
+            ));
+        }
         validate_positive("pricing.max_age_s", self.pricing.max_age_s)?;
         validate_positive("quote.window_s", self.rate_lock.window_s)?;
         validate_positive(
@@ -308,6 +314,8 @@ pub struct RateLockConfig {
     pub spread_bps: Bps,
     /// Accepted transfer amount tolerance in basis points.
     pub lock_tolerance_bps: Bps,
+    /// Token decimals a quote's amount is rounded up to, at most `asset.decimals`.
+    pub amount_decimals: u8,
     /// Maximum successful lock creations per account in one rolling minute.
     pub max_creations_per_minute: u64,
     /// Open exposure caps.
@@ -512,6 +520,10 @@ pub struct QuoteSpec {
     /// Accepted payment tolerance in basis points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance_bps: Option<Bps>,
+    /// Token decimals the amount to pay is rounded up to; default [`DEFAULT_QUOTE_AMOUNT_DECIMALS`]
+    /// or `asset.decimals` if fewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_decimals: Option<u8>,
     /// Quote creations per account in a rolling minute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_creations_per_minute: Option<u64>,
@@ -587,6 +599,9 @@ pub const DEFAULT_QUOTE_WINDOW_S: u64 = 900;
 pub const DEFAULT_QUOTE_SPREAD_BPS: u16 = 50;
 /// 1% absorbs wallet rounding without accepting a real underpayment.
 pub const DEFAULT_QUOTE_TOLERANCE_BPS: u16 = 100;
+/// Four token decimals keep the amount to pay readable and typeable; rounding up overpays by less
+/// than 0.0001 token.
+pub const DEFAULT_QUOTE_AMOUNT_DECIMALS: u8 = 4;
 /// Quote creations per account in a rolling minute.
 pub const DEFAULT_QUOTE_MAX_CREATIONS_PER_MINUTE: u64 = 10;
 /// Detected deposits normally confirm within minutes.
@@ -775,6 +790,10 @@ impl TryFrom<RouteSpec> for RouteFile {
                     Some(value) => value,
                     None => bps("quote.tolerance_bps", DEFAULT_QUOTE_TOLERANCE_BPS)?,
                 },
+                amount_decimals: spec
+                    .quote
+                    .amount_decimals
+                    .unwrap_or(DEFAULT_QUOTE_AMOUNT_DECIMALS.min(spec.asset.decimals)),
                 max_creations_per_minute: spec
                     .quote
                     .max_creations_per_minute
@@ -846,6 +865,7 @@ impl From<RouteFile> for RouteSpec {
                 window_s: Some(route.rate_lock.window_s),
                 spread_bps: Some(route.rate_lock.spread_bps),
                 tolerance_bps: Some(route.rate_lock.lock_tolerance_bps),
+                amount_decimals: Some(route.rate_lock.amount_decimals),
                 max_creations_per_minute: Some(route.rate_lock.max_creations_per_minute),
             },
             alerts: AlertsSpec {

@@ -19,7 +19,8 @@ use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::address::{forwarder_address, lock_salt};
 use topup_core::money::{
-    AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, lock_price, tokens_for_credit,
+    AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, lock_price, round_up_to_decimals,
+    tokens_for_credit,
 };
 use topup_core::route::RouteFile;
 use uuid::Uuid;
@@ -695,12 +696,21 @@ fn amount_for_credit(
             "amount must be greater than zero",
         ));
     }
+    // The smallest amount worth the credit, rounded up to the route's shown decimals so the payer
+    // reads and types a short amount; the rounding overpays, never underpays, the locked credit.
     tokens_for_credit(
         credit_minor,
         price,
         route.asset.decimals,
         route.destination.unit_decimals,
     )
+    .and_then(|amount| {
+        round_up_to_decimals(
+            amount,
+            route.asset.decimals,
+            route.rate_lock.amount_decimals,
+        )
+    })
     .map_err(|_| RateLockError::AmountTooLarge("amount is too large to quote"))
 }
 

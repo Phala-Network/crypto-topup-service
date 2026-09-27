@@ -159,7 +159,7 @@ and never reduces a credit.
 {
   "id": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", "object": "quote", "account_id": "team-42",
   "amount": 2500, "currency": "usd", "chain_id": 11155111, "asset": "pha",
-  "amount_atomic": "100502512562814070352", "exchange_rate": "0.24875621",
+  "amount_atomic": "100502600000000000000", "exchange_rate": "0.24875621",
   "address": "0x…", "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…&uint256=…",
   "status": "open", "expires_at": 1790410500, "created": 1790409600,
   "payment": null, "deposit": null, "client_secret": "qt_…_secret_…"
@@ -168,7 +168,10 @@ and never reduces a credit.
 
 - `account_id` is your workspace id (1 to 255 bytes); its account is created by its first quote.
 - `amount` is an integer in US cents; `amount_atomic` is the exact token amount to pay, a decimal
-  string in base units; `exchange_rate` is the locked price in USD per token with 8 decimal
+  string in base units, rounded up to four token decimals (the route's `quote.amount_decimals`) so
+  the payer reads and types a short amount such as `100.5026 PHA`; show every digit of it. The
+  rounding is the payer's, below 0.0001 token, and the credit stays exactly `amount`;
+  `exchange_rate` is the locked price in USD per token with 8 decimal
   places; times are Unix seconds.
 - `status` is `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A
   quote stays `open` past `expires_at` until the finalized chain passes it, so a payment mined in

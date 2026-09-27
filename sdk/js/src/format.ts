@@ -1,8 +1,23 @@
 import { formatUnits } from "viem";
 import type { ClientQuote } from "./quote.js";
 
-/** The exact token amount, for example `100.502512562814070352`. */
-export function formatTokenAmount(quote: ClientQuote): string {
+/**
+ * The exact token amount to show, grouped for `locale` and without trailing zeros, for example
+ * `1,273.9185`. Every digit is kept: the service rounds a quote to a few decimals.
+ */
+export function formatTokenAmount(quote: ClientQuote, locale?: string): string {
+  const [whole = "0", fraction] = tokenAmount(quote).split(".");
+  const format = new Intl.NumberFormat(locale);
+  const grouped = format.format(BigInt(whole));
+  if (fraction === undefined) {
+    return grouped;
+  }
+  const separator = format.formatToParts(0.5).find((part) => part.type === "decimal")?.value ?? ".";
+  return `${grouped}${separator}${fraction}`;
+}
+
+/** The exact token amount as a plain decimal, for copying into a wallet, for example `1273.9185`. */
+export function tokenAmount(quote: ClientQuote): string {
   return formatUnits(BigInt(quote.amount_atomic), quote.decimals);
 }
 

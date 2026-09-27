@@ -11,3 +11,6 @@
   ERC-20 transfer from a browser wallet, switching or adding the chain.
 - `@phala/pay/react`: `<Checkout>` with wallet ("Pay with crypto", `buttonText`), QR code, and
   manual payment, live status, and Stripe-style `appearance`; `useCheckout`.
+- `formatTokenAmount(quote, locale?)` shows the exact token amount grouped for the locale and
+  without trailing zeros (`1,273.9185`); `tokenAmount(quote)` is the plain decimal a wallet
+  accepts, which `<Checkout>`'s "Exact amount" copies.

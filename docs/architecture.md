@@ -276,11 +276,13 @@ Invoice model, enabled from the pilot, with this service's exception profile:
 - `POST /v1/quotes {account_id, amount, currency, chain_id, asset}` returns the quote `{id,
   amount, amount_atomic, exchange_rate, address, payment_uri, status, expires_at, …}`.
   `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*; the
-  user states USD cents and the token amount is rounded up. `expires_at = now + window`
-  *(policy)*. Quotes count against open-exposure caps per account, per product, and global
-  *(policy)*, reserved atomically at creation; creation is rate-limited per account. Repeating
-  an `Idempotency-Key` with the same parameters returns the stored quote (other parameters are
-  `409 idempotency_error`), also while `quotes` is paused.
+  user states USD cents and the token amount is rounded up, then up again to
+  `quote.amount_decimals` token decimals so the payer reads and types a short amount (the
+  overpayment, below one unit of the last decimal, is the payer's; the credit is unchanged).
+  `expires_at = now + window` *(policy)*. Quotes count against open-exposure caps per account,
+  per product, and global *(policy)*, reserved atomically at creation; creation is rate-limited
+  per account. Repeating an `Idempotency-Key` with the same parameters returns the stored quote
+  (other parameters are `409 idempotency_error`), also while `quotes` is paused.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
   `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
   single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock` and the
@@ -650,6 +652,7 @@ defaulted addresses from it. The defaults and why:
 | `pricing.max_age_s`, `max_deviation_bps`, `max_fx_deviation_bps` | 120 (two Coin Metrics intervals), 100, 50 |
 | `limits.min_deposit_atomic`, `limits.min_flush_atomic` | 0: `min_credit_minor` rejects dust, and the gas-ratio rule governs flush economics *(policy: finance confirms before production)* |
 | `quote.window_s`, `spread_bps`, `tolerance_bps`, `max_creations_per_minute` | 900, 50, 100, 10 |
+| `quote.amount_decimals` | 4, or `asset.decimals` if fewer: a quote asks for, say, `273.9185` PHA rather than 18 decimals; at most `asset.decimals` |
 | `alerts.stuck_after_s` | detected 1 800, confirmed 1 800, credited 172 800 (credited waits for the six-hourly, gas-gated flush) |
 | `unit_decimals` | 2 (USD cents) |
 

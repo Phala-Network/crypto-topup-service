@@ -15,7 +15,7 @@ import {
   type Trust,
   type WebhookEvent,
 } from "./api.js";
-import { dollars, exactTokens, short, statusLabel, time, tokens } from "./format.js";
+import { dollars, short, statusLabel, time, tokens } from "./format.js";
 import { firstWallet, mintTestTokens } from "./testTokens.js";
 
 type Theme = "light" | "dark";
@@ -432,7 +432,7 @@ function DetailValue({ detail, account }: { detail: Detail; account: Account | n
     return <span className="success">+{dollars(value)}</span>;
   }
   if (kind === "atomic" && typeof value === "string") {
-    return <>{exactTokens(value, account?.token.symbol ?? "")}</>;
+    return <>{tokens(value, account?.token.symbol ?? "")}</>;
   }
   return <span className={detail.mono === true ? "mono" : undefined}>{String(value)}</span>;
 }

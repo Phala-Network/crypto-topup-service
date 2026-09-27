@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { Hash } from "viem";
 import type { CheckoutStatus } from "../checkout.js";
 import { networkName, transactionUrl } from "../chains.js";
-import { formatAmount, formatCountdown, formatTokenAmount } from "../format.js";
+import { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "../format.js";
 import { quoteTransfer } from "../payment.js";
 import type { ClientQuote } from "../quote.js";
 import { WalletError, payWithWallet, watchWallets, type Wallet } from "../wallet.js";
@@ -344,19 +344,30 @@ function ManualPanel({ quote, now }: { quote: ClientQuote; now: number }) {
       <Field label="Network" value={`${networkName(quote.chain_id)} (chain ID ${quote.chain_id})`} />
       <Field label={`Token (${quote.asset.toUpperCase()}) contract`} value={token} copy />
       <Field label="Send to address" value={quote.address} copy />
-      <Field label="Exact amount" value={formatTokenAmount(quote)} copy />
+      <Field label="Exact amount" value={formatTokenAmount(quote)} copy={tokenAmount(quote)} />
       <Field label="Time left" value={formatCountdown(quote.expires_at, now)} />
     </dl>
   );
 }
 
-function Field({ label, value, copy = false }: { label: string; value: string; copy?: boolean }) {
+/** `copy` adds a copy button, copying `value`, or the given string when it differs from it. */
+function Field({
+  label,
+  value,
+  copy = false,
+}: {
+  label: string;
+  value: string;
+  copy?: boolean | string;
+}) {
   return (
     <div className="pp-field">
       <dt>{label}</dt>
       <dd>
-        <span className={copy ? "pp-value" : undefined}>{value}</span>
-        {copy && <CopyButton value={value} label={label} />}
+        <span className={copy === false ? undefined : "pp-value"}>{value}</span>
+        {copy !== false && (
+          <CopyButton value={typeof copy === "string" ? copy : value} label={label} />
+        )}
       </dd>
     </div>
   );

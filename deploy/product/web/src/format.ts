@@ -6,15 +6,11 @@ export function dollars(cents: number): string {
   return usd.format(cents / 100);
 }
 
+/** The exact token amount, grouped and without trailing zeros: `1,273.9185 PHA`. */
 export function tokens(atomic: string, symbol: string, decimals = 18): string {
-  const value = formatUnits(BigInt(atomic), decimals);
-  const [whole = "0", fraction = ""] = value.split(".");
-  const trimmed = fraction.slice(0, 6).replace(/0+$/, "");
-  return `${Number(whole).toLocaleString("en-US")}${trimmed ? `.${trimmed}` : ""} ${symbol}`;
-}
-
-export function exactTokens(atomic: string, symbol: string, decimals = 18): string {
-  return `${formatUnits(BigInt(atomic), decimals)} ${symbol}`;
+  const [whole = "0", fraction] = formatUnits(BigInt(atomic), decimals).split(".");
+  const grouped = BigInt(whole).toLocaleString("en-US");
+  return `${fraction === undefined ? grouped : `${grouped}.${fraction}`} ${symbol}`;
 }
 
 export function short(value: string): string {

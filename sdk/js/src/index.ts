@@ -12,7 +12,7 @@ export {
 } from "./checkout.js";
 export { PhalaPay, type PhalaPayOptions } from "./client.js";
 export { knownChain, networkName, transactionUrl } from "./chains.js";
-export { formatAmount, formatCountdown, formatTokenAmount } from "./format.js";
+export { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "./format.js";
 export { quoteTransfer, type TokenTransfer } from "./payment.js";
 export { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./quote.js";
 export {
