@@ -212,6 +212,30 @@ pub fn signed_request(
     )
 }
 
+/// A default-signed request that also sends and covers `Idempotency-Key`.
+pub fn signed_request_with_key(
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    kid: &str,
+    key: &SigningKey,
+    created: i64,
+    idempotency_key: &str,
+) -> Request<Body> {
+    signed_request_with_options(
+        method,
+        path,
+        body,
+        kid,
+        key,
+        created,
+        &SignatureOptions {
+            idempotency_key: Some(idempotency_key.to_owned()),
+            ..SignatureOptions::default()
+        },
+    )
+}
+
 #[derive(Clone, Debug)]
 pub enum SignatureParameter {
     Created,

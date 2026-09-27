@@ -20,7 +20,7 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Job queue | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` | — |
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
 | Product fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the product holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
-| Idempotent product API | Natural keys (`product_lock_ref`, `(product, external_id)`, rotation version) | A retry with a fresh signature returns the stored result |
+| Idempotent product API | `Idempotency-Key` on quote creation (Stripe; the IETF Idempotency-Key draft), natural keys elsewhere (`(product, external_id)`, rotation version) | The key is stored on the quote and never pruned; a retry with a fresh signature returns the stored result |
 | Request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | — |
 | Webhooks | Standard Webhooks | — |
 | Money | Integer minor units; 8-decimal scaled prices | Precision is an application choice |
@@ -104,8 +104,9 @@ contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = financ
 ```
 
 - `salt = keccak256(abi.encode(product_slug, external_id, version))` for persistent
-  addresses; `keccak256(abi.encode(product_slug, external_id, "lock", product_lock_ref))` for
-  rate locks. The product holds every input, so any address can be recomputed with no service
+  addresses; `keccak256(abi.encode(product_slug, external_id, "lock", quote_id))` for quotes
+  (rate locks), where `quote_id` is the service-assigned `qt_…` id (locks created before
+  quotes used the product's lock reference). The product holds every input, so any address can be recomputed with no service
   state. The API returns the inputs with the address.
 - Each chain configuration records the deployed `forwarder_factory`, its immutable
   `implementation`, and the `treasury`. Address derivation uses the configured factory and
@@ -268,14 +269,14 @@ adapter that compliance may require before GA.
 
 Invoice model, enabled from the pilot, with this service's exception profile:
 
-- `POST …/rate-locks {amount_minor | amount_atomic, product_lock_ref}` returns
-  `{address, amount_atomic, price_scaled, credit_minor, expires_at, eip681_uri, salt_inputs}`.
-  `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*;
-  when the user states USD, the token amount is rounded up. `expires_at = now + window`
-  *(policy)*. Locks count against open-exposure caps per account, per product, and global
+- `POST /v1/quotes {account_id, amount, currency, chain_id, asset}` returns the quote `{id,
+  amount, amount_atomic, exchange_rate, address, payment_uri, status, expires_at, …}`.
+  `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*; the
+  user states USD cents and the token amount is rounded up. `expires_at = now + window`
+  *(policy)*. Quotes count against open-exposure caps per account, per product, and global
   *(policy)*, reserved atomically at creation; creation is rate-limited per account. Repeating
-  a `product_lock_ref` returns the stored lock (a different amount is `409
-  idempotency_mismatch`), also while `quotes` is paused or the route disables rate locks.
+  an `Idempotency-Key` with the same parameters returns the stored quote (other parameters are
+  `409 idempotency_error`), also while `quotes` is paused.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
   `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
   single `UPDATE … WHERE consumed_by IS NULL`. That deposit is valued at `price_lock` and the
@@ -396,17 +397,16 @@ shared key would let a signed request be replayed within the freshness window ag
 deployment that shares its public origin (for example a replacement or restored instance).
 
 ```text
-POST   /v1/products/{p}/accounts                                  optional: the next two create the account
-POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent; GET same
+GET    /v1/config                                                 assets, limits, quote terms
+POST   /v1/quotes {account_id, amount, currency, chain_id, asset} single-use address + locked price; Idempotency-Key
+GET    /v1/quotes/{id}                                            resume a checkout page
+POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
+POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent, creates the account; GET same
 POST   /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
-POST   /v1/products/{p}/accounts/{ext}/rate-locks                 single-use address + locked price
-GET    /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           resume a checkout page
-DELETE /v1/products/{p}/accounts/{ext}/rate-locks/{ref}           cancel an unpaid lock; later payments credit at spot
 GET    /v1/products/{p}/accounts/{ext}/deposits?state&from&to&cursor
 GET    /v1/products/{p}/accounts/{ext}/pending-deposits           seen above finalized; not deposits
 GET    /v1/products/{p}/deposits/{id}
 GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
-GET    /v1/products/{p}/accounts/{ext}/limits                     caps, remaining, reset time
 POST   /v1/products/{p}/accounts/{ext}/pause | resume {scopes}
 POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   rejected, or credited on the product's request; finance approves (§15)
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)

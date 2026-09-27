@@ -16,6 +16,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from web3 import Web3
 from web3.contract.contract import ContractFunction
 from web3.middleware import SignAndSendRawMiddlewareBuilder
 
-from topup_client.models import DepositResponse, RateLockResponse
+from topup_client.models import DepositResponse, Quote
 from topup_sdk import RequestSigner, SigningAuth
 from topup_sdk.addresses import same_address
 
@@ -118,11 +119,9 @@ class ProductApi:
     def register(self, team: str) -> str:
         return str(self._call("POST", "/accounts", {"account_id": team})["address"])
 
-    def quote(self, team: str, lock_ref: str, amount_minor: int) -> RateLockResponse:
-        body = {"lock_ref": lock_ref, "amount_minor": amount_minor}
-        return RateLockResponse.from_dict(
-            self._call("POST", f"/accounts/{quote(team)}/quotes", body)
-        )
+    def quote(self, team: str, amount_minor: int) -> Quote:
+        body = {"amount_minor": amount_minor}
+        return Quote.from_dict(self._call("POST", f"/accounts/{quote(team)}/quotes", body))
 
     def account(self, team: str) -> dict[str, Any]:
         return self._call("GET", f"/accounts/{quote(team)}")
@@ -176,25 +175,26 @@ def run_deposit(
         persistent = api.register(team)
         LOG.info("registered workspace %s (persistent address %s)", team, persistent)
 
-        lock: RateLockResponse | None = None
+        lock: Quote | None = None
         lock_ref = None
         if persistent_atomic is not None:
             address, amount_atomic = persistent, persistent_atomic
         else:
-            lock_ref = f"checkout-{uuid.uuid4().hex[:12]}"
-            lock = api.quote(team, lock_ref, amount_minor)
-            # Pay only an address recomputed here from the product slug, workspace, and lock_ref.
-            if not same_address(quote_address(config, team, lock_ref), lock.address):
+            lock = api.quote(team, amount_minor)
+            lock_ref = lock.id
+            # Pay only an address recomputed here from the product slug, workspace, and quote id.
+            if not same_address(quote_address(config, team, lock.id), lock.address):
                 raise RuntimeError("quote address does not match the driver's own computation")
             address = lock.address
             amount_atomic = int(lock.amount_atomic) * pay_bps // 10_000
             LOG.info(
-                "quote: pay %s atomic to %s before %s for %s minor (%s)",
+                "quote %s: pay %s atomic to %s before %s for %s cents (%s)",
+                lock.id,
                 lock.amount_atomic,
                 lock.address,
-                lock.expires_at.isoformat(),
-                lock.credit_minor,
-                lock.eip681_uri,
+                datetime.fromtimestamp(lock.expires_at, UTC).isoformat(),
+                lock.amount,
+                lock.payment_uri,
             )
         if amount_atomic < min_atomic:
             hint = ""
@@ -206,7 +206,7 @@ def run_deposit(
                 f"nothing was paid{hint}"
             )
         if lock is not None and pay_after_expiry:
-            wait_s = lock.expires_at.timestamp() + LATE_MARGIN_S - time.time()
+            wait_s = lock.expires_at + LATE_MARGIN_S - time.time()
             LOG.info("waiting %.0fs to pay after the quote window", max(wait_s, 0))
             time.sleep(max(wait_s, 0))
 
@@ -228,7 +228,7 @@ def run_deposit(
             raise RuntimeError(f"deposit.credited names another account or quote: {credited}")
         expected_minor = deposit.credit_minor
         if lock is not None and at_lock_price:
-            expected_minor = lock.credit_minor
+            expected_minor = str(lock.amount)
         if credited["amount_minor"] != expected_minor:
             raise RuntimeError("credited amount differs from the expected credit")
         if lock is not None and deposit.lock_ref != lock_ref:
@@ -243,7 +243,7 @@ def run_deposit(
             deposit.state,
             credited["amount_minor"],
             credited["price_source"],
-            None if lock is None else lock.credit_minor,
+            None if lock is None else lock.amount,
         )
 
 

@@ -4,7 +4,7 @@ These are the calls a product such as Phala Cloud makes, and the checks it adds 
 
 1. pin the service's settlement key from attestation evidence bound to a fresh nonce;
 2. create a persistent deposit address (the account is created with it) and recompute it;
-3. create a quote-first rate lock and recompute its single-use address before showing it;
+3. create a quote; the client recomputes its single-use address from the pinned forwarder;
 4. list the account's deposits;
 5. receive webhooks (Standard Webhooks) and fulfill each `deposit.credited` once.
 
@@ -30,7 +30,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from topup_client.models import RateLockResponse
+from topup_client.models import Quote
 from topup_sdk import (
     AttestationError,
     CreditedDeposit,
@@ -40,7 +40,7 @@ from topup_sdk import (
     load_public_key,
     verify_webhook,
 )
-from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
+from topup_sdk.addresses import forwarder_address, persistent_salt, same_address
 
 SETTLEMENT_KEYID = "settlement/v1"
 
@@ -56,6 +56,7 @@ class Integration:
     chain_id: int
     factory: str
     implementation: str
+    token_symbol: str
 
     @classmethod
     def load(cls, path: str | Path) -> Integration:
@@ -63,8 +64,10 @@ class Integration:
         return cls(**{field.name: values[field.name] for field in fields(cls)})
 
     def client(self) -> TopupClient:
+        """A client whose key id, `{product}/v1`, names the product; with the forwarder pinned,
+        it recomputes every open quote's address before returning it."""
         signer = RequestSigner.from_seed_file(self.product_keyid, self.product_seed_file)
-        return TopupClient(self.service_url, self.product_slug, signer)
+        return TopupClient(self.service_url, signer, forwarder=(self.factory, self.implementation))
 
 
 # 1. The settlement key ---------------------------------------------------------------------------
@@ -97,20 +100,15 @@ def register(config: Integration, client: TopupClient, account: str) -> str:
     return address.address
 
 
-def quote(
-    config: Integration, client: TopupClient, account: str, lock_ref: str, amount_minor: int
-) -> RateLockResponse:
-    """Creates a quote-first lock whose single-use address the product computed itself.
+def quote(config: Integration, client: TopupClient, account: str, amount_minor: int) -> Quote:
+    """Quotes `amount_minor` cents; the account is created with its first quote.
 
-    Record `expected` as the account's before the request, so a crash in between never leaves a
-    paid address the product does not recognise.
+    The client raises `AddressMismatchError` before returning an address it did not derive from
+    the pinned forwarder, the product slug, the account, and the quote id.
     """
-    salt = lock_salt(config.product_slug, account, lock_ref)
-    expected = forwarder_address(config.factory, config.implementation, salt)
-    lock = client.create_rate_lock(account, lock_ref, amount_minor=amount_minor)
-    if not same_address(expected, lock.address):
-        raise RuntimeError("the rate-lock address does not match the product's computation")
-    return lock
+    return client.create_quote(
+        account, amount_minor, chain_id=config.chain_id, asset=config.token_symbol.lower()
+    )
 
 
 # 5. Webhooks and fulfillment ---------------------------------------------------------------------
@@ -146,12 +144,10 @@ def main() -> int:
         print("pinned the settlement key from attestation")
         account = f"example-{uuid.uuid4().hex[:12]}"
         print(f"created {account}; persistent address {register(config, client, account)}")
-        lock = quote(
-            config, client, account, f"checkout-{uuid.uuid4().hex[:12]}", args.amount_minor
-        )
+        lock = quote(config, client, account, args.amount_minor)
         print(
-            f"quote: pay {lock.amount_atomic} atomic to {lock.address} before "
-            f"{lock.expires_at.isoformat()} for {lock.credit_minor} minor ({lock.eip681_uri})"
+            f"quote {lock.id}: pay {lock.amount_atomic} atomic to {lock.address} before "
+            f"Unix time {lock.expires_at} for {lock.amount} cents ({lock.payment_uri})"
         )
         deposits = [(str(item.id), item.state) for item in client.list_deposits(account)]
         print(f"deposits: {deposits}")

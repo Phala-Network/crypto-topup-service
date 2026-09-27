@@ -106,7 +106,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 1,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
@@ -131,7 +131,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 2,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
@@ -151,7 +151,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 3,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         sqlx::query("UPDATE route_pauses SET paused_scopes = '{}' WHERE route = $1")
             .bind("phala-cloud-ethereum-pha-usd")
             .execute(&database.app_pool)
@@ -226,7 +226,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 7,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
@@ -251,7 +251,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 8,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
@@ -271,7 +271,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 now + 9,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         sqlx::query("UPDATE route_pauses SET paused_scopes = '{}' WHERE route = $1")
             .bind("phala-cloud-ethereum-pha-usd")
             .execute(&database.app_pool)
@@ -640,7 +640,7 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
                 now + 1,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         Ok(())
     }
     .await;
@@ -1335,6 +1335,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
+        client_reads: Arc::default(),
     };
     topup::api::router(state).0
 }

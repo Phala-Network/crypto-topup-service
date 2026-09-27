@@ -50,17 +50,16 @@ async fn signature_verification_vectors() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        let product =
-            seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
-        let path = format!("/v1/products/{}/accounts", product.slug);
+        let path = "/v1/config".to_owned();
         let body = serde_json::to_vec(&json!({"external_id": "signed-account"}))?;
         let now = Utc::now().timestamp();
 
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 body.clone(),
                 PRODUCT_KID,
@@ -77,7 +76,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-idempotency"}))?,
                 PRODUCT_KID,
@@ -94,7 +93,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-alg"}))?,
                 PRODUCT_KID,
@@ -107,7 +106,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "reordered-parameters"}))?,
                 PRODUCT_KID,
@@ -128,7 +127,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "different-label"}))?,
                 PRODUCT_KID,
@@ -146,7 +145,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &origin_path,
                 serde_json::to_vec(&json!({"external_id": "origin-form-query"}))?,
                 PRODUCT_KID,
@@ -163,7 +162,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "wrong-algorithm"}))?,
                 PRODUCT_KID,
@@ -185,7 +184,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 body.clone(),
                 PRODUCT_KID,
@@ -198,7 +197,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "future-created"}))?,
                 PRODUCT_KID,
@@ -209,7 +208,7 @@ async fn signature_verification_vectors() -> Result<()> {
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
 
         let mut tampered = signed_request(
-            Method::POST,
+            Method::GET,
             &path,
             body.clone(),
             PRODUCT_KID,
@@ -223,7 +222,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 body.clone(),
                 PRODUCT_KID,
@@ -234,7 +233,7 @@ async fn signature_verification_vectors() -> Result<()> {
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
 
         let mut missing_component = signed_request(
-            Method::POST,
+            Method::GET,
             &path,
             serde_json::to_vec(&json!({"external_id": "missing-component"}))?,
             PRODUCT_KID,
@@ -255,7 +254,7 @@ async fn signature_verification_vectors() -> Result<()> {
         let response = app
             .clone()
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 replay_body.clone(),
                 PRODUCT_KID,
@@ -266,7 +265,7 @@ async fn signature_verification_vectors() -> Result<()> {
         ensure!(response.status() == StatusCode::OK);
         let response = app
             .oneshot(signed_request(
-                Method::POST,
+                Method::GET,
                 &path,
                 replay_body,
                 PRODUCT_KID,
@@ -295,11 +294,11 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
         let admin_key = SigningKey::from_bytes(&[9; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
-        let path = format!("/v1/products/{}/accounts", product.slug);
+        let path = "/v1/config".to_owned();
         let now = Utc::now().timestamp();
         let request = |external_id: &str, origin: &str| -> Result<_> {
             let mut request = signed_request_with_options(
-                Method::POST,
+                Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": external_id}))?,
                 PRODUCT_KID,
@@ -340,7 +339,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
         // A signature for one path must not authorize a request to another route.
         let mut tampered = request("tampered-path", TEST_ORIGIN)?;
         *tampered.uri_mut() = format!(
-            "/v1/products/{}/accounts/tampered-path/deposit-address",
+            "/v1/products/{}/accounts/tampered-path/deposits",
             product.slug
         )
         .parse()?;
@@ -389,36 +388,6 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
 
-        let register_path = format!("/v1/products/{}/accounts", product.slug);
-        let register_body = serde_json::to_vec(&json!({"external_id": "account-001"}))?;
-        let first = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &register_path,
-                register_body.clone(),
-                PRODUCT_KID,
-                &product_key,
-                now,
-            ))
-            .await?;
-        ensure!(first.status() == StatusCode::OK);
-        let account: Value = response_json(first).await?;
-
-        let second = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &register_path,
-                register_body,
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(second.status() == StatusCode::OK);
-        ensure!(response_json(second).await?["id"] == account["id"]);
-
         let address_path = format!(
             "/v1/products/{}/accounts/account-001/deposit-address",
             product.slug
@@ -430,6 +399,12 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         ensure!(first_address.status() == StatusCode::OK);
         let first_address = response_json(first_address).await?;
         ensure!(first_address["address"] == "0x382ca64bfc7332eef90547e1a345779fa26590c2");
+        let account_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM accounts WHERE product_id = $1 AND external_id = 'account-001'",
+        )
+        .bind(product.id)
+        .fetch_one(&database.app_pool)
+        .await?;
         ensure!(first_address["salt_inputs"]["version"] == 1);
 
         let same_address = app
@@ -472,7 +447,7 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         let address_counts = sqlx::query(
             "SELECT count(*) AS total, count(*) FILTER (WHERE retired_at IS NOT NULL) AS retired FROM addresses WHERE account_id = $1",
         )
-        .bind(Uuid::parse_str(account["id"].as_str().context("account id string")?)?)
+        .bind(account_id)
         .fetch_one(&database.app_pool)
         .await?;
         ensure!(address_counts.try_get::<i64, _>("total")? == 2);
@@ -497,14 +472,12 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         ensure!(paused["paused_scopes"] == json!(["addresses", "settlement"]));
         let stored_scopes: Vec<String> =
             sqlx::query_scalar("SELECT paused_scopes FROM accounts WHERE id = $1")
-                .bind(Uuid::parse_str(
-                    account["id"].as_str().context("account id")?,
-                )?)
+                .bind(account_id)
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(stored_scopes == ["addresses", "settlement"]);
         let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit WHERE subject = $1")
-            .bind(format!("account:{}", account["id"].as_str().context("account id")?))
+            .bind(format!("account:{account_id}"))
             .fetch_one(&database.app_pool)
             .await?;
         ensure!(audit_count == 1);
@@ -520,7 +493,7 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
                 now + 2,
             ))
             .await?;
-        ensure!(paused_address.status() == StatusCode::LOCKED);
+        ensure!(paused_address.status() == StatusCode::CONFLICT);
         ensure!(response_json(paused_address).await?["error"]["code"] == "paused");
 
         let admin_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
@@ -671,7 +644,7 @@ async fn admin_product_registration() -> Result<()> {
                 response.status() == StatusCode::BAD_REQUEST,
                 "{body} must be rejected"
             );
-            ensure!(response_json(response).await?["error"]["code"] == "invalid_request");
+            ensure!(response_json(response).await?["error"]["code"] == "parameter_invalid");
         }
 
         let response = app
@@ -708,12 +681,12 @@ async fn admin_product_registration() -> Result<()> {
         ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
         ensure!(audit[0].try_get::<String, _>("action")? == "product.issue");
 
-        // The registered key authenticates product requests under the route's key id.
+        // The registered key authenticates product requests under the key id `{slug}/v1`.
         let response = app
             .oneshot(signed_request(
-                Method::POST,
-                "/v1/products/phala-cloud/accounts",
-                serde_json::to_vec(&json!({"external_id": "registered"}))?,
+                Method::GET,
+                "/v1/config",
+                Vec::new(),
                 PRODUCT_KID,
                 &product_key,
                 now,
@@ -752,9 +725,9 @@ async fn admin_product_key_replacement() -> Result<()> {
         };
         let register_account = |key: &SigningKey, created: i64| -> Result<_> {
             Ok(signed_request(
-                Method::POST,
-                "/v1/products/phala-cloud/accounts",
-                serde_json::to_vec(&json!({"external_id": format!("team-{created}")}))?,
+                Method::GET,
+                &format!("/v1/config?request={created}"),
+                Vec::new(),
                 PRODUCT_KID,
                 key,
                 created,
@@ -1036,7 +1009,7 @@ async fn route_pause_controls_address_routes() -> Result<()> {
                 now + 2,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         ensure!(response_json(response).await?["error"]["code"] == "paused");
 
         let resume_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/resume";
@@ -1114,7 +1087,7 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
                     created,
                 ))
                 .await?;
-            ensure!(response.status() == StatusCode::LOCKED);
+            ensure!(response.status() == StatusCode::CONFLICT);
             ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
         }
         let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM addresses")
@@ -1123,20 +1096,20 @@ async fn frozen_chain_refuses_address_issuance_and_rate_locks() -> Result<()> {
         ensure!(issued == 0);
 
         let lock_body = serde_json::to_vec(&json!({
-            "amount_minor": "1000",
-            "product_lock_ref": "checkout-1",
+            "account_id": "frozen-account", "amount": 1000, "currency": "usd",
+            "chain_id": 1, "asset": "pha",
         }))?;
         let response = app
             .oneshot(signed_request(
                 Method::POST,
-                "/v1/products/phala-cloud/accounts/frozen-account/rate-locks",
+                "/v1/quotes",
                 lock_body,
                 PRODUCT_KID,
                 &product_key,
                 now + 2,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::LOCKED);
+        ensure!(response.status() == StatusCode::CONFLICT);
         ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
         // A refused creation leaves no lock or lock address behind.
         let leftovers: i64 = sqlx::query_scalar(
@@ -1224,7 +1197,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             .oneshot(admin(Method::POST, lift, json!({"reason": " "}), now + 2)?)
             .await?;
         ensure!(response.status() == StatusCode::BAD_REQUEST);
-        ensure!(response_json(response).await?["error"]["code"] == "invalid_request");
+        ensure!(response_json(response).await?["error"]["code"] == "parameter_invalid");
         let response = app
             .clone()
             .oneshot(admin(
@@ -1235,7 +1208,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             )?)
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
-        ensure!(response_json(response).await?["error"]["code"] == "not_found");
+        ensure!(response_json(response).await?["error"]["code"] == "resource_missing");
 
         let response = app
             .clone()
@@ -1516,6 +1489,7 @@ fn app_state_with_attestor(
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor,
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
+        client_reads: Arc::default(),
     }
 }
 

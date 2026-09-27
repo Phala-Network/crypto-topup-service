@@ -19,7 +19,7 @@ use crate::locks::{RateLock, RateLockStatus};
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
 use super::handlers::require_account;
-use super::models::{PendingDepositResponse, PendingDepositsResponse, RateLockPayment};
+use super::models::{PendingDepositResponse, PendingDepositsResponse, QuotePayment};
 
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s (12.8 to 19 minutes).
@@ -79,27 +79,19 @@ pub(crate) async fn list_pending_deposits(
     Ok(Json(PendingDepositsResponse { pending_deposits }))
 }
 
-/// The payment the lock page shows, following the consumption rule of §9: the deposit that
-/// consumed the lock; otherwise the first transfer that would consume it (finalized deposits
+/// The payment the quote page shows, following the consumption rule of §9: the deposit that
+/// consumed the quote; otherwise the first transfer that would consume it (finalized deposits
 /// first, then transfers seen above `finalized`); otherwise the first transfer at all. On a
-/// cancelled lock no payment is in time or within tolerance, because every payment is valued at
-/// spot.
-pub(super) async fn lock_payment(
+/// canceled quote no payment matches, because every payment is valued at spot.
+pub(super) async fn quote_payment(
     state: &AppState,
     route: &RouteFile,
     lock: &RateLock,
-) -> Result<Option<RateLockPayment>, ApiError> {
-    let consumed_by = sqlx::query_scalar::<_, Option<Uuid>>(
-        "SELECT consumed_by FROM rate_locks WHERE address_id = $1",
-    )
-    .bind(lock.address_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .flatten();
+) -> Result<Option<QuotePayment>, ApiError> {
     let deposits = address_deposits(state, lock.address_id).await?;
     if let Some(consumed) = deposits
         .iter()
-        .find(|deposit| Some(deposit.deposit_id) == consumed_by)
+        .find(|deposit| Some(deposit.deposit_id) == lock.consumed_by)
     {
         return Ok(Some(payment(route, lock, consumed)));
     }
@@ -123,8 +115,6 @@ struct Observed {
     status: &'static str,
     deposit_id: Uuid,
     tx_hash: alloy_primitives::B256,
-    log_index: u64,
-    block_number: u64,
     block_time: DateTime<Utc>,
     confirmations: Option<u64>,
     asset_contract: EvmAddress,
@@ -139,8 +129,6 @@ impl From<PendingTransfer> for Observed {
             confirmations: Some(transfer.confirmations()),
             deposit_id: transfer.deposit_id,
             tx_hash: transfer.tx_hash,
-            log_index: transfer.log_index,
-            block_number: transfer.block_number,
             block_time: transfer.block_time,
             asset_contract: transfer.asset_contract,
             amount_atomic: transfer.amount_atomic,
@@ -178,30 +166,23 @@ fn terms(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Terms {
     }
 }
 
-fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> RateLockPayment {
-    let terms = terms(route, lock, observed);
-    RateLockPayment {
+fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> QuotePayment {
+    QuotePayment {
         status: observed.status.to_owned(),
-        deposit_id: observed.deposit_id,
         tx_hash: format!("{:#x}", observed.tx_hash),
-        log_index: observed.log_index,
-        block_number: observed.block_number,
-        confirmations: observed.confirmations,
         amount_atomic: observed.amount_atomic.value().to_string(),
-        asset_contract: format!("{:#x}", observed.asset_contract),
-        supported: terms.supported,
-        amount_within_tolerance: terms.amount_within_tolerance,
-        in_time: terms.in_time,
+        confirmations: observed.confirmations,
         estimated_final_at: (observed.status == "seen")
-            .then(|| estimated_final_at(observed.block_time)),
+            .then(|| estimated_final_at(observed.block_time).timestamp()),
+        matches_quote: terms(route, lock, observed).consumes_lock(),
+        deposit: crate::ids::format(crate::ids::DEPOSIT, observed.deposit_id),
     }
 }
 
 async fn address_deposits(state: &AppState, address_id: Uuid) -> Result<Vec<Observed>, ApiError> {
-    let rows = sqlx::query_as::<_, (i64, String, i64, i64, DateTime<Utc>, String, String)>(
+    let rows = sqlx::query_as::<_, (i64, String, i64, DateTime<Utc>, String, String)>(
         r#"
-        SELECT chain_id, tx_hash, log_index, block_number, block_time, asset_contract,
-               amount_atomic::text
+        SELECT chain_id, tx_hash, log_index, block_time, asset_contract, amount_atomic::text
         FROM deposits
         WHERE address_id = $1
         ORDER BY block_number, log_index
@@ -212,16 +193,14 @@ async fn address_deposits(state: &AppState, address_id: Uuid) -> Result<Vec<Obse
     .await?;
     rows.into_iter()
         .map(
-            |(chain_id, tx_hash, log_index, block_number, block_time, asset, amount)| {
+            |(chain_id, tx_hash, log_index, block_time, asset, amount)| {
                 let chain_id = u64::try_from(chain_id).ok()?;
                 let tx_hash = tx_hash.parse().ok()?;
                 let log_index = u64::try_from(log_index).ok()?;
                 Some(Observed {
-                    status: "finalized",
+                    status: "final",
                     deposit_id: deposit_id(chain_id, tx_hash, log_index),
                     tx_hash,
-                    log_index,
-                    block_number: u64::try_from(block_number).ok()?,
                     block_time,
                     confirmations: None,
                     asset_contract: asset.parse().ok()?,

@@ -19,42 +19,16 @@ use super::attestation::AttestationError;
 use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::models::{
-    AccountResponse, AdminReasonRequest, AdminRefundResponse, AttestationQuery,
-    AttestationResponse, DailyReportResponse, DepositAddressResponse, DepositListQuery,
-    DepositLookupQuery, DepositResponse, DepositsResponse, LimitsResponse, NudgeResponse,
-    OutboxReplayResponse, PauseRequest, PauseResponse, PersistentSaltInputs, ProductResponse,
-    ReconciliationBlockLiftResponse, RecordRefundRequest, RefundRequest, RefundResponse,
-    RegisterAccountRequest, RegisterProductRequest, RotateDepositAddressRequest,
-    RoutePauseResponse, SupportDepositsResponse, UpdateProductRequest,
+    AdminReasonRequest, AdminRefundResponse, AttestationQuery, AttestationResponse,
+    DailyReportResponse, DepositAddressResponse, DepositListQuery, DepositLookupQuery,
+    DepositResponse, DepositsResponse, NudgeResponse, OutboxReplayResponse, PauseRequest,
+    PauseResponse, PersistentSaltInputs, ProductResponse, ReconciliationBlockLiftResponse,
+    RecordRefundRequest, RefundRequest, RefundResponse, RegisterProductRequest,
+    RotateDepositAddressRequest, RoutePauseResponse, SupportDepositsResponse, UpdateProductRequest,
 };
 use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
-
-#[utoipa::path(
-    post,
-    path = "/v1/products/{p}/accounts",
-    params(("p" = String, Path, description = "Product slug")),
-    request_body = RegisterAccountRequest,
-    responses(
-        (status = 200, description = "OK", body = AccountResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "accounts"
-)]
-pub(crate) async fn register_account(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path(_product_slug): Path<String>,
-    Json(request): Json<RegisterAccountRequest>,
-) -> ApiResult<Json<AccountResponse>> {
-    validate_external_id(&request.external_id)?;
-    let account =
-        repository::register_account(&state.pool, product.id, &request.external_id).await?;
-    Ok(Json(account_response(account)))
-}
 
 #[utoipa::path(
     get,
@@ -205,44 +179,6 @@ pub(crate) async fn lookup_deposits(
     Ok(Json(
         repository::lookup_product_deposits(&state.pool, product.id, &filters).await?,
     ))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/products/{p}/accounts/{ext}/limits",
-    params(("p" = String, Path), ("ext" = String, Path)),
-    responses((status = 200, description = "OK", body = LimitsResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
-    security(("http_message_signature" = [])),
-    tag = "accounts"
-)]
-pub(crate) async fn get_limits(
-    State(state): State<AppState>,
-    Extension(product): Extension<Product>,
-    Path((_product_slug, external_id)): Path<(String, String)>,
-) -> ApiResult<Json<LimitsResponse>> {
-    let account = require_account(&state, product.id, &external_id).await?;
-    let route = state.route_for_product(&product)?;
-    let availability = crate::locks::exposure_availability(
-        &state.pool,
-        account.id,
-        route.rate_lock.max_open_minor.account,
-    )
-    .await
-    .map_err(|error| match error {
-        crate::locks::RateLockError::Database(error) => ApiError::from(error),
-        _ => ApiError::internal(),
-    })?;
-    Ok(Json(LimitsResponse {
-        route: route.route.clone(),
-        min_deposit_atomic: route.screening.min_deposit_atomic.value().to_string(),
-        max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
-        min_credit_minor: route.screening.min_credit_minor,
-        account_open_minor: route.rate_lock.max_open_minor.account,
-        product_open_minor: route.rate_lock.max_open_minor.product,
-        global_open_minor: route.rate_lock.max_open_minor.global,
-        remaining_account_minor: Some(availability.remaining_minor),
-        reset_at: availability.reset_at,
-    }))
 }
 
 #[utoipa::path(
@@ -811,10 +747,11 @@ async fn mutate_route_scopes(
     }))
 }
 
-fn validate_external_id(external_id: &str) -> ApiResult<()> {
+pub(super) fn validate_external_id(external_id: &str) -> ApiResult<()> {
     if external_id.is_empty() || external_id.len() > 255 {
-        return Err(ApiError::bad_request(
-            "external_id must contain 1 to 255 bytes",
+        return Err(ApiError::invalid_param(
+            "account_id",
+            "account_id must contain 1 to 255 bytes",
         ));
     }
     Ok(())
@@ -918,15 +855,6 @@ fn decode_nonce(value: &str) -> ApiResult<Vec<u8>> {
         ));
     }
     hex::decode(value).map_err(|_| ApiError::bad_request("nonce must be valid hexadecimal"))
-}
-
-fn account_response(account: Account) -> AccountResponse {
-    AccountResponse {
-        id: account.id,
-        external_id: account.external_id,
-        status: account.status,
-        paused_scopes: account.paused_scopes,
-    }
 }
 
 fn product_response(product: Product) -> ProductResponse {

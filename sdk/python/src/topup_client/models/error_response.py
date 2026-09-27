@@ -19,10 +19,11 @@ T = TypeVar("T", bound="ErrorResponse")
 
 @_attrs_define
 class ErrorResponse:
-    """Machine-readable error envelope returned by every API failure.
+    """Machine-readable error envelope returned by every API failure, Stripe's error object
+    (<https://docs.stripe.com/api/errors>).
 
-    Attributes:
-        error (ErrorDetail): Stable error fields safe to expose to callers.
+        Attributes:
+            error (ErrorDetail): Stable error fields safe to expose to callers.
     """
 
     error: ErrorDetail

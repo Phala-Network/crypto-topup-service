@@ -280,6 +280,11 @@ def verify_request(
     raise SignatureError("no valid signature")
 
 
+def sf_string(value: str) -> str:
+    """Serializes `value` as an RFC 8941 string, the form of an `Idempotency-Key` header."""
+    return _sf_serialize(value)
+
+
 def _parse_idempotency_key(value: str) -> str:
     parse = cast("Callable[..., object]", http_sf.parse)
     try:

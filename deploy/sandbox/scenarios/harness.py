@@ -29,7 +29,7 @@ from reference_product.driver import Payer  # noqa: E402
 from reference_product.fulfillment import Answer, Fulfillment  # noqa: E402
 from reference_product.ledger import ProductLedger  # noqa: E402
 from reference_product.server import create_quote, register_team  # noqa: E402
-from topup_client.models import DepositResponse, RateLockResponse  # noqa: E402
+from topup_client.models import DepositResponse, Quote  # noqa: E402
 from topup_sdk import TopupClient  # noqa: E402
 from topup_sdk.addresses import same_address  # noqa: E402
 
@@ -104,17 +104,10 @@ class Context:
         address = register_team(self.config, self.client, self.ledger, team, suspended=suspended)
         return team, address
 
-    def lock(self, team: str, amount_minor: int) -> tuple[str, RateLockResponse]:
-        lock_ref = f"lock-{uuid.uuid4().hex[:12]}"
-        lock = create_quote(
-            self.config,
-            self.client,
-            self.ledger,
-            team,
-            lock_ref=lock_ref,
-            amount_minor=amount_minor,
-        )
-        return lock_ref, lock
+    def lock(self, team: str, amount_minor: int) -> tuple[str, Quote]:
+        """Creates a quote and returns `(quote_id, quote)`."""
+        quote = create_quote(self.config, self.client, self.ledger, team, amount_minor=amount_minor)
+        return quote.id, quote
 
     def pay(self, to: str, amount_atomic: int, token: str | None = None) -> str:
         tx_hash = self.payer.mint_and_transfer(token or self.config.token, to, amount_atomic)
@@ -145,7 +138,7 @@ class Context:
         return self.event(event_type, lambda data: data.get("deposit_id") == str(deposit.id))
 
     def credited(
-        self, team: str, address: str, lock: RateLockResponse | None = None
+        self, team: str, address: str, lock: Quote | None = None
     ) -> tuple[DepositResponse, dict[str, Any]]:
         """Waits for credit and checks the webhook and product ledger agree with the service."""
         deposit = self.deposit(team, address)

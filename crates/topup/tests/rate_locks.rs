@@ -15,11 +15,11 @@ use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::locks::pricing::ValidatedQuote;
-use topup::locks::{self, QuoteProvider, RateLockError, RequestedAmount};
+use topup::locks::{self, QuoteProvider, RateLockError};
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::pricing::Observation;
 use topup_core::deposit::{DepositState, RejectReason};
-use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
+use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{SourceId, UnixSeconds};
 use tower::ServiceExt;
@@ -27,7 +27,9 @@ use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewProduct};
-use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
+use support::{
+    TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, signed_request_with_key,
+};
 
 const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
@@ -54,7 +56,7 @@ impl QuoteProvider for FixedQuote {
 }
 
 #[tokio::test]
-async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() -> Result<()> {
+async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -87,53 +89,138 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(FixedQuote),
+            client_reads: Arc::default(),
         })
         .0;
-        let path = "/v1/products/phala-cloud/accounts/account-rl/rate-locks";
-        let body = serde_json::to_vec(&json!({
-            "amount_atomic": "100",
-            "product_lock_ref": "checkout-1"
-        }))?;
         let now = Utc::now().timestamp();
-        let created = app
-            .clone()
-            .oneshot(signed_request(
+        let quote_body = |account: &str, amount: u64| {
+            serde_json::to_vec(&json!({
+                "account_id": account, "amount": amount, "currency": "usd",
+                "chain_id": 1, "asset": "pha"
+            }))
+        };
+        let create = |key: &str, body: Vec<u8>, created: i64| {
+            signed_request_with_key(
                 Method::POST,
-                path,
-                body.clone(),
+                "/v1/quotes",
+                body,
                 PRODUCT_KID,
                 &product_key,
-                now,
-            ))
+                created,
+                key,
+            )
+        };
+
+        let created = app
+            .clone()
+            .oneshot(create("key-1", quote_body("account-rl", 100)?, now))
             .await?;
         ensure!(created.status() == StatusCode::OK);
         let created = response_json(created).await?;
-        ensure!(created["status"] == "open");
-        ensure!(created["credit_minor"] == "100");
-        ensure!(created["amount_atomic"] == "100");
+        let quote_id = created["id"].as_str().context("id")?.to_owned();
+        ensure!(quote_id.starts_with("qt_") && quote_id.len() == 35);
+        ensure!(created["object"] == "quote" && created["status"] == "open");
+        ensure!(created["account_id"] == "account-rl" && created["amount"] == 100);
+        ensure!(created["currency"] == "usd" && created["asset"] == "pha");
+        ensure!(created["amount_atomic"] == "100" && created["exchange_rate"] == "1.00000000");
+        ensure!(created["expires_at"].as_i64().context("expires_at")? > now);
+        ensure!(created["payment"].is_null() && created["deposit"].is_null());
         ensure!(
-            created["eip681_uri"]
+            created["payment_uri"]
                 == format!(
                     "ethereum:{:#x}@1/transfer?address={}&uint256=100",
                     route.asset.contract,
                     created["address"].as_str().context("address")?
                 )
         );
-        ensure!(created["salt_inputs"]["lock_ref"] == "checkout-1");
+        // The address salt's reference is the quote id.
+        let salt = topup_core::address::lock_salt("phala-cloud", "account-rl", &quote_id);
+        let expected = topup_core::address::forwarder_address(
+            route.chain.contracts.forwarder_factory,
+            route.chain.contracts.implementation,
+            salt,
+        );
+        ensure!(created["address"] == format!("{expected:#x}"));
+
+        let first_secret = created["client_secret"]
+            .as_str()
+            .context("client_secret")?
+            .to_owned();
+        let random = first_secret
+            .strip_prefix(&format!("{quote_id}_secret_"))
+            .context("client_secret names its quote")?;
+        ensure!(random.len() == 48 && random.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
         let retried = app
             .clone()
+            .oneshot(create("key-1", quote_body("account-rl", 100)?, now + 1))
+            .await?;
+        ensure!(retried.status() == StatusCode::OK);
+        let retried = response_json(retried).await?;
+        ensure!(retried["id"] == quote_id);
+        // Only the secret's hash is stored, so a repeat issues a new one and the first stops working.
+        let client_secret = retried["client_secret"].as_str().context("client_secret")?;
+        ensure!(client_secret != first_secret);
+        let stale = app
+            .clone()
+            .oneshot(client_read(&quote_id, &first_secret)?)
+            .await?;
+        ensure!(stale.status() == StatusCode::NOT_FOUND);
+
+        // The payer's browser reads the public view with the secret alone, from any origin.
+        let public = app
+            .clone()
+            .oneshot(client_read(&quote_id, client_secret)?)
+            .await?;
+        ensure!(public.status() == StatusCode::OK);
+        ensure!(public.headers()["access-control-allow-origin"] == "*");
+        let public = response_json(public).await?;
+        ensure!(
+            public
+                == json!({
+                    "id": quote_id, "object": "quote", "status": "open", "amount": 100,
+                    "currency": "usd", "asset": "pha", "decimals": route.asset.decimals,
+                    "chain_id": 1, "amount_atomic": "100", "address": created["address"],
+                    "payment_uri": created["payment_uri"], "expires_at": created["expires_at"],
+                    "payment_status": "none", "confirmations": null,
+                }),
+            "{public}"
+        );
+        // Signed reads never return the secret; unsigned reads need the quote's own secret.
+        let signed = app
+            .clone()
             .oneshot(signed_request(
-                Method::POST,
-                path,
-                body,
+                Method::GET,
+                &format!("/v1/quotes/{quote_id}"),
+                Vec::new(),
                 PRODUCT_KID,
                 &product_key,
                 now + 1,
             ))
             .await?;
-        ensure!(retried.status() == StatusCode::OK);
-        ensure!(response_json(retried).await?["address"] == created["address"]);
+        ensure!(signed.status() == StatusCode::OK);
+        let signed = response_json(signed).await?;
+        ensure!(signed["account_id"] == "account-rl" && signed["client_secret"].is_null());
+        let other_quote = format!("qt_{}", Uuid::new_v4().simple());
+        for (path, secret) in [
+            (other_quote.as_str(), client_secret),
+            (
+                quote_id.as_str(),
+                &format!("{quote_id}_secret_{}", "0".repeat(48)),
+            ),
+        ] {
+            let refused = app.clone().oneshot(client_read(path, secret)?).await?;
+            ensure!(refused.status() == StatusCode::NOT_FOUND);
+            ensure!(refused.headers()["access-control-allow-origin"] == "*");
+            ensure!(response_json(refused).await?["error"]["code"] == "resource_missing");
+        }
+        let unsigned = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!("/v1/quotes/{quote_id}")).body(Body::empty())?,
+            )
+            .await?;
+        ensure!(unsigned.status() == StatusCode::UNAUTHORIZED);
         let lock_count: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_locks")
             .fetch_one(&database.app_pool)
             .await?;
@@ -141,55 +228,73 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
 
         let mismatched = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "200",
-                    "product_lock_ref": "checkout-1"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
+            .oneshot(create("key-1", quote_body("account-rl", 200)?, now + 1))
             .await?;
         ensure!(mismatched.status() == StatusCode::CONFLICT);
-        ensure!(response_json(mismatched).await?["error"]["code"] == "idempotency_mismatch");
+        let mismatched = response_json(mismatched).await?;
+        ensure!(mismatched["error"]["type"] == "idempotency_error");
+        ensure!(mismatched["error"]["code"] == "idempotency_key_reused");
 
         let limited = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-2"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 2,
-            ))
+            .oneshot(create("key-2", quote_body("account-rl", 100)?, now + 2))
             .await?;
         ensure!(limited.status() == StatusCode::TOO_MANY_REQUESTS);
-        ensure!(response_json(limited).await?["error"]["code"] == "rate_limited");
+        ensure!(response_json(limited).await?["error"]["code"] == "rate_limit");
+
+        // Invalid parameters name the parameter.
+        for (body, code, param) in [
+            (quote_body("account-rl", 0)?, "amount_too_small", "amount"),
+            (
+                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "eur",
+                    "chain_id": 1, "asset": "pha"}))?,
+                "parameter_invalid",
+                "currency",
+            ),
+            (
+                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "usd",
+                    "chain_id": 1, "asset": "usdc"}))?,
+                "parameter_invalid",
+                "asset",
+            ),
+            (
+                serde_json::to_vec(&json!({"account_id": "a", "currency": "usd",
+                    "chain_id": 1, "asset": "pha"}))?,
+                "parameter_missing",
+                "amount",
+            ),
+            (
+                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "usd",
+                    "chain_id": 1, "asset": "pha", "product_lock_ref": "x"}))?,
+                "parameter_unknown",
+                "product_lock_ref",
+            ),
+        ] {
+            let answer = app
+                .clone()
+                .oneshot(create("key-bad", body, now + 2))
+                .await?;
+            ensure!(answer.status() == StatusCode::BAD_REQUEST, "{code}");
+            let answer = response_json(answer).await?;
+            ensure!(
+                answer["error"]["type"] == "invalid_request_error",
+                "{answer}"
+            );
+            ensure!(answer["error"]["code"] == code, "{answer}");
+            ensure!(answer["error"]["param"] == param, "{answer}");
+        }
 
         // A quote for an account the service has not seen creates it, like a checkout session.
         let implicit = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                "/v1/products/phala-cloud/accounts/implicit-rl/rate-locks",
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-implicit"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
+            .oneshot(create(
+                "key-implicit",
+                quote_body("implicit-rl", 100)?,
                 now + 3,
             ))
             .await?;
         ensure!(implicit.status() == StatusCode::OK);
-        ensure!(response_json(implicit).await?["salt_inputs"]["external_id"] == "implicit-rl");
+        ensure!(response_json(implicit).await?["account_id"] == "implicit-rl");
         let implicit_accounts: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM accounts WHERE product_id = $1 AND external_id = 'implicit-rl'",
         )
@@ -198,11 +303,13 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         .await?;
         ensure!(implicit_accounts == 1);
 
+        // Another product sees neither the quote nor its key.
+        let path = format!("/v1/quotes/{quote_id}");
         let cross_tenant = app
             .clone()
             .oneshot(signed_request(
                 Method::GET,
-                "/v1/products/builder/accounts/account-rl/rate-locks/checkout-1",
+                &path,
                 Vec::new(),
                 "builder/v1",
                 &other_key,
@@ -210,11 +317,12 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             ))
             .await?;
         ensure!(cross_tenant.status() == StatusCode::NOT_FOUND);
+        ensure!(response_json(cross_tenant).await?["error"]["code"] == "resource_missing");
         let cross_tenant_cancel = app
             .clone()
             .oneshot(signed_request(
-                Method::DELETE,
-                "/v1/products/builder/accounts/account-rl/rate-locks/checkout-1",
+                Method::POST,
+                &format!("{path}/cancel"),
                 Vec::new(),
                 "builder/v1",
                 &other_key,
@@ -222,7 +330,7 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             ))
             .await?;
         ensure!(cross_tenant_cancel.status() == StatusCode::NOT_FOUND);
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "checkout-1").await? == "open");
+        ensure!(quote_status(&database.app_pool, &quote_id).await? == "open");
         let other_locks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM addresses WHERE account_id = $1 AND kind = 'lock'",
         )
@@ -235,49 +343,20 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         let paused = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-3"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 3,
-            ))
+            .oneshot(create("key-3", quote_body("account-rl", 100)?, now + 3))
             .await?;
-        ensure!(paused.status() == StatusCode::LOCKED);
-        // A replay creates nothing, so the pause does not hide the lock the product showed.
+        ensure!(paused.status() == StatusCode::CONFLICT);
+        ensure!(response_json(paused).await?["error"]["code"] == "paused");
+        // A repeat creates nothing, so the pause does not hide the quote the product showed.
         let paused_replay = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-1"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 10,
-            ))
+            .oneshot(create("key-1", quote_body("account-rl", 100)?, now + 10))
             .await?;
         ensure!(paused_replay.status() == StatusCode::OK);
         ensure!(response_json(paused_replay).await?["address"] == created["address"]);
         let paused_mismatch = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "200",
-                    "product_lock_ref": "checkout-1"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 11,
-            ))
+            .oneshot(create("key-1", quote_body("account-rl", 200)?, now + 11))
             .await?;
         ensure!(paused_mismatch.status() == StatusCode::CONFLICT);
 
@@ -286,19 +365,9 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         let product_paused = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-4"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 4,
-            ))
+            .oneshot(create("key-4", quote_body("account-rl", 100)?, now + 4))
             .await?;
-        ensure!(product_paused.status() == StatusCode::LOCKED);
+        ensure!(product_paused.status() == StatusCode::CONFLICT);
 
         seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
         sqlx::query("INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['quotes'])")
@@ -307,25 +376,15 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         let route_paused = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-5"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 5,
-            ))
+            .oneshot(create("key-5", quote_body("account-rl", 100)?, now + 5))
             .await?;
-        ensure!(route_paused.status() == StatusCode::LOCKED);
+        ensure!(route_paused.status() == StatusCode::CONFLICT);
 
         let get = app
             .clone()
             .oneshot(signed_request(
                 Method::GET,
-                "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-1",
+                &path,
                 Vec::new(),
                 PRODUCT_KID,
                 &product_key,
@@ -335,29 +394,31 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
         ensure!(get.status() == StatusCode::OK);
         ensure!(response_json(get).await?["status"] == "open");
 
-        let cancelled = app
-            .clone()
-            .oneshot(signed_request(
-                Method::DELETE,
-                "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-1",
+        let cancel = |id: &str, created: i64| {
+            signed_request(
+                Method::POST,
+                &format!("/v1/quotes/{id}/cancel"),
                 Vec::new(),
                 PRODUCT_KID,
                 &product_key,
-                now + 7,
-            ))
-            .await?;
-        ensure!(cancelled.status() == StatusCode::OK);
-        ensure!(response_json(cancelled).await?["status"] == "cancelled");
+                created,
+            )
+        };
+        let canceled = app.clone().oneshot(cancel(&quote_id, now + 7)).await?;
+        ensure!(canceled.status() == StatusCode::OK);
+        ensure!(response_json(canceled).await?["status"] == "canceled");
+        // Canceling again returns the canceled quote.
+        let again = app.clone().oneshot(cancel(&quote_id, now + 8)).await?;
+        ensure!(again.status() == StatusCode::OK);
+        ensure!(response_json(again).await?["status"] == "canceled");
         let audit_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM audit WHERE action = 'cancel_rate_lock'")
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(audit_count == 1);
-        ensure!(
-            lock_status_by_ref(&database.app_pool, account.id, "checkout-1").await? == "cancelled"
-        );
+        ensure!(quote_status(&database.app_pool, &quote_id).await? == "cancelled");
 
-        // A lock whose single-use address already received funds is no longer unpaid.
+        // A quote whose single-use address already received funds is no longer unpaid.
         sqlx::query("DELETE FROM route_pauses WHERE route = $1")
             .bind(&route.route)
             .execute(&database.app_pool)
@@ -367,81 +428,68 @@ async fn api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() ->
             .await?;
         let paid = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-6"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 8,
-            ))
+            .oneshot(create("key-6", quote_body("account-rl", 100)?, now + 8))
             .await?;
         ensure!(paid.status() == StatusCode::OK);
-        let paid_address_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM addresses WHERE account_id = $1 AND lock_ref = 'checkout-6'",
-        )
-        .bind(account.id)
-        .fetch_one(&database.app_pool)
-        .await?;
+        let paid_id = response_json(paid).await?["id"]
+            .as_str()
+            .context("id")?
+            .to_owned();
+        let paid_address_id = topup::ids::parse(topup::ids::QUOTE, &paid_id).context("quote id")?;
         insert_rejected_deposit(&database.app_pool, &route, account.id, paid_address_id).await?;
-        let refused = app
-            .clone()
-            .oneshot(signed_request(
-                Method::DELETE,
-                "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-6",
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now + 9,
-            ))
-            .await?;
+        let refused = app.clone().oneshot(cancel(&paid_id, now + 9)).await?;
         ensure!(refused.status() == StatusCode::CONFLICT);
-        ensure!(response_json(refused).await?["error"]["code"] == "pending_payment");
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "checkout-6").await? == "open");
+        ensure!(response_json(refused).await?["error"]["code"] == "quote_payment_received");
+        ensure!(quote_status(&database.app_pool, &paid_id).await? == "open");
 
-        // An unpaid lock whose payment window has closed stays open until chain-time expiry, and
-        // can no longer be cancelled.
+        // An unpaid quote whose payment window has closed stays open until chain-time expiry,
+        // and can no longer be canceled.
         sqlx::query("UPDATE rate_locks SET created_at = now() - interval '2 minutes'")
             .execute(&database.app_pool)
             .await?;
         let lapsed = app
             .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&json!({
-                    "amount_atomic": "100",
-                    "product_lock_ref": "checkout-7"
-                }))?,
-                PRODUCT_KID,
-                &product_key,
-                now + 10,
-            ))
+            .oneshot(create("key-7", quote_body("account-rl", 100)?, now + 10))
             .await?;
         ensure!(lapsed.status() == StatusCode::OK);
+        let lapsed_id = response_json(lapsed).await?["id"]
+            .as_str()
+            .context("id")?
+            .to_owned();
         sqlx::query(
-            "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = \
-             (SELECT id FROM addresses WHERE account_id = $1 AND lock_ref = 'checkout-7')",
+            "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = $1",
         )
-        .bind(account.id)
+        .bind(topup::ids::parse(topup::ids::QUOTE, &lapsed_id).context("quote id")?)
         .execute(&database.app_pool)
         .await?;
-        let window_closed = app
+        let window_closed = app.clone().oneshot(cancel(&lapsed_id, now + 11)).await?;
+        ensure!(window_closed.status() == StatusCode::CONFLICT);
+        ensure!(response_json(window_closed).await?["error"]["code"] == "quote_window_closed");
+        ensure!(quote_status(&database.app_pool, &lapsed_id).await? == "open");
+
+        let config = app
             .oneshot(signed_request(
-                Method::DELETE,
-                "/v1/products/phala-cloud/accounts/account-rl/rate-locks/checkout-7",
+                Method::GET,
+                "/v1/config",
                 Vec::new(),
                 PRODUCT_KID,
                 &product_key,
-                now + 11,
+                now + 12,
             ))
             .await?;
-        ensure!(window_closed.status() == StatusCode::CONFLICT);
-        ensure!(response_json(window_closed).await?["error"]["code"] == "window_closed");
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "checkout-7").await? == "open");
+        ensure!(config.status() == StatusCode::OK);
+        let config = response_json(config).await?;
+        ensure!(config["object"] == "config" && config["currency"] == "usd");
+        ensure!(config["max_open_amount_per_account"] == 500_000);
+        ensure!(
+            config["assets"].as_array().map(Vec::len) == Some(1),
+            "{config}"
+        );
+        let asset = &config["assets"][0];
+        ensure!(asset["chain_id"] == 1 && asset["asset"] == "pha" && asset["decimals"] == 0);
+        ensure!(asset["contract"] == format!("{:#x}", route.asset.contract));
+        ensure!(asset["min_amount"] == 1 && asset["quote_ttl_seconds"] == 900);
+        ensure!(asset["quote_spread_bps"] == 0 && asset["quote_tolerance_bps"] == 100);
         Ok(())
     }
     .await;
@@ -478,8 +526,8 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
             &product,
             &account,
             &route,
-            "round-up-1",
-            RequestedAmount::Minor(topup_core::money::MinorAmount::new(1)),
+            Some("round-up-1"),
+            MinorAmount::new(1),
         )
         .await?;
         ensure!(lock.amount_atomic.value() == U256::from(34_u64));
@@ -514,8 +562,8 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
             &first,
             &first_account,
             &account_route,
-            "account-cap-1",
-            RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+            Some("account-cap-1"),
+            MinorAmount::new(100),
         )
         .await?;
         ensure!(matches!(
@@ -525,13 +573,21 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
                 &first,
                 &first_account,
                 &account_route,
-                "account-cap-2",
-                RequestedAmount::Atomic(AtomicAmount::new(U256::from(1_u64))),
+                Some("account-cap-2"),
+                MinorAmount::new(1),
             )
             .await,
-            Err(RateLockError::ExposureCap("account"))
+            Err(RateLockError::ExposureCap {
+                scope: "account",
+                ..
+            })
         ));
-        locks::cancel(&database.app_pool, &first, &first_account, "account-cap-1").await?;
+        locks::cancel(
+            &database.app_pool,
+            &first,
+            lock_id(&database.app_pool, first_account.id, "account-cap-1").await?,
+        )
+        .await?;
 
         let mut product_route = account_route.clone();
         product_route.rate_lock.max_open_minor.account = 1_000;
@@ -542,8 +598,8 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
             &first,
             &first_account,
             &product_route,
-            "product-cap-1",
-            RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+            Some("product-cap-1"),
+            MinorAmount::new(100),
         )
         .await?;
         ensure!(matches!(
@@ -553,13 +609,21 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
                 &first,
                 &second_account,
                 &product_route,
-                "product-cap-2",
-                RequestedAmount::Atomic(AtomicAmount::new(U256::from(1_u64))),
+                Some("product-cap-2"),
+                MinorAmount::new(1),
             )
             .await,
-            Err(RateLockError::ExposureCap("product"))
+            Err(RateLockError::ExposureCap {
+                scope: "product",
+                ..
+            })
         ));
-        locks::cancel(&database.app_pool, &first, &first_account, "product-cap-1").await?;
+        locks::cancel(
+            &database.app_pool,
+            &first,
+            lock_id(&database.app_pool, first_account.id, "product-cap-1").await?,
+        )
+        .await?;
 
         let mut global_route = account_route.clone();
         global_route.rate_lock.max_open_minor.account = 1_000;
@@ -571,8 +635,8 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
             &first,
             &first_account,
             &global_route,
-            "global-cap-1",
-            RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+            Some("global-cap-1"),
+            MinorAmount::new(100),
         )
         .await?;
         ensure!(matches!(
@@ -582,11 +646,14 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
                 &second,
                 &other_account,
                 &global_route,
-                "global-cap-2",
-                RequestedAmount::Atomic(AtomicAmount::new(U256::from(1_u64))),
+                Some("global-cap-2"),
+                MinorAmount::new(1),
             )
             .await,
-            Err(RateLockError::ExposureCap("global"))
+            Err(RateLockError::ExposureCap {
+                scope: "global",
+                ..
+            })
         ));
         sqlx::query(
             "UPDATE rate_locks SET expires_at = now() - interval '1 second' WHERE address_id = $1",
@@ -603,7 +670,7 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
         ensure!(event["product_id"] == first.id.to_string());
         ensure!(event["external_id"] == "first");
         ensure!(event.get("account_id").is_none());
-        ensure!(event["product_lock_ref"] == "global-cap-1");
+        ensure!(event["product_lock_ref"] == locks::quote_id(expiring.address_id));
         ensure!(event["address"] == format!("{:#x}", expiring.address));
         ensure!(event["chain_id"] == 1);
         ensure!(event["amount_atomic"] == "100");
@@ -655,7 +722,12 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         ensure!(locks::expire_once(&database.app_pool).await? == 0);
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "open");
         ensure!(matches!(
-            locks::cancel(&database.app_pool, &product, &account, "unpaid-1").await,
+            locks::cancel(
+                &database.app_pool,
+                &product,
+                lock_id(&database.app_pool, account.id, "unpaid-1").await?
+            )
+            .await,
             Err(RateLockError::WindowClosed)
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 100);
@@ -674,8 +746,13 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         ensure!(locks::expire_once(&database.app_pool).await? == 1);
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "expired");
         ensure!(matches!(
-            locks::cancel(&database.app_pool, &product, &account, "unpaid-1").await,
-            Err(RateLockError::NotOpen)
+            locks::cancel(
+                &database.app_pool,
+                &product,
+                lock_id(&database.app_pool, account.id, "unpaid-1").await?
+            )
+            .await,
+            Err(RateLockError::NotOpen(_))
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 0);
         let events: i64 = sqlx::query_scalar(
@@ -800,8 +877,8 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
                 &product,
                 &account,
                 &route,
-                "limited-2",
-                RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+                Some("limited-2"),
+                MinorAmount::new(100),
             )
             .await,
             Err(RateLockError::RateLimited)
@@ -827,7 +904,12 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
         let lock = create_lock(&database, &quotes, &product, &account, &route, "paid-1").await?;
         insert_rejected_deposit(&database.app_pool, &route, account.id, lock.address_id).await?;
         ensure!(matches!(
-            locks::cancel(&database.app_pool, &product, &account, "paid-1").await,
+            locks::cancel(
+                &database.app_pool,
+                &product,
+                lock_id(&database.app_pool, account.id, "paid-1").await?
+            )
+            .await,
             Err(RateLockError::PendingPayment)
         ));
         ensure!(lock_status_by_ref(&database.app_pool, account.id, "paid-1").await? == "open");
@@ -897,8 +979,8 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
                     &product,
                     &account,
                     &route,
-                    "race",
-                    RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+                    Some(&format!("race-{index}")),
+                    MinorAmount::new(100),
                 )
                 .await
             });
@@ -907,7 +989,9 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
         while let Some(joined) = tasks.join_next().await {
             match joined? {
                 Ok(_) => successes += 1,
-                Err(RateLockError::ExposureCap("product")) => {}
+                Err(RateLockError::ExposureCap {
+                    scope: "product", ..
+                }) => {}
                 Err(error) => anyhow::bail!("unexpected creation failure: {error}"),
             }
         }
@@ -981,10 +1065,9 @@ async fn cancel_waits_for_an_uncommitted_deposit_to_the_lock_address() -> Result
         let mut scanner = database.app_pool.begin().await?;
         insert_deposit_in(&mut scanner, account.id, lock.address_id, 0x81).await?;
         let pool = database.app_pool.clone();
-        let (cancel_product, cancel_account) = (product.clone(), account.clone());
-        let cancel = tokio::spawn(async move {
-            locks::cancel(&pool, &cancel_product, &cancel_account, "race-1").await
-        });
+        let (cancel_product, cancel_lock) = (product.clone(), lock.address_id);
+        let cancel =
+            tokio::spawn(async move { locks::cancel(&pool, &cancel_product, cancel_lock).await });
         for _ in 0..200 {
             if cancel.is_finished() || lock_waiters(&database.app_pool).await? > 0 {
                 break;
@@ -1084,10 +1167,10 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
         for index in 0..ACCOUNTS {
             let account =
                 seed_account(&database.app_pool, product.id, &format!("c-{index}")).await?;
-            for lock in ["consume", "cancel", "expire", "keep"] {
+            for name in ["consume", "cancel", "expire", "keep"] {
                 let lock =
-                    create_lock(&database, &quotes, &product, &account, &route, lock).await?;
-                if lock.lock_ref == "expire" {
+                    create_lock(&database, &quotes, &product, &account, &route, name).await?;
+                if name == "expire" {
                     sqlx::query("UPDATE rate_locks SET expires_at = now() WHERE address_id = $1")
                         .bind(lock.address_id)
                         .execute(&database.app_pool)
@@ -1108,19 +1191,19 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
             );
             tasks.spawn(async move {
                 for round in 0..3 {
-                    let lock_ref = format!("new-{round}");
+                    let key = format!("{}/new-{round}", account.external_id);
                     locks::create(
                         &pool,
                         &quotes,
                         &product,
                         &account,
                         &route,
-                        &lock_ref,
-                        RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+                        Some(&key),
+                        MinorAmount::new(100),
                     )
                     .await?;
                 }
-                locks::cancel(&pool, &product, &account, "cancel").await?;
+                locks::cancel(&pool, &product, lock_id(&pool, account.id, "cancel").await?).await?;
                 consume_lock(&pool, account.id, "consume", u8::try_from(index)?).await?;
                 anyhow::Ok(())
             });
@@ -1185,12 +1268,7 @@ async fn consume_lock(
     lock_ref: &str,
     number: u8,
 ) -> Result<()> {
-    let address_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM addresses WHERE account_id = $1 AND lock_ref = $2")
-            .bind(account_id)
-            .bind(lock_ref)
-            .fetch_one(pool)
-            .await?;
+    let address_id = lock_id(pool, account_id, lock_ref).await?;
     let mut transaction = pool.begin().await?;
     let deposit_id = insert_deposit_in(&mut transaction, account_id, address_id, number).await?;
     let lease_token = Uuid::new_v4();
@@ -1303,8 +1381,8 @@ async fn create_lock(
         product,
         account,
         route,
-        lock_ref,
-        RequestedAmount::Atomic(AtomicAmount::new(U256::from(100_u64))),
+        Some(&format!("{}/{lock_ref}", account.external_id)),
+        MinorAmount::new(100),
     )
     .await?)
 }
@@ -1327,23 +1405,46 @@ async fn exposure(pool: &sqlx::PgPool, scope: &str) -> Result<u64> {
     Ok(open.parse()?)
 }
 
-async fn lock_status_by_ref(
-    pool: &sqlx::PgPool,
-    account_id: Uuid,
-    lock_ref: &str,
-) -> Result<String> {
+/// The address id of the account's lock created with `lock_ref`: its idempotency key is
+/// `lock_ref` itself or, from [`create_lock`], `{external_id}/{lock_ref}`.
+async fn lock_id(pool: &sqlx::PgPool, account_id: Uuid, lock_ref: &str) -> Result<Uuid> {
     Ok(sqlx::query_scalar(
         r#"
-        SELECT rate_lock.status
+        SELECT rate_lock.address_id
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
-        WHERE address.account_id = $1 AND address.lock_ref = $2
+        JOIN accounts AS account ON account.id = address.account_id
+        WHERE address.account_id = $1
+          AND rate_lock.idempotency_key IN ($2, account.external_id || '/' || $2)
         "#,
     )
     .bind(account_id)
     .bind(lock_ref)
     .fetch_one(pool)
     .await?)
+}
+
+/// Status of the account's lock created with `lock_ref` (see [`lock_id`]).
+async fn lock_status_by_ref(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+    lock_ref: &str,
+) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
+            .bind(lock_id(pool, account_id, lock_ref).await?)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+async fn quote_status(pool: &sqlx::PgPool, quote_id: &str) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
+            .bind(topup::ids::parse(topup::ids::QUOTE, quote_id).context("quote id")?)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 async fn insert_rejected_deposit(
@@ -1430,6 +1531,14 @@ async fn seed_account(
         },
     )
     .await?)
+}
+
+/// An unsigned `GET /v1/quotes/{id}?client_secret=…`, as a browser sends it.
+fn client_read(quote_id: &str, client_secret: &str) -> Result<axum::http::Request<Body>> {
+    Ok(axum::http::Request::get(format!(
+        "/v1/quotes/{quote_id}?client_secret={client_secret}"
+    ))
+    .body(Body::empty())?)
 }
 
 async fn response_json(response: axum::response::Response) -> Result<Value> {

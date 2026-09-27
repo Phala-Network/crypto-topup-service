@@ -16,9 +16,9 @@ def run(ctx: Context) -> None:
         "rate_lock.expired",
         lambda data: data.get("external_id") == team and data.get("product_lock_ref") == lock_ref,
     )
-    check(expired["credit_minor"] == lock.credit_minor, "expiry event names another quote")
+    check(expired["credit_minor"] == str(lock.amount), "expiry event names another quote")
     ctx.pay(lock.address, int(lock.amount_atomic))
     deposit, confirmed = ctx.credited(team, lock.address, lock)
     check(confirmed["price_source"] == "spot", "late payment was valued at the lock price")
-    check(ctx.client.get_rate_lock(team, lock_ref).status == "expired", "lock is not expired")
+    check(ctx.client.get_quote(lock_ref).status == "expired", "lock is not expired")
     check(deposit.lock_ref == lock_ref, "deposit does not reference its lock")

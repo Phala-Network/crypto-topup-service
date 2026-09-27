@@ -7,6 +7,25 @@ webhook receivers must ignore unknown fields.
 
 ### Changed
 
+- **Breaking**: quotes replace rate locks (docs/design/stripe-style-api.md §2). `POST /v1/quotes
+  {account_id, amount, currency, chain_id, asset}`, `GET /v1/quotes/{id}`, and
+  `POST /v1/quotes/{id}/cancel` replace `…/accounts/{ext}/rate-locks[/{ref}]`; the quote id
+  (`qt_…`) replaces `product_lock_ref`, `Idempotency-Key` makes creation safe to retry, amounts
+  are integer cents with `currency: "usd"`, timestamps are Unix seconds, and statuses are `open`,
+  `complete`, `expired`, and `canceled`. A new quote's address salt uses its id as the reference.
+  Quoting by token amount is removed. `GET /v1/config` lists the payable assets, limits, and
+  quote terms; `POST …/accounts` and `GET …/accounts/{ext}/limits` are removed (the first quote or
+  address creates the account).
+- `POST /v1/quotes` returns a `client_secret`, like Stripe's PaymentIntent. The payer's browser
+  reads the quote's public view, `ClientQuote`, from `GET /v1/quotes/{id}?client_secret=…` without
+  a signature (any origin; rate-limited). Only the secret's hash is stored: `GET` returns `null`,
+  and a repeat with the same `Idempotency-Key` returns a new secret.
+- **Breaking**: the product is identified by the request signature's key id, `{product}/v1`,
+  not by the path.
+- **Breaking**: errors are Stripe's error object, `{"error": {"type", "code", "message",
+  "param"}}`, with Stripe-style codes (`parameter_invalid`, `resource_missing`,
+  `signature_invalid`, `rate_limit`, `idempotency_key_reused`, …). `paused` and `chain_frozen`
+  answer `409` instead of `423`.
 - Route files name only what differs per route or environment (`route`, `version`, `product`,
   `chain.{chain_id, forwarder_factory, treasury}`, `asset.{symbol, contract, decimals}`,
   `pricing.{primary, check}`, and `limits`); every other value is a code default, overridable

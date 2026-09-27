@@ -634,50 +634,20 @@
         }
       }
     },
-    "/v1/products/{p}/accounts": {
-      "post": {
+    "/v1/config": {
+      "get": {
         "tags": [
-          "accounts"
+          "config"
         ],
-        "operationId": "register_account",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "description": "Product slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RegisterAccountRequest"
-              }
-            }
-          },
-          "required": true
-        },
+        "summary": "The calling product's assets, limits, and quote terms, from its attested routes.",
+        "operationId": "get_config",
         "responses": {
           "200": {
             "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccountResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/Config"
                 }
               }
             }
@@ -1045,59 +1015,6 @@
         ]
       }
     },
-    "/v1/products/{p}/accounts/{ext}/limits": {
-      "get": {
-        "tags": [
-          "accounts"
-        ],
-        "operationId": "get_limits",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LimitsResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
     "/v1/products/{p}/accounts/{ext}/pause": {
       "post": {
         "tags": [
@@ -1211,249 +1128,6 @@
           },
           "404": {
             "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/accounts/{ext}/rate-locks": {
-      "post": {
-        "tags": [
-          "rate-locks"
-        ],
-        "operationId": "create_rate_lock",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateRateLockRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RateLockResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "423": {
-            "description": "Locked",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Too Many Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/products/{p}/accounts/{ext}/rate-locks/{ref}": {
-      "get": {
-        "tags": [
-          "rate-locks"
-        ],
-        "operationId": "get_rate_lock",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ref",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RateLockResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "rate-locks"
-        ],
-        "operationId": "cancel_rate_lock",
-        "parameters": [
-          {
-            "name": "p",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ext",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ref",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CancelRateLockResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "`conflict`: the lock is consumed or expired; `window_closed`: the payment window has closed while the lock awaits chain-time expiry; `pending_payment`: the lock address already received a payment.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1761,42 +1435,254 @@
           }
         ]
       }
+    },
+    "/v1/quotes": {
+      "post": {
+        "tags": [
+          "quotes"
+        ],
+        "summary": "Quotes `amount` cents payable in `asset` on `chain_id`: a locked price, the exact token amount,\nand a single-use address, valid until `expires_at`.",
+        "operationId": "create_quote",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; a repeat with the same parameters returns the same quote, and with other parameters is `409 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateQuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`exposure_cap_exceeded`, `paused`, `chain_frozen`, `signature_replayed`, or `idempotency_error`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/quotes/{id}": {
+      "get": {
+        "tags": [
+          "quotes"
+        ],
+        "summary": "One quote, for example to resume a checkout page. The payer's browser can read the quote's\npublic view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.",
+        "operationId": "get_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Quote id, `qt_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client_secret",
+            "in": "query",
+            "description": "The quote's `client_secret`, to read its public view without a signature. Send the request\nwithout `Signature` headers; the response then allows any origin.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK: a `Quote` to a signed request, a `ClientQuote` to a request by `client_secret`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found, also for a `client_secret` that is not this quote's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests: reads by `client_secret`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          },
+          {}
+        ]
+      }
+    },
+    "/v1/quotes/{id}/cancel": {
+      "post": {
+        "tags": [
+          "quotes"
+        ],
+        "summary": "Cancels an open, unpaid quote; a canceled quote is returned unchanged. Later payments to its\naddress are credited at spot.",
+        "operationId": "cancel_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Quote id, `qt_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`quote_payment_received`: the address already received a payment; `quote_window_closed`: past `expires_at`; `quote_unexpected_state`: complete or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
-      "AccountResponse": {
-        "type": "object",
-        "description": "Product-owned account.",
-        "required": [
-          "id",
-          "external_id",
-          "status",
-          "paused_scopes"
-        ],
-        "properties": {
-          "external_id": {
-            "type": "string",
-            "description": "Product-owned account identifier."
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Service account identifier."
-          },
-          "paused_scopes": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Active account-level pause scopes."
-          },
-          "status": {
-            "type": "string",
-            "description": "Workspace lifecycle state."
-          }
-        }
-      },
       "AdminReasonRequest": {
         "type": "object",
         "description": "Administrative action body; `reason` is recorded in the action's audit row.",
@@ -1874,50 +1760,247 @@
           }
         }
       },
-      "CancelRateLockResponse": {
+      "ClientQuote": {
         "type": "object",
-        "description": "Cancellation result for an unpaid rate lock.",
+        "description": "The public view of a quote, read with its `client_secret` and without a signature, for the\npayer's checkout page. It has no account or internal fields.",
         "required": [
-          "product_lock_ref",
-          "status"
+          "id",
+          "object",
+          "status",
+          "amount",
+          "currency",
+          "asset",
+          "decimals",
+          "chain_id",
+          "amount_atomic",
+          "address",
+          "payment_uri",
+          "expires_at",
+          "payment_status"
         ],
         "properties": {
-          "product_lock_ref": {
+          "address": {
             "type": "string",
-            "description": "Product checkout reference."
+            "description": "Single-use forwarder address to pay."
+          },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credit in the currency's minor unit.",
+            "minimum": 0
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "The exact token amount to pay, in base units, as a decimal string."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset code."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "While `seen`: blocks on top of and including the payment's block; otherwise `null`.",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "description": "`usd`."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The token's decimals, to display `amount_atomic`.",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End of the payment window, Unix seconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "`qt_` id."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `quote`."
+          },
+          "payment_status": {
+            "type": "string",
+            "description": "Progress of the payment shown on the page; display only, never a reason to deliver\nanything: `none`; `seen` (in a block that is not final yet and may still disappear);\n`confirming` (final, being valued and screened); `credited`; or `rejected` (final and not\ncredited; the payer should contact the product's support)."
+          },
+          "payment_uri": {
+            "type": "string",
+            "description": "EIP-681 URI carrying the token, chain, address, and amount."
           },
           "status": {
             "type": "string",
-            "description": "Stable cancellation status."
+            "description": "`open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once\n`expires_at` has passed."
           }
         }
       },
-      "CreateRateLockRequest": {
+      "Config": {
         "type": "object",
-        "description": "Rate-lock creation body owned by C10.",
+        "description": "What a product's UI reads instead of hardcoding: assets, limits, and quote terms.",
         "required": [
-          "product_lock_ref"
+          "object",
+          "currency",
+          "max_open_amount_per_account",
+          "assets"
         ],
         "properties": {
-          "amount_atomic": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Desired token amount in atomic units."
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConfigAsset"
+            },
+            "description": "One entry per payable asset."
           },
-          "amount_minor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Desired destination amount in minor units."
-          },
-          "product_lock_ref": {
+          "currency": {
             "type": "string",
-            "description": "Product checkout reference."
+            "description": "Credit currency, `usd`."
+          },
+          "max_open_amount_per_account": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-account cap on the credit of open quotes, in cents; no single quote can exceed it.",
+            "minimum": 0
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `config`."
           }
         }
+      },
+      "ConfigAsset": {
+        "type": "object",
+        "description": "A payable asset and its terms.",
+        "required": [
+          "chain_id",
+          "asset",
+          "contract",
+          "decimals",
+          "pricing",
+          "min_amount",
+          "max_deposit_atomic",
+          "min_refund_atomic",
+          "quote_ttl_seconds",
+          "quote_spread_bps",
+          "quote_tolerance_bps",
+          "typical_finality_seconds"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset code."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "contract": {
+            "type": "string",
+            "description": "Token contract address."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Token decimals.",
+            "minimum": 0
+          },
+          "max_deposit_atomic": {
+            "type": "string",
+            "description": "Maximum creditable deposit in base units, as a decimal string."
+          },
+          "min_amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum credit in cents, for quotes and deposits; smaller deposits are not credited.",
+            "minimum": 0
+          },
+          "min_refund_atomic": {
+            "type": "string",
+            "description": "Minimum refundable amount in base units, as a decimal string."
+          },
+          "pricing": {
+            "type": "string",
+            "description": "`spot` or `stablecoin`."
+          },
+          "quote_spread_bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no spread.",
+            "minimum": 0
+          },
+          "quote_tolerance_bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A payment within this many basis points of the quoted amount completes the quote.",
+            "minimum": 0
+          },
+          "quote_ttl_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Payment window of a quote, in seconds.",
+            "minimum": 0
+          },
+          "typical_finality_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Typical time from payment to finality, in seconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateQuoteRequest": {
+        "type": "object",
+        "description": "`POST /v1/quotes` body.",
+        "required": [
+          "account_id",
+          "amount",
+          "currency",
+          "chain_id",
+          "asset"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "description": "Your identifier of the customer account to credit, 1 to 255 bytes; the account is created\non its first quote."
+          },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The credit to quote, a positive integer in the currency's minor unit (US cents).",
+            "minimum": 0
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset code of the payment on that chain, such as `pha`."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain of the payment, one of `GET /v1/config` `assets[].chain_id`.",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "description": "Lowercase ISO currency code; only `usd`."
+          }
+        },
+        "additionalProperties": false
       },
       "DailyReportResponse": {
         "type": "object",
@@ -2241,6 +2324,7 @@
         "type": "object",
         "description": "Stable error fields safe to expose to callers.",
         "required": [
+          "type",
           "code",
           "message"
         ],
@@ -2251,13 +2335,24 @@
           },
           "message": {
             "type": "string",
-            "description": "Human-readable summary without internal details."
+            "description": "Human-readable summary without internal details; it may change."
+          },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The request parameter the error is about, when there is one."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ErrorType",
+            "description": "Error category: `invalid_request_error` for any 4xx except an idempotency conflict,\n`idempotency_error` for an `Idempotency-Key` reused with other parameters, `api_error` for\n5xx."
           }
         }
       },
       "ErrorResponse": {
         "type": "object",
-        "description": "Machine-readable error envelope returned by every API failure.",
+        "description": "Machine-readable error envelope returned by every API failure, Stripe's error object\n(<https://docs.stripe.com/api/errors>).",
         "required": [
           "error"
         ],
@@ -2267,6 +2362,15 @@
             "description": "Error details."
           }
         }
+      },
+      "ErrorType": {
+        "type": "string",
+        "description": "Error category of [`ErrorDetail`].",
+        "enum": [
+          "invalid_request_error",
+          "idempotency_error",
+          "api_error"
+        ]
       },
       "FailedCheckReport": {
         "type": "object",
@@ -2309,74 +2413,6 @@
           "outcome": {
             "type": "string",
             "description": "`planned`; `idle` when no address met the flush policy, a flush was already in flight, or\nreconciliation froze the chain; `operator_not_authorized` when the operator was not known\nto hold `OPERATOR_ROLE`; `failed`; or `send_failed` when planning succeeded but sending or\nmaintaining a flush afterwards failed."
-          }
-        }
-      },
-      "LimitsResponse": {
-        "type": "object",
-        "description": "Configured route limits and currently available exposure.",
-        "required": [
-          "route",
-          "min_deposit_atomic",
-          "max_deposit_atomic",
-          "min_credit_minor",
-          "account_open_minor",
-          "product_open_minor",
-          "global_open_minor"
-        ],
-        "properties": {
-          "account_open_minor": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-account open rate-lock cap in minor units.",
-            "minimum": 0
-          },
-          "global_open_minor": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Global open rate-lock cap in minor units.",
-            "minimum": 0
-          },
-          "max_deposit_atomic": {
-            "type": "string",
-            "description": "Maximum atomic deposit amount."
-          },
-          "min_credit_minor": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Minimum destination credit in minor units.",
-            "minimum": 0
-          },
-          "min_deposit_atomic": {
-            "type": "string",
-            "description": "Minimum atomic deposit amount."
-          },
-          "product_open_minor": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-product open rate-lock cap in minor units.",
-            "minimum": 0
-          },
-          "remaining_account_minor": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Remaining account exposure.",
-            "minimum": 0
-          },
-          "reset_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "Earliest payment-window close among open reserved locks; it can be in the past, because\nexposure is released only at chain finality, about 15 minutes after the window closes."
-          },
-          "route": {
-            "type": "string",
-            "description": "Route name."
           }
         }
       },
@@ -2657,39 +2693,129 @@
           }
         }
       },
-      "RateLockPayment": {
+      "Quote": {
         "type": "object",
-        "description": "A payment observed at a rate-lock address.",
+        "description": "A quote: a locked price, an exact token amount, and a single-use address to pay it to.",
+        "required": [
+          "id",
+          "object",
+          "account_id",
+          "amount",
+          "currency",
+          "chain_id",
+          "asset",
+          "amount_atomic",
+          "exchange_rate",
+          "address",
+          "payment_uri",
+          "status",
+          "expires_at",
+          "created"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "description": "Your account identifier."
+          },
+          "address": {
+            "type": "string",
+            "description": "Single-use forwarder address to pay."
+          },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credit in the currency's minor unit.",
+            "minimum": 0
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "The exact token amount to pay, in base units, as a decimal string."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset code."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lets the payer's browser read the quote's public view, `ClientQuote`, from\n`GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by\n`POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`\nreturns a new secret and the earlier one stops working. Give it only to the paying\ncustomer's page, and do not log it."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "currency": {
+            "type": "string",
+            "description": "`usd`."
+          },
+          "deposit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`dep_` id of the deposit that completed the quote."
+          },
+          "exchange_rate": {
+            "type": "string",
+            "description": "The locked price in USD per token, a decimal string with 8 decimal places."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End of the payment window, Unix seconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "`qt_` id. New quotes' address salt is `keccak256(abi.encode(product_slug, account_id,\n\"lock\", id))`."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `quote`."
+          },
+          "payment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/QuotePayment",
+                "description": "The payment the checkout page should show, once one is seen on chain; display only."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "payment_uri": {
+            "type": "string",
+            "description": "EIP-681 URI carrying the token, chain, address, and amount."
+          },
+          "status": {
+            "type": "string",
+            "description": "`open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays\n`open` after `expires_at` until the finalized chain passes it, so a payment mined in time\nis never reported as expired; hide the address once `expires_at` has passed."
+          }
+        }
+      },
+      "QuotePayment": {
+        "type": "object",
+        "description": "A payment observed at a quote's address. Display only: while `status` is `seen` it is not\nfinal, may still disappear in a reorg, and nothing has been credited.",
         "required": [
           "status",
-          "deposit_id",
           "tx_hash",
-          "log_index",
-          "block_number",
           "amount_atomic",
-          "asset_contract",
-          "supported",
-          "amount_within_tolerance",
-          "in_time"
+          "matches_quote",
+          "deposit"
         ],
         "properties": {
           "amount_atomic": {
             "type": "string",
-            "description": "Atomic token amount encoded as a decimal string."
-          },
-          "amount_within_tolerance": {
-            "type": "boolean",
-            "description": "Whether the amount is the lock's asset within the lock tolerance; always false on a\ncancelled lock."
-          },
-          "asset_contract": {
-            "type": "string",
-            "description": "Canonical token contract address."
-          },
-          "block_number": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Block that contains the transfer.",
-            "minimum": 0
+            "description": "Token amount in base units, as a decimal string."
           },
           "confirmations": {
             "type": [
@@ -2697,39 +2823,28 @@
               "null"
             ],
             "format": "int64",
-            "description": "Blocks on top of and including that block at the last head scan; `seen` only.",
+            "description": "Blocks on top of and including the transfer's block at the last head scan; `seen` only.",
             "minimum": 0
           },
-          "deposit_id": {
+          "deposit": {
             "type": "string",
-            "format": "uuid",
-            "description": "Identifier the deposit has, or will have once final."
+            "description": "`dep_` id the deposit has, or will have once final."
           },
           "estimated_final_at": {
             "type": [
-              "string",
+              "integer",
               "null"
             ],
-            "format": "date-time",
-            "description": "Estimated finality time: block time plus 15 minutes; `seen` only."
-          },
-          "in_time": {
-            "type": "boolean",
-            "description": "Whether the block time is at or before `expires_at`; always false on a cancelled lock."
-          },
-          "log_index": {
-            "type": "integer",
             "format": "int64",
-            "description": "Transfer log index.",
-            "minimum": 0
+            "description": "Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only."
+          },
+          "matches_quote": {
+            "type": "boolean",
+            "description": "Whether the payment is the quote's asset, in time, and within tolerance, so it will be\ncredited at the quoted price; otherwise it is credited at spot once final."
           },
           "status": {
             "type": "string",
-            "description": "`seen`: in a block above `finalized`, provisional and may still disappear in a reorg.\n`finalized`: recorded as a deposit; follow it by `deposit_id`. New values may be added."
-          },
-          "supported": {
-            "type": "boolean",
-            "description": "Whether the token is the lock's route asset."
+            "description": "`seen` (above the finalized head) or `final` (recorded as a deposit). New values may be\nadded."
           },
           "tx_hash": {
             "type": "string",
@@ -2737,95 +2852,18 @@
           }
         }
       },
-      "RateLockResponse": {
-        "type": "object",
-        "description": "Rate-lock response shape owned by C10.",
-        "required": [
-          "address",
-          "amount_atomic",
-          "price_scaled",
-          "credit_minor",
-          "expires_at",
-          "status",
-          "remaining_seconds",
-          "eip681_uri",
-          "salt_inputs"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Single-use forwarder address."
+      "QuoteView": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Quote",
+            "description": "The product's view."
           },
-          "amount_atomic": {
-            "type": "string",
-            "description": "Exact token amount in atomic units."
-          },
-          "credit_minor": {
-            "type": "string",
-            "description": "Destination credit in minor units."
-          },
-          "eip681_uri": {
-            "type": "string",
-            "description": "EIP-681 payment URI."
-          },
-          "expires_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Lock expiry time."
-          },
-          "payment": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/RateLockPayment",
-                "description": "The payment to the lock address that the checkout page should show, once one is seen on\nchain: the deposit that consumed the lock; otherwise the first payment that would consume\nit; otherwise the first payment. Display only: while `status` is `seen` the payment is not\nfinal and nothing has been credited."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "price_scaled": {
-            "type": "string",
-            "description": "Locked eight-decimal scaled price."
-          },
-          "remaining_seconds": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Whole seconds remaining in the payment window; zero once `expires_at` has passed.",
-            "minimum": 0
-          },
-          "salt_inputs": {
-            "$ref": "#/components/schemas/RateLockSaltInputs",
-            "description": "Inputs encoded into the rate-lock salt."
-          },
-          "status": {
-            "type": "string",
-            "description": "Stable lifecycle status: `open`, `consumed`, `expired`, or `cancelled`. A lock stays `open`\nafter its window closes until the finalized chain passes `expires_at`, so a payment mined\ninside the window is never reported as expired."
+          {
+            "$ref": "#/components/schemas/ClientQuote",
+            "description": "The payer's view."
           }
-        }
-      },
-      "RateLockSaltInputs": {
-        "type": "object",
-        "description": "Inputs needed to recompute a rate-lock CREATE2 address.",
-        "required": [
-          "product_slug",
-          "external_id",
-          "lock_ref"
         ],
-        "properties": {
-          "external_id": {
-            "type": "string",
-            "description": "Product-owned account identifier."
-          },
-          "lock_ref": {
-            "type": "string",
-            "description": "Product checkout reference."
-          },
-          "product_slug": {
-            "type": "string",
-            "description": "Stable product slug."
-          }
-        }
+        "description": "`GET /v1/quotes/{id}` returns a `Quote` to a signed request and a `ClientQuote` to a request by\n`client_secret`."
       },
       "ReconciliationBlockLiftResponse": {
         "type": "object",
@@ -2980,19 +3018,6 @@
           "to_address": {
             "type": "string",
             "description": "Customer-controlled destination address."
-          }
-        }
-      },
-      "RegisterAccountRequest": {
-        "type": "object",
-        "description": "Account registration body.",
-        "required": [
-          "external_id"
-        ],
-        "properties": {
-          "external_id": {
-            "type": "string",
-            "description": "Product-owned account identifier."
           }
         }
       },

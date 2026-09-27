@@ -192,6 +192,21 @@ pub fn verify(
     Err(VerificationFailed)
 }
 
+/// Returns the key ids named by the well-formed profile entries of `Signature-Input`, in order,
+/// so a verifier can choose the key to verify with. Nothing here is verified.
+#[must_use]
+pub fn signature_keyids(signature_input: &str) -> Vec<String> {
+    parse_dictionary(signature_input)
+        .map(|entries| {
+            entries
+                .values()
+                .filter_map(|entry| parse_signature_input_entry(entry).ok())
+                .map(|parsed| parsed.keyid)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn verify_content_digest(value: &str, body: &[u8]) -> Result<(), VerificationFailed> {
     let encoded = value
         .trim()
@@ -481,6 +496,16 @@ mod tests {
             signature: format!("{}, {}", other.signature, ours.signature),
         };
         assert!(check(&combined, true).is_ok());
+    }
+
+    #[test]
+    fn signature_keyids_lists_well_formed_entries() {
+        let input = format!(
+            "a=(\"@method\" \"@target-uri\" \"content-digest\");created={NOW};keyid=\"acme/v1\", \
+             b=(\"@method\");created={NOW};keyid=\"other/v1\""
+        );
+        assert_eq!(signature_keyids(&input), ["acme/v1"]);
+        assert!(signature_keyids("not a dictionary(").is_empty());
     }
 
     #[test]

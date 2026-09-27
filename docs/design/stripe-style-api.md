@@ -44,7 +44,7 @@ Every product request is signed; the `keyid` names the product (§2.8).
 |---|---|---|
 | `GET /v1/config` | What the integrator's UI reads instead of hardcoding: assets, limits, quote terms, finality time (§2.2) | `GET …/accounts/{ext}/limits` (static part) |
 | `POST /v1/quotes` | Create a quote: `{account_id, amount, currency, chain_id, asset}`; `Idempotency-Key` | `POST …/accounts/{ext}/rate-locks`; implicit account creation stays |
-| `GET /v1/quotes/{id}` | Resume a checkout; carries the display-only `payment` | `GET …/rate-locks/{ref}` |
+| `GET /v1/quotes/{id}` | Resume a checkout; carries the display-only `payment`. Unsigned with `?client_secret=`: the payer's public view (§2.3.1) | `GET …/rate-locks/{ref}` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote | `DELETE …/rate-locks/{ref}` |
 | `GET /v1/deposits` | List, newest first; filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]` | `GET …/accounts/{ext}/deposits`, `GET …/deposits?tx_hash=\|address=\|lock_ref=` |
 | `GET /v1/deposits/{id}` | One deposit | `GET …/deposits/{id}` |
@@ -133,7 +133,8 @@ adopts the error object. `GET /openapi.json` and `/healthz` stay.
   "expires_at": 1790410500,
   "created": 1790409600,
   "payment": null,
-  "deposit": null
+  "deposit": null,
+  "client_secret": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10_secret_…"
 }
 ```
 
@@ -161,6 +162,32 @@ adopts the error object. `GET /openapi.json` and `/healthz` stay.
 - The address salt is today's lock salt with the quote id as the reference:
   `keccak256(abi.encode(product_slug, account_id, "lock", quote_id))`. The SDK's `lock_salt` and
   the CREATE2 vectors are unchanged.
+
+#### 2.3.1 Client secret
+
+Stripe's
+[`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret)
+lets the customer's browser retrieve a PaymentIntent without the secret key
+([`stripe.retrievePaymentIntent(clientSecret)`](https://docs.stripe.com/js/payment_intents/retrieve_payment_intent);
+retrieving with a publishable key returns a subset of properties). A quote has the same:
+
+- `client_secret` is `{quote id}_secret_{48 random hex digits}` (192 bits), so the quote id is
+  recoverable from it. Only its SHA-256 is stored (`rate_locks.client_secret_hash`), so it is
+  returned only by `POST /v1/quotes`; `GET` returns `null`, and webhooks never carry it. A repeat
+  with the same `Idempotency-Key` returns a new secret and the earlier one stops working: the
+  product retries only when it lost the response, so nobody holds the earlier one.
+- `GET /v1/quotes/{id}?client_secret=…` without signature headers returns a `ClientQuote`:
+  `{id, object: "quote", status, amount, currency, asset, decimals, chain_id, amount_atomic,
+  address, payment_uri, expires_at, payment_status, confirmations}`. No `account_id`, price,
+  deposit id, or transaction hash. `payment_status` is `none`, `seen` (above the finalized head),
+  `confirming` (final, being valued and screened), `credited`, or `rejected` (final and not
+  credited; the payer contacts support; the reason is not exposed); `confirmations` is set while
+  `seen`. A request with signature headers is a product request as before.
+- Every response to an unsigned read, errors included, has `Access-Control-Allow-Origin: *`: the
+  secret is the bearer, like Stripe's publishable key with the client secret. A plain `GET` needs
+  no preflight. A secret that is not the quote's, in form or value, is `404 resource_missing`.
+- Unsigned reads are rate-limited in the process, per quote (120 per minute) and in total (6,000
+  per minute), answering `429 rate_limit`; the total bounds database load and the limiter's memory.
 
 ### 2.4 Deposit
 

@@ -6,7 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// Machine-readable error envelope returned by every API failure.
+/// Machine-readable error envelope returned by every API failure, Stripe's error object
+/// (<https://docs.stripe.com/api/errors>).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Error details.
@@ -16,10 +17,32 @@ pub struct ErrorResponse {
 /// Stable error fields safe to expose to callers.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorDetail {
+    /// Error category: `invalid_request_error` for any 4xx except an idempotency conflict,
+    /// `idempotency_error` for an `Idempotency-Key` reused with other parameters, `api_error` for
+    /// 5xx.
+    #[serde(rename = "type")]
+    pub error_type: ErrorType,
     /// Stable machine-readable code.
     pub code: &'static str,
-    /// Human-readable summary without internal details.
+    /// Human-readable summary without internal details; it may change.
     pub message: String,
+    /// The request parameter the error is about, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+}
+
+/// Error category of [`ErrorDetail`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+pub enum ErrorType {
+    /// The request cannot succeed as sent.
+    #[serde(rename = "invalid_request_error")]
+    InvalidRequest,
+    /// An `Idempotency-Key` was reused with different parameters.
+    #[serde(rename = "idempotency_error")]
+    Idempotency,
+    /// The service failed; retry with backoff.
+    #[serde(rename = "api_error")]
+    Api,
 }
 
 /// API failure with an HTTP status and stable public body.
@@ -30,10 +53,40 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    /// Returns a request-validation failure.
+    /// Returns a request-validation failure not tied to one parameter.
     #[must_use]
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
+        Self::new(StatusCode::BAD_REQUEST, "parameter_invalid", message)
+    }
+
+    /// Returns a validation failure of the request parameter `param`.
+    #[must_use]
+    pub fn invalid_param(param: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::bad_request(message).with_param(param)
+    }
+
+    /// Returns a request missing a required parameter.
+    #[must_use]
+    pub fn missing_param(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "parameter_missing", message)
+    }
+
+    /// Returns a request naming a parameter the operation does not take.
+    #[must_use]
+    pub fn unknown_param(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "parameter_unknown", message)
+    }
+
+    /// Returns a failure for a requested amount below the minimum.
+    #[must_use]
+    pub fn amount_too_small(param: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "amount_too_small", message).with_param(param)
+    }
+
+    /// Returns a failure for a requested amount above the maximum.
+    #[must_use]
+    pub fn amount_too_large(param: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "amount_too_large", message).with_param(param)
     }
 
     /// Returns an authentication failure.
@@ -41,74 +94,86 @@ impl ApiError {
     pub fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
-            "unauthorized",
+            "signature_invalid",
             "request signature verification failed",
         )
     }
 
-    /// Returns a tenant-safe missing-resource failure.
+    /// Returns a missing or foreign resource.
     #[must_use]
     pub fn not_found() -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", "resource not found")
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "resource_missing",
+            "resource not found",
+        )
     }
 
-    /// Returns a conflict caused by current persisted state.
+    /// Returns a state conflict.
     #[must_use]
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
-    /// Returns a typed open-exposure cap conflict.
+    /// Returns an open quote exposure cap failure.
     #[must_use]
-    pub fn exposure_cap(scope: &'static str) -> Self {
+    pub fn exposure_cap(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "exposure_cap_exceeded", message).with_param("amount")
+    }
+
+    /// Returns a cancellation refused because the quote's address already received a payment.
+    #[must_use]
+    pub fn quote_payment_received() -> Self {
         Self::new(
             StatusCode::CONFLICT,
-            "exposure_cap_exceeded",
-            format!("{scope} open rate-lock exposure cap would be exceeded"),
+            "quote_payment_received",
+            "the quote's address already received a payment",
         )
     }
 
-    /// Returns a conflict for a rate lock whose address already received funds.
+    /// Returns a cancellation refused because the quote's payment window has closed.
     #[must_use]
-    pub fn pending_payment() -> Self {
+    pub fn quote_window_closed() -> Self {
         Self::new(
             StatusCode::CONFLICT,
-            "pending_payment",
-            "rate lock address already received a payment",
+            "quote_window_closed",
+            "the quote's payment window has closed",
         )
     }
 
-    /// Returns a conflict for cancelling a lock whose payment window has closed.
+    /// Returns a cancellation refused because the quote is complete or expired.
     #[must_use]
-    pub fn window_closed() -> Self {
+    pub fn quote_unexpected_state(status: &str) -> Self {
         Self::new(
             StatusCode::CONFLICT,
-            "window_closed",
-            "payment window has closed",
+            "quote_unexpected_state",
+            format!("the quote is {status}"),
         )
     }
 
-    /// Returns a conflict for an idempotent replay whose body differs from the original.
+    /// Returns an `Idempotency-Key` reused with different parameters.
     #[must_use]
-    pub fn idempotency_mismatch() -> Self {
-        Self::new(
+    pub fn idempotency_key_reused() -> Self {
+        let mut error = Self::new(
             StatusCode::CONFLICT,
-            "idempotency_mismatch",
-            "request does not match the original request for this reference",
-        )
+            "idempotency_key_reused",
+            "the Idempotency-Key was used with different parameters",
+        );
+        error.detail.error_type = ErrorType::Idempotency;
+        error
     }
 
-    /// Returns a typed per-account rate-limit response.
+    /// Returns a quote creation rate-limit failure.
     #[must_use]
     pub fn rate_limited() -> Self {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "rate-lock creation limit exceeded",
+            "rate_limit",
+            "quote creation limit exceeded",
         )
     }
 
-    /// Returns a conflict for an already consumed request signature.
+    /// Returns a replayed request signature.
     #[must_use]
     pub fn signature_replayed() -> Self {
         Self::new(
@@ -118,23 +183,23 @@ impl ApiError {
         )
     }
 
-    /// Returns a locked response for an operation blocked by a pause scope.
+    /// Returns an operation blocked by a pause scope; not retried automatically.
     #[must_use]
     pub fn paused(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::LOCKED, "paused", message)
+        Self::new(StatusCode::CONFLICT, "paused", message)
     }
 
-    /// Returns a locked response for a chain frozen by reconciliation.
+    /// Returns an operation blocked because reconciliation froze the chain.
     #[must_use]
     pub fn chain_frozen() -> Self {
         Self::new(
-            StatusCode::LOCKED,
+            StatusCode::CONFLICT,
             "chain_frozen",
             "the route chain is frozen pending reconciliation review",
         )
     }
 
-    /// Returns a temporary dependency or pause failure.
+    /// Returns a temporary dependency failure; retry.
     #[must_use]
     pub fn service_unavailable(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
@@ -150,12 +215,26 @@ impl ApiError {
         )
     }
 
+    /// Names the request parameter the error is about.
+    #[must_use]
+    pub fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.detail.param = Some(param.into());
+        self
+    }
+
     fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        let error_type = if status.is_server_error() {
+            ErrorType::Api
+        } else {
+            ErrorType::InvalidRequest
+        };
         Self {
             status,
             detail: ErrorDetail {
+                error_type,
                 code,
                 message: message.into(),
+                param: None,
             },
         }
     }
