@@ -1,7 +1,7 @@
 //! Quotes (`/v1/quotes`) and the product configuration (`/v1/config`).
 
 use axum::Json;
-use axum::extract::{Extension, Path, RawQuery, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
 use sqlx::PgPool;
@@ -16,7 +16,7 @@ use crate::routes::RouteSet;
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, expansions, idempotency_key, query_pairs};
+use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
 use super::handlers::{ensure_account, validate_external_id};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
@@ -203,7 +203,7 @@ pub(crate) async fn create_quote(
 pub(crate) async fn get_quote(
     State(state): State<AppState>,
     product: Option<Extension<Product>>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> Response {
     let pairs = query_pairs(query.as_deref());
@@ -343,7 +343,7 @@ async fn client_quote(
 pub(crate) async fn cancel_quote(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Quote>> {
     let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
     let lock = locks::cancel(&state.pool, &product, quote)

@@ -8,8 +8,8 @@ use uuid::Uuid;
 /// A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DepositResponse {
-    /// Deterministic deposit identifier.
-    pub id: Uuid,
+    /// Deposit id, `dep_…`.
+    pub id: String,
     /// Product-owned identifier of the account the receiving address belongs to. This service
     /// always sends it; it is optional in the schema so clients also parse responses from servers
     /// that predate it.
@@ -464,8 +464,8 @@ pub struct ProductResponse {
 /// Administrative deposit nudge result.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct NudgeResponse {
-    /// Nudged deposit identifier.
-    pub deposit_id: Uuid,
+    /// Nudged deposit id, `dep_…`.
+    pub deposit_id: String,
     /// Newly due processing time.
     pub next_attempt_at: DateTime<Utc>,
 }
@@ -473,8 +473,8 @@ pub struct NudgeResponse {
 /// Administrative refund workflow result.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AdminRefundResponse {
-    /// Refund request identifier.
-    pub id: Uuid,
+    /// Refund id, `re_…`.
+    pub id: String,
     /// Stable workflow status.
     pub status: String,
     /// Recorded treasury transaction hash, when present.

@@ -450,6 +450,9 @@ POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event
 GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 ```
 
+Admin paths take an object's prefixed id or, for ids handed out before prefixed ids, its bare
+UUID; admin responses show prefixed ids.
+
 **Config.** One `assets` entry per loaded route of the calling product (its current version):
 chain, asset code, contract, decimals, pricing mode, `min_amount` (the route's minimum credit in
 cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and tolerance, and the

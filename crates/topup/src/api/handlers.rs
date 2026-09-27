@@ -5,7 +5,7 @@ use std::str::FromStr;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::B256;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ use super::AppState;
 use super::attestation::AttestationError;
 use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
+use super::extract::{ApiJson, ApiPath, ApiQuery};
 use super::models::{
     AdminReasonRequest, AdminRefundResponse, AttestationQuery, AttestationResponse,
     DailyReportResponse, NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
@@ -39,7 +40,7 @@ type ApiResult<T> = Result<T, ApiError>;
 )]
 pub(crate) async fn get_attestation(
     State(state): State<AppState>,
-    Query(query): Query<AttestationQuery>,
+    ApiQuery(query): ApiQuery<AttestationQuery>,
 ) -> ApiResult<Json<AttestationResponse>> {
     let nonce = decode_nonce(&query.nonce)?;
     // The flusher signs with these keys; startup refuses routes that disagree on one.
@@ -70,7 +71,7 @@ pub(crate) async fn get_attestation(
 )]
 pub(crate) async fn register_product(
     State(state): State<AppState>,
-    Json(request): Json<RegisterProductRequest>,
+    ApiJson(request): ApiJson<RegisterProductRequest>,
 ) -> ApiResult<Json<ProductResponse>> {
     validate_product_credentials(
         &state,
@@ -105,8 +106,8 @@ pub(crate) async fn register_product(
 )]
 pub(crate) async fn update_product(
     State(state): State<AppState>,
-    Path(slug): Path<String>,
-    Json(request): Json<UpdateProductRequest>,
+    ApiPath(slug): ApiPath<String>,
+    ApiJson(request): ApiJson<UpdateProductRequest>,
 ) -> ApiResult<Json<ProductResponse>> {
     validate_product_credentials(&state, &slug, &request.public_key, &request.webhook_url)?;
     validate_reason(&request.reason)?;
@@ -128,6 +129,7 @@ pub(crate) async fn update_product(
     params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
     responses(
         (status = 200, description = "OK", body = SupportDepositResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
@@ -136,11 +138,9 @@ pub(crate) async fn update_product(
 /// One deposit of any product with its stored facts, transitions, and webhook events.
 pub(crate) async fn admin_get_deposit(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<SupportDepositResponse>> {
-    let id = crate::ids::parse(crate::ids::DEPOSIT, &id)
-        .or_else(|| Uuid::parse_str(&id).ok())
-        .ok_or_else(ApiError::not_found)?;
+    let id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
     repository::admin_deposit(&state.pool, id)
         .await?
         .map(Json)
@@ -159,8 +159,8 @@ pub(crate) async fn admin_get_deposit(
 /// Pauses scopes of one product account, for example `settlement` to stop crediting it.
 pub(crate) async fn pause_account(
     State(state): State<AppState>,
-    Path((slug, account_id)): Path<(String, String)>,
-    Json(request): Json<PauseRequest>,
+    ApiPath((slug, account_id)): ApiPath<(String, String)>,
+    ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
     mutate_account_scopes(&state, &slug, &account_id, request, true).await
 }
@@ -177,8 +177,8 @@ pub(crate) async fn pause_account(
 /// Resumes scopes of one product account.
 pub(crate) async fn resume_account(
     State(state): State<AppState>,
-    Path((slug, account_id)): Path<(String, String)>,
-    Json(request): Json<PauseRequest>,
+    ApiPath((slug, account_id)): ApiPath<(String, String)>,
+    ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
     mutate_account_scopes(&state, &slug, &account_id, request, false).await
 }
@@ -194,8 +194,8 @@ pub(crate) async fn resume_account(
 )]
 pub(crate) async fn pause_route(
     State(state): State<AppState>,
-    Path(route): Path<String>,
-    Json(request): Json<PauseRequest>,
+    ApiPath(route): ApiPath<String>,
+    ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<RoutePauseResponse>> {
     mutate_route_scopes(&state, &route, request, true).await
 }
@@ -211,8 +211,8 @@ pub(crate) async fn pause_route(
 )]
 pub(crate) async fn resume_route(
     State(state): State<AppState>,
-    Path(route): Path<String>,
-    Json(request): Json<PauseRequest>,
+    ApiPath(route): ApiPath<String>,
+    ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<RoutePauseResponse>> {
     mutate_route_scopes(&state, &route, request, false).await
 }
@@ -220,15 +220,21 @@ pub(crate) async fn resume_route(
 #[utoipa::path(
     post,
     path = "/v1/admin/deposits/{id}/nudge",
-    params(("id" = Uuid, Path)),
-    responses((status = 200, description = "OK", body = NudgeResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
+    responses(
+        (status = 200, description = "OK", body = NudgeResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
 pub(crate) async fn nudge_deposit(
     State(state): State<AppState>,
-    Path(deposit_id): Path<Uuid>,
+    ApiPath(deposit_id): ApiPath<String>,
 ) -> ApiResult<Json<NudgeResponse>> {
+    let deposit_id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &deposit_id)
+        .ok_or_else(ApiError::not_found)?;
     Ok(Json(
         repository::nudge_deposit(&state.pool, deposit_id, &admin_actor(&state)).await?,
     ))
@@ -237,15 +243,20 @@ pub(crate) async fn nudge_deposit(
 #[utoipa::path(
     post,
     path = "/v1/admin/refunds/{id}/approve",
-    params(("id" = Uuid, Path)),
-    responses((status = 200, description = "OK", body = AdminRefundResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    params(("id" = String, Path, description = "Refund id, `re_…` or the UUID")),
+    responses(
+        (status = 200, description = "OK", body = AdminRefundResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
 pub(crate) async fn approve_refund(
     State(state): State<AppState>,
-    Path(refund_id): Path<Uuid>,
+    ApiPath(refund_id): ApiPath<String>,
 ) -> ApiResult<Json<AdminRefundResponse>> {
+    let refund_id = parse_refund_id(&refund_id)?;
     Ok(Json(
         repository::approve_refund(
             &state.pool,
@@ -260,7 +271,7 @@ pub(crate) async fn approve_refund(
 #[utoipa::path(
     post,
     path = "/v1/admin/refunds/{id}/record",
-    params(("id" = Uuid, Path)),
+    params(("id" = String, Path, description = "Refund id, `re_…` or the UUID")),
     request_body = RecordRefundRequest,
     responses(
         (status = 200, description = "OK", body = AdminRefundResponse),
@@ -273,9 +284,10 @@ pub(crate) async fn approve_refund(
 )]
 pub(crate) async fn record_refund(
     State(state): State<AppState>,
-    Path(refund_id): Path<Uuid>,
-    Json(request): Json<RecordRefundRequest>,
+    ApiPath(refund_id): ApiPath<String>,
+    ApiJson(request): ApiJson<RecordRefundRequest>,
 ) -> ApiResult<Json<AdminRefundResponse>> {
+    let refund_id = parse_refund_id(&refund_id)?;
     let tx_hash = B256::from_str(&request.tx_hash)
         .map_err(|_| ApiError::bad_request("tx_hash must be a 32-byte hexadecimal value"))?;
     Ok(Json(
@@ -298,8 +310,8 @@ pub(crate) async fn record_refund(
 )]
 pub(crate) async fn lift_reconciliation_block(
     State(state): State<AppState>,
-    Path(block_key): Path<String>,
-    Json(request): Json<AdminReasonRequest>,
+    ApiPath(block_key): ApiPath<String>,
+    ApiJson(request): ApiJson<AdminReasonRequest>,
 ) -> ApiResult<Json<ReconciliationBlockLiftResponse>> {
     validate_reason(&request.reason)?;
     Ok(Json(
@@ -332,8 +344,8 @@ pub(crate) async fn lift_reconciliation_block(
 )]
 pub(crate) async fn replay_outbox_event(
     State(state): State<AppState>,
-    Path(event_id): Path<String>,
-    Json(request): Json<AdminReasonRequest>,
+    ApiPath(event_id): ApiPath<String>,
+    ApiJson(request): ApiJson<AdminReasonRequest>,
 ) -> ApiResult<Json<OutboxReplayResponse>> {
     let event_id = crate::ids::parse_event(&event_id).ok_or_else(ApiError::not_found)?;
     validate_reason(&request.reason)?;
@@ -612,6 +624,10 @@ fn product_response(product: Product) -> ProductResponse {
         webhook_url: product.webhook_url,
         paused_scopes: product.paused_scopes,
     }
+}
+
+fn parse_refund_id(id: &str) -> ApiResult<Uuid> {
+    crate::ids::parse_or_uuid(crate::ids::REFUND, id).ok_or_else(ApiError::not_found)
 }
 
 fn admin_actor(state: &AppState) -> String {

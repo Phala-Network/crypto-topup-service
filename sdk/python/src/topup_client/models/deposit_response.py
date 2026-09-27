@@ -10,7 +10,6 @@ from ..types import UNSET, Unset
 
 from ..types import UNSET, Unset
 from typing import cast
-from uuid import UUID
 import datetime
 
 
@@ -30,7 +29,7 @@ class DepositResponse:
         chain_id (int): EVM chain identifier.
         created_at (datetime.datetime): Row creation time.
         from_address (str): Canonical transfer sender address.
-        id (UUID): Deterministic deposit identifier.
+        id (str): Deposit id, `dep_…`.
         log_index (int): Transfer log index.
         state (str): Current processing state.
         tx_hash (str): Canonical transaction hash.
@@ -56,7 +55,7 @@ class DepositResponse:
     chain_id: int
     created_at: datetime.datetime
     from_address: str
-    id: UUID
+    id: str
     log_index: int
     state: str
     tx_hash: str
@@ -88,7 +87,7 @@ class DepositResponse:
 
         from_address = self.from_address
 
-        id = str(self.id)
+        id = self.id
 
         log_index = self.log_index
 
@@ -201,7 +200,7 @@ class DepositResponse:
 
         from_address = d.pop("from_address")
 
-        id = UUID(d.pop("id"))
+        id = d.pop("id")
 
         log_index = d.pop("log_index")
 

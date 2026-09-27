@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
-use axum::extract::{Extension, Path, RawQuery, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
@@ -17,7 +17,7 @@ use crate::routes::RouteSet;
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, expansions, idempotency_key, query_pairs};
+use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote, Refund,
 };
@@ -177,7 +177,7 @@ pub(crate) async fn list_deposits(
 pub(crate) async fn get_deposit(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Deposit>> {
     let expand = expansions(&query_pairs(query.as_deref()), &["quote"])?;
@@ -287,7 +287,7 @@ pub(crate) async fn create_refund(
 pub(crate) async fn get_refund(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Refund>> {
     let expand = expansions(&query_pairs(query.as_deref()), &["deposit"])?;
