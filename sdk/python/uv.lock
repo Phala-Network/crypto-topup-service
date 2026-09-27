@@ -1482,7 +1482,7 @@ wheels = [
 ]
 
 [[package]]
-name = "phala-crypto-topup"
+name = "phala-pay"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

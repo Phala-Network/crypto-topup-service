@@ -12,11 +12,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from crypto_topup import CryptoTopup
+from phala_pay import PhalaPay
 from topup_sdk import sign_webhook
 
-from .test_crypto_topup import EVENT_ID, QUOTE_ID, SEED, SERVICE_KEY, SERVICE_PUBLIC_KEY, _deposit
-from .test_crypto_topup import _quote as quote_object
+from .test_phala_pay import EVENT_ID, QUOTE_ID, SEED, SERVICE_KEY, SERVICE_PUBLIC_KEY, _deposit
+from .test_phala_pay import _quote as quote_object
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
 
@@ -46,7 +46,7 @@ def app(tmp_path: Path) -> tuple[TestClient, list[httpx.Request], Path]:
             )
         return httpx.Response(200, json=quote_object(client_secret=SECRET))
 
-    client = CryptoTopup(
+    client = PhalaPay(
         "http://service.test", "acme/v1", seed=SEED, transport=httpx.MockTransport(service)
     )
     database = tmp_path / "product.sqlite3"
@@ -96,7 +96,7 @@ def test_webhook_credits_each_deposit_once(
     http, _, database = app
     body, headers = _credited()
     for _ in range(2):
-        response = http.post("/webhooks/crypto-topup", content=body, headers=headers)
+        response = http.post("/webhooks/phala-pay", content=body, headers=headers)
         assert response.status_code == 200
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT team, amount FROM balances").fetchall() == [("team-42", 2500)]
@@ -109,7 +109,7 @@ def test_webhook_refuses_a_forged_delivery(
     http, _, database = app
     body, headers = _credited()
     forged = body.replace(b'"amount": 2500', b'"amount": 999999')
-    assert http.post("/webhooks/crypto-topup", content=forged, headers=headers).status_code == 400
-    assert http.post("/webhooks/crypto-topup", content=body).status_code == 400
+    assert http.post("/webhooks/phala-pay", content=forged, headers=headers).status_code == 400
+    assert http.post("/webhooks/phala-pay", content=body).status_code == 400
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT count(*) FROM balances").fetchone() == (0,)

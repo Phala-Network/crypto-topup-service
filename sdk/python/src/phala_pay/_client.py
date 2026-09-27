@@ -1,4 +1,4 @@
-"""`CryptoTopup`: the product API as Stripe-style resources over the signed `TopupClient`."""
+"""`PhalaPay`: the Phala Pay product API as Stripe-style resources over the signed `TopupClient`."""
 
 from __future__ import annotations
 
@@ -13,12 +13,13 @@ from topup_sdk import RequestSigner, TopupClient
 from ._webhook import Webhook
 
 
-class CryptoTopup:
+class PhalaPay:
     """A client for one product, signed with its key.
 
-        client = CryptoTopup("https://topup.example.com", "acme/v1", key_file="product.seed")
-        quote = client.quotes.create(account_id="team-42", amount=2500, chain_id=11155111,
-                                     asset="pha")
+        pay = PhalaPay(api_base="https://pay.example.com", key_id="acme/v1",
+                       key_file="product.seed")
+        quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111,
+                                  asset="pha")
         return {"client_secret": quote.client_secret}
 
     `key_id` is `{product}/v1`; the key is the product's ed25519 seed, from `key_file` (64 hex
@@ -68,7 +69,7 @@ class CryptoTopup:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> CryptoTopup:
+    def __enter__(self) -> PhalaPay:
         return self
 
     def __exit__(self, *_: object) -> None:

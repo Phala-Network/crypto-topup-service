@@ -1,19 +1,19 @@
-# phala-crypto-topup
+# phala-pay
 
-Python SDK for the Phala crypto top-up service (Python 3.12+), in the shape of Stripe's: create a
-quote, hand its `client_secret` to the browser checkout (`@phala/crypto-topup`), and fulfil from
+Phala Pay for Python (3.12+), in the shape of Stripe's SDK: create a
+quote, hand its `client_secret` to the browser checkout (`@phala/pay`), and fulfil from
 the signed `deposit.credited` webhook.
 
 ## Install
 
 ```sh
-uv add phala-crypto-topup        # or: pip install phala-crypto-topup
+uv add phala-pay        # or: pip install phala-pay
 ```
 
 Until the first PyPI release, install from the repository (read access is required):
 
 ```sh
-uv add "phala-crypto-topup @ git+https://github.com/Phala-Network/crypto-topup-service#subdirectory=sdk/python"
+uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
 ```
 
 ## Quickstart
@@ -21,17 +21,17 @@ uv add "phala-crypto-topup @ git+https://github.com/Phala-Network/crypto-topup-s
 Create the product key once and send only the printed public key to the operator:
 
 ```sh
-uvx --from phala-crypto-topup topup-sdk keygen --keyid acme/v1 --seed-out product.seed
+uvx --from phala-pay topup-sdk keygen --keyid acme/v1 --seed-out product.seed
 ```
 
 Create a quote for the signed-in account and return its client secret to the browser:
 
 ```python
-from crypto_topup import CryptoTopup
+from phala_pay import PhalaPay
 
-client = CryptoTopup("https://topup.example.com", "acme/v1", key_file="product.seed")
+pay = PhalaPay(api_base="https://pay.example.com", key_id="acme/v1", key_file="product.seed")
 
-quote = client.quotes.create(
+quote = pay.quotes.create(
     account_id="team-42",  # your id for the customer; credits are addressed to it
     amount=2500,  # US cents
     chain_id=11155111,
@@ -44,10 +44,10 @@ return {"client_secret": quote.client_secret}
 Fulfil from the webhook, once per deposit, and answer `2xx` after the credit is committed:
 
 ```python
-from crypto_topup import SignatureVerificationError, Webhook
+from phala_pay import SignatureVerificationError
 
 try:
-    event = Webhook.construct_event(raw_body, request.headers, SETTLEMENT_PUBLIC_KEY)
+    event = pay.webhooks.construct_event(raw_body, request.headers, SETTLEMENT_PUBLIC_KEY)
 except (SignatureVerificationError, ValueError):
     return Response(status_code=400)
 
@@ -57,7 +57,7 @@ if event.type == "deposit.credited":
 ```
 
 `SETTLEMENT_PUBLIC_KEY` is the service's webhook key, pinned from its attestation
-(`client.attestation`, docs/integration.md). `construct_event` checks the Standard Webhooks
+(docs/integration.md §3.3). `construct_event` checks the Standard Webhooks
 signature, the timestamp (five minutes' tolerance), and that the body's id is the `webhook-id`;
 `event.data.object` is the `Deposit` (or, for `quote.expired`, the `Quote`) as it was when the
 event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with both routes.
@@ -66,13 +66,13 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 
 | Call | API |
 |---|---|
-| `client.quotes.create(account_id=, amount=, chain_id=, asset=, idempotency_key=)` | `POST /v1/quotes` |
-| `client.quotes.retrieve(id)` / `.cancel(id)` | `GET /v1/quotes/{id}`, `POST /v1/quotes/{id}/cancel` |
-| `client.deposits.list(account_id=, quote=, status=, tx_hash=, created_gte=, created_lte=)` | `GET /v1/deposits`, every page |
-| `client.deposits.retrieve(id)` | `GET /v1/deposits/{id}` |
-| `client.refunds.create(deposit=, destination_address=, amount_atomic=)` / `.retrieve(id)` | `POST /v1/refunds`, `GET /v1/refunds/{id}` |
-| `client.config.retrieve()` | `GET /v1/config` |
-| `Webhook.construct_event(payload, headers, public_key)` | verifies a webhook delivery |
+| `pay.quotes.create(account_id=, amount=, chain_id=, asset=, idempotency_key=)` | `POST /v1/quotes` |
+| `pay.quotes.retrieve(id)` / `.cancel(id)` | `GET /v1/quotes/{id}`, `POST /v1/quotes/{id}/cancel` |
+| `pay.deposits.list(account_id=, quote=, status=, tx_hash=, created_gte=, created_lte=)` | `GET /v1/deposits`, every page |
+| `pay.deposits.retrieve(id)` | `GET /v1/deposits/{id}` |
+| `pay.refunds.create(deposit=, destination_address=, amount_atomic=)` / `.retrieve(id)` | `POST /v1/refunds`, `GET /v1/refunds/{id}` |
+| `pay.config.retrieve()` | `GET /v1/config` |
+| `pay.webhooks.construct_event(payload, headers, public_key)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 
 Every request is signed with the product key (RFC 9421). Transport errors, `429`, and `5xx` are
 retried with backoff, reusing one `Idempotency-Key` per `POST`. Failures raise `ApiError` with the

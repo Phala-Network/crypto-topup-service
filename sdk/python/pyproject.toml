@@ -1,7 +1,7 @@
 [project]
-name = "phala-crypto-topup"
+name = "phala-pay"
 version = "0.1.0"
-description = "Python SDK for the Phala crypto top-up service: quotes, deposits, refunds, and webhooks"
+description = "Phala Pay for Python: quotes, deposits, refunds, and webhooks"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -27,9 +27,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Phala-Network/crypto-topup-service/tree/main/sdk/python"
-Repository = "https://github.com/Phala-Network/crypto-topup-service"
-Changelog = "https://github.com/Phala-Network/crypto-topup-service/blob/main/sdk/python/CHANGELOG.md"
+Homepage = "https://github.com/Phala-Network/phala-pay/tree/main/sdk/python"
+Repository = "https://github.com/Phala-Network/phala-pay"
+Changelog = "https://github.com/Phala-Network/phala-pay/blob/main/sdk/python/CHANGELOG.md"
 
 [project.scripts]
 topup-sdk = "topup_sdk.__main__:main"
@@ -57,7 +57,7 @@ requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/crypto_topup", "src/topup_client", "src/topup_sdk"]
+packages = ["src/phala_pay", "src/topup_client", "src/topup_sdk"]
 
 [tool.uv]
 default-groups = ["dev", "product", "examples"]

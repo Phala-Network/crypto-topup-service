@@ -1,16 +1,17 @@
-"""A minimal product backend on FastAPI: quotes for the checkout, and webhook fulfillment.
+"""A minimal product backend on FastAPI with Phala Pay: quotes for the checkout, and webhook
+fulfillment.
 
 - `POST /topups` `{"amount": 2500}` creates a quote for the signed-in team and returns its
-  `client_secret`, which the browser passes to `<CryptoTopupCheckout clientSecret apiBase />`.
-- `POST /webhooks/crypto-topup` verifies each delivery with `Webhook.construct_event` and, for
+  `client_secret`, which the browser passes to `<Checkout clientSecret apiBase />`.
+- `POST /webhooks/phala-pay` verifies each delivery with `pay.webhooks.construct_event` and, for
   `deposit.credited`, credits `amount` cents to `account_id` once per deposit id, in the same
   transaction that records the credit, before answering `200`.
 
-Run it against staging (install with `uv add phala-crypto-topup fastapi uvicorn`):
+Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
-    CRYPTO_TOPUP_API_BASE=https://topup.example.com \\
-    CRYPTO_TOPUP_KEY_ID=acme/v1 CRYPTO_TOPUP_KEY_FILE=product.seed \\
-    CRYPTO_TOPUP_WEBHOOK_KEY=<settlement public key, pinned from attestation> \\
+    PHALA_PAY_API_BASE=https://pay.example.com \\
+    PHALA_PAY_KEY_ID=acme/v1 PHALA_PAY_KEY_FILE=product.seed \\
+    PHALA_PAY_WEBHOOK_KEY=<settlement public key, pinned from attestation> \\
     uvicorn --factory fastapi_app:app_from_env
 """
 
@@ -28,7 +29,7 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from crypto_topup import ApiError, CryptoTopup, SignatureVerificationError, Webhook
+from phala_pay import ApiError, PhalaPay, SignatureVerificationError
 
 LOG = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def current_team(x_team_id: Annotated[str, Header(pattern=r"^[A-Za-z0-9._-]{1,64
 
 
 def create_app(
-    client: CryptoTopup, webhook_key: str, database: str, *, chain_id: int, asset: str
+    pay: PhalaPay, webhook_key: str, database: str, *, chain_id: int, asset: str
 ) -> FastAPI:
     app = FastAPI()
 
@@ -87,7 +88,7 @@ def create_app(
         try:
             # The order id as the Idempotency-Key: repeating the call returns the same quote
             # with a fresh client secret, for example to resume the checkout after a reload.
-            quote = client.quotes.create(
+            quote = pay.quotes.create(
                 account_id=team,
                 amount=body.amount,
                 chain_id=chain_id,
@@ -106,11 +107,11 @@ def create_app(
             db.execute("UPDATE orders SET quote = ? WHERE id = ?", (quote.id, order_id))
         return TopupResponse(order_id=order_id, client_secret=quote.client_secret)
 
-    @app.post("/webhooks/crypto-topup")
+    @app.post("/webhooks/phala-pay")
     async def webhook(request: Request) -> dict[str, bool]:
         payload = await request.body()
         try:
-            event = Webhook.construct_event(payload, request.headers, webhook_key)
+            event = pay.webhooks.construct_event(payload, request.headers, webhook_key)
         except (SignatureVerificationError, ValueError) as error:
             raise HTTPException(400) from error
 
@@ -137,15 +138,15 @@ def create_app(
 
 
 def app_from_env() -> FastAPI:
-    client = CryptoTopup(
-        os.environ["CRYPTO_TOPUP_API_BASE"],
-        os.environ["CRYPTO_TOPUP_KEY_ID"],
-        key_file=os.environ["CRYPTO_TOPUP_KEY_FILE"],
+    pay = PhalaPay(
+        os.environ["PHALA_PAY_API_BASE"],
+        os.environ["PHALA_PAY_KEY_ID"],
+        key_file=os.environ["PHALA_PAY_KEY_FILE"],
     )
     return create_app(
-        client,
-        os.environ["CRYPTO_TOPUP_WEBHOOK_KEY"],
+        pay,
+        os.environ["PHALA_PAY_WEBHOOK_KEY"],
         os.environ.get("DATABASE", "topups.sqlite3"),
-        chain_id=int(os.environ.get("CRYPTO_TOPUP_CHAIN_ID", "11155111")),
-        asset=os.environ.get("CRYPTO_TOPUP_ASSET", "pha"),
+        chain_id=int(os.environ.get("PHALA_PAY_CHAIN_ID", "11155111")),
+        asset=os.environ.get("PHALA_PAY_ASSET", "pha"),
     )

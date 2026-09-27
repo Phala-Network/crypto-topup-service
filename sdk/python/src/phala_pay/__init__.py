@@ -1,11 +1,11 @@
-"""Python SDK for the crypto top-up service, in the shape of Stripe's.
+"""Phala Pay for Python, in the shape of Stripe's.
 
-    from crypto_topup import CryptoTopup, Webhook
+    from phala_pay import PhalaPay
 
-    client = CryptoTopup("https://topup.example.com", "acme/v1", key_file="product.seed")
-    quote = client.quotes.create(account_id="team-42", amount=2500, chain_id=11155111, asset="pha")
+    pay = PhalaPay(api_base="https://pay.example.com", key_id="acme/v1", key_file="product.seed")
+    quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111, asset="pha")
 
-    event = Webhook.construct_event(raw_body, request.headers, SETTLEMENT_PUBLIC_KEY)
+    event = pay.webhooks.construct_event(raw_body, request.headers, SETTLEMENT_PUBLIC_KEY)
     if event.type == "deposit.credited":
         credit_once(event.deposit.id, event.deposit.account_id, event.deposit.amount)
 
@@ -16,7 +16,7 @@
 from topup_client.models import ClientQuote, Config, Deposit, Quote, Refund
 from topup_sdk import AddressMismatchError, ApiError, TopupError
 
-from ._client import CryptoTopup
+from ._client import PhalaPay
 from ._webhook import Event, EventData, SignatureVerificationError, Webhook
 
 __all__ = [
@@ -24,10 +24,10 @@ __all__ = [
     "ApiError",
     "ClientQuote",
     "Config",
-    "CryptoTopup",
     "Deposit",
     "Event",
     "EventData",
+    "PhalaPay",
     "Quote",
     "Refund",
     "SignatureVerificationError",

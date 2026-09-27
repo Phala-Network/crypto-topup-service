@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from crypto_topup import CryptoTopup, Deposit, Quote, SignatureVerificationError, Webhook
+from phala_pay import Deposit, PhalaPay, Quote, SignatureVerificationError, Webhook
 from topup_sdk import load_public_key, sign_webhook, verify_request
 from topup_sdk.signing import target_uri
 
@@ -82,8 +82,8 @@ def _deposit(index: int = 1) -> dict[str, object]:
 # Resources ---------------------------------------------------------------------------------------
 
 
-def _client(handler: httpx.MockTransport) -> CryptoTopup:
-    return CryptoTopup("http://service.test", "acme/v1", seed=SEED, transport=handler)
+def _client(handler: httpx.MockTransport) -> PhalaPay:
+    return PhalaPay("http://service.test", "acme/v1", seed=SEED, transport=handler)
 
 
 def test_quotes_create_returns_the_client_secret_from_a_signed_request() -> None:
@@ -140,9 +140,9 @@ def test_the_key_loads_from_a_seed_file_or_hex(tmp_path: Path, key: str) -> None
 
     transport = httpx.MockTransport(handler)
     client = (
-        CryptoTopup("http://service.test", "acme/v1", key_file=seed_file, transport=transport)
+        PhalaPay("http://service.test", "acme/v1", key_file=seed_file, transport=transport)
         if key == "file"
-        else CryptoTopup("http://service.test", "acme/v1", seed=SEED.hex(), transport=transport)
+        else PhalaPay("http://service.test", "acme/v1", seed=SEED.hex(), transport=transport)
     )
     client.quotes.retrieve(QUOTE_ID)
     verify_request(
@@ -158,9 +158,9 @@ def test_the_key_loads_from_a_seed_file_or_hex(tmp_path: Path, key: str) -> None
 
 def test_exactly_one_key_source_is_required() -> None:
     with pytest.raises(ValueError, match="exactly one"):
-        CryptoTopup("http://service.test", "acme/v1")
+        PhalaPay("http://service.test", "acme/v1")
     with pytest.raises(ValueError, match="exactly one"):
-        CryptoTopup("http://service.test", "acme/v1", seed=SEED, key_file="product.seed")
+        PhalaPay("http://service.test", "acme/v1", seed=SEED, key_file="product.seed")
 
 
 # Webhooks ----------------------------------------------------------------------------------------
