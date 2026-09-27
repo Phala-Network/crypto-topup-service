@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs the end-to-end tests with Chromium served from Playwright's official image, for hosts
 # without Chromium's system libraries (the self-hosted CI runner). The tests, Vite, and Anvil run
-# here; the browser container shares this host's network namespace, or this container's when this
-# runs inside one, so both sides reach each other on 127.0.0.1. Extra arguments go to
+# here; the browser container uses the host's network (as the runner does), so both sides reach
+# each other on 127.0.0.1. PLAYWRIGHT_DOCKER_NETWORK overrides the network. Extra arguments go to
 # `playwright test`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -13,10 +13,7 @@ if [[ $image != *":v$version-"* ]]; then
   echo "@playwright/test $version does not match the browser image $image" >&2
   exit 1
 fi
-network=host
-if [[ -f /.dockerenv ]]; then
-  network="container:$(hostname)"
-fi
+network="${PLAYWRIGHT_DOCKER_NETWORK:-host}"
 port="${PLAYWRIGHT_SERVER_PORT:-3799}"
 name="crypto-topup-playwright-$$"
 
