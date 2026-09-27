@@ -28,8 +28,9 @@ The whole integration is three pieces, as with Stripe's Payment Element: the bac
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
 **Install.** Once released: `uv add phala-pay` and `npm install @phala/pay viem`.
-Until then, from this repository (read access required; pnpm builds the package on install only
-when `pnpm-workspace.yaml` lists it under `allowBuilds: {"@phala/pay": true}`):
+Until then, from this repository. pnpm builds the package on install only for an allowed git
+dependency: the first `pnpm add` stops and prints an `allowBuilds` entry for the exact commit; add
+it to `pnpm-workspace.yaml` and run the command again (sdk/js/README.md):
 
 ```sh
 uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
