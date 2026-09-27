@@ -16,6 +16,9 @@ Until the first PyPI release, install from the repository (read access is requir
 uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
 ```
 
+Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to uv, for example);
+install with `uv` or `pip` directly, and switch to the PyPI package once it is released.
+
 ## Quickstart
 
 Create the product key once and send only the printed public key to the operator:
