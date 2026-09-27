@@ -43,7 +43,7 @@ Today (architecture §3, §4, §6, §7, §10, §12, §14):
 
 | # | Topic | Decision | Standard followed |
 |---|---|---|---|
-| D1 | Credit timing | Credit at `confirmations` depth on both providers (Ethereum default 2, about 24 s); watch to `finalized`; reorged log → `reversed` + `deposit.reversed` | Exchange deposit confirmations (Kraken, Binance); Stripe post-success ACH failure → dispute |
+| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2 ≈ 24 s; OP-stack `safe`); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
 | D2 | Custody | Non-custodial: forwarders pay only the merchant's treasury | BTCPay Server; FinCEN FIN-2019-G001 §1.1, §4.2 |
 | D3 | Contracts | One permissionless factory per chain; clones carry `treasury` as the only immutable arg; public `flush` with per-target failure isolation | OZ `Clones.cloneDeterministicWithImmutableArgs` (pinned 5.7.0); BitGo public `flush()`; Multicall3 `allowFailure` |
 | D4 | Sweeping | The merchant sweeps with its own wallet or Safe and pays gas; dashboard and SDK build the transaction | BTCPay (merchant wallet); EIP-1193; Safe via WalletConnect |
@@ -54,25 +54,45 @@ Today (architecture §3, §4, §6, §7, §10, §12, §14):
 | D9 | Test/live | One deployment; key selects mode; `livemode` on every row, object, and event; Sepolia = test | Stripe test mode |
 | D10 | Treasury | EIP-4361 proof (EOA) or EIP-1271 (deployed Safe); live changes time-locked 48 h, cancellable | EIP-4361, EIP-1271; timelock on sensitive changes |
 | D11 | Webhooks | Standard Webhooks `v1a` with one key **per account and mode**; endpoints per account; bounded retries | Standard Webhooks; Stripe endpoints |
-| D12 | Go-live | Activation after profile, ToS, verified live treasury, entity screening; Phala legal review is a hard gate for live mode | Stripe activation (`charges_enabled`, `tos_acceptance`) |
+| D12 | Go-live | Activation after profile, ToS, verified live treasury, entity screening; invite-only `live_access` until legal sign-off, then open to all | Stripe activation (`charges_enabled`, `tos_acceptance`) |
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 
 ## 4. Fast credit and reversal (D1)
 
-**Decision.** A route sets `confirmations` (default 2 on Ethereum and Sepolia). A transfer is
-credited when both RPC providers report the same block hash and the same log with depth
-`head − block + 1 ≥ confirmations`, or the block is at or below `finalized`, whichever comes
-first. Setting `confirmations: finalized` reproduces today's behaviour: there is one rule.
+**Decision.** One credit rule, evaluated per chain family by reviewed code (a new family needs a
+reviewed code change, as today). A transfer is credited when both RPC providers report the same
+block hash and the same log and the block has reached the **required confirmation**:
 
-**Why 2.** 0 confirmations is a mempool transaction the payer can still replace. Depth-1 reorgs
-are routine on post-Merge Ethereum: Etherscan's forked-blocks list, sampled on 2026-09-27, shows
-224 031 forked blocks in total, and the latest 1 000 (about April to September 2026) all have reorg
-depth 1 ([Etherscan forked blocks](https://etherscan.io/blocks_forked)). Crediting at 1 would
-credit, reverse, and re-credit several times a day. Depth-2 reorgs did not appear in that sample;
-proposer boost exists to prevent short-range reorgs, and reverting a finalized block costs at least
-one third of staked ETH ([ethereum.org, proof-of-stake](https://ethereum.org/developers/docs/consensus-mechanisms/pos/)).
+| Chain family | Confirmation values | Default |
+|---|---|---|
+| Ethereum L1 (mainnet, Sepolia) | a depth `head − block + 1 ≥ n`, or `finalized` | 2 |
+| OP-stack L2 (Base, when enabled) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` |
+
+The required confirmation is the **stricter of the route's value and the account's policy**. The
+route value is the floor and default; an account may require more for a chain (for example
+`finalized` for irreversible goods), never less. BTCPay stores set the same knob: "the minimum
+amount of confirmations after which the invoice gets the 'confirmed' status"
+([BTCPay stores FAQ](https://docs.btcpayserver.org/FAQ/Stores/)). A block at or below `finalized`
+always qualifies, so `finalized` as the policy reproduces today's behaviour: one rule, one
+parameter per account.
+
+**Why 2 on Ethereum.** 0 confirmations is a mempool transaction the payer can still replace.
+Depth-1 reorgs are routine on post-Merge Ethereum: Etherscan's forked-blocks list, sampled on
+2026-09-27, shows 224 031 forked blocks in total, and the latest 1 000 (about April to September
+2026) all have reorg depth 1 ([Etherscan forked blocks](https://etherscan.io/blocks_forked)).
+Crediting at 1 would credit, reverse, and re-credit several times a day. Depth-2 reorgs did not
+appear in that sample; proposer boost exists to prevent short-range reorgs, and reverting a
+finalized block costs at least one third of staked ETH
+([ethereum.org, proof-of-stake](https://ethereum.org/developers/docs/consensus-mechanisms/pos/)).
 The owner accepts the residual risk because a reversal is recoverable (below).
+
+**Why `safe` on OP-stack.** Sequencer blocks can reorg before their data reaches L1: Base reports
+that "Only a single Base L2 block has ever reorged" at L2 inclusion and "There has never been a
+reorg of L2 blocks that were batched to Ethereum L1"
+([Base, transaction finality](https://docs.base.org/base-chain/network-information/transaction-finality));
+the OP Stack calls a block *unsafe* until verifiers derive it from posted data, then *safe*, then
+*finalized* with L1 ([OP Stack overview](https://docs.optimism.io/stack/rollup/overview)).
 
 **What others use.** Kraken's deposit table lists 30 confirmations (about 6 minutes) for
 Ethereum-network assets ([Kraken](https://support.kraken.com/articles/203325283-cryptocurrency-deposit-processing-times));
@@ -80,7 +100,7 @@ Binance announced 12 for ETH and ERC-20 in 2021, before the Merge
 ([Binance](https://www.binance.com/en/support/announcement/d57bbb741ecf408c8599e97e8dcc9083)).
 Coinbase's and Gemini's pages refused automated access and are not cited. Exchanges credit
 tradable, withdrawable balances to anonymous users; a merchant crediting a known customer can
-claw back, so a shallower depth is proportionate. The depth is per route and can be raised.
+claw back, so a shallower default is proportionate, and the account policy raises it where not.
 
 **Detection keeps up.** One scanner per chain polls `eth_getBlockByNumber("latest")` every 2 s
 (a sixth of the 12 s slot) on provider A. That is plain JSON-RPC over the HTTP providers already
@@ -88,34 +108,51 @@ configured, with no WebSocket subscription to keep alive. Each new head:
 
 1. reads `Transfer` logs to watched addresses for the new blocks (by block hash) and upserts them
    as `seen` (`pending_transfers`, display only, as today);
-2. promotes transfers at depth ≥ `confirmations` to deposits and runs the confirm step at once:
-   provider B must return the same block hash and log at that depth;
+2. promotes transfers that reach the required confirmation to deposits and runs the confirm step
+   at once: provider B must return the same block hash and log;
 3. values, screens, and credits in the same pump pass; the `deposit.credited` event is written in
    the credit transaction (outbox, architecture §11), and delivery starts immediately.
 
 A payer's wallet shows the transaction in its block; checkout shows "Payment received" within about
-2 s of the block, and "Credited" after the second block: **credited in about 30 seconds** after
-paying (inclusion wait, one more slot, polling and delivery).
+2 s of the block and, at the default, "Credited" after the second block: **credited in about 30
+seconds** after paying (inclusion wait, one more slot, polling and delivery). `GET /v1/config`
+reports the typical credit time for the account's effective policy.
 
-**Watch to finality.** When `finalized` advances, the service compares, on both providers, the
-canonical hash of every block holding a not-yet-final deposit (one call per block, not per
-deposit). Same hash: the deposit is `final` (a timestamp, not a state). Different hash: the logs of
-that block range are re-read; a deposit whose `(tx_hash, log_index)` is absent from the finalized
-chain becomes **`reversed`** (terminal). If the transaction was re-included elsewhere with the same
-log identity, only its evidence is updated and nothing is reversed.
+**Deposit identity survives re-inclusion.** A deposit is the transfer at position *i* among the
+logs of its transaction's receipt: id `uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}")`.
+The block-level `log_index`, block number, and hash are evidence that may change, not identity.
+This replaces today's `chain:tx_hash:log_index` identity (architecture §0, §6, §11); staging is
+reset, so no existing id is migrated.
+
+**Watch to finality.** When `finalized` advances, the service re-reads, on both providers, the
+receipt of every not-yet-final deposit's transaction:
+
+- **Receipt at or below `finalized` with the same log at position *i*:** the deposit is `final`
+  (a timestamp, not a state); evidence is updated if the block changed.
+- **Receipt in a newer, not-yet-final block:** the transaction was re-included; follow it (update
+  the evidence) and keep waiting. Nothing is reversed.
+- **Receipt at or below `finalized` without the transfer** (the re-executed transaction reverted
+  or emitted no such log), or **proven dropped**: both providers find no receipt and, at the
+  finalized block, the sender's nonce is above the transaction's nonce, so another transaction
+  consumed it. That is Etherscan's "Dropped & Replaced" ("a newly created transaction with the
+  same FROM account nonce is accepted and confirmed", [Etherscan](https://info.etherscan.com/transaction-dropped-replaced/))
+  and ethers' `TRANSACTION_REPLACED` ([ethers](https://docs.ethers.org/v6/api/utils/errors/)).
+  The deposit becomes **`reversed`** (terminal).
+- **No receipt and the nonce not yet consumed:** the transaction is pending again; keep waiting
+  and alert after one hour (`TopupDepositPendingAfterReorg`).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> detected: transfer at depth ≥ confirmations
+    [*] --> detected: transfer at the required confirmation
     detected --> confirmed: provider B agrees, valued
     detected --> rejected: below minimum or unsupported
     confirmed --> credited: screened, deposit.credited
     confirmed --> rejected: sanctioned or out of bounds
     credited --> swept: finalized Flushed after the deposit
-    credited --> reversed: log absent at finality
-    detected --> reversed: log absent at finality
-    confirmed --> reversed: log absent at finality
-    rejected --> reversed: log absent at finality
+    credited --> reversed: transaction dropped or transfer gone at finality
+    detected --> reversed: transaction dropped or transfer gone at finality
+    confirmed --> reversed: transaction dropped or transfer gone at finality
+    rejected --> reversed: transaction dropped or transfer gone at finality
     swept --> [*]
     reversed --> [*]
     rejected --> [*]
@@ -123,7 +160,8 @@ stateDiagram-v2
 
 - `deposit.reversed` (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`, like every
   event) is sent for a reversed deposit that was reported as credited or rejected. A quote consumed
-  by it becomes `open` again if its window is still open, otherwise `expired`.
+  by it becomes `open` again if its window is still open, otherwise `expired`; its pending refunds
+  are canceled.
 - The merchant claws back the credit as for `deposit.refunded`. This is Stripe's pattern for
   payments that fail after success: "In rare situations, Stripe might receive an ACH failure from
   the bank after a PaymentIntent has transitioned to `succeeded`. If this happens, Stripe creates a
@@ -132,6 +170,7 @@ stateDiagram-v2
 - A reversal raises the platform alert `TopupDepositReversed` (a chain-health signal) and an
   email and dashboard notice to the merchant.
 - Price is observed when crediting (architecture rule 5, "together with the credit").
+- Refunds require `final`: nothing is paid back for a deposit that could still be reversed (D5).
 - A forwarder's balance can include unfinalized funds; a merchant's `flush` moves whatever is
   there. The service marks deposits `swept` only from **finalized** `Flushed` events after the
   deposit's log position, so the swept accounting never depends on an unfinalized sweep.
@@ -206,13 +245,15 @@ contract ForwarderFactory {                        // no roles, no admin, no con
 
 Every account sweeps the same way. The dashboard lists unswept balances per chain and token (from
 the service's ledger and on-chain balances) and builds one `factory.flush(treasury, salts[],
-token)` call per token, excluding addresses that hold a sanctioned deposit (§8). The merchant
+token)` call per token. It never builds a flush to a treasury on a sanctions list and never
+includes an address holding a sanctioned deposit (§8). The merchant
 sends it through its connected wallet with EIP-1193 `eth_sendTransaction`
 ([EIP-1193](https://eips.ethereum.org/EIPS/eip-1193)); a Safe connects through WalletConnect,
 which turns the request into a transaction proposal for the owners
 ([Safe help](https://help.safe.global/articles/6643739210-how-to-connect-a-safe-to-a-dapp-using-walletconnect)).
-Scripts and cron jobs use the SDK's `flush_transaction(chain_id, token)`, which returns `{to,
-data}` from `GET /v1/sweeps`. The merchant pays the gas and chooses when sweeping is worth it; the
+Scripts and cron jobs use the SDK's `flush_transaction(factory, treasury, salts, token)`, which
+encodes the call offline from the address export (§13); `GET /v1/sweeps` is a convenience that
+lists unswept balances and the same call. The merchant pays the gas and chooses when sweeping is worth it; the
 dashboard shows the estimated gas next to the balance. Funds left in forwarders are safe: they can
 only ever reach the treasury.
 
@@ -225,14 +266,16 @@ The merchant refunds from its own treasury, in two steps (BTCPay's payouts: the 
 own wallet, and Greenfield's `POST /api/v1/payouts/{payoutId}/mark-paid` records it;
 [BTCPay payouts](https://docs.btcpayserver.org/Payouts/)):
 
-1. `POST /v1/refunds {deposit, amount_atomic, destination_address}` → Refund `pending`; checks the
-   deposit is refundable and the amount fits its unrefunded remainder (reserved).
+1. `POST /v1/refunds {deposit, amount_atomic, destination_address}` → Refund `pending`; requires
+   the deposit to be `final` (`409 deposit_not_final` otherwise) and refundable, the amount to fit
+   its unrefunded remainder (reserved), and `destination_address` to pass sanctions screening.
 2. After paying, `POST /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}`. At `finalized`
    (refunds need no speed), both providers must show a `Transfer` of the deposit's token with
    `from == addresses.treasury` of the deposit's own address (not the account's current
    treasury), `to == destination_address`, `value == amount_atomic`, a log not used by another
    refund. Then `succeeded` and `deposit.refunded`; otherwise `failed` with `failure_reason` and
-   the reservation released. `POST /v1/refunds/{id}/cancel` cancels a pending refund.
+   the reservation released. `POST /v1/refunds/{id}/cancel` cancels a pending refund; a deposit
+   that becomes `reversed` cancels its pending refunds.
 
 Statuses are Stripe's Refund names (`pending`, `succeeded`, `failed`, `canceled`).
 
@@ -323,11 +366,14 @@ its RFC 9421 admin key: it is the operator's surface, not a second merchant path
   dashboard requires its own **passkey** ([WebAuthn](https://www.w3.org/TR/webauthn-2/)) at first
   login, and a WebAuthn assertion with user verification within 5 minutes (step-up) for: treasury
   changes, key creation and rolls, member and role changes, endpoint changes, live activation.
-- Enrolment issues 10 one-time recovery codes (stored hashed). An owner who loses the identity
-  provider or passkey is recovered by another owner or administrator; a sole owner uses a recovery
-  code. Without both, recovery is by a signature from the account's live treasury (EIP-4361, as in
-  D10) plus a 7-day wait with notices to every member, as the treasury is the account's root of
-  ownership.
+- Enrolment issues 10 one-time recovery codes (stored hashed). A user who loses a passkey is
+  reset by an owner or administrator of the account, as Stripe lets an owner or administrator reset
+  a member's two-step authentication; a user can also use a recovery code. A sole owner without
+  either is recovered by the operator after identity verification, as Stripe's account recovery
+  form ([Stripe](https://support.stripe.com/questions/sign-in-to-your-stripe-account-without-a-2fa-device-and-or-backup-code))
+  and GitHub's support-reviewed recovery ("A member of GitHub Support will review your request",
+  [GitHub](https://docs.github.com/en/authentication/securing-your-account-with-two-factor-authentication-2fa/recovering-your-account-if-you-lose-your-2fa-credentials)):
+  audited, with a 3-day notice to every member and address on file before access is restored.
 - Sessions: server-side, a 256-bit id in `__Host-session` (`Secure; HttpOnly; SameSite=Lax`),
   stored hashed, 12 h idle and 7 d absolute; state-changing requests require a matching `Origin`
   (OWASP [Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),
@@ -358,9 +404,9 @@ its RFC 9421 admin key: it is the operator's surface, not a second merchant path
 | Where funds go | Fixed per address (treasury arg). The service sends no transactions and has no contract role. |
 | Compromised service | Cannot move funds; could issue new addresses for a wrong treasury or sign unbacked events. The SDK always recomputes each quote's address from `(factory, implementation, treasury, salt)` and fails closed on a mismatch; `<Checkout>` renders only the `expected_address` the merchant backend passes after that check. Pinning expected treasuries in the SDK is optional hardening. |
 | Hijacked session | Passkey login, step-up, and the treasury time-lock (D10) with notices to every owner and administrator. |
-| Sanctions | Payer screening unchanged. A deposit from a sanctioned address is `rejected(sanctioned)`; the sweep builder excludes addresses holding one and tells the merchant why. Public `flush` means anyone can still move such funds, but only to the merchant's treasury; the merchant's own compliance applies. A treasury that becomes sanctioned (screened when set and daily) pauses the account's `quotes` and `settlement`. Merchant entity screening and IP geo-blocking at activation (D12). |
-| SSRF | Webhook egress goes through an egress proxy (Stripe's [smokescreen](https://github.com/stripe/smokescreen), which refuses non-public IPs), as a compose sidecar. The service also refuses before connecting: private, loopback, link-local, CGNAT `100.64.0.0/10`, `0.0.0.0/8`, IPv4-mapped IPv6 `::ffff:0:0/96`, ports other than 443 (and 80 in test mode); no redirects (Stripe counts 3xx as failure); 20 s timeout. |
-| EIP-1271 and SIWE details | §9, D10. |
+| Sanctions | Phala's software does not assist in moving blocked assets. A deposit from a sanctioned address is `rejected(sanctioned)`; the sweep builder never includes its address and never builds a flush to a sanctioned treasury; refund destinations are screened (D5). The contracts cannot freeze anything: public `flush` can still move such funds, only to the merchant's treasury, and the merchant's own compliance applies. A treasury that becomes sanctioned (screened when set and daily) pauses the account's `quotes` and `settlement`. Merchant entity screening and IP geo-blocking at activation (D12). |
+| SSRF | All webhook egress goes through Stripe's [smokescreen](https://github.com/stripe/smokescreen) (a compose sidecar), the only IP filter: it refuses addresses that are not publicly routable. The service itself checks only the scheme (`https`, `http` in test mode), the port (443, 80 in test mode), and follows no redirects (Stripe counts 3xx as failure); 20 s timeout. |
+| EIP-1271 and SIWE details | §10, D10. |
 | Keys at rest | API keys and session ids hashed; recovery codes hashed; webhook keys derived on demand from dstack KMS, never stored. |
 
 ## 9. Test and live modes (D9)
@@ -426,8 +472,11 @@ the blocked-jurisdiction list. A screening hit leaves the account `restricted` f
 New live accounts get default limits; the operator raises them on request. No document KYB: Phala
 Pay is software and never touches funds.
 
-**Hard gate:** live mode opens to any account, Phala Cloud included, only after Phala's legal
-review (§17) signs off. PR 12 ships with live activation disabled by a platform flag until then.
+**Live access allowlist.** Until Phala's legal review (§17) signs off, live activation is
+invite-only: an account can start it only when `accounts.live_access` is set, granted by the
+operator through the admin API (audited, owners notified). Invited accounts go through the full
+activation above, with no exceptions. Phala Cloud is the first invited account. After sign-off the
+operator grants live access at signup to every account: the same flag, no second mechanism.
 
 ## 11. Webhooks (D11)
 
@@ -467,7 +516,9 @@ review (§17) signs off. PR 12 ships with live activation disabled by a platform
   amount per customer and per account *(policy)*, max deposit (route). There is no global cap: the
   merchant, not Phala, bears price exposure. Open quotes bound the scanner's watched-address set.
 - **Pause** scopes per account (`quotes`, `settlement`, `refunds`) and per route; the operator
-  uses them for abuse and incidents.
+  uses them for abuse and incidents. Owners and administrators can pause and resume their own
+  account's `quotes` from the dashboard (step-up), for emergencies such as a compromise during a
+  treasury time-lock: no new addresses are issued while paused.
 - **Signup abuse.** Identity-provider login plus passkey, one account creation per user per hour,
   test mode moves no money and costs Phala no gas.
 
@@ -480,7 +531,14 @@ review (§17) signs off. PR 12 ships with live activation disabled by a platform
 - **Security history.** Merchant-visible audit log of logins, key, member, endpoint, treasury, and
   activation changes (Stripe exposes "security history audit logs" to roles). Same `audit` table,
   scoped by account.
-- **Closure and export.** Owners export account data (JSON/CSV) at any time (GDPR Art. 20). Closure
+- **Reconciliation per forwarder.** At each finalized block the reconciler checks, for every
+  forwarder with activity, that its balance per token equals its final deposits minus its
+  finalized `Flushed` amounts. A mismatch freezes the chain's crediting (architecture §13) and
+  alerts. The indexer accepts `ForwarderCreated`, `Flushed`, and `FlushFailed` only for known
+  `(address, treasury)` pairs from `addresses`; anyone can call the factory, so other events are
+  ignored.
+- **Closure and export.** Owners export account data (JSON/CSV) at any time (GDPR Art. 20),
+  including every address's `(factory, salt, treasury)`, so funds stay sweepable without Phala. Closure
   deletes members' personal data and pseudonymizes audit actors (Art. 17); payment records are kept
   for the retention period (architecture §15, 7 years) under the legal-obligation exception
   (Art. 17(3)(b)) ([GDPR](https://eur-lex.europa.eu/eli/reg/2016/679/oj)). Forwarders keep
@@ -510,7 +568,10 @@ Fresh schema (staging is reset); unchanged tables of architecture §6 keep their
 
 ```text
 accounts        id, public_id (acct_…), name, business_profile jsonb, country, tos_acceptance jsonb,
-                charges_enabled bool, restricted bool, paused_scopes text[], created_at
+                live_access bool, charges_enabled bool, restricted bool, paused_scopes text[],
+                webhook_key_version jsonb ({"live": 1, "test": 1}), created_at
+confirmation_policies account_id, chain_id, required (depth | safe | finalized)
+                PRIMARY KEY (account_id, chain_id)          -- absent: the route's value
 account_limits  account_id, livemode, max_open_quotes, max_open_minor_account,
                 max_open_minor_customer                           PRIMARY KEY (account_id, livemode)
 users           id, email, name, created_at
@@ -529,10 +590,11 @@ customers       id, account_id, livemode, client_reference_id, paused_scopes
                 UNIQUE (account_id, livemode, client_reference_id)
 addresses       id, account_id, livemode, chain_id, quote_id, salt, treasury, address UNIQUE (chain_id, address)
 quotes          (today's rate_locks) + account_id, livemode, customer_id
-deposits        + account_id, livemode, confirmations_at, final_at; state adds `reversed`
+deposits        + account_id, livemode, receipt_log_index, confirmations_at, final_at;
+                state adds `reversed`; UNIQUE (chain_id, tx_hash, receipt_log_index)
 flushed         chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
                 block_number, block_hash                     -- from finalized Flushed events, any sender
-refunds         id, account_id, livemode, deposit_id, amount_atomic, destination_address,
+refunds         id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
                 tx_hash, log_index, status, failure_reason, created_at
                 UNIQUE (chain_id, tx_hash, log_index)
 webhook_endpoints id (we_…), account_id, livemode, url, enabled_events text[], status, disabled_reason
@@ -550,7 +612,8 @@ Removed: `products`, `settlements`, `flushes` (operator plans and nonces), outbo
 `requested_by`/`approved_by`.
 
 **Route file.** No `product`, no `treasury`, no operator or `chain.flush` settings. Adds
-`livemode` and `confirmations`; keeps chain, factory, implementation, asset, pricing, and limits.
+`livemode` and `confirmations` (the floor and default); keeps chain, factory, implementation,
+asset, pricing, and limits.
 
 ## 15. API surface
 
@@ -572,6 +635,8 @@ GET|POST /v1/webhook_endpoints, GET|POST|DELETE /v1/webhook_endpoints/{id}
 GET    /v1/attestation?nonce=…                       authenticated; binds the account's key
 ```
 
+- The dashboard API adds the account's confirmation policy per chain and the self-serve `quotes`
+  pause; the admin API adds `live_access`.
 - Objects and events carry `livemode`; events carry `account`. Deposit gains `status: reversed`,
   `confirmations`, `final` (bool), `swept`. Quote gains `treasury`. Events add `deposit.reversed`.
 - The dashboard lives on its own origin, `https://dashboard.pay.phala.com`, served by the same
@@ -587,8 +652,9 @@ GET    /v1/attestation?nonce=…                       authenticated; binds the 
 
 Each PR is sized for one agent, has its own branch and green CI, and updates the docs it touches.
 The **launch set** (PRs 1–13) must land before any account, Phala Cloud included, takes live
-payments. After it, the independent security review, the legal sign-off (§17), and the HUMAN-ONLY
-factory deployments on Sepolia and mainnet open live mode.
+payments. After it, the independent security review and the HUMAN-ONLY factory deployments on
+Sepolia and mainnet open live mode to invited accounts (`live_access`); the legal sign-off (§17)
+opens it to everyone.
 
 | PR | Title | Launch set | Depends on |
 |---|---|---|---|
@@ -609,15 +675,17 @@ factory deployments on Sepolia and mainnet open live mode.
 | 15 | Account closure and export | | 12 |
 
 **PR 1 — fast credit and reversal** (on today's code, before multi-tenancy). Scope: route
-`confirmations` (default 2; `finalized` allowed); scanner polls the head every 2 s; confirm step
-at depth on both providers; finality watch by block hash; state `reversed`, event
-`deposit.reversed`, quote re-opening; `TopupDepositReversed`; swept linkage from finalized `Flushed`
-only; checkout copy and the integration guide's "about 15 minutes" become "credited in about 30
+`confirmations` (default 2; `safe`/`finalized` per chain family); deposit identity by receipt log
+position; scanner polls the head every 2 s; confirm step on both providers; finality watch by
+receipt with re-inclusion following and dropped-transaction proof (nonce consumed); state
+`reversed`, event `deposit.reversed`, quote re-opening; `TopupDepositReversed`,
+`TopupDepositPendingAfterReorg`; swept linkage from finalized `Flushed` only; checkout copy and the integration guide's "about 15 minutes" become "credited in about 30
 seconds" with the reversal obligation. Files: `crates/core` (state machine, route), scanner, pump,
 reconciler, outbox, `docs/architecture.md` §2/§7/§8/§11/§12, `docs/integration.md`,
 `sdk/js` copy. Tests: Anvil reorg simulation with `anvil_reorg` (a depth-1 reorg before credit
-changes nothing; a depth-2 reorg after credit gives `reversed` and one `deposit.reversed`;
-re-inclusion with the same log keeps the deposit); provider B lagging; time from inclusion to
+changes nothing; a transaction re-included in a later block keeps its deposit id and is followed,
+not reversed, even when its block-level `log_index` changes; a transaction replaced by another
+with the same nonce gives `reversed` and one `deposit.reversed`); provider B lagging; time from inclusion to
 event under 30 s on a 12 s Anvil block time. Acceptance: `confirmations: finalized` passes today's
 suite unchanged.
 
@@ -632,12 +700,13 @@ cross-mode `404` per endpoint; migration on an empty database. Acceptance: all t
 HUMAN-ONLY staging reset listed in PR 13.
 
 **PR 4 — chain-sourced sweeps.** Index `ForwarderCreated`, `Flushed`, `FlushFailed` from the
-factory at finality whoever sent them; reconciliation per treasury; delete the flusher, operator
+factory at finality whoever sent them, only for known `(address, treasury)` pairs; reconciliation
+per forwarder freezing crediting on mismatch; delete the flusher, operator
 keys, `OPERATOR_ROLE` handling, gas alerts, and attestation operator records. Tests (Anvil): a
 third party's flush marks deposits swept only after finality; a failing target is reported.
 
-**PR 5 — users and login.** OIDC/OAuth with PKCE, passkeys, step-up, recovery codes, owner
-recovery, invitations, sessions, security history, SES email via outbox. Tests: token validation
+**PR 5 — users and login.** OIDC/OAuth with PKCE, passkeys, step-up, recovery codes, member
+reset by owners, operator-assisted owner recovery (audited, 3-day notice), invitations, sessions, security history, SES email via outbox. Tests: token validation
 cases, WebAuthn ceremonies (virtual authenticator), CSRF `Origin`, role matrix.
 
 **PR 6 — API keys.** `ppay_sk_` keys, Bearer auth, roll and expiry, hashing, checksum pre-check,
@@ -645,7 +714,7 @@ per-account and platform rate limits, `idempotency_keys` for every POST; RFC 942
 merchant routes. Tests: valid, unknown, expired, revoked, wrong-mode keys; idempotent retries.
 
 **PR 7 — modes and webhook keys.** `livemode` end to end; per-account key derivation and
-signing; authenticated attestation with a new `report_data` vector; separate test and live workers.
+signing with `webhook_key_version` and dual signatures during rotation; authenticated attestation with a new `report_data` vector; separate test and live workers.
 Tests: a key never sees the other mode; an event for A fails verification with B's key.
 
 **PR 8 — treasuries.** SIWE and EIP-1271 verification (both providers, `finalized`, ERC-6492
@@ -653,29 +722,34 @@ refused), nonce binding, 48 h time-lock with cancel and notices, screening; quot
 effective treasury. Tests: EOA, deployed Safe, undeployed Safe, expired message, reused nonce,
 cancel during the lock.
 
-**PR 9 — webhook endpoints.** Endpoints API, `enabled_events`, smokescreen sidecar and address
-checks, fair per-endpoint scheduling, 3-day disable with email, `410`, resend, `/v1/events`.
-Tests: fan-out, SSRF cases (mapped IPv6, CGNAT, redirects), a slow endpoint not delaying another.
+**PR 9 — webhook endpoints.** Endpoints API, `enabled_events`, smokescreen sidecar (scheme,
+port, and no-redirect checks in the service), fair per-endpoint scheduling, 3-day disable with email, `410`, resend, `/v1/events`.
+Tests: fan-out, smokescreen refusing private, CGNAT, and IPv4-mapped IPv6 targets, redirects
+refused, a slow endpoint not delaying another.
 
-**PR 10 — refunds.** D5 flow with finalized verification and reservation. Tests: valid refund;
-wrong sender (current treasury instead of the address's), wrong destination or amount, reused
-log, cancel.
+**PR 10 — refunds.** D5 flow: final deposits only, destination screening, finalized
+verification, reservation, auto-cancel on reversal. Tests: valid refund; non-final deposit refused;
+sanctioned destination refused; wrong sender (current treasury instead of the address's), wrong
+destination or amount, reused log, cancel, reversal cancelling a pending refund.
 
 **PR 11 — vocabulary and SDKs.** `client_reference_id`, `livemode`, `account`, Quote `treasury`,
 Deposit fields, `/v1/sweeps`; OpenAPI regenerated; Python `phala-pay` (Bearer, `construct_event`
-with `expected_account`, address recompute failing closed, `flush_transaction`); JS `@phala/pay`
+with `expected_account`, address recompute failing closed, offline `flush_transaction`); JS `@phala/pay`
 (`<Checkout expected_address>`, `livemode`, reversal status). Tests: SDK suites, recompute vectors.
 
 **PR 12 — dashboard and onboarding.** SPA on `dashboard.pay.phala.com` with CSP: payments,
 deposits, refunds (declare, mark paid), sweep builder (EIP-1193, WalletConnect), keys, endpoints
-and deliveries, members, treasuries, security history, test/live toggle; signup, profile, ToS,
-screening, geo-blocking, activation behind the legal-gate flag. Tests: component tests; one browser
+and deliveries, members, treasuries, confirmation policy, `quotes` pause, security history,
+test/live toggle; signup, profile, ToS, screening, geo-blocking, activation for accounts with
+`live_access`; address export. Tests: component tests; one browser
 run from signup to a credited, swept, and refunded test payment.
 
 **PR 13 — deploy and docs.** Compose with smokescreen and the second domain; route files with
 `livemode` and `confirmations`; architecture and integration rewritten; runbooks: remove gas refill,
 flush-reverted, operator-key compromise, treasury change, product-key compromise, rejected funds at
-treasury, refund execution; add merchant sweep guide, reversal handling, restore notice. HUMAN-ONLY
+treasury, refund execution; add merchant sweep guide (including a note for Phala Cloud's
+finance: its Safe owners sign a sweep periodically, like any merchant), reversal handling,
+restore notice, `live_access` grants. HUMAN-ONLY
 steps listed, not executed: staging reset, factory deployment on Sepolia and mainnet, second domain
 DNS, SES domain verification.
 
@@ -683,11 +757,13 @@ DNS, SES domain verification.
 set Phala's Safe as treasury with a Safe signature, create `ppay_sk_test_`/`ppay_sk_live_` keys,
 register its endpoint, pin its account's webhook public keys, use `client_reference_id` (team id),
 handle `deposit.reversed` like `deposit.refunded`, pass `expected_address` to `<Checkout>`, and
-sweep and refund from its Safe through the dashboard.
+sweep and refund from its Safe through the dashboard. It is the first account granted
+`live_access`.
 
-## 17. Legal review (hard gate for live mode)
+## 17. Legal review (gate for opening live mode to everyone)
 
-Before live mode opens to any account, Phala's legal review confirms:
+Until Phala's legal review signs off, live mode is invite-only (`live_access`, D12). The review
+confirms:
 
 1. Phala Pay as pure software with no fee and no control of funds is outside money transmission
    (US federal and state) and crypto-asset service licensing (EU
