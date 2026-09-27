@@ -22,8 +22,8 @@ use topup_core::route::RouteFile;
 use tracing::Instrument as _;
 
 use super::{
-    AlertSink, FlushAlert, Flusher, FlusherPolicy, OperatorRole, Planner, PriceError, PriceSource,
-    RunResult,
+    AlertSink, BroadcastingChain, ChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole,
+    Planner, PriceError, PriceSource, RunResult,
 };
 use crate::observability::FlushPlanningOutcome;
 use crate::routes::RouteSet;
@@ -298,11 +298,23 @@ pub fn configure_tasks(
     let mut tasks = Vec::with_capacity(latest.len());
     for route in latest {
         let chain_id = route.chain.chain_id;
-        let chain = Arc::clone(
-            routes
-                .provider(chain_id, 0)
-                .map_err(|error| format!("flusher route `{}`: {error}", route.route))?,
-        );
+        let reads: Arc<dyn ChainClient> = routes
+            .provider(chain_id, 0)
+            .map_err(|error| format!("flusher route `{}`: {error}", route.route))?
+            .clone();
+        let mut others = Vec::new();
+        for index in 1..route.chain.rpc_providers.len() {
+            match routes.provider(chain_id, index) {
+                Ok(provider) => others.push(Arc::clone(provider) as Arc<dyn ChainClient>),
+                Err(error) => tracing::warn!(
+                    %error,
+                    chain_id,
+                    route = %route.route,
+                    "flusher broadcasts without an unusable RPC provider"
+                ),
+            }
+        }
+        let chain: Arc<dyn ChainClient> = Arc::new(BroadcastingChain::new(reads, others));
         let version = route
             .chain
             .operator_key_version()

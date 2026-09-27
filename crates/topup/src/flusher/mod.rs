@@ -9,6 +9,7 @@ mod types;
 
 use topup_core::SignerError;
 
+pub use chain::BroadcastingChain;
 pub use engine::{Flusher, OperatorRole, RunResult};
 pub use planner::{GasRatioInput, Planner, gas_ratio_allowed};
 pub use sweep::SweepStep;

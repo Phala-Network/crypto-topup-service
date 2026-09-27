@@ -121,6 +121,18 @@ pub enum ChainError {
     /// The provider health lock was poisoned.
     #[error("provider health state unavailable")]
     HealthStateUnavailable,
+    /// Every provider a signed transaction was broadcast to failed; one error per provider, in
+    /// configuration order.
+    #[error("every provider failed to broadcast the transaction: {}", join_errors(.0))]
+    BroadcastFailed(Vec<ChainError>),
+}
+
+fn join_errors(errors: &[ChainError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl ChainError {
