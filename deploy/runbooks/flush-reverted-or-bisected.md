@@ -34,6 +34,11 @@ route's `min_flush_atomic` is never swept, by design.
 - Isolated address: check the token's behaviour and the forwarder's balance; only that address
   stays excluded.
 - `FeeCapReached`: review the route's gas policy, not the batch.
+- `send_failed` with `every provider failed to broadcast the transaction`: the flusher sends each
+  signed transaction to all of the chain's providers, and every one refused it (the error names
+  each refusal). The flush stays `sent` and every maintenance tick rebroadcasts it to all
+  providers; fix the providers. One provider's refusal alone only logs `one RPC provider failed
+  to broadcast`.
 - `MissingConsumedReceipt` or unknown operator transactions: [operator key compromise](operator-key-compromise.md).
 - A pause during bisection voids the replan, so bisection restarts after resume; keep such a pause
   short.

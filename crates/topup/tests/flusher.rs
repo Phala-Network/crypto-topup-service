@@ -13,14 +13,17 @@ use std::time::Duration as StdDuration;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use chrono::{Duration, Utc};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
 use topup::db::{AddressKind, NewDeposit};
 use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
-    AlertSink, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote, FlushAlert, Flusher,
-    FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError, PriceSource, RunResult,
+    AlertSink, BroadcastingChain, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote,
+    FlushAlert, Flusher, FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError,
+    PriceSource, RunResult,
 };
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -651,6 +654,86 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
                         flush_id: account_plan
                     }
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Staging, 2026-09-27: the scheduled sweep was signed and marked sent, but provider A refused
+/// every broadcast with a rate limit while provider B was healthy, so rebroadcasts to A alone
+/// never landed. Broadcasting to every provider sends it through B.
+#[tokio::test]
+async fn a_rate_limited_provider_does_not_strand_a_sent_flush() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let anvil = Anvil::start(&[]).await?;
+            let factory = forge_create(
+                &anvil.rpc_url,
+                "src/ForwarderFactory.sol:ForwarderFactory",
+                &[ADMIN_ADDRESS, TREASURY],
+            )?;
+            let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
+            grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
+            let implementation =
+                cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
+            let route = test_route(factory, token)?;
+            let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
+            mint(&anvil.rpc_url, token, seeded[0].physical)?;
+
+            let (provider_a, server_a) =
+                send_limited_provider(&anvil.rpc_url, "provider-a").await?;
+            let (limited_b, server_b) = send_limited_provider(&anvil.rpc_url, "provider-b").await?;
+            let healthy_b: Arc<dyn ChainClient> =
+                Arc::new(EvmClient::new(&anvil.rpc_url)?.with_provider("provider-b"));
+            let alerts = Arc::new(Alerts::default());
+            let signer = signer_handle(OPERATOR_KEY)?;
+            let flusher = |others: Vec<Arc<dyn ChainClient>>| {
+                Flusher::new(
+                    database.app_pool.clone(),
+                    Arc::new(BroadcastingChain::new(provider_a.clone(), others)),
+                    signer.clone(),
+                    alerts.clone(),
+                    FlusherPolicy::default(),
+                )
+            };
+            let planner = Planner::new(
+                database.app_pool.clone(),
+                Arc::new(BroadcastingChain::new(provider_a.clone(), Vec::new())),
+                signer.clone(),
+                Arc::new(FixedPrice),
+                alerts.clone(),
+            );
+            let flush_id = planner.plan(&route).await?.context("plan the sweep")?;
+
+            // Every provider refuses: the flush stays sent and the error names each refusal.
+            let error = flusher(vec![limited_b])
+                .run_once(&route)
+                .await
+                .expect_err("no provider accepts the broadcast")
+                .to_string();
+            for provider in ["provider-a", "provider-b"] {
+                ensure!(
+                    error.contains(&format!(
+                        "send raw transaction failed for provider `{provider}` \
+                         (JSON-RPC error -32005: rate limit exceeded)"
+                    )),
+                    "{error}"
+                );
+            }
+            let status: String = sqlx::query_scalar("SELECT status FROM flushes WHERE id = $1")
+                .bind(flush_id)
+                .fetch_one(&database.app_pool)
+                .await?;
+            ensure!(status == "sent", "{status}");
+
+            // Provider A still refuses, provider B accepts: the rebroadcast lands and confirms.
+            let flusher = flusher(vec![healthy_b]);
+            ensure!(flusher.run_once(&route).await? == RunResult::Rebroadcast { flush_id });
+            finalize(&anvil.rpc_url)?;
+            ensure!(flusher.run_once(&route).await? == RunResult::Confirmed { flush_id });
+            server_a.abort();
+            server_b.abort();
             Ok(())
         })
     })
@@ -1651,6 +1734,51 @@ async fn seed_addresses(
         });
     }
     Ok(result)
+}
+
+/// A provider that serves reads from `upstream` but refuses every `eth_sendRawTransaction` the
+/// way Tenderly's public gateway did: HTTP 429 with JSON-RPC `-32005 rate limit exceeded`.
+async fn send_limited_provider(
+    upstream: &str,
+    label: &str,
+) -> Result<(
+    Arc<dyn ChainClient>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let upstream = upstream.to_owned();
+    let http = reqwest::Client::new();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |axum::Json(request): axum::Json<Value>| async move {
+            let id = request["id"].clone();
+            if request["method"] == "eth_sendRawTransaction" {
+                let refusal = json!({"jsonrpc": "2.0", "id": id, "error": {
+                    "code": -32005, "message": "rate limit exceeded"}});
+                return (StatusCode::TOO_MANY_REQUESTS, axum::Json(refusal));
+            }
+            let forwarded = async {
+                http.post(&upstream)
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<Value>()
+                    .await
+            };
+            match forwarded.await {
+                Ok(answer) => (StatusCode::OK, axum::Json(answer)),
+                Err(error) => {
+                    let failure = json!({"jsonrpc": "2.0", "id": id, "error": {
+                        "code": -32603, "message": error.to_string()}});
+                    (StatusCode::BAD_GATEWAY, axum::Json(failure))
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = EvmClient::new(&endpoint)?.with_provider(label);
+    Ok((Arc::new(client), server))
 }
 
 fn mint(rpc_url: &str, token: Address, address: Address) -> Result<()> {

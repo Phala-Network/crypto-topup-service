@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use async_trait::async_trait;
 use serde_json::Value;
 use topup_adapters::chain::evm::{ChainError, EvmClient, FeeQuote};
@@ -129,6 +131,124 @@ impl ChainClient for EvmClient {
             receipt: None,
             next_block: (last < latest).then_some(last.saturating_add(1)),
         })
+    }
+}
+
+/// The flusher's chain: reads from one provider and broadcasts every signed transaction to all
+/// of the chain's configured providers.
+///
+/// Sending the same signed bytes to several providers is safe: the transaction hash is fixed by
+/// the signature and the chain executes it at most once. A broadcast succeeds when any provider
+/// accepts the transaction with its signed hash (a node that already knows it counts, see
+/// [`EvmClient::send_raw_transaction`]), so one rate-limited or failing provider no longer
+/// strands a sent flush.
+pub struct BroadcastingChain {
+    reads: Arc<dyn ChainClient>,
+    others: Vec<Arc<dyn ChainClient>>,
+}
+
+impl BroadcastingChain {
+    /// Reads from `reads` and broadcasts to `reads` followed by `others`.
+    #[must_use]
+    pub fn new(reads: Arc<dyn ChainClient>, others: Vec<Arc<dyn ChainClient>>) -> Self {
+        Self { reads, others }
+    }
+}
+
+#[async_trait]
+impl ChainClient for BroadcastingChain {
+    async fn token_balances(
+        &self,
+        token: Address,
+        addresses: &[Address],
+    ) -> Result<Vec<U256>, ChainError> {
+        self.reads.token_balances(token, addresses).await
+    }
+
+    async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
+        self.reads.native_balances(addresses).await
+    }
+
+    async fn estimate_flush_gas(
+        &self,
+        factory: Address,
+        operator: Address,
+        salts: &[B256],
+        token: Address,
+    ) -> Result<u64, ChainError> {
+        self.reads
+            .estimate_flush_gas(factory, operator, salts, token)
+            .await
+    }
+
+    async fn has_operator_role(
+        &self,
+        factory: Address,
+        operator: Address,
+    ) -> Result<bool, ChainError> {
+        self.reads.has_operator_role(factory, operator).await
+    }
+
+    async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError> {
+        self.reads.pending_nonce(operator).await
+    }
+
+    async fn confirmed_nonce(&self, operator: Address) -> Result<u64, ChainError> {
+        self.reads.confirmed_nonce(operator).await
+    }
+
+    async fn latest_block(&self) -> Result<u64, ChainError> {
+        self.reads.latest_block().await
+    }
+
+    async fn finalized_block(&self) -> Result<u64, ChainError> {
+        self.reads.finalized_block().await
+    }
+
+    async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
+        self.reads.fee_quote().await
+    }
+
+    /// Sends `raw` to every provider in order and returns the signed hash when any provider
+    /// accepted it. Otherwise a provider's different hash is returned for the caller's invariant
+    /// check, and failing that, every provider's error.
+    async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, ChainError> {
+        let signed = keccak256(raw);
+        let mut answer = None;
+        let mut failures = Vec::new();
+        for provider in std::iter::once(&self.reads).chain(&self.others) {
+            match provider.send_raw_transaction(raw).await {
+                Ok(hash) if answer != Some(signed) => answer = Some(hash),
+                Ok(_) => {}
+                Err(error) => failures.push(error),
+            }
+        }
+        if let Some(hash) = answer {
+            for error in &failures {
+                tracing::warn!(%error, tx_hash = %signed, "one RPC provider failed to broadcast");
+            }
+            return Ok(hash);
+        }
+        if failures.len() == 1 {
+            return Err(failures.remove(0));
+        }
+        Err(ChainError::BroadcastFailed(failures))
+    }
+
+    async fn receipt(&self, hash: B256) -> Result<Option<ChainReceipt>, ChainError> {
+        self.reads.receipt(hash).await
+    }
+
+    async fn receipt_by_sender_nonce(
+        &self,
+        operator: Address,
+        nonce: u64,
+        from_block: u64,
+        max_blocks: u64,
+    ) -> Result<NonceReceiptSearch, ChainError> {
+        self.reads
+            .receipt_by_sender_nonce(operator, nonce, from_block, max_blocks)
+            .await
     }
 }
 

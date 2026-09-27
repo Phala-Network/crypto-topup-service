@@ -328,7 +328,10 @@ queue is voided unsigned; later plans move down onto its nonce, and its addresse
 once the pause lifts, so one pause never stalls the chain. Recovery after a
 crash is by `(operator, nonce)`: if consumed, locate the transaction and read its receipt;
 if reverted, mark the flush `reverted` and plan a new one with a fresh nonce; otherwise
-rebroadcast the same signed transaction. Gas is a service cost and never reduces credit.
+rebroadcast the same signed transaction. Every signed transaction (first send, rebroadcast,
+replacement) goes to all of the chain's configured RPC providers and counts as sent when any
+accepts it with its signed hash, so one rate-limited provider cannot strand a flush; reads use
+provider A. Gas is a service cost and never reduces credit.
 
 ## 11. Fulfillment webhook
 

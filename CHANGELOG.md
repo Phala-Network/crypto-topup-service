@@ -58,6 +58,10 @@ webhook receivers must ignore unknown fields.
   address on chains that have one, and a product's key id is `{product}/v1`. `finality`,
   `destination.product_kid`, and `rate_lock.enabled` are removed; the `quotes` pause scope stops
   quote creation. Staging's route moves to version 2.
+- The flusher broadcasts every signed sweep (first send, rebroadcast, replacement) to all of the
+  chain's configured RPC providers and succeeds when any accepts it, so one rate-limited provider
+  no longer blocks sweeps. When every provider refuses, the daily report's `flush_planning.error`
+  reads `every provider failed to broadcast the transaction: …` with each provider's refusal.
 
 ### Added
 
