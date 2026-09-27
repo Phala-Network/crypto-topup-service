@@ -2,38 +2,9 @@
 
 All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
-(section 5.9); versions follow [Semantic Versioning](https://semver.org/).
+(section 5.9); versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
-### Changed
-
-- **Breaking**: the distribution is `phala-pay` (was `crypto-topup-sdk`), published to
-  PyPI from `sdk-py-v*` tags. The `topup_sdk` and `topup_client` imports are unchanged.
-- **Breaking**: `verify_webhook` parses Stripe-style events: `WebhookEvent(id, type, created, data)`
-  with `object` (the event's `data.object`), still accepting the old envelope of a replayed old
-  event. `CreditedDeposit` carries the deposit's fields (`deposit_id` `dep_…`, `account_id`,
-  `amount` in cents, `price_source` `quote` or `spot`, `quote`, …) and its `fulfillment_key` is
-  the `dep_` id; `deposit_id` returns `dep_…` and `credited_event_id` `evt_…`.
-  `topup-sdk send-test-event` takes `--account-id` and `--amount` and sends the new envelope.
-- **Breaking**: `TopupClient(base_url, signer, *, forwarder=None, …)`: the product is the signer's
-  key id, `{product}/v1`; there is no `product_slug` argument. With `forwarder=(factory,
-  implementation)` pinned, `create_quote` and `get_quote` recompute an open quote's address and
-  raise the new `AddressMismatchError`.
-- **Breaking**: `ApiError` carries the error object's `error_type` and `param`.
-
-### Removed
-
-- **Breaking**: `create_deposit_address`, `get_deposit_address`, `rotate_deposit_address`,
-  `list_pending_deposits`, and `topup_sdk.persistent_salt`, with their generated operations and
-  models: quotes are the only flow.
-- **Breaking**: `lookup_deposits` and `request_refund`; `list_deposits(external_id, state=…,
-  created_from=…, created_to=…)` becomes `list_deposits(account_id=…, quote=…, status=…,
-  tx_hash=…, created_gte=…, created_lte=…, expand=…)` over Stripe's cursors, and `get_deposit`
-  takes a `dep_` id. Use `create_refund` and `get_refund`.
-- **Breaking**: `register_account`, `create_rate_lock`, `get_rate_lock`, `cancel_rate_lock`, and
-  `get_limits`, with their generated `topup_client` operations and models. Use `create_quote`,
-  `get_quote`, `cancel_quote`, and `get_config`.
+## [Unreleased]
 
 ### Added
 
@@ -76,14 +47,49 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 - `topup_sdk.verify_attestation_binding` and `attestation_report_data`, which check that
   `report_data` binds the nonce, the settlement key, and every listed operator, and
   `AttestationError`.
+- `TopupClient.list_pending_deposits` and the generated `list_pending_deposits` operation with
+  `PendingDepositResponse` and `PendingDepositsResponse`: transfers to persistent addresses seen
+  before finality. Display only; they are not credited.
+- `RateLockResponse.payment` (`RateLockPayment`): the payment the checkout page should show (the
+  consuming deposit, else the first qualifying payment, else the first), `seen` before finality
+  or `finalized` once it is a deposit.
+- `DailyReportResponse.exposure_minor`, the global open rate-lock credit in destination minor
+  units (#94). Optional, so the model also parses reports from servers that predate it.
 
 ### Changed
 
+- **Breaking**: the distribution is `phala-pay` (was `crypto-topup-sdk`), published to
+  PyPI from `sdk-py-v*` tags. The `topup_sdk` and `topup_client` imports are unchanged.
+- **Breaking**: `verify_webhook` parses Stripe-style events: `WebhookEvent(id, type, created, data)`
+  with `object` (the event's `data.object`), still accepting the old envelope of a replayed old
+  event. `CreditedDeposit` carries the deposit's fields (`deposit_id` `dep_…`, `account_id`,
+  `amount` in cents, `price_source` `quote` or `spot`, `quote`, …) and its `fulfillment_key` is
+  the `dep_` id; `deposit_id` returns `dep_…` and `credited_event_id` `evt_…`.
+  `topup-sdk send-test-event` takes `--account-id` and `--amount` and sends the new envelope.
+- **Breaking**: `TopupClient(base_url, signer, *, forwarder=None, …)`: the product is the signer's
+  key id, `{product}/v1`; there is no `product_slug` argument. With `forwarder=(factory,
+  implementation)` pinned, `create_quote` and `get_quote` recompute an open quote's address and
+  raise the new `AddressMismatchError`.
+- **Breaking**: `ApiError` carries the error object's `error_type` and `param`.
 - `TopupClient.attestation` raises `AttestationError` unless `report_data` binds the returned
   keys. It does not verify the quote itself.
+- The service now rebuilds `@target-uri` from its configured public origin
+  (`TOPUP_PUBLIC_ORIGIN`) instead of the `Host` and `X-Forwarded-Proto` headers, so requests
+  signed for the public URL verify behind the dstack gateway (#77). The `http_message_signature`
+  security scheme in `openapi.json` documents this. No SDK code changed.
 
 ### Removed
 
+- **Breaking**: `create_deposit_address`, `get_deposit_address`, `rotate_deposit_address`,
+  `list_pending_deposits`, and `topup_sdk.persistent_salt`, with their generated operations and
+  models: quotes are the only flow.
+- **Breaking**: `lookup_deposits` and `request_refund`; `list_deposits(external_id, state=…,
+  created_from=…, created_to=…)` becomes `list_deposits(account_id=…, quote=…, status=…,
+  tx_hash=…, created_gte=…, created_lte=…, expand=…)` over Stripe's cursors, and `get_deposit`
+  takes a `dep_` id. Use `create_refund` and `get_refund`.
+- **Breaking**: `register_account`, `create_rate_lock`, `get_rate_lock`, `cancel_rate_lock`, and
+  `get_limits`, with their generated `topup_client` operations and models. Use `create_quote`,
+  `get_quote`, `cancel_quote`, and `get_config`.
 - **Breaking:** the generated `RouteDailyReportSettlementsByStatus` and
   `RouteDailyReport.settlements_by_status`, replaced by `credited_undelivered` and
   `credited_undelivered_max_age_seconds`; the settlement-request test vectors, since the service
@@ -93,36 +99,12 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   `/v1/attestation` (`get_attestation`) (#90). Both belonged only to the pre-C11 placeholder
   attestor; the production service never returned them. There was no deprecation window because
   neither was ever reachable in production.
-
-### Added
-
-- `TopupClient.list_pending_deposits` and the generated `list_pending_deposits` operation with
-  `PendingDepositResponse` and `PendingDepositsResponse`: transfers to persistent addresses seen
-  before finality. Display only; they are not credited.
-- `RateLockResponse.payment` (`RateLockPayment`): the payment the checkout page should show (the
-  consuming deposit, else the first qualifying payment, else the first), `seen` before finality
-  or `finalized` once it is a deposit.
-
-### Changed
-
-- The service now rebuilds `@target-uri` from its configured public origin
-  (`TOPUP_PUBLIC_ORIGIN`) instead of the `Host` and `X-Forwarded-Proto` headers, so requests
-  signed for the public URL verify behind the dstack gateway (#77). The `http_message_signature`
-  security scheme in `openapi.json` documents this. No SDK code changed.
-
-### Added
-
-- `DailyReportResponse.exposure_minor`, the global open rate-lock credit in destination minor
-  units (#94). Optional, so the model also parses reports from servers that predate it.
-
-### Removed
-
 - **Breaking:** `RouteDailyReport.exposure_minor`, `exposure_minor_reason`, `pnl_minor`, and
   `pnl_minor_reason` (#94). They were always null placeholders on the admin-only daily report;
   PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
   no service has been deployed. Regenerated models only.
 
-## 0.1.0 - 2026-09-22
+## [0.1.0] - 2026-09-22
 
 Generated from OpenAPI `info.version` 0.1.0.
 
