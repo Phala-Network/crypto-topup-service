@@ -71,6 +71,9 @@ contract ForwarderHandler is Test {
         bool native,
         bool anyTreasury
     ) external {
+        // A forwarder address has no key: as a caller, the fuzzer would give it an account nonce
+        // no real chain can, and CREATE2 refuses an address with a nonce.
+        if (treasuryOf[caller] != address(0)) caller = address(0xCA11E2);
         address treasury = anyTreasury && treasurySeed != 0
             ? address(uint160(treasurySeed))
             : treasuries[treasurySeed % TREASURY_COUNT];
@@ -113,6 +116,9 @@ contract ForwarderInvariantTest is StdInvariant, Test {
         selectors[3] = ForwarderHandler.flush.selector;
         targetSelector(FuzzSelector({ addr: address(handler), selectors: selectors }));
         targetContract(address(handler));
+        for (uint256 i; i < handler.forwarderCount(); ++i) {
+            excludeSender(handler.forwarders(i));
+        }
     }
 
     /// Every unit funded into a treasury's forwarders is either still in them or at that
