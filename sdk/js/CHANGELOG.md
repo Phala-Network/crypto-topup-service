@@ -6,6 +6,11 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The transaction link in `<Checkout>` uses the text color with an underline instead of
+  `colorPrimary`, so it stays readable with a light brand color.
+
 ## [0.1.1] - 2026-09-27
 
 ### Added
