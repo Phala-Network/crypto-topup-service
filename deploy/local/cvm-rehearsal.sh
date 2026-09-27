@@ -56,7 +56,7 @@ registry="$project-registry"
 client="$project-client"
 product_project="$project-product"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-export TOPUP_LOCAL_DSTACK_IMAGE="crypto-topup-dstack-simulator:$project"
+export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
 export SANDBOX_ANVIL_PORT
 SANDBOX_ANVIL_PORT=$(free_port)
 registry_port=$(free_port)
@@ -167,9 +167,9 @@ publish() {
     printf -v "$variable" '%s' "$digest"
     export "${variable?}"
 }
-publish crypto-topup TOPUP_IMAGE "$root"
+publish phala-pay TOPUP_IMAGE "$root"
 publish postgres-walg POSTGRES_WALG_IMAGE -f "$root/deploy/Dockerfile.postgres-walg" "$root"
-publish crypto-topup-reference-product PRODUCT_IMAGE \
+publish phala-pay-reference-product PRODUCT_IMAGE \
     -f "$root/deploy/Dockerfile.reference-product" "$root"
 docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
     -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
@@ -256,7 +256,7 @@ render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
         WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=$1 \
         TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key SENTRY_ENVIRONMENT=staging \
-        TOPUP_DOMAIN=crypto-topup-api-staging.phala.com \
+        TOPUP_DOMAIN=pay-api-staging.phala.com \
         TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
         TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 \
         TOPUP_RPC_PROVIDER_B_URL='http://anvil:8545/?key={key}' \

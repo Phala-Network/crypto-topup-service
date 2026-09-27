@@ -164,21 +164,21 @@ jobs:
         run: >-
           docker build
           --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          --tag crypto-topup-service:ci .
+          --tag phala-pay:ci .
       - name: Smoke test runtime image
-        run: docker run --rm crypto-topup-service:ci topup --help
+        run: docker run --rm phala-pay:ci topup --help
       - name: Build and smoke test the reference-product image
         run: |
           docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            -f deploy/Dockerfile.reference-product -t crypto-topup-reference-product:ci .
-          docker run --rm crypto-topup-reference-product:ci --help
+            -f deploy/Dockerfile.reference-product -t phala-pay-reference-product:ci .
+          docker run --rm phala-pay-reference-product:ci --help
       # The OCI exporter needs a BuildKit builder; the runner's Docker driver has none.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         id: buildx
         with:
           use: false
       # Release images publishes only after two matching builds; catch a nondeterministic
-      # dependency here rather than at release. The crypto-topup build is too slow to repeat per PR.
+      # dependency here rather than at release. The phala-pay build is too slow to repeat per PR.
       - name: Check the reference-product image is reproducible
         env:
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
@@ -194,7 +194,7 @@ jobs:
           SANCTIONS_ORACLE=0x2222222222222222222222222222222222222222 \
           PRODUCT_SLUG=ci-check \
             deploy/sandbox/render-route.sh >"$route"
-          docker run --rm -i crypto-topup-service:ci \
+          docker run --rm -i phala-pay:ci \
             topup route validate --template /dev/stdin <"$route"
 
   deployment:

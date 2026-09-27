@@ -21,7 +21,7 @@ require_command cast
 require_command forge
 require_command jq
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-reference.XXXXXX")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-reference.XXXXXX")"
 ANVIL_PID=""
 cleanup() {
     if [[ -n "$ANVIL_PID" ]]; then

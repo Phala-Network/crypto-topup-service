@@ -1,4 +1,4 @@
-//! Command-line entry point for the crypto top-up service.
+//! Command-line entry point for the Phala Pay service.
 
 mod route;
 
@@ -39,7 +39,7 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
 #[derive(Parser)]
-#[command(name = "topup", version, about = "Crypto top-up service")]
+#[command(name = "topup", version, about = "Phala Pay service")]
 struct Cli {
     #[command(subcommand)]
     command: TopupCommand,

@@ -101,7 +101,7 @@ provisional `TOPUP_DOMAIN` (the instance's gateway host is known only after crea
 needs no `TOPUP_GATEWAY_DOMAIN`):
 
 ```sh
-export TOPUP_IMAGE=<live crypto-topup digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>
+export TOPUP_IMAGE=<live phala-pay digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>
 TOPUP_DOMAIN=pending.invalid deploy/render-compose.sh --restore-check >restore-check.yml
 ```
 
@@ -162,7 +162,7 @@ live_isolated() {
    npx --yes phala@1.1.22 cvms get "$SOURCE_CVM_ID" --json >source.json
    export APP_ID="$(jq -er '.app_id' source.json)"
    npx --yes phala@1.1.22 instances add --app-id "$APP_ID" --compose-file restore-check.yml \
-     --env-file "$RESTORE_ENV_DIR/restore.env" --name crypto-topup-restore --json >instance.json
+     --env-file "$RESTORE_ENV_DIR/restore.env" --name phala-pay-restore --json >instance.json
    export RESTORE_CVM_ID="$(jq -er '.vm_uuid' instance.json)"
    ```
 
@@ -243,7 +243,7 @@ a later real restore), never runs `backup` or the full `topup`, and never takes 
    the live staging images and settings, and require that it publishes only 8081:
    `docker compose -f restore-check.yml config --format json | jq -e '[.services[] | .ports[]? | .published] == ["8081"]'`.
 2. Require `live_isolated` to pass before the instance exists, with
-   `LIVE_URL=https://$TOPUP_DOMAIN` (`https://crypto-topup-api-staging.phala.com`).
+   `LIVE_URL=https://$TOPUP_DOMAIN` (`https://pay-api-staging.phala.com`).
 3. Record the start time (the RPO anchor), run steps 1-5 of [Restore](#restore), and record the
    report, RPO, and RTO. **Hard abort:** run `live_isolated` right after creation, before each
    step, and at least every five minutes; if it fails once, delete the instance at once and record

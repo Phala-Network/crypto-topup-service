@@ -1,4 +1,4 @@
-"""Python SDK for the crypto top-up service product API.
+"""Python SDK for the Phala Pay service product API.
 
 `topup_client` is generated from the service's OpenAPI document; this package adds request
 signing, inbound verification, deterministic address helpers, and an idempotent client.

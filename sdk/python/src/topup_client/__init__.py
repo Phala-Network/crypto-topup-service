@@ -1,4 +1,4 @@
-"""A client library for accessing Crypto Top-up Service API"""
+"""A client library for accessing Phala Pay API"""
 
 from .client import AuthenticatedClient, Client
 

@@ -21,8 +21,8 @@ done
 
 "$DEPLOY_CONTRACTS_DIR/check-build.sh" --check
 
-safe_report="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-safe-report.XXXXXX")"
-tmp="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-reference-manifest.XXXXXX")"
+safe_report="$(mktemp "${TMPDIR:-/tmp}/phala-pay-safe-report.XXXXXX")"
+tmp="$(mktemp "${TMPDIR:-/tmp}/phala-pay-reference-manifest.XXXXXX")"
 trap 'rm -f "$safe_report" "$tmp"' EXIT
 validate_deployment_params "$safe_expectations" "$safe_report" "$target" || \
     die "refusing to deploy: ADMIN/TREASURY are not the verified approved Safes on $target"

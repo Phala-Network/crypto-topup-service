@@ -1,4 +1,4 @@
-//! External-system adapters for the crypto top-up service.
+//! External-system adapters for the Phala Pay service.
 
 #![cfg_attr(
     test,

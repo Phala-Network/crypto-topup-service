@@ -1,4 +1,4 @@
-"""The staging reference product for the crypto top-up service.
+"""The staging reference product for the Phala Pay service.
 
 `serve` runs the product service (reference_product.server); `deposit` drives one deposit through
 a running product (reference_product.driver); with no mode, both run in one process

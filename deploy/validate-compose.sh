@@ -20,7 +20,7 @@ trap cleanup EXIT INT TERM
 
 # Both variants of the attested compose, rendered as Deploy does.
 render() {
-    TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    TOPUP_IMAGE=ghcr.io/phala-network/phala-pay@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
         POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
         AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto \
         AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres \
@@ -222,7 +222,7 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
 # The reference-product CVM (deploy/product), rendered as Deploy (target `product`) does: it reads
 # exactly the names of its env example, which become its allowed_envs, carries its settings in the
 # attested config, mounts no host path, and publishes only 8089.
-PRODUCT_IMAGE=ghcr.io/phala-network/crypto-topup-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
+PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
     TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
     PRODUCT_RPC_URL=https://rpc.example PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
     "$root/deploy/product/render-compose.sh" >"$product_compose"

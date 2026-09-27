@@ -33,7 +33,7 @@ mapfile -t safes_to_check < <(jq -c '
     | .[] | {address: .[0].address, roles: map(.role)}
 ' "$expectations")
 
-reports="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-safe-report.XXXXXX")"
+reports="$(mktemp "${TMPDIR:-/tmp}/phala-pay-safe-report.XXXXXX")"
 trap 'rm -f "$reports"' EXIT
 status=0
 

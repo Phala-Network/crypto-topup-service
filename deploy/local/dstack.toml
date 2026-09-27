@@ -1,7 +1,7 @@
 [default]
 workers = 4
 max_blocking = 32
-ident = "crypto-topup dstack simulator"
+ident = "phala-pay dstack simulator"
 temp_dir = "/tmp"
 keep_alive = 10
 log_level = "info"

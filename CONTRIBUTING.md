@@ -75,8 +75,8 @@ commit timestamp when producing an image:
 ```sh
 export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
 cargo build --release --locked -p topup
-docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t crypto-topup-service:dev .
-docker run --rm crypto-topup-service:dev --help
+docker build --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t phala-pay:dev .
+docker run --rm phala-pay:dev --help
 ```
 
 Release artifacts build only the `topup` package.

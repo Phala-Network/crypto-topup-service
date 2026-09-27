@@ -1,4 +1,4 @@
-# Crypto Top-up Service
+# Phala Pay
 
 A service, called by the Phala Cloud billing backend, that turns finalized ERC-20
 deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that

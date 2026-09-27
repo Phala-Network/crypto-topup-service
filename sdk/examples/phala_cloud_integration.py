@@ -1,4 +1,4 @@
-"""Integrating a product with the crypto top-up service through the Python SDK.
+"""Integrating a product with the Phala Pay service through the Python SDK.
 
 These are the calls a product such as Phala Cloud makes, and the checks it adds to each:
 

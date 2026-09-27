@@ -23,8 +23,8 @@ services:
     # config's content does, and a restart keeps the old config file. The renderer sets this label
     # to the digest of the rendered file, so every rendered change recreates every service.
     labels: &rendered-labels
-      crypto-topup.rendered-sha256: "${TOPUP_RENDERED_SHA256:-}"
-    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      phala-pay.rendered-sha256: "${TOPUP_RENDERED_SHA256:-}"
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command:
       - topup
@@ -87,7 +87,7 @@ services:
 
   migrate:
     labels: *rendered-labels
-    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command: ["topup", "migrate"]
     environment:
@@ -102,7 +102,7 @@ services:
 
   topup:
     labels: *rendered-labels
-    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     # Database clients run as uid 999, which owns the 0600 credential files; each mounts only its own.
     user: "999:999"
     command:
@@ -133,7 +133,7 @@ services:
       # release is the digest of the image rendered here; the environment is this deployment's.
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-}"
-      TOPUP_IMAGE: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      TOPUP_IMAGE: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - db_app:/run/db-app:ro
@@ -188,7 +188,7 @@ services:
 
   heartbeat:
     labels: *rendered-labels
-    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     user: "999:999"
     command: ["topup", "heartbeat", "--interval-s", "60"]
     environment:
@@ -248,7 +248,7 @@ services:
   # writes the report that the read-only topup serves on /healthz (deploy/RESTORE.md).
   restore-check:
     labels: *rendered-labels
-    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     entrypoint:
       - topup
       - restore-check

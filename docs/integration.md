@@ -411,8 +411,8 @@ Idempotency-Key: "…"
 
 | | Origin | Chain | Status |
 |---|---|---|---|
-| Production | `https://crypto-topup-api.phala.com` | Ethereum Mainnet (1) | Domain being set up |
-| Staging | `https://crypto-topup-api-staging.phala.com` | Sepolia (11155111) | Domain being set up |
+| Production | `https://pay-api.phala.com` | Ethereum Mainnet (1) | Not deployed yet |
+| Staging | `https://pay-api-staging.phala.com` | Sepolia (11155111) | Live |
 
 The origin is exact: it is the service's `TOPUP_PUBLIC_ORIGIN`, and every request signature
 covers it (§5.5). Staging's route, with its forwarder factory, implementation, and test PHA token
@@ -506,7 +506,7 @@ domain and stays), derived inside its confidential VM. You hold only its public 
 you store can forge a credit. Pin it only from verified attestation ([architecture §14](architecture.md#14-configuration-and-deployment)):
 
 ```sh
-export TOPUP_ORIGIN=https://crypto-topup-api-staging.phala.com
+export TOPUP_ORIGIN=https://pay-api-staging.phala.com
 export NONCE="$(openssl rand -hex 32)"
 curl -fsS "$TOPUP_ORIGIN/v1/attestation?nonce=$NONCE" > attestation.json
 # The official dstack verifier, pinned by digest (Docker): quote, TCB, event log, OS image.
@@ -581,7 +581,7 @@ signer = RequestSigner.from_seed_file("phala-cloud/v1", "/secrets/phala-cloud-st
 # key (§5.3): the client recomputes every open quote's address before returning it.
 forwarder = ("0x2407bE5Be2b632F5b166872A49E4946a70CCa531", "0x70B714508BFa441449DC09f790Ca03Baa5170360")
 with TopupClient(
-    "https://crypto-topup-api-staging.phala.com", signer, forwarder=forwarder
+    "https://pay-api-staging.phala.com", signer, forwarder=forwarder
 ) as client:
     config = client.get_config()
     quote = client.create_quote("team-42", 2500, chain_id=11155111, asset="pha")

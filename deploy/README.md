@@ -53,7 +53,7 @@ passwords: that is a key migration, not an image bump.
    |---|---|
    | `PHALA_WORKSPACE` | display name of the API key's workspace (preflight checks it) |
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
-   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain): `crypto-topup-api-staging.phala.com` (`staging`), `crypto-topup-api.phala.com` (`production`) |
+   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain): `pay-api-staging.phala.com` (`staging`), `pay-api.phala.com` (`production`) |
    | `AWS_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
@@ -84,8 +84,8 @@ passwords: that is a key migration, not an image bump.
      1 minute, timeout 10 seconds, environment = the Environment's name.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
-6. **Packages.** After the first Release images run, make `crypto-topup`, `postgres-walg`, and
-   `crypto-topup-reference-product` public (organization Packages > package > Package settings >
+6. **Packages.** After the first Release images run, make `phala-pay`, `postgres-walg`, and
+   `phala-pay-reference-product` public (organization Packages > package > Package settings >
    Change visibility; the organization must allow public container packages). This is
    irreversible. CVMs pull without credentials, and preflight fails on a private image.
 
@@ -94,7 +94,7 @@ passwords: that is a key migration, not an image bump.
 ### Build and publish images
 
 Run **Release images** on `main` (Actions tab, or `gh workflow run release-images.yml --ref
-main`). It builds `crypto-topup`, `postgres-walg`, and `crypto-topup-reference-product`, checks
+main`). It builds `phala-pay`, `postgres-walg`, and `phala-pay-reference-product`, checks
 that the reproducible ones build bit for bit twice, pushes them tagged `sha-<12 hex commit>`, and
 records the `repository@sha256` references in its summary and its `images.json` artifact.
 `postgres-walg` is not bit-for-bit reproducible (apt and dpkg timestamps). The same two-build
@@ -180,7 +180,7 @@ an RPC provider's API key is not one: its URL has `{key}` where the key goes, an
 | `dstack-ingress` image | pinned in [docker-compose.yml](docker-compose.yml) by digest ([Custom domain](#custom-domain)) |
 | route files (inline configs) | committed in [docker-compose.yml](docker-compose.yml), checked against `config/routes/` by [validate-compose.sh](validate-compose.sh) |
 
-Every service also carries the label `crypto-topup.rendered-sha256`, so any rendered change
+Every service also carries the label `phala-pay.rendered-sha256`, so any rendered change
 recreates it. To change a setting, change the variable (or the route, by PR) and run Deploy
 `upgrade`. [product/render-compose.sh](product/render-compose.sh) renders the product the same way.
 

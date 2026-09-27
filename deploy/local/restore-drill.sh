@@ -25,9 +25,9 @@ case "$drill_id" in
 esac
 project="topup-restore-drill-$mode-$drill_id"
 # Per-run image tags keep concurrent checkouts from replacing this drill's images mid-run.
-export TOPUP_LOCAL_SERVICE_IMAGE="crypto-topup-service:$project"
-export TOPUP_LOCAL_POSTGRES_IMAGE="crypto-topup-postgres-walg:$project"
-export TOPUP_LOCAL_DSTACK_IMAGE="crypto-topup-dstack-simulator:$project"
+export TOPUP_LOCAL_SERVICE_IMAGE="phala-pay:$project"
+export TOPUP_LOCAL_POSTGRES_IMAGE="phala-pay-postgres-walg:$project"
+export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
 writer_pid=
 samples_file=
 routes_dir=

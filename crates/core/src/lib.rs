@@ -1,4 +1,4 @@
-//! Pure domain types and rules for the crypto top-up service.
+//! Pure domain types and rules for the Phala Pay service.
 
 #![cfg_attr(
     test,

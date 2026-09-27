@@ -27,11 +27,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # Test the given image (CI passes the one it just built); otherwise build a per-run tag from this
-# checkout, because a shared tag such as crypto-topup-postgres-walg:local may be stale.
+# checkout, because a shared tag such as phala-pay-postgres-walg:local may be stale.
 if [ "$#" -ge 1 ]; then
     image=$1
 else
-    built_image="crypto-topup-postgres-walg:$prefix"
+    built_image="phala-pay-postgres-walg:$prefix"
     docker build -q -f "$root/deploy/Dockerfile.postgres-walg" -t "$built_image" "$root" >/dev/null
     image=$built_image
 fi
