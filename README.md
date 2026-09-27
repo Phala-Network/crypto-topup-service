@@ -38,7 +38,7 @@ balance, debt, entitlements, and billing policy.
 
 - [Design](docs/architecture.md) — goal, trust model, schema, state machine, contracts, deployment, policies, acceptance
 - [First route profile](examples/phala-cloud-pha.yaml)
-- [Integration guide](docs/integration.md) — onboarding, API, webhooks and fulfillment, outcomes, testing, versioning
+- [Integration guide](docs/integration.md) — quickstart, quotes, webhooks and fulfillment, refunds, testing, reference
 - [Delivery plan](docs/plan.md) — lanes, work packages, gates, agent rules; no dates
 
 ## Database roles

@@ -57,7 +57,7 @@ if event.type == "deposit.credited":
 ```
 
 `SETTLEMENT_PUBLIC_KEY` is the service's webhook key, pinned from its attestation
-(docs/integration.md §3.3). `construct_event` checks the Standard Webhooks
+(docs/integration.md §5.3). `construct_event` checks the Standard Webhooks
 signature, the timestamp (five minutes' tolerance), and that the body's id is the `webhook-id`;
 `event.data.object` is the `Deposit` (or, for `quote.expired`, the `Quote`) as it was when the
 event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with both routes.

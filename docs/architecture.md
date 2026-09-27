@@ -1,6 +1,6 @@
 # Crypto Top-up Service — Design
 
-Status: v6 (webhook fulfillment). Single specification and implementation design. Numbers marked *(policy)* are set
+Status: v7 (Stripe-style product API). Single specification and implementation design. Numbers marked *(policy)* are set
 by finance and risk; this document fixes what they mean.
 
 ## 0. Standards used
@@ -20,7 +20,8 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Job queue | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` | — |
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
 | Product fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the product holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
-| Idempotent product API | `Idempotency-Key` on quote creation (Stripe; the IETF Idempotency-Key draft), natural keys elsewhere (`(product, external_id)`, rotation version) | The key is stored on the quote and never pruned; a retry with a fresh signature returns the stored result |
+| Product API shape | Stripe's API conventions: top-level resources, the list object, the error object, prefixed ids, `expand[]`, the Event object, `client_secret` | Requests are signed instead of carrying a secret key; token amounts are decimal strings; §12 lists every departure |
+| Idempotent product API | `Idempotency-Key` on quote and refund creation (Stripe; the IETF Idempotency-Key draft), natural keys elsewhere (`(product, account_id)`) | The key is stored on the created object and never pruned; a retry with a fresh signature returns the stored result |
 | Request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | — |
 | Webhooks | Standard Webhooks | — |
 | Money | Integer minor units; 8-decimal scaled prices | Precision is an application choice |
@@ -154,15 +155,17 @@ append-only. Physical addresses belong to an account and a chain; routes are sel
 deposit by `(chain_id, asset_contract)`.
 
 ```text
-products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- key id: route (§14)
+products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- key id: {slug}/v1 (§12)
 accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
-              -- scopes: quotes | addresses | settlement | flush | refunds; empty = active
+              -- external_id is the API's account_id; created by the account's first quote
+              -- scopes: quotes | settlement | flush | refunds; empty = active
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
 addresses     id, account_id, chain_id, kind (lock | persistent: legacy, never issued again), version,
               lock_ref, salt, address, retired_at
               UNIQUE (chain_id, address)
-rate_locks    address_id PK, route, amount_atomic, price_scaled, credit_minor, expires_at,
-              consumed_by (deposit_id) UNIQUE
+rate_locks    address_id PK (the quote: qt_ + hex), route, amount_atomic, price_scaled, credit_minor,
+              expires_at, status, consumed_by (deposit_id) UNIQUE, product_id, idempotency_key,
+              client_secret_hash                  UNIQUE (product_id, idempotency_key)
 cursors       chain_id PK, scanned_block, scanned_block_time
 pending_transfers  chain_id, tx_hash, log_index, block_number, block_hash, block_time, head_block,
               address_id, asset_contract, from_address, amount_atomic, first_seen_at
@@ -182,8 +185,11 @@ flushes       id, chain_id, token, operator, nonce, tx_hash, block_number,
 flushed       flush_id, address_id, amount_atomic, block_number, log_index   -- one row per Flushed event
               PRIMARY KEY (flush_id, address_id)
 refunds       id, deposit_id, amount_atomic, to_address, tx_hash, status (requested|approved|sent|confirmed),
-              requested_by, approved_by, created_at                 -- executed from the treasury Safe; recorded here
-outbox        id, event_type, payload jsonb, next_attempt_at, delivered_at, response jsonb
+              requested_by, approved_by, idempotency_key, created_at   -- executed from the treasury Safe
+outbox        id, event_type, format, product_id, object_type (deposit|quote), object_id,
+              payload jsonb, next_attempt_at, delivered_at, response jsonb
+              -- format 2: payload is the event's data, rendered at the first attempt;
+              -- format 1: rows written before Stripe-style events, delivered unchanged
 audit         id, actor, action, subject, reason, created_at
 ```
 
@@ -263,7 +269,7 @@ depeg guard; check and FX observations are not required for that mode.
 **Screening** is direct sanctions-list screening plus per-deposit bounds. KYT is a separate
 adapter that compliance may require before GA.
 
-## 9. Quote-first deposits (rate locks)
+## 9. Quotes
 
 Invoice model, enabled from the pilot, with this service's exception profile:
 
@@ -288,9 +294,9 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   confirm step. A payment mined inside the window is therefore consumed at the lock price and
   never reported as expired. Exposure stays reserved until finality, about 15 minutes after
   `expires_at`, and longer while the scanner is stalled (§16). Until then the API
-  shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
-  window has closed (`409 window_closed`). A lock whose address has received any deposit, even
-  a rejected one, can no longer be cancelled (`409 pending_payment`).
+  shows the quote `open` past `expires_at`, and cancellation is refused once the window has
+  closed (`409 quote_window_closed`). A quote whose address has received any payment, even a
+  rejected one, can no longer be cancelled (`409 quote_payment_received`).
 - Exposure counters sum `credit_minor` across routes, so every route must use the same
   `unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
@@ -384,22 +390,42 @@ the welcome promotion by existing rule.
 
 ## 12. API and events
 
-Product requests use the same signature scheme with the product's key; paths use the product's
-`external_id`; every request is checked for tenant ownership. Address responses include the
-salt inputs (`product_slug`, `external_id`, `version` or `lock_ref`) so the product can
-recompute any address without the service. The admin key can only issue products and replace
-their key and webhook URL, pause and resume, nudge, drive the refund workflow, lift reconciliation blocks (§13), and replay webhook
-events; each change writes `audit`. The verifier rebuilds `@target-uri` from the configured public origin
-(`TOPUP_PUBLIC_ORIGIN`, §14) and the request's path and query, never from `Host` or
-`X-Forwarded-*`, so signers sign the public URL they call. Each deployment (sandbox, staging,
-production) must pin a distinct product key: signature single-use is recorded per database, so a
-shared key would let a signed request be replayed within the freshness window against another
-deployment that shares its public origin (for example a replacement or restored instance).
+The product API follows Stripe's documented conventions, so an integrator who knows Stripe
+knows it. Where it departs, the last column says why.
+
+| Convention | Stripe | Here |
+|---|---|---|
+| Resources | Top-level nouns, actions as `POST …/{id}/cancel` ([API reference](https://docs.stripe.com/api)) | `/v1/quotes`, `/v1/deposits`, `/v1/refunds`, `POST /v1/quotes/{id}/cancel` |
+| Caller | The secret key identifies the account | The RFC 9421 `keyid`, `{product}/v1`, identifies the product; the service stores only its public key |
+| Customer reference | Checkout's `client_reference_id` | `account_id`, the product's own id for its customer (a workspace); an account is created by its first quote |
+| Ids | Prefixed opaque ids | `qt_`, `dep_`, `re_`, `evt_` and the 32 hex digits of a UUID; the deposit and `deposit.credited` UUIDs are UUIDv5, so both stay recomputable (§0, §11) |
+| Amounts | Integer minor units, lowercase currency ([currencies](https://docs.stripe.com/currencies)) | `amount` in US cents with `currency: "usd"`; token amounts are decimal strings (`amount_atomic`), since 18-decimal values exceed JSON's safe integers |
+| Timestamps | Unix seconds | Same: `created`, `expires_at`, `valued_at` |
+| Lists ([pagination](https://docs.stripe.com/api/pagination)) | `{object: "list", url, has_more, data}`, newest first; `limit` 1–100, `starting_after` or `ending_before` | Same |
+| Expansion ([expanding](https://docs.stripe.com/api/expanding_objects)) | `expand[]`, depth ≤ 4 | `expand[]` for a deposit's `quote`, a quote's `deposit`, and a refund's `deposit`; depth 1 |
+| Errors ([errors](https://docs.stripe.com/api/errors)) | `{error: {type, code, message, param, doc_url}}` | `{error: {type, code, message, param}}`; `type` is `invalid_request_error`, `idempotency_error`, or `api_error` |
+| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | On `POST /v1/quotes` and `POST /v1/refunds`, covered by the signature, stored on the object and never pruned |
+| Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
+| Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
+| Test mode | `livemode` and test keys | Each environment is its own origin and key; no flag |
+
+Every product request is signed (§3); the product is the signature's `keyid`, which must have the
+form `{slug}/v1`, name a registered product with its stored key, and be named by a loaded route.
+The verifier rebuilds `@target-uri` from the configured public origin (`TOPUP_PUBLIC_ORIGIN`,
+§14) and the request's path and query, never from `Host` or `X-Forwarded-*`, so signers sign the
+public URL they call. Signatures are single-use within the acceptance window. Each deployment
+(sandbox, staging, production) must pin a distinct product key: single use is recorded per
+database, so a shared key would let a signed request be replayed within the freshness window
+against another deployment that shares its public origin (for example a replacement or restored
+instance). A request for another product's object answers `404`. The admin key can only issue
+products and replace their key and webhook URL, pause and resume, nudge, drive the refund
+workflow, lift reconciliation blocks (§13), and replay webhook events; each change writes
+`audit`.
 
 ```text
 GET    /v1/config                                                 assets, limits, quote terms
 POST   /v1/quotes {account_id, amount, currency, chain_id, asset} single-use address + locked price; Idempotency-Key
-GET    /v1/quotes/{id}                                            resume a checkout page
+GET    /v1/quotes/{id}                                            resume a checkout; unsigned with ?client_secret=: the payer's view
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
 GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
@@ -407,52 +433,108 @@ POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or 
 GET    /v1/refunds/{id}
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
-GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
-
-POST   /v1/admin/products {slug, public_key, webhook_url}   key id: route (§14); same values → same product, different → 409
+POST   /v1/admin/products {slug, public_key, webhook_url}   same values → same product, different → 409
 PUT    /v1/admin/products/{slug} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
 GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
-POST   /v1/admin/products/{slug}/accounts/{account_id}/pause | resume {scopes}
+POST   /v1/admin/products/{slug}/accounts/{account_id}/pause | resume {scopes, reason}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
-GET    /v1/admin/report/daily                 treasury, unflushed, open locks, rejected holds, undelivered credits, global lock exposure, reconciliation blocks
+GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 ```
 
-Signatures are single-use within the acceptance window.
+**Config.** One `assets` entry per loaded route of the calling product (its current version):
+chain, asset code, contract, decimals, pricing mode, `min_amount` (the route's minimum credit in
+cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and tolerance, and the
+typical finality time; plus `max_open_amount_per_account`, the per-account open exposure cap,
+which also bounds any single quote. The remaining exposure is not served: a quote above it fails
+with `409 exposure_cap_exceeded`, whose message states the remaining amount. The forwarder factory
+and implementation are not served: the product pins them from the attested deployment, like the
+settlement key, because the service cannot vouch for its own addresses.
 
-Pending view (display only, §8). A rate lock carries an optional `payment`, chosen by the §9
-consumption rule: the deposit that consumed the lock; otherwise the first payment that would
-consume it (asset, `in_time`, and tolerance all hold), taking finalized deposits before transfers
-seen above `finalized`; otherwise the first payment. Its `status` is `"seen"` while above
-`finalized` (with `confirmations` and `estimated_final_at`) and `"finalized"` once it is a deposit
-(then `deposit_id` locates it); `supported`, `in_time`, and `amount_within_tolerance` describe it
-against the lock. On a cancelled lock every payment is valued at spot, so `in_time` and
-`amount_within_tolerance` are false; the lock's own `status` shows why. An expired lock still
-applies to a payment mined before `expires_at` (§9), so those fields are computed normally there.
-It is separate from `deposits` so it is never mistaken for a credit. `estimated_final_at` is `block_time + 15
-minutes`, the typical Ethereum delay to `finalized` (64 to 95 slots); it is an estimate. A seen
-transfer can disappear in a reorg; only `deposits` and `deposit.credited` reflect credit. The
-pending view ignores pause scopes: it is informational, and a pause still stops whatever it
-stops for the deposit once final. While a chain is frozen (§13) its pending view stops updating.
+**Quote.** `{id, object: "quote", account_id, amount, currency, chain_id, asset, amount_atomic,
+exchange_rate, address, payment_uri, status, expires_at, created, payment, deposit,
+client_secret}`. `exchange_rate` is the locked price in USD per token, exactly, with 8 decimal
+places. `status` is `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`
+(Checkout Session's and PaymentIntent's names; the database keeps `consumed` and `cancelled`).
+`chain_id` and `asset` are required, so a second route for the same asset is not a breaking change.
+Cancel returns `canceled`, also on a repeat, and refuses with `409 quote_payment_received`,
+`quote_window_closed`, or `quote_unexpected_state` (complete or expired).
 
-Events (Standard Webhooks, signed with the settlement key) are Stripe's Event object,
+`payment` (display only, §8) is the payment the page should show, chosen by the §9 consumption
+rule: the deposit that consumed the quote; otherwise the first payment that would consume it,
+finalized deposits before transfers seen above `finalized`; otherwise the first payment at all. It
+carries `status` (`seen` above `finalized`, `final` once it is a deposit), `tx_hash`,
+`amount_atomic`, and, while `seen`, `confirmations` and `estimated_final_at` (block time plus
+15 minutes, the typical Ethereum delay to `finalized`; an estimate); `matches_quote` (right asset,
+in time, and within tolerance: it will be credited at the quoted price); and `deposit`, the
+`dep_` id it has or will have. On a canceled quote no payment matches. A seen transfer can
+disappear in a reorg; only deposits and `deposit.credited` reflect credit. The view ignores pause
+scopes, and while a chain is frozen (§13) it stops updating.
+
+**Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{48 random hex
+digits}`, for the payer's checkout page. Only its SHA-256 is stored, so no other response returns
+it; a repeat with the same `Idempotency-Key` returns a new secret, and the earlier one stops
+working (the product repeats only when it lost the response). `GET /v1/quotes/{id}?client_secret=…`
+without signature headers returns the public subset `ClientQuote`: `{id, object, status, amount,
+currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
+payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (final,
+being valued and screened), `credited`, or `rejected` (the reason is not exposed). No account,
+price, deposit id, or transaction hash. Every unsigned response, errors included, allows any
+origin (`Access-Control-Allow-Origin: *`); the secret is the bearer. A secret that is not the
+quote's is `404`. Unsigned reads are limited in the process to 120 per quote and 6 000 in total per
+minute (`429 rate_limit`).
+
+**Deposit.** `{id, object: "deposit", account_id, quote, status, rejection_reason, chain_id, asset,
+asset_contract, amount_atomic, amount, currency, exchange_rate, price_source, valued_at, address,
+from_address, tx_hash, log_index, block_number, amount_refunded_atomic, refunded, created}`.
+`status` is the state machine (§7); a refund is not a state, because it neither moves custody nor
+has to be whole: like Stripe's Charge, the deposit carries `amount_refunded_atomic` and
+`refunded`. `amount` and `exchange_rate` are set once valued; `price_source` is `quote` or `spot`;
+`asset` is `null` for a token without a route; `quote` is `null` only for a legacy persistent
+address. Routes, versions, and valuation evidence are in the admin view.
+
+**Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, status, tx_hash,
+created}`. `amount_atomic` defaults to the unrefunded remainder. `status` is `pending` while
+requested, approved, or sent, and `succeeded` once the transfer is final; finance's steps are
+visible in the admin API. An ineligible deposit is `409 deposit_not_refundable`; an amount above
+the remainder is `400 amount_too_large`.
+
+**Errors.** Codes are stable; messages are not.
+
+| Status | `type` | `code` |
+|---|---|---|
+| 400 | `invalid_request_error` | `parameter_missing`, `parameter_invalid`, `parameter_unknown`, `amount_too_small`, `amount_too_large` (each with `param`) |
+| 401 | `invalid_request_error` | `signature_invalid` |
+| 404 | `invalid_request_error` | `resource_missing` |
+| 409 | `idempotency_error` | `idempotency_key_reused` (the same key with other parameters) |
+| 409 | `invalid_request_error` | `signature_replayed`, `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_not_refundable`, `paused`, `chain_frozen` |
+| 429 | `invalid_request_error` | `rate_limit` (quote creations per account; unsigned quote reads) |
+| 503 | `api_error` | `unavailable` (no fresh price, database unavailable) |
+| 500 | `api_error` | `internal_error` |
+
+The SDK retries `429`, `5xx`, transport errors, and `signature_replayed`, re-signing with the same
+`Idempotency-Key`.
+
+**Events** (Standard Webhooks, signed with the settlement key) are Stripe's Event object,
 `{id: "evt_…", object: "event", type, created, data: {object}}`: `deposit.credited`,
 `deposit.rejected`, and `deposit.refunded` (one per final refund) carry the deposit, and
-`quote.expired` the quote. Every event id is `uuid_v5(NS, "{type}:{object UUID}")`, the object
-being the refund for `deposit.refunded`, so a re-emission after a restore deduplicates for every
-type. `deposit.credited` is the fulfillment event (§11); the others are informational and never
-change balances. Nothing is sent before finality: the checkout page reads the quote's display-only
-`payment`. The outbox does not order events, so `quote.expired` can arrive after the
-`deposit.credited` of a late payment; receivers must act on state (the deposit or quote they
-fetch), never on event order. Object changes
-are additive; receivers must ignore unknown fields. OpenAPI from `utoipa`; SDKs generated from
-it, shipped with a runnable
-Python integration example, a signing helper, and a versioning and deprecation policy. A
-sandbox (Sepolia, test token, product credentials, scripted late/under/over/rejected
-scenarios) is available to integrators before mainnet.
+`quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
+delivery attempt and stored, so every retry and replay sends the same body. Every event id is
+`uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded`, so a
+re-emission after a restore deduplicates for every type. `deposit.credited` is the fulfillment
+event (§11); the others are informational and never change balances. Nothing is sent before
+finality: the checkout page reads the quote's `payment`. The outbox does not order events, so
+`quote.expired` can arrive after the `deposit.credited` of a late payment; receivers must act on
+state (the deposit or quote they fetch), never on event order. Object changes are additive;
+receivers must ignore unknown fields.
+
+OpenAPI comes from `utoipa`; the SDKs are generated from it and ship with a runnable integration
+example, a signing helper, and a versioning and deprecation policy. A sandbox (Sepolia, test
+token, product credentials, scripted late/under/over/rejected scenarios) is available to
+integrators before mainnet.
 
 ### Customer experience obligations (product UI)
 
@@ -464,13 +546,13 @@ checklist:
 | Default flow | Quote first: amount input → locked price, exact token amount, single-use address, QR as an EIP-681 URI carrying token and amount, countdown to `expires_at`, and the rule for late or wrong-amount payments. |
 | Warnings | Network name and chain id, full token contract, "only PHA on Ethereum", minimum deposit, and that below-minimum deposits are not credited. Never truncate addresses or hashes. |
 | Waiting | After payment the user sees "received, N confirmations, final around hh:mm" from the quote's `payment` (`status: "seen"`), with a transaction-hash lookup and an explorer link; it is not credited and may still disappear in a reorg. Deposits are reported only once final. |
-| History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and lock reference. |
-| Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by `lock_ref`. |
+| History | Each deposit shows token amount, rate, valuation time, USD credited, transaction hash, status, and quote. |
+| Quote page | Shows spread, that network and exchange withdrawal fees are the user's, the lock window, remaining limits, workspace name, promotion eligibility, and what happens on underpayment, overpayment, or late payment. Supports cancel and re-quote; the page is resumable by the quote id. |
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
 | Exceptions | Wrong asset or below minimum: "contact support"; the funds are held (§15) and finance may return them per the refund policy. Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9). Sanctions: "under compliance review, contact support"; the reason code stays server-side. A credit the product held (closed or suspended workspace, the product's caps): "under review, contact support", then a refund to an address the user supplies (§15). Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
 | Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `quote.expired`; the waiting screen's "payment received, waiting for finality" comes from the quote's `payment`. |
-| Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
+| Support | Support staff can look up by transaction hash, address, quote, workspace, or order and see the full timeline; every case has an owner and a response target. |
 
 ### Deposit status for exchange users (product UI)
 
@@ -483,7 +565,7 @@ from fetched state, never from webhook order.
 
 | UI state | Service state | Copy |
 |---|---|---|
-| Detected, N confirmations | none yet: the quote's `payment.status` `seen` (display only) | "Payment detected: N confirmations. Final around {`estimated_final_at`}." When `in_time` or `amount_within_tolerance` is false on a lock, add: "This payment does not match the quote, so it will be credited at the rate when it becomes final." |
+| Detected, N confirmations | none yet: the quote's `payment.status` `seen` (display only) | "Payment detected: N confirmations. Final around {`estimated_final_at`}." When `matches_quote` is false, add: "This payment does not match the quote, so it will be credited at the rate when it becomes final." |
 | Finalizing | `detected` | "Final on Ethereum. Checking the payment and fixing the rate." |
 | Crediting | `confirmed`, or `credited` before the product has applied the credit | "Crediting your balance." |
 | Completed | `credited`, `swept`, and the product's own credit recorded | "Credited $X at $rate." When a lock-address payment was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |
@@ -503,9 +585,9 @@ from fetched state, never from webhook order.
   quote, or it is credited at the rate when it becomes final."
 - QR codes: a quote's QR is an EIP-681 URI (token and amount), always shown with copy-address
   and copy-amount buttons for wallets and exchanges that do not read the URI.
-- When a quote's `remaining_seconds` reaches 0, hide its QR code and address and show "Payment
+- When a quote's `expires_at` has passed, hide its QR code and address and show "Payment
   window closed, awaiting finality. A payment sent in time is still credited at the quoted
-  price." Offer a re-quote; the lock stays `open` until chain-time expiry (§9).
+  price." Offer a re-quote; the quote stays `open` until chain-time expiry (§9).
 - Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
   are not credited." Support handles such a payment with the
   [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).
@@ -568,6 +650,9 @@ defaulted addresses from it. The defaults and why:
 | `alerts.stuck_after_s` | detected 1 800, confirmed 1 800, credited 172 800 (credited waits for the six-hourly, gas-gated flush) |
 | `unit_decimals` | 2 (USD cents) |
 
+The defaults are the pilot's numbers *(policy)*: finance confirms each, including the zero token
+floors, before production, and a route overrides any it does not accept.
+
 Only `finalized` finality is supported, so it is not configurable. A product's key id is
 `{product}/v1`; the database stores only the product's slug, webhook URL, and public key.
 Changing a value, including a default, is a new version and compose hash; deposits keep the
@@ -584,7 +669,7 @@ socket, two RPC providers, or the on-chain contract checks of §4.
 
 All enabled versions are loaded at startup. The highest enabled version of a route is current for
 new API operations, while older versions remain available for historical deposits. A chain is
-scanned only while it has a loaded route, and its rate locks expire only by its scanner's cursor
+scanned only while it has a loaded route, and its quotes expire only by its scanner's cursor
 (§9), so a route version or a chain's last route is removed only after its open locks and
 in-flight deposits have resolved (`deploy/runbooks/route-retirement.md`).
 
@@ -660,7 +745,7 @@ verified this way, since a production CVM exposes no logs or shell.
 | Refunds | Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
-| Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open rate-lock exposure up to the caps. |
+| Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open quote exposure up to the caps. |
 | Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
@@ -735,7 +820,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 
 | Feature | Owner | Pilot | GA | Later |
 |---|---|---|---|---|
-| Quote-first checkout: spread and fee disclosure, exact amount, EIP-681 QR, countdown, resume by `lock_ref`, cancel, re-quote | S+P | ✓ | | |
+| Quote-first checkout: spread and fee disclosure, exact amount, EIP-681 QR, countdown, resume by quote id, cancel, re-quote | S+P | ✓ | | |
 | Underpayment shortfall and top-up re-quote; overpayment beyond tolerance credited at spot | S+P | ✓ | | |
 | Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
 | Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |
