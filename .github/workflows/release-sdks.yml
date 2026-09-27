@@ -3,7 +3,9 @@ name: Release SDKs
 # Publishes an SDK from the tagged commit, after its tests pass on that commit:
 # - `sdk-js-v<version>`: sdk/js to npm as @phala/pay;
 # - `sdk-py-v<version>`: sdk/python to PyPI (its `project.name`, phala-pay).
-# The tag must name the version in package.json or pyproject.toml.
+# The tag must name the version in package.json or pyproject.toml, and the package's CHANGELOG.md
+# (Keep a Changelog 1.1.0) must have that version's dated section: it becomes the GitHub release's
+# notes once the package is published (CONTRIBUTING.md, "Releasing an SDK").
 #
 # Publishing uses trusted publishing (OIDC) only: no token or secret is stored anywhere. The owner
 # registers this repository, this workflow file (release-sdks.yml), and the `release` environment
@@ -41,6 +43,8 @@ jobs:
           version="$(node -p 'require("./package.json").version')"
           test "sdk-js-v$version" = "$GITHUB_REF_NAME" ||
             { echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1; }
+      - name: The changelog has this version's section
+        run: ../changelog-section.sh CHANGELOG.md "${GITHUB_REF_NAME#sdk-js-v}"
       - uses: ./.github/actions/sdk-js
       - name: Typecheck, lint, unit tests, and build
         run: pnpm run check
@@ -71,6 +75,12 @@ jobs:
           node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"
       # `prepare` builds dist from the checked-out tag.
       - name: Publish to npm with provenance
+        # BOOTSTRAP ONLY: npm registers a trusted publisher only for a package that exists, so the
+        # first version of @phala/pay is published with a short-lived token stored as the `release`
+        # environment secret NPM_TOKEN. Remove this env and the secret once the trusted publisher
+        # is registered; without a token npm publishes with OIDC.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
 
   py-test:
@@ -88,6 +98,8 @@ jobs:
           version="$(uv version --short --project sdk/python)"
           test "sdk-py-v$version" = "$GITHUB_REF_NAME" ||
             { echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml version $version"; exit 1; }
+      - name: The changelog has this version's section
+        run: sdk/changelog-section.sh sdk/python/CHANGELOG.md "${GITHUB_REF_NAME#sdk-py-v}"
       - name: Lint, type-check, test, and check that client regeneration is a no-op
         run: make sdk-check
       - name: Build the sdist and wheel
@@ -113,3 +125,30 @@ jobs:
           path: dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  # The GitHub release of the tag, with the changelog section as its notes, once the package is on
+  # its registry.
+  github-release:
+    needs: [js-publish, py-publish]
+    if: always() && contains(needs.*.result, 'success') && !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create the release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            sdk-js-v*) changelog=sdk/js/CHANGELOG.md package=@phala/pay ;;
+            sdk-py-v*) changelog=sdk/python/CHANGELOG.md package=phala-pay ;;
+          esac
+          version=${GITHUB_REF_NAME##*-v}
+          sdk/changelog-section.sh "$changelog" "$version" >"$RUNNER_TEMP/notes.md"
+          prerelease=()
+          [[ "$version" != *-* ]] || prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$package $version" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"

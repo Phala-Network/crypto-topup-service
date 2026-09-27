@@ -94,3 +94,34 @@ package D1; B1 establishes the inputs and build flags only.
 5. No secret, key, or credential can reach a log, error, or response.
 6. Migrations are additive and reversible; append-only tables have no update or delete path.
 7. The pull request names the verification commands actually run and their results.
+
+## Releasing an SDK
+
+The SDKs, `@phala/pay` (sdk/js) and `phala-pay` (sdk/python), follow
+[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html): while the major version is 0, a
+breaking change bumps the minor version. Each keeps a [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
+`CHANGELOG.md`; a pull request that changes an SDK adds its entry under `## [Unreleased]`, in
+`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security`, and marks breaking changes
+**Breaking**.
+
+1. Open a release pull request, `chore(release): <package> <version>`, that sets the version in
+   `package.json` or `pyproject.toml`, renames `## [Unreleased]` to `## [<version>] - <YYYY-MM-DD>`
+   above a new empty `## [Unreleased]`, and updates the link references at the end of the
+   changelog (`sdk-py-v` for the Python SDK):
+
+   ```markdown
+   [unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v<version>...HEAD
+   [<version>]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-js-v<version>
+   ```
+
+2. After it merges, a repository admin tags the merge commit on `main` (only admins may create
+   `sdk-js-v*` and `sdk-py-v*` tags):
+
+   ```sh
+   git tag sdk-js-v<version> <merge commit> && git push origin sdk-js-v<version>
+   ```
+
+3. [Release SDKs](.github/workflows/release-sdks.yml) checks that the tag names the version and
+   that the changelog has its dated section, runs the SDK's tests, publishes from the `release`
+   environment with trusted publishing (npm provenance, PyPI attestations), and creates the GitHub
+   release with the changelog section as its notes (`sdk/changelog-section.sh`).
