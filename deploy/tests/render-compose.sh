@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-topup=ghcr.io/phala-network/crypto-topup@sha256:1111111111111111111111111111111111111111111111111111111111111111
+topup=ghcr.io/phala-network/phala-pay@sha256:1111111111111111111111111111111111111111111111111111111111111111
 postgres=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222
 
 settings=(AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
@@ -25,7 +25,7 @@ render() {
     env TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres "${settings[@]}" "$@"
 }
 label() {
-    grep -o 'crypto-topup.rendered-sha256: "[0-9a-f]\{64\}"' "$1" | sort -u
+    grep -o 'phala-pay.rendered-sha256: "[0-9a-f]\{64\}"' "$1" | sort -u
 }
 render "$root/deploy/render-compose.sh" >"$tmp/compose.yml"
 
@@ -49,7 +49,7 @@ docker compose -f "$tmp/compose.yml" config --variables | awk 'NR > 1 && NF > 0 
         "$root/deploy/staging.env.example" | sort) -
 # Every service carries the one label, and it changes with any setting.
 [[ "$(docker compose -f "$tmp/compose.yml" --profile tools config --format json |
-    jq '[.services[].labels["crypto-topup.rendered-sha256"]] | unique | length')" == 1 ]]
+    jq '[.services[].labels["phala-pay.rendered-sha256"]] | unique | length')" == 1 ]]
 render TOPUP_RPC_PROVIDER_A_URL=https://other.example/sepolia "$root/deploy/render-compose.sh" \
     >"$tmp/other-rpc.yml"
 [[ -n "$(label "$tmp/compose.yml")" && "$(label "$tmp/compose.yml")" != "$(label "$tmp/other-rpc.yml")" ]] || {
@@ -95,14 +95,14 @@ render "$root/deploy/render-app-compose.sh" | jq -e --rawfile compose "$tmp/comp
 TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres "$root/deploy/render-compose.sh" --images-only |
     grep -F "image: $topup" >/dev/null
 
-if render TOPUP_IMAGE=crypto-topup:latest \
+if render TOPUP_IMAGE=phala-pay:latest \
     "$root/deploy/render-compose.sh" >"$tmp/bare-tag.out" 2>"$tmp/bare-tag.err"; then
     echo "render-compose accepted a bare tag" >&2
     exit 1
 fi
 grep -F 'TOPUP_IMAGE must be an image@sha256 reference' "$tmp/bare-tag.err" >/dev/null
 
-if render TOPUP_IMAGE=ghcr.io/phala-network/crypto-topup@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+if render TOPUP_IMAGE=ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
     "$root/deploy/render-compose.sh" >"$tmp/zero.out" 2>"$tmp/zero.err"; then
     echo "render-compose accepted the zero digest" >&2
     exit 1
@@ -112,7 +112,7 @@ grep -F 'TOPUP_IMAGE must not use the zero digest placeholder' "$tmp/zero.err" >
 # The reference product: public settings inline, and a label digest that changes with any of
 # them (Compose recreates a container only when its service definition changes).
 product_env() {
-    env PRODUCT_IMAGE=ghcr.io/phala-network/crypto-topup-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
+    env PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
         TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
         PRODUCT_RPC_URL=https://rpc.example/sepolia \
         PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= "$@" \

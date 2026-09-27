@@ -1,4 +1,4 @@
-# Crypto Top-up Service — Design
+# Phala Pay — Design
 
 Status: v7 (Stripe-style product API). Single specification and implementation design. Numbers marked *(policy)* are set
 by finance and risk; this document fixes what they mean.
@@ -691,7 +691,7 @@ metric (`ReferenceRateUSD`, 1m) are fixed by §8 and §11, not configured.
 
 ```yaml
 services:
-  topup:    { image: ghcr.io/phala-network/crypto-topup@sha256:…, command: ["topup", "run"] }
+  topup:    { image: ghcr.io/phala-network/phala-pay@sha256:…, command: ["topup", "run"] }
   postgres: { image: ghcr.io/phala-network/postgres-walg@sha256:…,     # postgres:18 + WAL-G
               volumes: [pgdata:/var/lib/postgresql] }   # archive_timeout=60, archive_command=walg-cron wal-push %p
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }

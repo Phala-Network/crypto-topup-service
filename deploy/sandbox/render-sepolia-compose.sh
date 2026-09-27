@@ -21,7 +21,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 "$root/deploy/render-compose.sh" >"$tmp/docker-compose.yml"
 cp "$root/deploy/sandbox/docker-compose.sepolia.yml" "$tmp/docker-compose.sepolia.yml"
-docker compose --project-name crypto-topup-sandbox \
+docker compose --project-name phala-pay-sandbox \
     -f "$tmp/docker-compose.yml" -f "$tmp/docker-compose.sepolia.yml" \
     config --no-interpolate --format json |
     jq --rawfile route "$route" '

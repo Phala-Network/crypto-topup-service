@@ -29,7 +29,7 @@ Load values from the attested route and the admin's key store, never from chat o
 `BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, or signatures fail with `401`.
 
 ```sh
-export BASE_URL=https://crypto-topup-api.phala.com   # staging: https://crypto-topup-api-staging.phala.com
+export BASE_URL=https://pay-api.phala.com   # staging: https://pay-api-staging.phala.com
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x... OPERATOR_ADDRESS=0x...
@@ -87,23 +87,23 @@ in its current form against a CVM.
 
 | Runbook | Last run | Outcome | Evidence |
 |---|---|---|---|
-| Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Flush reverted or bisected | 2026-09-23, local | complete: selective revert, fresh nonce, bisection, isolation, pause voiding | [#83](https://github.com/Phala-Network/crypto-topup-service/pull/83) |
-| Refund execution | 2026-09-22, local | complete: request, approve, record, finality-checked confirm | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Operator key compromise | 2026-09-22, local | partial: revoke, role gate, key-version rotation; Safe steps human-only | [#74](https://github.com/Phala-Network/crypto-topup-service/pull/74) |
-| Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/crypto-topup-service/pull/126) |
-| Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Provider disagreement | 2026-09-22, local | partial: sanctions truth table; no disagreeing-provider fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Price outage | 2026-09-22, local | partial: route pause; no controllable price-source fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Rejected funds at treasury | 2026-09-22, local | partial: report; Compliance and Safe steps human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Gas refill | 2026-09-22, local | partial: balance and nonce reads; the transfer is human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Treasury change | 2026-09-22, local | partial: tooling refuses without Safe expectations; the rest is human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Outbox backlog | 2026-09-22, local | partial: no controllable webhook receiver | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Scanner lag | 2026-09-22, local | partial: no controllable finalized-chain fixture | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Backup age | 2026-09-22, local | partial: predates encrypted backups; local restore drills cover archiving | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
-| Incident communication | 2026-09-22, local | partial: publication and roles human-only | [#59](https://github.com/Phala-Network/crypto-topup-service/pull/59) |
+| Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Flush reverted or bisected | 2026-09-23, local | complete: selective revert, fresh nonce, bisection, isolation, pause voiding | [#83](https://github.com/Phala-Network/phala-pay/pull/83) |
+| Refund execution | 2026-09-22, local | complete: request, approve, record, finality-checked confirm | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Operator key compromise | 2026-09-22, local | partial: revoke, role gate, key-version rotation; Safe steps human-only | [#74](https://github.com/Phala-Network/phala-pay/pull/74) |
+| Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/phala-pay/pull/126) |
+| Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Provider disagreement | 2026-09-22, local | partial: sanctions truth table; no disagreeing-provider fixture | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Price outage | 2026-09-22, local | partial: route pause; no controllable price-source fixture | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Rejected funds at treasury | 2026-09-22, local | partial: report; Compliance and Safe steps human-only | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Gas refill | 2026-09-22, local | partial: balance and nonce reads; the transfer is human-only | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Treasury change | 2026-09-22, local | partial: tooling refuses without Safe expectations; the rest is human-only | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Outbox backlog | 2026-09-22, local | partial: no controllable webhook receiver | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Scanner lag | 2026-09-22, local | partial: no controllable finalized-chain fixture | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Backup age | 2026-09-22, local | partial: predates encrypted backups; local restore drills cover archiving | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Incident communication | 2026-09-22, local | partial: publication and roles human-only | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Wrong-network deposit | — | not exercised; every step is human-only | — |
 | Product key compromise | 2026-09-26, local | partial: the key replacement and its hard cut in the API test `admin_product_key_replacement`; the product side not exercised | this runbook's PR |
 | Route or chain retirement | — | not exercised; the upgrade is human-only | — |

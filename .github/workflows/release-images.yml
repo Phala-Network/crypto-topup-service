@@ -2,14 +2,14 @@ name: Release images
 
 # Publishes the images the attested composes pin, from CI only and only from main
 # (deploy/README.md, "Build and publish images"), all tagged sha-<12 hex commit>[-suffix]:
-# - crypto-topup: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
+# - phala-pay: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
 #   config digests, builds and pushes a third time, and fails unless the registry's platform
 #   manifest and config equal the verified local ones.
 # - postgres-walg: apt and dpkg record wall-clock times, so two builds differ; it is built and
 #   pushed once, the registry tag must resolve to the digest BuildKit pushed, and that digest,
 #   pulled from the registry, must run `wal-g --version`.
-# - crypto-topup-reference-product (deploy/Dockerfile.reference-product, the staging reference
-#   product): the same two-build, push, and read-back discipline as crypto-topup, and the digest,
+# - phala-pay-reference-product (deploy/Dockerfile.reference-product, the staging reference
+#   product): the same two-build, push, and read-back discipline as phala-pay, and the digest,
 #   pulled from the registry, must run `--help`.
 # The job summary and the `images.json` artifact carry the manifest references
 # (`repository@sha256:...`) for Deploy and deploy/render-compose.sh.
@@ -39,9 +39,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TOPUP_REPOSITORY: ghcr.io/phala-network/crypto-topup
+  TOPUP_REPOSITORY: ghcr.io/phala-network/phala-pay
   POSTGRES_WALG_REPOSITORY: ghcr.io/phala-network/postgres-walg
-  REFERENCE_PRODUCT_REPOSITORY: ghcr.io/phala-network/crypto-topup-reference-product
+  REFERENCE_PRODUCT_REPOSITORY: ghcr.io/phala-network/phala-pay-reference-product
 
 jobs:
   publish:
@@ -76,7 +76,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish crypto-topup after two matching reproducible builds
+      - name: Publish phala-pay after two matching reproducible builds
         env:
           SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
           PUBLISH_IMAGE: ${{ env.TOPUP_REPOSITORY }}:${{ steps.meta.outputs.tag }}
@@ -113,7 +113,7 @@ jobs:
           docker run --rm --pull=always "$ref" wal-g --version
           docker image rm "$ref" >/dev/null || true
           printf '%s\n' "$ref" >"$RUNNER_TEMP/postgres-walg.ref"
-      - name: Publish crypto-topup-reference-product after two matching reproducible builds
+      - name: Publish phala-pay-reference-product after two matching reproducible builds
         env:
           SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
           DOCKERFILE: deploy/Dockerfile.reference-product

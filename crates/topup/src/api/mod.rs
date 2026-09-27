@@ -160,9 +160,9 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .merge(quote)
         .merge(admin)
         .routes(routes!(handlers::get_attestation));
-    let mut info = Info::new("Crypto Top-up Service API", env!("CARGO_PKG_VERSION"));
+    let mut info = Info::new("Phala Pay API", env!("CARGO_PKG_VERSION"));
     info.description = Some(
-        "Authenticated product and administrative API for deterministic crypto top-ups.".to_owned(),
+        "Authenticated product and administrative API for Phala Pay crypto payments.".to_owned(),
     );
     documented.get_openapi_mut().info = info;
     documented

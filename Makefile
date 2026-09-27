@@ -20,8 +20,8 @@ lint:
 	cargo deny --locked check
 
 image:
-	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t crypto-topup-service:dev .
-	docker run --rm crypto-topup-service:dev topup --help
+	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t phala-pay:dev .
+	docker run --rm phala-pay:dev topup --help
 
 # The attested compose rendered with local settings, plus the local overlay (Garage S3, dstack
 # simulator, images built here).

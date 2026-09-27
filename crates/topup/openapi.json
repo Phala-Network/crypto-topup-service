@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Crypto Top-up Service API",
-    "description": "Authenticated product and administrative API for deterministic crypto top-ups.",
+    "title": "Phala Pay API",
+    "description": "Authenticated product and administrative API for Phala Pay crypto payments.",
     "version": "0.1.0"
   },
   "paths": {

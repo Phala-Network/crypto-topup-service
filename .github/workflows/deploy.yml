@@ -134,14 +134,14 @@ jobs:
                 TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY
                 TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL"
               # The public URL is the custom domain; there is no gateway port to resolve.
-              dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=crypto-topup-$DEPLOY_ENVIRONMENT
+              dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=phala-pay-$DEPLOY_ENVIRONMENT
               instance_type=tdx.medium port="" origin_variable=""
               images="TOPUP_IMAGE POSTGRES_WALG_IMAGE" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
             product)
               required="TOPUP_DOMAIN PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY"
               [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
                 { echo "::error::the reference product deploys to staging only"; status=1; }
-              dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=crypto-topup-staging-product
+              dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=phala-pay-staging-product
               instance_type=tdx.small port=8089 origin_variable=PRODUCT_PUBLIC_URL
               images=PRODUCT_IMAGE compose_name=docker-compose.product.yml ;;
             *) echo "::error::unknown target $TARGET"; exit 1 ;;

@@ -1,4 +1,4 @@
-//! Service boundary modules for the crypto top-up binary.
+//! Service boundary modules for the Phala Pay binary.
 
 #![cfg_attr(
     test,

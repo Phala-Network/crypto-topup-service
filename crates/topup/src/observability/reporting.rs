@@ -33,7 +33,7 @@ const SCRUBBED_FIELDS: [&str; 1] = ["account_id"];
 /// Context in which the tracing integration stores event fields.
 const TRACING_FIELDS_CONTEXT: &str = "Rust Tracing Fields";
 const RUNBOOKS: &str =
-    "https://github.com/Phala-Network/crypto-topup-service/blob/main/deploy/runbooks/";
+    "https://github.com/Phala-Network/phala-pay/blob/main/deploy/runbooks/";
 /// Minimum interval between two events of the same issue; loops retry every few seconds.
 const EVENT_REPEAT_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Minimum interval between two check-ins of one monitor, below the Crons limit of six a minute.
@@ -376,12 +376,12 @@ mod tests {
     #[test]
     fn release_is_the_pinned_image_digest() {
         let digest = format!("sha256:{}", "a".repeat(64));
-        let image = format!("ghcr.io/phala-network/crypto-topup@{digest}");
+        let image = format!("ghcr.io/phala-network/phala-pay@{digest}");
         let options = client_options(Some(TEST_DSN), Some(&image), None)
             .expect("valid")
             .expect("enabled");
         assert_eq!(options.release.as_deref(), Some(digest.as_str()));
-        let local = client_options(Some(TEST_DSN), Some("crypto-topup-service:dev"), None)
+        let local = client_options(Some(TEST_DSN), Some("phala-pay:dev"), None)
             .expect("valid")
             .expect("enabled");
         assert_eq!(local.release, None);
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(
             alert.tags.get("runbook").map(String::as_str),
             Some(
-                "https://github.com/Phala-Network/crypto-topup-service/blob/main/deploy/runbooks/\
+                "https://github.com/Phala-Network/phala-pay/blob/main/deploy/runbooks/\
                  provider-disagreement.md"
             )
         );

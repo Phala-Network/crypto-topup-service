@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 platform=${PLATFORM:-linux/amd64}
-# DOCKERFILE (relative to the repository root) selects another image; default the crypto-topup one.
+# DOCKERFILE (relative to the repository root) selects another image; default the phala-pay one.
 dockerfile="$root/${DOCKERFILE:-Dockerfile}"
 tmp=$(mktemp -d)
 
@@ -26,7 +26,7 @@ build() {
         --provenance=false \
         --sbom=false \
         --file "$dockerfile" \
-        --output "type=oci,dest=$archive,name=crypto-topup-service:repro,rewrite-timestamp=true,oci-mediatypes=true" \
+        --output "type=oci,dest=$archive,name=phala-pay:repro,rewrite-timestamp=true,oci-mediatypes=true" \
         "$root"
     tar -xf "$archive" -C "$output"
 

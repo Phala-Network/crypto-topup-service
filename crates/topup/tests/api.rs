@@ -1220,7 +1220,7 @@ async fn openapi_snapshot() -> Result<()> {
     let state = app_state(pool, &admin_key);
     let actual = topup::api::openapi_json(state)?;
     let document: Value = serde_json::from_str(&actual)?;
-    ensure!(document["info"]["title"] == "Crypto Top-up Service API");
+    ensure!(document["info"]["title"] == "Phala Pay API");
     ensure!(document["info"]["version"] == env!("CARGO_PKG_VERSION"));
     ensure!(document["info"]["description"].as_str().is_some());
     assert_query_parameters(&document)?;

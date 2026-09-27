@@ -8,14 +8,14 @@
 # signing seed (64 hex), sealed by the owner (deploy/product/staging.env.example).
 services:
   product:
-    image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/crypto-topup-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/phala-pay-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
       PRODUCT_SEED: ${PRODUCT_SEED:-}
     # Compose recreates a container only when its service definition changes, not when an inline
     # config's content does, and a restart keeps the old config file. The renderer sets this label
     # to the digest of the rendered file, so every rendered change recreates the product.
     labels:
-      crypto-topup.rendered-sha256: "${PRODUCT_RENDERED_SHA256:-}"
+      phala-pay.rendered-sha256: "${PRODUCT_RENDERED_SHA256:-}"
     configs:
       - source: product_config
         target: /etc/product/config.json

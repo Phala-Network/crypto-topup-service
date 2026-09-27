@@ -56,7 +56,7 @@ forwarder_creation="$(cd "$CONTRACTS_DIR" && forge inspect Forwarder bytecode)"
 forwarder_runtime="$(cd "$CONTRACTS_DIR" && forge inspect Forwarder deployedBytecode)"
 solc_version="$(jq -r '.metadata.compiler.version' "$CONTRACTS_DIR/out/ForwarderFactory.sol/ForwarderFactory.json")"
 
-tmp="$(mktemp "${TMPDIR:-/tmp}/crypto-topup-codehashes.XXXXXX")"
+tmp="$(mktemp "${TMPDIR:-/tmp}/phala-pay-codehashes.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
 jq -n \

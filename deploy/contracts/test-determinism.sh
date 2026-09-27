@@ -23,7 +23,7 @@ sample_salt="$(jq -er '.salts[0]' "$CONTRACTS_DIR/test-vectors/create2.json")"
 expected="$DEPLOY_CONTRACTS_DIR/local-test-vectors.json"
 [[ "$mode" == --write || -f "$expected" ]] || die "missing local deterministic vectors: $expected"
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-two-anvil.XXXXXX")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-two-anvil.XXXXXX")"
 pids=()
 cleanup() {
     for pid in "${pids[@]}"; do

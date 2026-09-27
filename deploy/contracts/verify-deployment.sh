@@ -19,7 +19,7 @@ require_command jq
 
 "$DEPLOY_CONTRACTS_DIR/check-build.sh" --check >/dev/null
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-topup-verification.XXXXXX")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-verification.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 if ! validate_deployment_params "$safe_expectations" "$tmp_dir/safe.json" "${rpcs[@]}"; then
     jq -n --slurpfile safe "$tmp_dir/safe.json" \
