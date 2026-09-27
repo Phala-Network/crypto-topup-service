@@ -16,7 +16,7 @@ webhook receivers must ignore unknown fields.
   the quote's `payment` shows a transfer before finality. Events delivered before this change
   keep their old envelope when replayed. The admin outbox replay and deposit view take and show
   `evt_` ids.
-- **Breaking**: quotes replace rate locks (docs/design/stripe-style-api.md §2). `POST /v1/quotes
+- **Breaking**: quotes replace rate locks (docs/architecture.md §9, §12). `POST /v1/quotes
   {account_id, amount, currency, chain_id, asset}`, `GET /v1/quotes/{id}`, and
   `POST /v1/quotes/{id}/cancel` replace `…/accounts/{ext}/rate-locks[/{ref}]`; the quote id
   (`qt_…`) replaces `product_lock_ref`, `Idempotency-Key` makes creation safe to retry, amounts

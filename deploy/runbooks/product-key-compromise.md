@@ -42,4 +42,4 @@ admin PUT /v1/admin/products/phala-cloud \
 The product's requests signed with the new seed succeed, a request signed with the old seed
 answers `401`, and every refund request since the exposure is confirmed or declined. A planned
 rotation without compromise is the same `PUT`, timed with the product's signer switch
-([integration guide](../../docs/integration.md#34-rotate-the-product-key)).
+([integration guide](../../docs/integration.md#54-rotate-the-product-key)).

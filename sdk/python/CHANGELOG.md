@@ -2,7 +2,7 @@
 
 All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
-(section 9); versions follow [Semantic Versioning](https://semver.org/).
+(section 5.9); versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
@@ -53,7 +53,7 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   into a typed credit with its `fulfillment_key` (`deposit:<deposit_id>`), raising
   `FulfillmentError` for any other shape; `credited_event_id` derives the event's
   `webhook-id` from the deposit id; `CREDITED_EVENT`. The service emits this payload once
-  `deposit.credited` becomes the fulfillment event (docs/integration.md §5).
+  `deposit.credited` becomes the fulfillment event (docs/integration.md §2).
 - `topup_sdk.sign_webhook` (test senders) and `topup-sdk send-test-event`, which checks a webhook
   receiver answers a signed event and its duplicate with `2xx` and a forged copy with `4xx`.
 - `DepositResponse.external_id` and `price_source` (also on `SupportDepositResponse`).

@@ -37,8 +37,8 @@ uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=
 pnpm add "github:Phala-Network/phala-pay#main&path:/sdk/js"
 ```
 
-**Configure.** Create the product key and send the printed public key to the operator (§3.1),
-and pin the service's settlement key from its attestation (§3.3):
+**Configure.** Create the product key and send the printed public key to the operator (§5.1),
+and pin the service's settlement key from its attestation (§5.3):
 
 ```sh
 uvx --from phala-pay topup-sdk keygen --keyid phala-cloud/v1 --seed-out product.seed
@@ -82,7 +82,7 @@ Its wallet button reads "Pay with crypto" (`buttonText`); `appearance` themes it
 page. Without React, `new PhalaPay({ apiBase }).checkout(clientSecret)` gives the same live status.
 
 **3. Webhook: verify and fulfil once.** Credit `amount` cents to `account_id` once per deposit id,
-commit, then answer `2xx`; `onSuccess` in the browser is display only (§5).
+commit, then answer `2xx`; `onSuccess` in the browser is display only (§2).
 
 ```python
 from phala_pay import SignatureVerificationError
@@ -102,17 +102,19 @@ async def webhook(request: Request) -> Response:
 idempotent SQLite ledger and tests; the staging reference product serves the Phala Pay demo, a
 cloud console's billing page, at `/demo/`.
 
-## 1. What the service does
+## 1. Quotes
 
-The service gives each Phala Cloud workspace deposit addresses, watches Ethereum for token
-transfers to them, waits for finality, prices each deposit, and screens it. A deposit that passes
-is credited, and the service tells Phala Cloud with a signed `deposit.credited` webhook. Phala
-Cloud owns the balance: it verifies the signature and credits the deposit once. This is the
-pattern of Stripe Checkout fulfillment
+### 1.1 How it works
+
+A quote is the only way to pay, as a PaymentIntent is in Stripe: the user states an amount in
+dollars and receives a locked price, an exact token amount, and a single-use address to pay
+within the window. The service watches Ethereum for transfers to its addresses, waits for
+finality, prices each deposit, and screens it. A deposit that passes is credited, and the service
+tells Phala Cloud with a signed `deposit.credited` webhook. Phala Cloud owns the balance: it
+verifies the signature and credits the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
 addresses are CREATE2 forwarders that can only pay the treasury; the service sweeps them there in
-batches. The default flow is quote first: the user states an amount, receives a locked price, an
-exact token amount, and a single-use address, and pays within the window.
+batches.
 
 ```mermaid
 sequenceDiagram
@@ -141,7 +143,271 @@ sequenceDiagram
     end
 ```
 
-## 2. Environments
+### 1.2 Creating and showing a quote
+
+Read `GET /v1/config` for what the page shows instead of hardcoding: the payable assets (chain,
+asset code, contract, decimals), the minimum `amount`, the maximum deposit, the refund floor, the
+quote window, spread, and tolerance, and the typical finality time. Quotes are priced at
+`spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
+payment) carries no spread; network and exchange fees are the payer's; sweep gas is the service's
+and never reduces a credit.
+
+`POST /v1/quotes {account_id, amount, currency: "usd", chain_id, asset}` with an
+`Idempotency-Key` returns the quote:
+
+```json
+{
+  "id": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", "object": "quote", "account_id": "team-42",
+  "amount": 2500, "currency": "usd", "chain_id": 11155111, "asset": "pha",
+  "amount_atomic": "100502512562814070352", "exchange_rate": "0.24875621",
+  "address": "0x…", "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…&uint256=…",
+  "status": "open", "expires_at": 1790410500, "created": 1790409600,
+  "payment": null, "deposit": null, "client_secret": "qt_…_secret_…"
+}
+```
+
+- `account_id` is your workspace id (1 to 255 bytes); its account is created by its first quote.
+- `amount` is an integer in US cents; `amount_atomic` is the exact token amount to pay, a decimal
+  string in base units; `exchange_rate` is the locked price in USD per token with 8 decimal
+  places; times are Unix seconds.
+- `status` is `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A
+  quote stays `open` past `expires_at` until the finalized chain passes it, so a payment mined in
+  time is never reported as expired: hide the address once `expires_at` has passed and offer a
+  new quote.
+- `payment` is what the waiting screen shows once a transfer is seen on chain, display only:
+  `status` (`seen` before finality, `final` once it is a deposit), `tx_hash`, `amount_atomic`,
+  `confirmations` and `estimated_final_at` while `seen`, `matches_quote` (credited at the quoted
+  price when true), and the `dep_` id it has or will have. A seen payment can disappear in a
+  reorg and is never a credit.
+- `deposit` is the deposit that completed the quote (`expand[]=deposit` returns it whole).
+- `GET /v1/quotes/{id}` resumes a checkout; `POST /v1/quotes/{id}/cancel` cancels an unpaid
+  quote, after which any payment to its address is credited at spot.
+- A quote above the remaining open exposure fails with `409 exposure_cap_exceeded`; its message
+  states what is left.
+
+Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
+[architecture §9](architecture.md#9-quotes).
+
+**Recompute every address before you show it.** A quote's address salt is
+`keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`; with the forwarder factory
+and implementation pinned from the attested deployment, `TopupClient` recomputes it and raises
+`AddressMismatchError`, so a user never pays an address you did not derive. You need no address
+records of your own to credit: `deposit.credited` carries the deposit, which names the workspace
+(`account_id`) and the quote (`quote`), also for a late or wrong-amount payment.
+
+**The payer's page.** Hand the quote's `client_secret` to the paying customer's page only, and
+do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without a signature, from any
+origin, as Stripe.js reads a PaymentIntent: `{id, object, status, amount, currency, asset,
+decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
+confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (final, being valued and
+screened), `credited`, or `rejected` (contact support). It carries no account, price, deposit id,
+or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
+repeat with the same `Idempotency-Key` returns the same quote with a new secret, and the earlier
+one stops working. `@phala/pay`'s `<Checkout>` is this page.
+
+### 1.3 Payment outcomes
+
+A deposit's `status` is `detected → confirmed → credited → swept`, or `rejected` with a
+`rejection_reason`
+([architecture §7](architecture.md#7-states-and-pump)). Nothing is reported as a deposit before
+finality. The staging deposit driver asserts these outcomes on Sepolia
+([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
+locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
+
+| Payment | Outcome visible to Phala Cloud |
+|---|---|
+| Exact quoted amount, in time (within `quote_tolerance_bps`) | Quote `complete`; `deposit.credited` with `price_source: "quote"` and exactly the quoted `amount`. |
+| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `409 quote_payment_received`. Payments are not accumulated against one quote: offer a new quote for the shortfall. |
+| Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
+| After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
+| Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
+| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot at finality. |
+| Token without a route | After finality `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
+| Below `min_credit_minor` | `rejected(below_minimum)`. |
+| Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
+| Sanctioned sender | `rejected(sanctioned)`; not refundable. |
+| You refuse the credit (for example a closed workspace) | Deposit `credited`; you hold it and request its refund (§2.4). Deposits refused under the retired settlement protocol show `rejected(product_refused)`. |
+
+User-facing copy per state and reason, including what never to show, is in
+[architecture §12, product UI](architecture.md#customer-experience-obligations-product-ui).
+
+## 2. Webhooks and fulfillment
+
+### 2.1 The event
+
+`deposit.credited` is the one event that moves a balance. The service writes it when a deposit
+passes screening, in the same transaction that marks the deposit `credited`: the credit is final
+and owed to you, whatever you answer.
+
+```http
+POST {webhook_url}
+content-type: application/json
+webhook-id: evt_26a20351ab10595a852f9c1aa0372d73
+webhook-timestamp: 1790409600
+webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
+
+{"id": "evt_26a20351ab10595a852f9c1aa0372d73", "object": "event", "type": "deposit.credited",
+ "created": 1790409590,
+ "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit",
+                     "account_id": "team-42", "quote": "qt_…", "status": "credited",
+                     "amount": 1234, "currency": "usd", "price_source": "quote", …}}}
+```
+
+- `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
+  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a flush
+  covered it before that first delivery.
+- `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
+  otherwise spot at finality (§1.3).
+- `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
+  valued at spot; it is `null` only for a legacy persistent address.
+- `webhook-id` is the event's `id`: `evt_` and the hex of
+  `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
+  (`topup_sdk.credited_event_id`), so every retry, operator replay, and re-emission after a
+  service restore carries the same id.
+
+### 2.2 The fulfillment function
+
+```python
+from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
+
+def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
+    try:
+        event = verify_webhook(headers, raw_body, SETTLEMENT_KEY)  # pinned (§5.3); 300 s tolerance
+    except SignatureError:
+        return 400
+    if event.type == "deposit.credited":
+        fulfill(CreditedDeposit.from_event(event))  # commits before returning
+    store_once(event.id, event.type, event.data)     # notifications and history
+    return 204
+
+def fulfill(credit: CreditedDeposit) -> None:
+    with db.transaction():
+        if orders.exists(provider_order_id=credit.fulfillment_key):  # "dep_…", unique
+            return  # already done; a differing amount only follows a service restore: report it
+        if refuses(credit):  # closed or suspended workspace, your own caps
+            orders.insert(credit.fulfillment_key, status="held")
+            return  # support later requests a refund (§2.4)
+        orders.insert(credit.fulfillment_key, status="paid")
+        ledger.credit(credit.account_id, credit.amount)
+```
+
+`phala_pay`'s `webhooks.construct_event` (Quickstart) is the same verification with a typed
+deposit. [deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
+is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/tests).
+
+### 2.3 Obligations
+
+| # | Obligation | Why |
+|---|---|---|
+| 1 | Verify the `v1a` signature over the raw body against the pinned `(settlement/v1, public key)`; answer `400` otherwise. | Only the attested service may credit. |
+| 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
+| 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
+| 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
+| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
+
+Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
+`credited` or `swept` with the same amount; recompute the deposit id, `dep_` and the hex of
+`uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` (`topup_sdk.deposit_id`), and verify the cited log on your
+own node at finality; per-deposit and per-period caps as review holds. None is needed for
+correctness: as with a card processor, the credit is authorized by the service's signature.
+Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
+events, and the event follows the `credited` commit within a second.
+
+### 2.4 Refusing a credit
+
+The service never asks whether you accept a deposit. To refuse one (a closed or suspended
+workspace, your own caps), record it as held and answer `2xx`; when support has a destination
+address from the user, request its refund with `POST /v1/refunds` (§3).
+Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
+stop crediting an account before deposits arrive, pause its `settlement` scope
+(the operator's `POST /v1/admin/products/phala-cloud/accounts/{account_id}/pause`): its deposits
+then wait in `confirmed` until you resume.
+
+### 2.5 Phala Cloud ledger mapping
+
+Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto-top-up'`,
+`provider_order_id` = the deposit id `dep_…`, unique per flow), the credit transaction with
+`funding_source = crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction
+([architecture §11](architecture.md#11-fulfillment-webhook)).
+
+### 2.6 Delivery and event types
+
+Every event, `deposit.credited` included, is Standard Webhooks with the asymmetric `v1a` scheme,
+signed with the `settlement/v1` key and `POST`ed to the registered webhook URL:
+
+```text
+webhook-id: evt_…
+webhook-timestamp: <Unix seconds of this attempt>
+webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
+
+{"id": "<same evt_ id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
+ "data": {"object": {…}}}
+```
+
+The body is Stripe's [Event object](https://docs.stripe.com/api/events/object) without its
+account fields; the signature is Standard Webhooks, not `Stripe-Signature`, because you hold only
+the service's public key.
+
+- Verify over the raw body bytes, never re-serialized JSON. Several space-separated signatures
+  may appear during a key rotation; accept when one verifies.
+- Answer `2xx` only after the credit and the event are durably stored. Anything else, or no
+  answer within 20 s, is retried until delivered, with full-jitter backoff whose ceiling starts at
+  30 s and doubles to 1 h; there is no final attempt. The operator is warned about events
+  undelivered for 24 hours.
+- Deduplicate by `webhook-id`; delivery is at least once.
+- There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
+  payment. Act on fetched state (the deposit or quote), never on event order.
+- Only `deposit.credited` moves a balance (§2); every other event is for notifications, history,
+  and UI refresh.
+- Ignore unknown event types and unknown fields.
+- A lost event can be replayed by the operator with the admin-signed
+  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same body. An event delivered
+  before prefixed ids keeps its old envelope on replay (`event_id`, `created_at`, flat `data`);
+  the SDK parses it, and `CreditedDeposit.from_event` refuses it because it was fulfilled when
+  first delivered. The operator's
+  deposit view (`GET /v1/admin/deposits/{id}`) lists each deposit's `events` with `delivered_at`.
+
+| Type | When | `data.object` |
+|---|---|---|
+| `deposit.credited` | Final, priced, and screened: fulfill it (§2). | The deposit |
+| `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
+| `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
+| `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
+
+Every object names its `account_id`. Before finality nothing is sent: a checkout page shows the
+payment from the quote's `payment` (or the payer's `payment_status` read by `client_secret`).
+
+## 3. Refunds
+
+A rejected deposit is refundable unless the reason is `sanctioned` or its amount is below the
+route's `min_refund_atomic` (in `/v1/config`). A credited deposit is refunded only when you ask,
+for a credit you did not apply or have reversed, such as a held credit (§2.4;
+[architecture §15](architecture.md#15-operating-policies)). Ask the user for a destination
+address they control (never default to `from_address`, which may be an exchange), then:
+
+```http
+POST /v1/refunds
+Idempotency-Key: "…"
+
+{"deposit": "dep_…", "destination_address": "0x…", "amount_atomic": "…"}
+```
+
+```json
+{"id": "re_…", "object": "refund", "deposit": "dep_…", "amount_atomic": "…",
+ "destination_address": "0x…", "status": "pending", "tx_hash": null, "created": 1790500000}
+```
+
+- `amount_atomic` is in token base units and defaults to the unrefunded remainder; more than the
+  remainder is `400 amount_too_large`.
+- `status` is `pending` while finance approves and executes the transfer from the treasury Safe,
+  and `succeeded` once the transfer is final, when `deposit.refunded` is sent and the deposit's
+  `amount_refunded_atomic` (and `refunded`, once whole) shows it. `GET /v1/refunds/{id}` reads it.
+- An ineligible deposit is `409 deposit_not_refundable`; a paused `refunds` scope is
+  `409 paused`. The same `Idempotency-Key` with the same parameters returns the same refund.
+
+## 4. Testing and go-live
+
+### 4.1 Environments
 
 | | Origin | Chain | Status |
 |---|---|---|---|
@@ -149,16 +415,63 @@ sequenceDiagram
 | Staging | `https://crypto-topup-api-staging.phala.com` | Sepolia (11155111) | Domain being set up |
 
 The origin is exact: it is the service's `TOPUP_PUBLIC_ORIGIN`, and every request signature
-covers it (§4.1). Staging's route, with its forwarder factory, implementation, and test PHA token
+covers it (§5.5). Staging's route, with its forwarder factory, implementation, and test PHA token
 (a `MockERC20` whose `mint(address,uint256)` is public), is
 [deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml).
 Staging's `phala-cloud` product is currently the reference product; switching staging to Phala
 Cloud's staging backend is an operator change: the admin replaces the product's key and webhook
-URL (§3.4), and the route stays as it is.
+URL (§5.4), and the route stays as it is. There is no `livemode` flag: each environment is its own
+origin, product key, and settlement key.
 
-## 3. Onboarding
+### 4.2 Testing your receiver
 
-### 3.1 Create the product key
+`topup-sdk send-test-event` exercises your webhook receiver the way `stripe trigger` does:
+
+```sh
+cd sdk/python
+uv run --locked topup-sdk keygen --keyid settlement/v1 --seed-out /tmp/test-service.seed
+# Configure your test instance to pin the printed public key in place of the service key, then:
+uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
+  --seed-file /tmp/test-service.seed --account-id test-workspace --amount 250
+```
+
+It sends a signed `deposit.credited`, the same event again, and a copy signed by another key, and
+passes when your answers are `2xx`, `2xx`, and `4xx`. Then check your ledger: exactly one credit
+of `--amount` cents for `--account-id`. The reference product's tests
+([deploy/product/tests](../deploy/product/tests)) are a worked example of the §2 obligations.
+
+### 4.3 Staging
+
+Staging runs on Sepolia with the test PHA token (§4.1). Until Phala Cloud's staging backend is
+registered there, the reference product receives staging's credits; it is the model for a
+complete product (fulfillment, holds, refund requests). Once your receiver is registered, pay test
+quotes with minted test PHA and Sepolia ETH for gas, and play the abnormal payments of §1.3. Sepolia
+finality takes about 15 minutes per deposit.
+
+### 4.4 Go-live checklist
+
+- [ ] `topup-sdk send-test-event` passes against your production code path, and the ledger holds
+      one credit.
+- [ ] Fulfillment keyed by the deposit id (`dep_…`) under a unique index, committed before `2xx`;
+      refusals recorded as holds, never answered `5xx`.
+- [ ] Production product key generated for production only; seed in the secret store; public key
+      and key id sent to the operator; webhook URL agreed.
+- [ ] Settlement key pinned from verified attestation of production (§5.3), with the keyid.
+- [ ] Every address recomputed before display; the `client_secret` handed only to the paying
+      customer's page and never logged.
+- [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
+      state.
+- [ ] Quote, waiting, history, and exception UI per
+      [architecture §12](architecture.md#customer-experience-obligations-product-ui); refund
+      request flow with a user-supplied address, also for held credits.
+- [ ] Alerts on your side: webhook verification failures, a repeated `deposit.credited` with a
+      different amount, and held credits waiting for a refund.
+- [ ] Optional hardening decided: caps, `GET /v1/deposits/{id}` check, own-node log verification.
+- [ ] One quote-first deposit credited end to end on staging.
+
+## 5. Reference
+
+### 5.1 Create the product key
 
 On a machine you control, one key per environment:
 
@@ -173,7 +486,7 @@ never send it. Use a distinct key per environment: each deployment records used 
 own database, so a shared key would let a request be replayed against another deployment within
 the five-minute window.
 
-### 3.2 Registration (done by the operator)
+### 5.2 Registration (done by the operator)
 
 Send the operator the printed `keyid` and `public_key` and your webhook URL (public `https`). The
 operator then:
@@ -184,9 +497,9 @@ operator then:
    webhook_url}` ([deploy/README.md](../deploy/README.md#product-credentials)).
 
 A repeat with the same values returns the same product; a different key or webhook URL for an
-issued slug is refused with `409`, because changing them is a replacement (§3.4).
+issued slug is refused with `409`, because changing them is a replacement (§5.4).
 
-### 3.3 Pin the service's settlement key
+### 5.3 Pin the service's settlement key
 
 The service signs its webhooks with one ed25519 key, `settlement/v1` (the name is a dstack key
 domain and stays), derived inside its confidential VM. You hold only its public key, so nothing
@@ -224,12 +537,12 @@ print(response.settlement_pubkey)  # hex; pin it together with the keyid
 `TopupClient.attestation(nonce)` fetches and runs the same binding check. The binding alone is
 worthless without the verifier step: it proves only that the response is self-consistent.
 
-### 3.4 Rotate the product key
+### 5.4 Rotate the product key
 
 The key id, `phala-cloud/v1`, stays the same; a rotation replaces only the public key the service
 stores for your slug:
 
-1. Generate a new key under the same key id (§3.1) and send the operator its `public_key`.
+1. Generate a new key under the same key id (§5.1) and send the operator its `public_key`.
 2. The operator stores it with the admin-signed `PUT /v1/admin/products/phala-cloud {public_key,
    webhook_url, reason}` ([deploy/README.md](../deploy/README.md#product-credentials)); the same
    call changes your webhook URL.
@@ -241,18 +554,16 @@ one key id its routes name. Agree a time for step 2 and switch right after it; `
 not retry `401`. For a leaked seed, tell the operator at once: they follow the
 [product key compromise runbook](../deploy/runbooks/product-key-compromise.md).
 
-## 4. Calling the API
-
-### 4.1 Request signing
+### 5.5 Request signing
 
 Every product request carries an RFC 9421 HTTP Message Signature with your ed25519 key:
 
 - covered components, in order: `"@method"`, `"@target-uri"`, `"content-digest"`, plus
-  `"idempotency-key"` when that header is sent (the product API does not need it);
+  `"idempotency-key"` when that header is sent (quote and refund creation);
 - `Content-Digest: sha-256=:<base64>:` over the exact body bytes, also for an empty body;
 - parameters `created` (Unix seconds) and `keyid` (`phala-cloud/v1`), optionally
   `alg="ed25519"` and `nonce`, serialized as RFC 8941 structured fields;
-- `@target-uri` is `scheme://host[:port]/path?query` of the public origin in §2, exactly as sent.
+- `@target-uri` is `scheme://host[:port]/path?query` of the public origin in §4.1, exactly as sent.
   The service rebuilds it from its configured origin and ignores `Host` and `X-Forwarded-*`, so a
   correctly signed request to any other URL gets `401`.
 
@@ -267,7 +578,7 @@ from topup_sdk import RequestSigner, TopupClient
 
 signer = RequestSigner.from_seed_file("phala-cloud/v1", "/secrets/phala-cloud-staging.seed")
 # The forwarder factory and implementation, pinned from the attested deployment like the settlement
-# key (§3.3): the client recomputes every open quote's address before returning it.
+# key (§5.3): the client recomputes every open quote's address before returning it.
 forwarder = ("0x2407bE5Be2b632F5b166872A49E4946a70CCa531", "0x70B714508BFa441449DC09f790Ca03Baa5170360")
 with TopupClient(
     "https://crypto-topup-api-staging.phala.com", signer, forwarder=forwarder
@@ -278,7 +589,7 @@ with TopupClient(
 
 The key id names the product: `phala-cloud/v1` is product `phala-cloud`.
 
-### 4.2 Idempotency and retries
+### 5.6 Idempotency and retries
 
 Every product operation is idempotent, so a retry with a fresh signature is always safe:
 
@@ -286,15 +597,16 @@ Every product operation is idempotent, so a retry with a fresh signature is alwa
 |---|---|
 | create a quote | the `Idempotency-Key` header, covered by the signature: an RFC 8941 string (`"8e03…"`, as in the IETF Idempotency-Key draft) or a bare token (Stripe's form), up to 255 characters. The same key with the same parameters returns the same quote; with other parameters it is `409 idempotency_error`. Without a key every request creates a quote. |
 | cancel a quote | the quote: canceling a canceled quote returns it |
-| request a refund | `(deposit, to_address, amount)` |
+| request a refund | the `Idempotency-Key` header, as for quotes |
 
-`TopupClient.create_quote` sends a fresh key unless you pass one, and reuses it on every retry.
+`TopupClient.create_quote` and `create_refund` send a fresh key unless you pass one, and reuse it
+on every retry.
 
 `TopupClient` retries transport errors, `429`, `500`, `502`, `503`, `504`, and
 `409 signature_replayed`, re-signing each attempt, up to 4 attempts with exponential backoff from
 0.5 s.
 
-### 4.3 Endpoints
+### 5.7 Endpoints
 
 Every path is a top-level resource; the key id names your product, and a request for another
 product's resources is refused. `account_id` is your workspace id (1 to 255 bytes).
@@ -307,28 +619,11 @@ product's resources is refused. `account_id` is your workspace id (1 to 255 byte
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
 | `GET /v1/deposits` | Final deposits, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
-| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§7); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
+| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
-| `GET /v1/attestation?nonce=` | Settlement key evidence (§3.3); unauthenticated. | `attestation` |
+| `GET /v1/attestation?nonce=` | Settlement key evidence (§5.3); unauthenticated. | `attestation` |
 
-A quote's `amount` is an integer in US cents with `currency: "usd"`; `amount_atomic` is a decimal
-string in token base units; `exchange_rate` is USD per token, a decimal string with 8 places;
-`expires_at` and `created` are Unix seconds. `status` is `open`, `complete` (a matching payment
-consumed it), `expired`, or `canceled`; a quote stays `open` past `expires_at` until the finalized
-chain passes it, so hide its address once `expires_at` has passed. Quote semantics (spread,
-tolerance, expiry by finalized chain time, exposure caps) are
-[architecture §9](architecture.md#9-quote-first-deposits-rate-locks); the pending view is
-[§12](architecture.md#12-api-and-events). Other amounts are decimal strings: `*_minor` in US cents,
-and `price_scaled` has scale 8.
-
-**Recompute every address before you show it.** A quote's address salt is
-`keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`; with the pinned forwarder
-`TopupClient` recomputes it and raises `AddressMismatchError`, so a user never pays an address you
-did not derive. You need no address records of your own to credit:
-`deposit.credited` carries the deposit, which names the workspace (`account_id`) and the quote
-(`quote`), also for a late or wrong-amount payment.
-
-### 4.4 Errors
+### 5.8 Errors
 
 Errors are Stripe's error object, `{"error": {"type", "code", "message", "param"}}`
 ([docs.stripe.com/api/errors](https://docs.stripe.com/api/errors)): `type` is
@@ -338,7 +633,7 @@ parameter when there is one. Codes are stable; messages are not.
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | `parameter_missing`, `parameter_unknown`, `parameter_invalid` | Malformed input, with `param`. Do not retry unchanged. |
-| 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`). |
+| 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`), or above a refund's remainder (`param: "amount_atomic"`). |
 | 401 | `signature_invalid` | Signature failed: wrong origin, clock outside five minutes, wrong key, or body changed after signing. |
 | 404 | `resource_missing` | Unknown or foreign resource. |
 | 409 | `signature_replayed` | Re-sign and retry. |
@@ -346,255 +641,15 @@ parameter when there is one. Codes are stable; messages are not.
 | 409 | `exposure_cap_exceeded` | Open quote exposure cap (account, product, or global); the message states what is left. |
 | 409 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
 | 409 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
-| 409 | `conflict` | Other state conflicts, for example a refund for an ineligible deposit or above the remaining amount. |
-| 429 | `rate_limit` | Quote creation limit per account. |
+| 409 | `deposit_not_refundable` | The deposit is not eligible for a refund (§3). |
+| 409 | `conflict` | Other state conflicts. |
+| 429 | `rate_limit` | Quote creation limit per account, or unsigned reads of one quote by its `client_secret`. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
 | 500 | `internal_error` | Retry with backoff. |
 
-## 5. Fulfillment
+### 5.9 Versioning and deprecation
 
-### 5.1 The event
-
-`deposit.credited` is the one event that moves a balance. The service writes it when a deposit
-passes screening, in the same transaction that marks the deposit `credited`: the credit is final
-and owed to you, whatever you answer.
-
-```http
-POST {webhook_url}
-content-type: application/json
-webhook-id: evt_26a20351ab10595a852f9c1aa0372d73
-webhook-timestamp: 1790409600
-webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
-
-{"id": "evt_26a20351ab10595a852f9c1aa0372d73", "object": "event", "type": "deposit.credited",
- "created": 1790409590,
- "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit",
-                     "account_id": "team-42", "quote": "qt_…", "status": "credited",
-                     "amount": 1234, "currency": "usd", "price_source": "quote", …}}}
-```
-
-- `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
-  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a flush
-  covered it before that first delivery.
-- `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
-  otherwise spot at finality (§7).
-- `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
-  valued at spot; it is `null` only for a legacy persistent address.
-- `webhook-id` is the event's `id`: `evt_` and the hex of
-  `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
-  (`topup_sdk.credited_event_id`), so every retry, operator replay, and re-emission after a
-  service restore carries the same id.
-
-### 5.2 The fulfillment function
-
-```python
-from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
-
-def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
-    try:
-        event = verify_webhook(headers, raw_body, SETTLEMENT_KEY)  # pinned (§3.3); 300 s tolerance
-    except SignatureError:
-        return 400
-    if event.type == "deposit.credited":
-        fulfill(CreditedDeposit.from_event(event))  # commits before returning
-    store_once(event.id, event.type, event.data)     # notifications and history
-    return 204
-
-def fulfill(credit: CreditedDeposit) -> None:
-    with db.transaction():
-        if orders.exists(provider_order_id=credit.fulfillment_key):  # "dep_…", unique
-            return  # already done; a differing amount only follows a service restore: report it
-        if refuses(credit):  # closed or suspended workspace, your own caps
-            orders.insert(credit.fulfillment_key, status="held")
-            return  # support later requests a refund (§5.4)
-        orders.insert(credit.fulfillment_key, status="paid")
-        ledger.credit(credit.account_id, credit.amount)
-```
-
-[deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
-is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/tests).
-
-### 5.3 Obligations
-
-| # | Obligation | Why |
-|---|---|---|
-| 1 | Verify the `v1a` signature over the raw body against the pinned `(settlement/v1, public key)`; answer `400` otherwise. | Only the attested service may credit. |
-| 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
-| 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
-| 4 | Refuse by holding (§5.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
-| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
-
-Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
-`credited` or `swept` with the same amount; recompute the deposit id, `dep_` and the hex of
-`uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` (`topup_sdk.deposit_id`), and verify the cited log on your
-own node at finality; per-deposit and per-period caps as review holds. None is needed for
-correctness: as with a card processor, the credit is authorized by the service's signature.
-Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
-events, and the event follows the `credited` commit within a second.
-
-### 5.4 Refusing a credit
-
-The service never asks whether you accept a deposit. To refuse one (a closed or suspended
-workspace, your own caps), record it as held and answer `2xx`; when support has a destination
-address from the user, request its refund with `POST /v1/refunds` (§7).
-Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
-stop crediting an account before deposits arrive, pause its `settlement` scope
-(the operator's `POST /v1/admin/products/phala-cloud/accounts/{account_id}/pause`): its deposits
-then wait in `confirmed` until you resume.
-
-### 5.5 Phala Cloud ledger mapping
-
-Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto-top-up'`,
-`provider_order_id` = the deposit id `dep_…`, unique per flow), the credit transaction with
-`funding_source = crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction
-([architecture §11](architecture.md#11-fulfillment-webhook)).
-
-## 6. Webhooks
-
-Every event, `deposit.credited` included, is Standard Webhooks with the asymmetric `v1a` scheme,
-signed with the `settlement/v1` key and `POST`ed to the registered webhook URL:
-
-```text
-webhook-id: evt_…
-webhook-timestamp: <Unix seconds of this attempt>
-webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
-
-{"id": "<same evt_ id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
- "data": {"object": {…}}}
-```
-
-The body is Stripe's [Event object](https://docs.stripe.com/api/events/object) without its
-account fields; the signature is Standard Webhooks, not `Stripe-Signature`, because you hold only
-the service's public key.
-
-```python
-from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
-
-def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
-    try:
-        event = verify_webhook(headers, raw_body, SETTLEMENT_KEY)  # 300 s tolerance by default
-    except SignatureError:
-        return 400
-    if event.type == "deposit.credited":
-        fulfill(CreditedDeposit.from_event(event))  # §5.2
-    store_once(event.id, event.type, event.data)  # durable; a duplicate id is a no-op
-    return 204
-```
-
-- Verify over the raw body bytes, never re-serialized JSON. Several space-separated signatures
-  may appear during a key rotation; accept when one verifies.
-- Answer `2xx` only after the credit and the event are durably stored. Anything else, or no
-  answer within 20 s, is retried until delivered, with full-jitter backoff whose ceiling starts at
-  30 s and doubles to 1 h; there is no final attempt. The operator is warned about events
-  undelivered for 24 hours.
-- Deduplicate by `webhook-id`; delivery is at least once.
-- There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
-  payment. Act on fetched state (the deposit or quote), never on event order.
-- Only `deposit.credited` moves a balance (§5); every other event is for notifications, history,
-  and UI refresh.
-- Ignore unknown event types and unknown fields.
-- A lost event can be replayed by the operator with the admin-signed
-  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same body. An event delivered
-  before prefixed ids keeps its old envelope on replay (`event_id`, `created_at`, flat `data`);
-  the SDK parses it, and `CreditedDeposit.from_event` refuses it because it was fulfilled when
-  first delivered. The operator's
-  deposit view (`GET /v1/admin/deposits/{id}`) lists each deposit's `events` with `delivered_at`.
-
-| Type | When | `data.object` |
-|---|---|---|
-| `deposit.credited` | Final, priced, and screened: fulfill it (§5). | The deposit |
-| `deposit.rejected` | Rejected (§7); `rejection_reason` says why. | The deposit |
-| `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
-| `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
-
-Every object names its `account_id`. Before finality nothing is sent: a checkout page shows the
-payment from the quote's `payment` (or the payer's `payment_status` read by `client_secret`).
-
-## 7. Deposit outcomes
-
-States: `detected → confirmed → credited → swept`, or `rejected` with a `reason`
-([architecture §7](architecture.md#7-states-and-pump)). Nothing is reported as a deposit before
-finality. The staging deposit driver asserts these outcomes on Sepolia
-([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
-locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
-
-| Payment | Outcome visible to Phala Cloud |
-|---|---|
-| Exact lock amount, in time (within `lock_tolerance_bps`) | Quote `complete`; `deposit.credited` with `price_source: "quote"` and exactly the quoted `amount`. |
-| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `409 quote_payment_received`. Payments are not accumulated against one lock: offer a re-quote for the shortfall. |
-| Overpayment beyond tolerance | Credited at spot for the full amount; lock not consumed. |
-| After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the lock price even if final later; the quote stays `open` past `expires_at` until then. |
-| Second payment to a lock address, or to a cancelled lock | Credited at spot. |
-| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot at finality. |
-| Token without a route | After finality `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
-| Below `min_credit_minor` | `rejected(below_minimum)`. |
-| Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
-| Sanctioned sender | `rejected(sanctioned)`; not refundable. |
-| You refuse the credit (for example a closed workspace) | Deposit `credited`; you hold it and request its refund (§5.4). Deposits refused under the retired settlement protocol show `rejected(product_refused)`. |
-
-User-facing copy per state and reason, including what never to show, is in
-[architecture §12, product UI](architecture.md#customer-experience-obligations-product-ui).
-
-**Refunds.** A rejected deposit is refundable unless the reason is `sanctioned` or its amount is
-below the route's `min_refund_atomic`. A credited deposit is refunded only when you ask, for a
-credit you did not apply or have reversed
-([architecture §15](architecture.md#15-operating-policies)). Ask the user for a destination
-address they control (never default to `from_address`, which may be an exchange), then
-`POST /v1/refunds {deposit, destination_address, amount_atomic}` (`amount_atomic` in base units, at
-most and by default the unrefunded remainder). The request is `requested`; finance approves and executes it from the
-treasury Safe; the service confirms the transaction on chain and sends `deposit.refunded`.
-Ineligible deposits get `409 deposit_not_refundable`, a paused `refunds` scope `409 paused`.
-
-## 8. Testing and go-live
-
-### 8.1 Testing your receiver
-
-`topup-sdk send-test-event` exercises your webhook receiver the way `stripe trigger` does:
-
-```sh
-cd sdk/python
-uv run --locked topup-sdk keygen --keyid settlement/v1 --seed-out /tmp/test-service.seed
-# Configure your test instance to pin the printed public key in place of the service key, then:
-uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
-  --seed-file /tmp/test-service.seed --account-id test-workspace --amount 250
-```
-
-It sends a signed `deposit.credited`, the same event again, and a copy signed by another key, and
-passes when your answers are `2xx`, `2xx`, and `4xx`. Then check your ledger: exactly one credit
-of `--amount` cents for `--account-id`. The reference product's tests
-([deploy/product/tests](../deploy/product/tests)) are a worked example of the §5 obligations.
-
-### 8.2 Staging
-
-Staging runs on Sepolia with the test PHA token (§2). Until Phala Cloud's staging backend is
-registered there, the reference product receives staging's credits; it is the model for a
-complete product (fulfillment, holds, refund requests). Once your receiver is registered, pay test
-quotes with minted test PHA and Sepolia ETH for gas, and play the abnormal payments of §7. Sepolia
-finality takes about 15 minutes per deposit.
-
-### 8.3 Go-live checklist
-
-- [ ] `topup-sdk send-test-event` passes against your production code path, and the ledger holds
-      one credit.
-- [ ] Fulfillment keyed by the deposit id (`dep_…`) under a unique index, committed before `2xx`;
-      refusals recorded as holds, never answered `5xx`.
-- [ ] Production product key generated for production only; seed in the secret store; public key
-      and key id sent to the operator; webhook URL agreed.
-- [ ] Settlement key pinned from verified attestation of production (§3.3), with the keyid.
-- [ ] Every address recomputed before display.
-- [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
-      state.
-- [ ] Quote, waiting, history, and exception UI per
-      [architecture §12](architecture.md#customer-experience-obligations-product-ui); refund
-      request flow with a user-supplied address, also for held credits.
-- [ ] Alerts on your side: webhook verification failures, a repeated `deposit.credited` with a
-      different amount, and held credits waiting for a refund.
-- [ ] Optional hardening decided: caps, `GET /deposits/{id}` check, own-node log verification.
-- [ ] One quote-first deposit credited end to end on staging.
-
-## 9. Versioning and deprecation
-
-### API
+#### API
 
 - The path prefix carries the major version (`/v1`). Within it every change is backward
   compatible: new endpoints, optional request fields, response fields, error codes, and event
@@ -606,7 +661,7 @@ finality takes about 15 minutes per deposit.
   PATCH otherwise.
 - Integrator-visible API changes are recorded in [CHANGELOG.md](../CHANGELOG.md).
 
-### SDK
+#### SDK
 
 - `phala-pay` and `@phala/pay` follow SemVer independently: MAJOR for a breaking
   change to the public API (`phala_pay` and `topup_sdk` exports, generated `topup_client`
@@ -616,7 +671,7 @@ finality takes about 15 minutes per deposit.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
   no-op, so a PR that changes `openapi.json` regenerates the client in the same PR.
 
-### Deprecation
+#### Deprecation
 
 - Anything integrators use is removed only after at least 90 days from the announcement:
   endpoints, fields, error codes, event types and fields, SDK public functions and parameters,
@@ -628,7 +683,7 @@ finality takes about 15 minutes per deposit.
 - Removal happens in the sandbox first, in production no earlier than the announced date. Only a
   security fix may shorten the window, and its changelog entry says why.
 
-### SDK changelog rules
+#### SDK changelog rules
 
 [sdk/python/CHANGELOG.md](../sdk/python/CHANGELOG.md) follows Keep a Changelog: every PR that
 changes `openapi.json`, `topup_sdk`, the generated client, or the signing profile adds an entry
@@ -637,7 +692,7 @@ heading carries the SDK version, date, and OpenAPI `info.version`; `Deprecated` 
 replacement and earliest removal date; `Removed` links the deprecating release; breaking changes
 come first.
 
-## 10. SDK development
+### 5.10 SDK development
 
 ```sh
 make -C sdk/python sync      # uv sync --locked --all-groups
