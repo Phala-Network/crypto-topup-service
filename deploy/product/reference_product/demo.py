@@ -559,7 +559,11 @@ class DemoConsole:
                 self._client = TopupClient(
                     self.config.service_url,
                     self.config.signer(),
-                    forwarder=(self.config.factory, self.config.implementation),
+                    forwarder=(
+                        self.config.factory,
+                        self.config.implementation,
+                        self.config.treasury,
+                    ),
                     transport=self.recorder,
                 )
             return self._client

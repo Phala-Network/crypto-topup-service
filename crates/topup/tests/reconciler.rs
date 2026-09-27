@@ -128,6 +128,7 @@ impl ReconciliationChain for MockChain {
     async fn flushed_total(
         &self,
         _factory: Address,
+        _treasury: Address,
         _token: Address,
         from_block: u64,
         to_block: u64,
@@ -144,6 +145,7 @@ impl ReconciliationChain for MockChain {
     async fn factory_addresses(
         &self,
         _factory: Address,
+        _treasury: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ReconciliationError> {
         if self.fail_derivation.load(Ordering::SeqCst) {

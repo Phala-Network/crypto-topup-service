@@ -150,6 +150,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
   "rpc_url": "https://your-sepolia-rpc.example",
   "factory": "0x...",
   "implementation": "0x...",
+  "treasury": "0x...",
   "token": "0x...",
   "token_symbol": "PHA",
   "unsupported_token": "0x...",

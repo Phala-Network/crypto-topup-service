@@ -22,8 +22,8 @@ use topup::db::{AddressKind, NewDeposit};
 use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
     AlertSink, BroadcastingChain, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote,
-    FlushAlert, Flusher, FlusherPolicy, NonceReceiptSearch, OperatorRole, Planner, PriceError,
-    PriceSource, RunResult,
+    FlushAlert, Flusher, FlusherPolicy, NonceReceiptSearch, Planner, PriceError, PriceSource,
+    RunResult,
 };
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
@@ -41,7 +41,6 @@ use support::chain::{Anvil, forge_create};
 use support::seed::{self, NewAccount, NewAddress, NewProduct};
 use support::with_database;
 
-const ADMIN_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 const ADMIN_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const OPERATOR_ADDRESS: &str = "0x90f79bf6eb2c4f870365e785982e1f101e93b906";
 const OPERATOR_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
@@ -109,19 +108,12 @@ impl ChainClient for StubChain {
         &self,
         _factory: Address,
         _operator: Address,
+        _treasury: Address,
         _salts: &[B256],
         _token: Address,
     ) -> Result<u64, ChainError> {
         self.record_call();
         Ok(100_000)
-    }
-
-    async fn has_operator_role(
-        &self,
-        _factory: Address,
-        _operator: Address,
-    ) -> Result<bool, ChainError> {
-        Err(ChainError::Rpc("not used by the stub"))
     }
 
     async fn pending_nonce(&self, _operator: Address) -> Result<u64, ChainError> {
@@ -504,10 +496,9 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
-                &[ADMIN_ADDRESS, TREASURY],
+                &[],
             )?;
             let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
-            grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let route = test_route(factory, token)?;
@@ -671,10 +662,9 @@ async fn a_rate_limited_provider_does_not_strand_a_sent_flush() -> Result<()> {
             let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
-                &[ADMIN_ADDRESS, TREASURY],
+                &[],
             )?;
             let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
-            grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let route = test_route(factory, token)?;
@@ -741,7 +731,7 @@ async fn a_rate_limited_provider_does_not_strand_a_sent_flush() -> Result<()> {
 }
 
 #[tokio::test]
-async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_bisect()
+async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_isolation()
 -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
@@ -749,14 +739,13 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
             let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
-                &[ADMIN_ADDRESS, TREASURY],
+                &[],
             )?;
             let token = forge_create(
                 &anvil.rpc_url,
                 "test/mocks/MockTokens.sol:MockERC20",
                 &[],
             )?;
-            grant_operator(&anvil.rpc_url, factory, OPERATOR_ADDRESS, ADMIN_KEY)?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let mut route = test_route(factory, token)?;
@@ -1019,7 +1008,6 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                     })
             );
 
-            grant_operator(&anvil.rpc_url, factory, ROTATED_ADDRESS, ADMIN_KEY)?;
             cast_send(
                 &anvil.rpc_url,
                 token,
@@ -1125,6 +1113,8 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                     })
             );
 
+            // A blocked forwarder no longer reverts the batch: the factory isolates it with
+            // `FlushFailed`, flushes the rest, and the flusher alerts the isolated address.
             let reverting = forge_create(
                 &anvil.rpc_url,
                 "test/mocks/MockTokens.sol:SelectiveRevertingToken",
@@ -1147,85 +1137,39 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 "setBlockedForwarder(address)",
                 &[&format!("{:#x}", seeded[1].physical)],
             )?;
-            let estimated_plan = planner
+            let isolated_plan = planner
                 .plan(&route)
                 .await?
-                .context("plan around estimation revert")?;
-            let estimated_count: i32 = sqlx::query_scalar(
+                .context("plan around a blocked forwarder")?;
+            let planned_count: i32 = sqlx::query_scalar(
                 "SELECT jsonb_array_length(receipt->'plan') FROM flushes WHERE id = $1",
             )
-            .bind(estimated_plan)
+            .bind(isolated_plan)
             .fetch_one(&database.app_pool)
             .await?;
-            ensure!(estimated_count == 1);
-            let exclusion_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM flush_exclusions WHERE chain_id = 31337 AND token = $1",
-            )
-            .bind(format!("{reverting:#x}"))
-            .fetch_one(&database.app_pool)
-            .await?;
-            ensure!(exclusion_count == 1);
-            ensure!(alerts.0.lock().expect("alert mutex is available").iter().any(
-                |alert| matches!(alert, FlushAlert::PlanningExcluded { address_id, .. } if *address_id == seeded[1].id)
-            ));
+            ensure!(planned_count == 2);
             ensure!(
                 flusher.send_next(&route).await?
                     == RunResult::Sent {
-                        flush_id: estimated_plan
+                        flush_id: isolated_plan
                     }
             );
             finalize(&anvil.rpc_url)?;
             ensure!(
                 flusher.maintain_sent(&route).await?
                     == Some(RunResult::Confirmed {
-                        flush_id: estimated_plan
+                        flush_id: isolated_plan
                     })
             );
-            cast_send(
-                &anvil.rpc_url,
-                reverting,
-                ADMIN_KEY,
-                "setBlockedForwarder(address)",
-                &["0x0000000000000000000000000000000000000000"],
-            )?;
-            for address in &seeded {
-                cast_send(
-                    &anvil.rpc_url,
-                    reverting,
-                    ADMIN_KEY,
-                    "mint(address,uint256)",
-                    &[&format!("{:#x}", address.physical), TOKEN_AMOUNT],
-                )?;
-            }
-            sqlx::query("DELETE FROM flush_exclusions WHERE chain_id = 31337 AND token = $1")
-                .bind(format!("{reverting:#x}"))
-                .execute(&database.app_pool)
-                .await?;
-            let revert_flush = planner.plan(&route).await?.context("plan reverting batch")?;
-            cast_send(
-                &anvil.rpc_url,
-                reverting,
-                ADMIN_KEY,
-                "setBlockedForwarder(address)",
-                &[&format!("{:#x}", seeded[1].physical)],
-            )?;
-            ensure!(
-                flusher
-                    .send_next(&route)
-                    .await
-                    .context("send reverting batch")?
-                    == RunResult::Sent {
-                        flush_id: revert_flush
-                    }
-            );
-            finalize(&anvil.rpc_url)?;
-            ensure!(
-                flusher.maintain_sent(&route).await?
-                    == Some(RunResult::Reverted {
-                        flush_id: revert_flush
-                    })
-            );
-            drive_bisection(&flusher, &route, &anvil.rpc_url, alerts.as_ref()).await?;
+            let flushed: Vec<Uuid> =
+                sqlx::query_scalar("SELECT address_id FROM flushed WHERE flush_id = $1")
+                    .bind(isolated_plan)
+                    .fetch_all(&database.app_pool)
+                    .await?;
+            ensure!(flushed == vec![seeded[0].id]);
+            ensure!(alerts.0.lock().expect("alert mutex is available").iter().any(
+                |alert| matches!(alert, FlushAlert::IsolatedAddress { address_id, .. } if *address_id == seeded[1].id)
+            ));
             Ok(())
         })
     })
@@ -1233,20 +1177,16 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
 }
 
 #[tokio::test]
-async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans() -> Result<()> {
+async fn anvil_operator_key_version_bump_rebinds_stale_plans() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let anvil = Anvil::start(&[]).await?;
             let factory = forge_create(
                 &anvil.rpc_url,
                 "src/ForwarderFactory.sol:ForwarderFactory",
-                &[ADMIN_ADDRESS, TREASURY],
-            )?;
-            let token = forge_create(
-                &anvil.rpc_url,
-                "test/mocks/MockTokens.sol:MockERC20",
                 &[],
             )?;
+            let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
             let implementation =
                 cast_call_address(&anvil.rpc_url, factory, "implementation()(address)", &[])?;
             let seeded = seed_addresses(&database.app_pool, factory, implementation).await?;
@@ -1279,48 +1219,6 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     ),
                 )
             };
-            let spawn_task = |route: &RouteFile, signer: &SignerHandle, interval: StdDuration| {
-                let (planner, flusher) = components(signer);
-                let cancellation = CancellationToken::new();
-                let task = FlusherTask::new(route.clone(), planner, flusher, alerts.clone())
-                    .map_err(anyhow::Error::msg)?
-                    .with_maintenance_interval(interval);
-                let handle = tokio::spawn(task.run(cancellation.clone()));
-                Ok::<_, anyhow::Error>((handle, cancellation))
-            };
-            let role_alerts = |operator: Address| {
-                alerts
-                    .0
-                    .lock()
-                    .expect("alert mutex is available")
-                    .iter()
-                    .filter(|alert| {
-                        matches!(alert, FlushAlert::OperatorRoleMissing { operator: alerted, .. } if *alerted == operator)
-                    })
-                    .count()
-            };
-            let stop = |(handle, cancellation): (tokio::task::JoinHandle<()>, CancellationToken)| async move {
-                ensure!(!handle.is_finished(), "flusher task must keep running");
-                cancellation.cancel();
-                tokio::time::timeout(StdDuration::from_secs(10), handle)
-                    .await
-                    .context("flusher task must stop when cancelled")??;
-                Ok::<_, anyhow::Error>(())
-            };
-            // A missing role must not end the task: it re-checks and alerts at every interval.
-            let waits_for_role = |route: &RouteFile, signer: &SignerHandle, operator: Address| {
-                let task = spawn_task(route, signer, StdDuration::from_secs(1));
-                let before = role_alerts(operator);
-                async move {
-                    let task = task?;
-                    tokio::time::sleep(StdDuration::from_millis(3_500)).await;
-                    ensure!(
-                        role_alerts(operator) >= before + 3,
-                        "missing role must be re-checked and alerted"
-                    );
-                    Ok::<_, anyhow::Error>(task)
-                }
-            };
 
             let route_v1 = test_route(factory, token)?;
             ensure!(route_v1.chain.operator_key_version()? == NonZeroU32::MIN);
@@ -1339,22 +1237,6 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
             }
             let (planner_v1, flusher_v1) = components(&signer_v1);
             let (planner_v2, flusher_v2) = components(&signer_v2);
-
-            ensure!(
-                flusher_v1.operator_role(&route_v1).await?
-                    == OperatorRole {
-                        operator: operator_v1,
-                        granted: false
-                    }
-            );
-            stop(waits_for_role(&route_v1, &signer_v1, operator_v1).await?).await?;
-            grant_operator(
-                &anvil.rpc_url,
-                factory,
-                &format!("{operator_v1:#x}"),
-                ADMIN_KEY,
-            )?;
-            ensure!(flusher_v1.operator_role(&route_v1).await?.granted);
 
             mint(seeded[0].physical)?;
             let first = planner_v1.plan(&route_v1).await?.context("plan v1 flush")?;
@@ -1383,6 +1265,24 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     row.try_get::<String, _>("status")?,
                 ))
             };
+            ensure!(
+                binding(stale).await?
+                    == (
+                        format!("{operator_v1:#x}"),
+                        "1".to_owned(),
+                        "planned".to_owned()
+                    )
+            );
+
+            // The v2 task rebinds the v1 plan to its own operator and nonce and flushes it.
+            ensure!(planner_v2.plan(&route_v2).await? == Some(stale));
+            let (rebound_operator, rebound_nonce, _) = binding(stale).await?;
+            ensure!(rebound_operator == format!("{operator_v2:#x}") && rebound_nonce == "0");
+            let cancellation = CancellationToken::new();
+            let task = FlusherTask::new(route_v2.clone(), planner_v2, flusher_v2)
+                .map_err(anyhow::Error::msg)?
+                .with_maintenance_interval(StdDuration::from_secs(1));
+            let handle = tokio::spawn(task.run(cancellation.clone()));
             let wait_for_status = |id: Uuid, status: &'static str| {
                 let binding = &binding;
                 async move {
@@ -1395,39 +1295,14 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     bail!("flush {id} did not become {status}")
                 }
             };
-            let v1_binding = (
-                format!("{operator_v1:#x}"),
-                "1".to_owned(),
-                "planned".to_owned(),
-            );
-            ensure!(binding(stale).await? == v1_binding);
-
-            // operator/v2 deployed before the admin Safe grants it waits and leaves the plan alone.
-            ensure!(!flusher_v2.operator_role(&route_v2).await?.granted);
-            let task_v2 = waits_for_role(&route_v2, &signer_v2, operator_v2).await?;
-            ensure!(binding(stale).await? == v1_binding);
-
-            // The running v2 task picks up the grant without a restart and flushes by itself.
-            grant_operator(
-                &anvil.rpc_url,
-                factory,
-                &format!("{operator_v2:#x}"),
-                ADMIN_KEY,
-            )?;
-            ensure!(
-                flusher_v2.operator_role(&route_v2).await?
-                    == OperatorRole {
-                        operator: operator_v2,
-                        granted: true
-                    }
-            );
-            ensure!(planner_v2.plan(&route_v2).await? == Some(stale));
-            let (rebound_operator, rebound_nonce, _) = binding(stale).await?;
-            ensure!(rebound_operator == format!("{operator_v2:#x}") && rebound_nonce == "0");
             wait_for_status(stale, "sent").await?;
             finalize(&anvil.rpc_url)?;
             wait_for_status(stale, "confirmed").await?;
-            stop(task_v2).await?;
+            ensure!(!handle.is_finished(), "flusher task must keep running");
+            cancellation.cancel();
+            tokio::time::timeout(StdDuration::from_secs(10), handle)
+                .await
+                .context("flusher task must stop when cancelled")??;
             ensure!(chain.confirmed_nonce(operator_v2).await? == 1);
             ensure!(chain.confirmed_nonce(operator_v1).await? == 1);
             let flushed: i64 =
@@ -1436,102 +1311,10 @@ async fn anvil_operator_key_version_bump_gates_on_role_and_rebinds_stale_plans()
                     .fetch_one(&database.app_pool)
                     .await?;
             ensure!(flushed == 1);
-
-            // After revocation a v1 task neither sends its own plan nor stops.
-            mint(seeded[0].physical)?;
-            let orphan = planner_v1
-                .plan(&route_v1)
-                .await?
-                .context("plan before revoking v1")?;
-            revoke_operator(
-                &anvil.rpc_url,
-                factory,
-                &format!("{operator_v1:#x}"),
-                ADMIN_KEY,
-            )?;
-            ensure!(!flusher_v1.operator_role(&route_v1).await?.granted);
-            stop(waits_for_role(&route_v1, &signer_v1, operator_v1).await?).await?;
-            ensure!(
-                binding(orphan).await?
-                    == (
-                        format!("{operator_v1:#x}"),
-                        "1".to_owned(),
-                        "planned".to_owned()
-                    )
-            );
-
-            // Revoking the operator of a running, authorized task stops its queued sends at the
-            // next maintenance tick instead of letting them revert on chain.
-            let slow_v2 = route_v2.clone();
-            ensure!(flusher_v2.operator_role(&slow_v2).await?.granted);
-            let before = role_alerts(operator_v2);
-            let task_v2 = spawn_task(&slow_v2, &signer_v2, StdDuration::from_secs(3))?;
-            // Polls instead of sleeping so a loaded host only slows the test down; the task's
-            // ticks interleave with the test on the single-threaded runtime.
-            let wait_for_role_alerts = |count: usize, reason: &'static str| {
-                let role_alerts = &role_alerts;
-                async move {
-                    for _ in 0..300 {
-                        if role_alerts(operator_v2) >= count {
-                            return Ok(());
-                        }
-                        tokio::time::sleep(StdDuration::from_millis(100)).await;
-                    }
-                    bail!("{reason}")
-                }
-            };
-            revoke_operator(
-                &anvil.rpc_url,
-                factory,
-                &format!("{operator_v2:#x}"),
-                ADMIN_KEY,
-            )?;
-            wait_for_role_alerts(before + 1, "revocation must be noticed by the running task")
-                .await?;
-            ensure!(planner_v2.plan(&slow_v2).await? == Some(orphan));
-            wait_for_role_alerts(
-                before + 2,
-                "the running task must keep re-checking the revoked role",
-            )
-            .await?;
-            stop(task_v2).await?;
-            ensure!(
-                binding(orphan).await?
-                    == (
-                        format!("{operator_v2:#x}"),
-                        "1".to_owned(),
-                        "planned".to_owned()
-                    )
-            );
             Ok(())
         })
     })
     .await
-}
-
-async fn drive_bisection(
-    flusher: &Flusher,
-    route: &RouteFile,
-    rpc_url: &str,
-    alerts: &Alerts,
-) -> Result<()> {
-    for _ in 0..10 {
-        match flusher.run_once(route).await? {
-            RunResult::Sent { .. } => finalize(rpc_url)?,
-            RunResult::Reverted { .. } | RunResult::Confirmed { .. } | RunResult::Idle => {}
-            RunResult::Replaced { .. } | RunResult::Rebroadcast { .. } => {}
-        }
-        if alerts
-            .0
-            .lock()
-            .expect("alert mutex is available")
-            .iter()
-            .any(|alert| matches!(alert, FlushAlert::IsolatedAddress { .. }))
-        {
-            return Ok(());
-        }
-    }
-    bail!("bisection did not isolate the failing address")
 }
 
 fn cast_send(
@@ -1559,41 +1342,6 @@ fn cast_send(
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
-}
-
-fn grant_operator(
-    rpc_url: &str,
-    factory: Address,
-    operator: &str,
-    private_key: &str,
-) -> Result<()> {
-    set_operator_role(rpc_url, factory, operator, private_key, "grantRole")
-}
-
-fn revoke_operator(
-    rpc_url: &str,
-    factory: Address,
-    operator: &str,
-    private_key: &str,
-) -> Result<()> {
-    set_operator_role(rpc_url, factory, operator, private_key, "revokeRole")
-}
-
-fn set_operator_role(
-    rpc_url: &str,
-    factory: Address,
-    operator: &str,
-    private_key: &str,
-    function: &str,
-) -> Result<()> {
-    let role = cast_call_text(rpc_url, factory, "OPERATOR_ROLE()(bytes32)", &[])?;
-    cast_send(
-        rpc_url,
-        factory,
-        private_key,
-        &format!("{function}(bytes32,address)"),
-        &[role.trim(), operator],
-    )
 }
 
 fn cast_call_address(
@@ -1713,7 +1461,8 @@ async fn seed_addresses(
         };
         seed::create_account(pool, &account).await?;
         let salt = B256::from([number; 32]);
-        let physical = forwarder_address(factory, implementation, salt);
+        let physical =
+            forwarder_address(factory, implementation, Address::from_str(TREASURY)?, salt);
         let address = NewAddress {
             id: Uuid::new_v4(),
             account_id: account.id,

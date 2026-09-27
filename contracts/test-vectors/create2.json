@@ -1,41 +1,82 @@
 {
   "factory": "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
   "implementation": "0xfeb1871c9897251C74b39DFC74e577888290faE6",
-  "predictedAddresses": [
-    "0x3a745d45Ff36c2f229A8Ef340D22B5eBf263Cc1a",
-    "0xbA14ce3ad038FA04A8c795Ccb6977175a1C2984f",
-    "0xfB3A37BB9a752f431802bA9B9e52EFe923763aB7",
-    "0xC1E2023F7fC12e95B3da55a83638D81b1CE05f36",
-    "0xDB9Bd7d31F668c8B8771757F6d87B84e0d7f9177"
-  ],
-  "salts": [
-    "0x49ca4d3e9742aabea0012fd487b01b3e193c6dc51e241cee16d05e81e52d795f",
-    "0x92facbbe5883cf2b43c3f602d276cf18f734f4c88f758f9dea9a6b76cf7ed8f7",
-    "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
-    "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
-    "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745"
+  "forwarders": [
+    {
+      "predicted_address": "0xf3b71cAb85B33f8Ffea80700f01BCd4C26EF5440",
+      "salt": "0x49ca4d3e9742aabea0012fd487b01b3e193c6dc51e241cee16d05e81e52d795f",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
+    },
+    {
+      "predicted_address": "0x879A7C506053D2719f2b8c7e6FF1C2EC99EE3a3B",
+      "salt": "0x92facbbe5883cf2b43c3f602d276cf18f734f4c88f758f9dea9a6b76cf7ed8f7",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
+    },
+    {
+      "predicted_address": "0x2ca343BF62a6cb1265D8B6BF9595cC4c8A8b8008",
+      "salt": "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
+    },
+    {
+      "predicted_address": "0xE9bE1f233b6D545c59265fb70D591061c86e5F7a",
+      "salt": "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
+    },
+    {
+      "predicted_address": "0xF8fC767E790a1d3a016336dEc4B07eA437708B08",
+      "salt": "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
+    },
+    {
+      "predicted_address": "0x9296ae542577F8FF8D0B6206ABf410928A2322D3",
+      "salt": "0x49ca4d3e9742aabea0012fd487b01b3e193c6dc51e241cee16d05e81e52d795f",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+    },
+    {
+      "predicted_address": "0x99308C6C12BEF9e1815D558d66Af40AB3637D802",
+      "salt": "0x92facbbe5883cf2b43c3f602d276cf18f734f4c88f758f9dea9a6b76cf7ed8f7",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+    },
+    {
+      "predicted_address": "0x731f08C9272d0F96540944557a00847F560f4119",
+      "salt": "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+    },
+    {
+      "predicted_address": "0x421a75BB6F1330F624385CcAd3b5aA03fD0A5871",
+      "salt": "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+    },
+    {
+      "predicted_address": "0x2F3E91325B2288BcE392711f85F5359661062A91",
+      "salt": "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
+    }
   ],
   "lock": [
     {
       "external_id": "invoice-2026-0001",
       "lock_ref": "checkout-0001",
-      "predicted_address": "0x9b53A0eE87Bac5c58b792fD073c4547499524b9F",
+      "predicted_address": "0x0F45147A02E4c9d91AFF20024e22095536Fd5053",
       "product_slug": "phala-cloud",
-      "salt": "0x92cbd012f7a5433131d039c37a2988b1d7cd0ddabe0c1703f41074e91d0fffc3"
+      "salt": "0x92cbd012f7a5433131d039c37a2988b1d7cd0ddabe0c1703f41074e91d0fffc3",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
     },
     {
       "external_id": "quote-0042",
       "lock_ref": "rate-lock:builder:0042",
-      "predicted_address": "0xC8dEBF44CCc8AFd78160fD5d8E2677a93a121Db6",
+      "predicted_address": "0x1775C1326aa633546B0b5634aE2bEF0Ba7CBFC9A",
       "product_slug": "builder",
-      "salt": "0xddb1b76da592b1dca18edacc2398ed44b6971cb4a7817819616e8a07cc2518d7"
+      "salt": "0xddb1b76da592b1dca18edacc2398ed44b6971cb4a7817819616e8a07cc2518d7",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
     },
     {
       "external_id": "invoice-long-reference",
       "lock_ref": "lock-ref-0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111-2222222222222222222222222222222222222222222222222222222222222222-3333333333333333333333333333333333333333333333333333333333333333",
-      "predicted_address": "0x169DB0031475d0C30bf061C88CA86943b30A877b",
+      "predicted_address": "0xfA7bFDCCa0E9d598A0C7032A043D566C87ecc8ea",
       "product_slug": "enterprise",
-      "salt": "0x783ed98ce1738f83a61c34dd5786bf0fd6b08669dff4fd95f54eac1e4d31aa69"
+      "salt": "0x783ed98ce1738f83a61c34dd5786bf0fd6b08669dff4fd95f54eac1e4d31aa69",
+      "treasury": "0x0000000000000000000000000000000000007EA5"
     }
   ]
 }

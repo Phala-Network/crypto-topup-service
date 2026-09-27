@@ -51,6 +51,7 @@ configs:
         "rpc_url": "${PRODUCT_RPC_URL:-}",
         "factory": "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",
         "implementation": "0x70B714508BFa441449DC09f790Ca03Baa5170360",
+        "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
         "token": "0x8F40e7E99678F44c88158f049E62817580ab113B",
         "token_symbol": "PHA",
         "listen_host": "0.0.0.0",

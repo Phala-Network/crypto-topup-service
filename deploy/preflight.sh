@@ -39,7 +39,7 @@ source "$(dirname -- "$0")/preflight-phala.sh"
 
 root="$REPO_ROOT"
 example="$root/deploy/staging.env.example"
-expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
+networks="$DEPLOY_CONTRACTS_DIR/networks.json"
 route_config=topup_route_phala_cloud_sepolia_pha
 # May stay empty: an empty DSN turns Sentry reporting off, an empty RPC key means a keyless URL.
 optional_empty=" SENTRY_DSN TOPUP_RPC_PROVIDER_A_KEY TOPUP_RPC_PROVIDER_B_KEY "
@@ -324,23 +324,21 @@ else
         fi
     done
     network=$(jq -r --argjson id "${route[chain_id]}" \
-        '.networks | to_entries[] | select(.value.chain_id == $id) | .key' "$expectations")
+        '.networks | to_entries[] | select(.value.chain_id == $id) | .key' "$networks")
     if ((chain_ok)) && [[ -n "$network" ]]; then
-        if ADMIN=$(jq -r .admin "$expectations") TREASURY=$(jq -r .treasury "$expectations") \
-            "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" --rpc "$network/a=$rpc_a" \
+        if "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" --rpc "$network/a=$rpc_a" \
             --rpc "$network/b=$rpc_b" >"$tmp/verification.json" 2>"$tmp/verification.err"; then
             ok "verify-deployment.sh passed on both providers"
         else
             fail "verify-deployment.sh failed: $(redact "$(tail -n 3 "$tmp/verification.err")")"
         fi
         if jq -e --arg factory "${route[forwarder_factory]}" \
-            --arg implementation "${route[implementation]}" --arg treasury "${route[treasury]}" \
+            --arg implementation "${route[implementation]}" \
             '(.chains | length) == 2 and all(.chains[];
                 (.factory | ascii_downcase) == ($factory | ascii_downcase) and
-                (.implementation | ascii_downcase) == ($implementation | ascii_downcase) and
-                (.treasury | ascii_downcase) == ($treasury | ascii_downcase))' \
+                (.implementation | ascii_downcase) == ($implementation | ascii_downcase))' \
             "$tmp/verification.json" >/dev/null 2>&1; then
-            ok "route factory, implementation, and treasury match the verified deployment"
+            ok "route factory and implementation match the verified deployment"
         else
             fail "route contract addresses differ from the verified deployment"
         fi
@@ -356,7 +354,7 @@ else
         [[ "$decimals" == "${route[decimals]}" ]] ||
             fail "asset decimals() is $decimals, the route says ${route[decimals]}"
     elif ((chain_ok)); then
-        fail "$expectations names no network with chain id ${route[chain_id]}"
+        fail "$networks names no network with chain id ${route[chain_id]}"
     fi
 fi
 

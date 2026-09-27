@@ -5,7 +5,7 @@
 #    rendered by deploy/render-compose.sh with immutable repository@sha256 references.
 # 2. Starts Anvil with Sepolia's chain id, installs the canonical Multicall3 that Sepolia carries
 #    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
-#    (deploy/contracts: canonical proxy, mock Safe as admin and treasury, deploy-factory.sh,
+#    (deploy/contracts: canonical proxy, mock Safe as the route treasury, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
 #    committed route lives, and renders the compose with the rehearsal's settings and the staging
@@ -19,8 +19,8 @@
 #    from the provably empty prefix.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers through the simulator and binds the flusher operator (matching
-#    `topup attest --route`), the flusher waits for that operator's OPERATOR_ROLE and resumes once
-#    the mock Safe grants it and it is funded, Sentry reporting is off with the empty DSN, and WAL
+#    `topup attest --route`), the flusher operator is funded (the factory is permissionless),
+#    Sentry reporting is off with the empty DSN, and WAL
 #    archiving writes a fresh backup marker; the derived key and database credentials are mode 0600
 #    files owned by PostgreSQL and in no container environment.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
@@ -201,16 +201,16 @@ treasury=$(cast compute-address "$owner" --nonce $((nonce + 1)) | awk '{print $N
 jq -n --arg safe "$treasury" --arg owner "$owner" \
     --arg code_hash "$(code_hash "$rpc_url" "$treasury")" --arg singleton "$safe_singleton" \
     --arg singleton_code_hash "$(code_hash "$rpc_url" "$safe_singleton")" --arg zero "$ZERO_ADDRESS" \
-    '{configured: true, networks: {sepolia: {chain_id: 11155111}}, admin: $safe, treasury: $safe,
+    '{configured: true, networks: {sepolia: {chain_id: 11155111}}, treasury: $safe,
       safes: [{address: $safe, owners: [$owner], threshold: 1, proxy_code_hashes: [$code_hash],
                singleton: $singleton, singleton_code_hash: $singleton_code_hash,
                modules: [], guard: $zero, fallback_handler: $zero}]}' >"$tmp/safe-expectations.json"
-ADMIN="$treasury" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
-    "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" --rpc "sepolia/a=$rpc_url" --broadcast \
-    --safe-expectations "$tmp/safe-expectations.json" >/dev/null 2>&1 ||
+"$DEPLOY_CONTRACTS_DIR/verify-safe.sh" --expectations "$tmp/safe-expectations.json" \
+    --rpc "sepolia/a=$rpc_url" >/dev/null || die "verify-safe.sh rejected the mock treasury Safe"
+PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
+    "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" --rpc "sepolia/a=$rpc_url" --broadcast >/dev/null 2>&1 ||
     die "deploy-factory.sh failed"
-ADMIN="$treasury" TREASURY="$treasury" "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
-    --safe-expectations "$tmp/safe-expectations.json" \
+"$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
     --rpc "sepolia/a=$rpc_url" --rpc "sepolia/b=$rpc_url" >"$tmp/verification.json" ||
     die "verify-deployment.sh failed: $(jq -c '[.chains[].checks]' "$tmp/verification.json")"
 factory=$(jq -er '.chains[0].factory' "$tmp/verification.json")
@@ -394,22 +394,10 @@ cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" \
 echo "ok: topup attest --route reports the same operators and report_data"
 
 operator=$(jq -er '.operators[0].address' <<<"$attestation")
-operator_role=$(cast keccak 'OPERATOR_ROLE')
-flusher_logged() {
-    dc logs --no-color topup 2>&1 | grep -F "$1" | grep -qiF "\"operator\":\"$operator\""
-}
-wait_for "the flusher to report its missing role" 30 flusher_logged 'does not hold OPERATOR_ROLE'
-[[ "$(cast call "$factory" 'hasRole(bytes32,address)(bool)' "$operator_role" "$operator" \
-    --rpc-url "$rpc_url")" == false ]] || die "the operator already holds OPERATOR_ROLE"
-echo "ok: the flusher waits for OPERATOR_ROLE on the attested operator $operator"
-# deploy/README.md: the admin Safe grants the attested address the role, then it is funded.
-cast send "$treasury" 'exec(address,bytes)' "$factory" \
-    "$(cast calldata 'grantRole(bytes32,address)' "$operator_role" "$operator")" \
-    --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
+# The factory is permissionless: the flusher needs no role, only gas.
 cast send "$operator" --value 1ether --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" \
     >/dev/null
-wait_for "the flusher to hold OPERATOR_ROLE" 30 flusher_logged 'flusher operator holds OPERATOR_ROLE'
-echo "ok: after the grant and gas funding the flusher holds OPERATOR_ROLE"
+echo "ok: funded the attested flusher operator $operator"
 
 marker_fresh() {
     local marker
@@ -443,6 +431,7 @@ driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /op
 # The committed product compose with this chain's addresses, as for the route above.
 sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
+    -e "s|^\(        \"treasury\": \).*|\1\"$treasury\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
@@ -490,11 +479,11 @@ unset seed
 pc up -d >/dev/null
 wait_for "the product's /healthz after sealing" 90 product_healthy
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
-    --arg payer "$owner" \
+    --arg payer "$owner" --arg treasury "$treasury" \
     '{service_url: "http://topup:8080", product_slug: "phala-cloud",
       product_keyid: "phala-cloud/v1", route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
-      token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
+      treasury: $treasury, token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
     docker exec -i "$client" sh -c 'cat >/opt/driver.json'
 product_python -m reference_product deposit --config /opt/driver.json \
     --driver-seed-file /opt/driver.seed --amount-minor 2500 --timeout 420

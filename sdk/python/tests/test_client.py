@@ -25,11 +25,14 @@ KEYID = "acme/v1"
 NOW = 1_790_000_000
 FACTORY = "0x" + "aa" * 20
 IMPLEMENTATION = "0x" + "bb" * 20
+TREASURY = "0x" + "cc" * 20
 QUOTE_ID = "qt_" + "0c" * 16
 
 
 def _quote(**fields: object) -> dict[str, object]:
-    address = forwarder_address(FACTORY, IMPLEMENTATION, lock_salt("acme", "ws 1", QUOTE_ID))
+    address = forwarder_address(
+        FACTORY, IMPLEMENTATION, TREASURY, lock_salt("acme", "ws 1", QUOTE_ID)
+    )
     return {
         "id": QUOTE_ID,
         "object": "quote",
@@ -92,7 +95,7 @@ def _client(service: FakeService, *, pinned: bool = True, **kwargs: int) -> Topu
     return TopupClient(
         "http://service.test:8080",
         signer,
-        forwarder=(FACTORY, IMPLEMENTATION) if pinned else None,
+        forwarder=(FACTORY, IMPLEMENTATION, TREASURY) if pinned else None,
         transport=httpx.MockTransport(service),
         sleep=lambda _: None,
         **kwargs,

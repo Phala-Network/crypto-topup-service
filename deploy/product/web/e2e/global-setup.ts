@@ -100,6 +100,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       rpc_url: anvil,
       factory: FACTORY,
       implementation: IMPLEMENTATION,
+      treasury: TREASURY,
       token,
       token_symbol: "PHA",
       public_url: product,

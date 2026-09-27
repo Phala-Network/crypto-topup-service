@@ -1,21 +1,26 @@
 //! ABI boundary for forwarder-factory flush operations.
 
-use alloy_primitives::{Address, B256, Bytes, LogData, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, LogData, U256};
 use alloy_sol_types::{SolCall, SolEvent, sol};
 
 sol! {
     function balanceOf(address account) external view returns (uint256);
-    function addressOf(bytes32 salt) external view returns (address);
-    function flush(bytes32[] salts, address token) external;
-    function hasRole(bytes32 role, address account) external view returns (bool);
+    function addressOf(address treasury, bytes32 salt) external view returns (address);
+    function flush(address treasury, bytes32[] salts, address token) external;
     function implementation() external view returns (address);
-    function treasury() external view returns (address);
     function factory() external view returns (address);
     event Flushed(
         bytes32 indexed salt,
         address indexed forwarder,
         address indexed token,
+        address treasury,
         uint256 amount
+    );
+    event FlushFailed(
+        bytes32 indexed salt,
+        address indexed forwarder,
+        address indexed token,
+        bytes reason
     );
 }
 
@@ -28,8 +33,23 @@ pub struct DecodedFlushed {
     pub forwarder: Address,
     /// Token transferred to the treasury.
     pub token: Address,
-    /// Amount received by the treasury.
+    /// Treasury the forwarder paid, its only immutable argument.
+    pub treasury: Address,
+    /// Amount that left the forwarder.
     pub amount: U256,
+}
+
+/// A decoded `ForwarderFactory.FlushFailed` event: one target of a batch whose transfer failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedFlushFailed {
+    /// CREATE2 salt identifying the forwarder.
+    pub salt: B256,
+    /// Forwarder address whose flush failed.
+    pub forwarder: Address,
+    /// Token that could not be transferred.
+    pub token: Address,
+    /// Revert data, truncated by the factory to 256 bytes.
+    pub reason: Bytes,
 }
 
 /// Encodes an ERC-20 `balanceOf` call.
@@ -38,19 +58,17 @@ pub fn encode_balance_of(account: Address) -> Bytes {
     balanceOfCall { account }.abi_encode().into()
 }
 
-/// Encodes `ForwarderFactory.addressOf(salt)`.
+/// Encodes `ForwarderFactory.addressOf(treasury, salt)`.
 #[must_use]
-pub fn encode_address_of(salt: B256) -> Bytes {
-    addressOfCall { salt }.abi_encode().into()
+pub fn encode_address_of(treasury: Address, salt: B256) -> Bytes {
+    addressOfCall { treasury, salt }.abi_encode().into()
 }
 
-/// Encodes a view call to `ForwarderFactory.implementation()`, `Forwarder.treasury()`, or
-/// `Forwarder.factory()`.
+/// Encodes a view call to `ForwarderFactory.implementation()` or `Forwarder.factory()`.
 #[must_use]
 pub fn encode_contract_address_getter(getter: ContractAddressGetter) -> Bytes {
     match getter {
         ContractAddressGetter::Implementation => implementationCall {}.abi_encode().into(),
-        ContractAddressGetter::Treasury => treasuryCall {}.abi_encode().into(),
         ContractAddressGetter::Factory => factoryCall {}.abi_encode().into(),
     }
 }
@@ -62,7 +80,6 @@ pub fn decode_contract_address_getter(
 ) -> Result<Address, alloy_sol_types::Error> {
     match getter {
         ContractAddressGetter::Implementation => implementationCall::abi_decode_returns(output),
-        ContractAddressGetter::Treasury => treasuryCall::abi_decode_returns(output),
         ContractAddressGetter::Factory => factoryCall::abi_decode_returns(output),
     }
 }
@@ -72,33 +89,20 @@ pub fn decode_contract_address_getter(
 pub enum ContractAddressGetter {
     /// `ForwarderFactory.implementation()`.
     Implementation,
-    /// `Forwarder.treasury()`.
-    Treasury,
     /// `Forwarder.factory()`.
     Factory,
 }
 
-/// Encodes `ForwarderFactory.flush(salts, token)`.
+/// Encodes `ForwarderFactory.flush(treasury, salts, token)`.
 #[must_use]
-pub fn encode_flush(salts: Vec<B256>, token: Address) -> Bytes {
-    flushCall { salts, token }.abi_encode().into()
-}
-
-/// Returns `ForwarderFactory.OPERATOR_ROLE`, the role required to call `flush`.
-#[must_use]
-pub fn operator_role() -> B256 {
-    keccak256("OPERATOR_ROLE")
-}
-
-/// Encodes `ForwarderFactory.hasRole(role, account)`.
-#[must_use]
-pub fn encode_has_role(role: B256, account: Address) -> Bytes {
-    hasRoleCall { role, account }.abi_encode().into()
-}
-
-/// Decodes a `ForwarderFactory.hasRole(role, account)` result.
-pub fn decode_has_role(output: &[u8]) -> Result<bool, alloy_sol_types::Error> {
-    hasRoleCall::abi_decode_returns(output)
+pub fn encode_flush(treasury: Address, salts: Vec<B256>, token: Address) -> Bytes {
+    flushCall {
+        treasury,
+        salts,
+        token,
+    }
+    .abi_encode()
+    .into()
 }
 
 /// Decodes a `ForwarderFactory.Flushed` log.
@@ -107,6 +111,7 @@ pub fn decode_flushed(log: &LogData) -> Result<DecodedFlushed, alloy_sol_types::
         salt: event.salt,
         forwarder: event.forwarder,
         token: event.token,
+        treasury: event.treasury,
         amount: event.amount,
     })
 }
@@ -115,6 +120,22 @@ pub fn decode_flushed(log: &LogData) -> Result<DecodedFlushed, alloy_sol_types::
 #[must_use]
 pub const fn flushed_signature() -> B256 {
     Flushed::SIGNATURE_HASH
+}
+
+/// Decodes a `ForwarderFactory.FlushFailed` log.
+pub fn decode_flush_failed(log: &LogData) -> Result<DecodedFlushFailed, alloy_sol_types::Error> {
+    FlushFailed::decode_log_data_validate(log).map(|event| DecodedFlushFailed {
+        salt: event.salt,
+        forwarder: event.forwarder,
+        token: event.token,
+        reason: event.reason,
+    })
+}
+
+/// Returns the first topic of `ForwarderFactory.FlushFailed`.
+#[must_use]
+pub const fn flush_failed_signature() -> B256 {
+    FlushFailed::SIGNATURE_HASH
 }
 
 #[cfg(test)]
@@ -129,8 +150,10 @@ mod tests {
         let salt = b256!("1111111111111111111111111111111111111111111111111111111111111111");
         let token = address!("2222222222222222222222222222222222222222");
         let forwarder = address!("3333333333333333333333333333333333333333");
-        let call = encode_flush(vec![salt], token);
+        let treasury = address!("4444444444444444444444444444444444444444");
+        let call = encode_flush(treasury, vec![salt], token);
         let decoded = flushCall::abi_decode(&call).expect("flush calldata should decode");
+        assert_eq!(decoded.treasury, treasury);
         assert_eq!(decoded.salts, vec![salt]);
         assert_eq!(decoded.token, token);
 
@@ -138,6 +161,7 @@ mod tests {
             salt,
             forwarder,
             token,
+            treasury,
             amount: U256::from(42_u8),
         };
         let encoded = event.encode_log_data();
@@ -149,7 +173,27 @@ mod tests {
                 salt,
                 forwarder,
                 token,
+                treasury,
                 amount: U256::from(42_u8),
+            }
+        );
+
+        let failed = FlushFailed {
+            salt,
+            forwarder,
+            token,
+            reason: Bytes::from_static(&[0xde, 0xad]),
+        }
+        .encode_log_data();
+        let log = LogData::new(failed.topics().to_vec(), failed.data.clone())
+            .expect("generated event topics are valid");
+        assert_eq!(
+            decode_flush_failed(&log).expect("event should decode"),
+            DecodedFlushFailed {
+                salt,
+                forwarder,
+                token,
+                reason: Bytes::from_static(&[0xde, 0xad]),
             }
         );
     }

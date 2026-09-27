@@ -201,6 +201,7 @@ impl ReconciliationChain for UnavailableChain {
     async fn flushed_total(
         &self,
         _factory: Address,
+        _treasury: Address,
         _token: Address,
         _from_block: u64,
         _to_block: u64,
@@ -211,6 +212,7 @@ impl ReconciliationChain for UnavailableChain {
     async fn factory_addresses(
         &self,
         _factory: Address,
+        _treasury: Address,
         _salts: &[B256],
     ) -> Result<Vec<Address>, ReconciliationError> {
         Self::error()

@@ -5,34 +5,30 @@ source "$(dirname -- "$0")/common.sh"
 
 target=""
 mode=""
-safe_expectations="$DEPLOY_CONTRACTS_DIR/safe-expectations.json"
+networks="$DEPLOY_CONTRACTS_DIR/networks.json"
 while (($#)); do
     case "$1" in
         --rpc) target="${2:-}"; shift 2 ;;
         --dry-run) mode="dry-run"; shift ;;
         --broadcast) mode="broadcast"; shift ;;
-        --safe-expectations) safe_expectations="${2:-}"; shift 2 ;;
-        *) die "usage: $0 --rpc NETWORK[/LABEL]=URL (--dry-run|--broadcast) [--safe-expectations FILE]" ;;
+        --networks) networks="${2:-}"; shift 2 ;;
+        *) die "usage: $0 --rpc NETWORK[/LABEL]=URL (--dry-run|--broadcast) [--networks FILE]" ;;
     esac
 done
 [[ -n "$target" ]] || die "--rpc NETWORK[/LABEL]=URL is required"
 [[ -n "$mode" ]] || die "one of --dry-run or --broadcast is required"
 [[ -n "${PRIVATE_KEY:-}" ]] || die "PRIVATE_KEY must be set in the environment"
+require_command jq
 
 "$DEPLOY_CONTRACTS_DIR/check-build.sh" --check
 
-safe_report="$(mktemp "${TMPDIR:-/tmp}/phala-pay-safe-report.XXXXXX")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/phala-pay-reference-manifest.XXXXXX")"
-trap 'rm -f "$safe_report" "$tmp"' EXIT
-validate_deployment_params "$safe_expectations" "$safe_report" "$target" || \
-    die "refusing to deploy: ADMIN/TREASURY are not the verified approved Safes on $target"
-parse_target "$safe_expectations" "$target"
+trap 'rm -f "$tmp"' EXIT
+parse_target "$networks" "$target"
+require_target_chain_id
 rpc_url="$TARGET_RPC_URL"
 
-"$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" \
-    --admin "$EXPECTED_ADMIN" \
-    --treasury "$EXPECTED_TREASURY" \
-    --output "$tmp" >/dev/null
+"$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" --output "$tmp" >/dev/null
 
 EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$tmp")"
 EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$tmp")"

@@ -10,8 +10,8 @@ the service side, so the wrapper retries transport failures, transient statuses,
 - `create_refund`: sends an `Idempotency-Key` like `create_quote`.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
-the factory, the implementation, and the quote id, and raise `AddressMismatchError` rather than
-return an address the product did not derive.
+the factory, the implementation, the treasury, and the quote id, and raise `AddressMismatchError`
+rather than return an address the product did not derive.
 
 `Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
 until the deposit is final and appears under `list_deposits`, and a reorg can remove it.
@@ -62,8 +62,9 @@ PRODUCT_KEYID_SUFFIX = "/v1"
 class TopupClient:
     """Product API client that signs every request with the product key.
 
-    `forwarder` is the `(factory, implementation)` pair pinned from the attested deployment, as
-    the settlement key is; given it, open quotes are checked before they are returned.
+    `forwarder` is the `(factory, implementation, treasury)` triple pinned from the attested
+    deployment and the product's treasury, as the settlement key is; given it, open quotes are
+    checked before they are returned.
     """
 
     def __init__(
@@ -71,7 +72,7 @@ class TopupClient:
         base_url: str,
         signer: RequestSigner,
         *,
-        forwarder: tuple[str, str] | None = None,
+        forwarder: tuple[str, str, str] | None = None,
         timeout: float = 15.0,
         max_attempts: int = 4,
         initial_backoff: float = 0.5,
@@ -251,9 +252,10 @@ class TopupClient:
         """Raises unless an open quote's address is the one derived from the pinned forwarder."""
         if self.forwarder is None or quote.status != "open":
             return quote
-        factory, implementation = self.forwarder
+        factory, implementation, treasury = self.forwarder
         salt = lock_salt(self.product_slug, quote.account_id, quote.id)
-        if not same_address(forwarder_address(factory, implementation, salt), quote.address):
+        derived = forwarder_address(factory, implementation, treasury, salt)
+        if not same_address(derived, quote.address):
             raise AddressMismatchError(f"quote {quote.id} has an address the product cannot derive")
         return quote
 

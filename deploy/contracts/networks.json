@@ -1,0 +1,10 @@
+{
+  "networks": {
+    "sepolia": {
+      "chain_id": 11155111
+    },
+    "mainnet": {
+      "chain_id": 1
+    }
+  }
+}

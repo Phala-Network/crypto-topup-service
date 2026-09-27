@@ -6,6 +6,12 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking**: forwarders are clones of the new permissionless factory whose address commits to
+  the treasury. `forwarder_address(factory, implementation, treasury, salt)` takes the treasury,
+  and `forwarder=` is the `(factory, implementation, treasury)` triple.
+
 ### Added
 
 - `phala_pay`: the Stripe-style facade. `PhalaPay(api_base, key_id, key_file=… | seed=…,

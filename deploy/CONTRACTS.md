@@ -1,7 +1,7 @@
 # Deterministic contract deployment
 
 This runbook implements work package A2. No signing key is stored in CI: every funding or
-broadcast command below is **HUMAN-ONLY**, run by the Safe owner with their own key, and the
+broadcast command below is **HUMAN-ONLY**, run by a deployer with their own key, and the
 Verify contracts workflow re-checks the deployment daily. Mainnet is never deployed from
 automation.
 
@@ -15,75 +15,64 @@ commit `be3c5974db5028d502537209329ff2e730ed336c`.
 The factory salt is fixed and unmodified:
 
 ```text
-keccak256("crypto-topup-service.ForwarderFactory.v1")
-= 0x33f357abc669d0dae6ca878fa2e4435dd82ff4a983efd8a8dd4f2efa9437a426
+keccak256("phala-pay.ForwarderFactory.v2")
+= 0x26f1d8427b0c2db52d02ee55402198e592a278fb8541ba4dfaefbd1ea7b09eee
 ```
 
-The CREATE2 address also commits to the full factory init code, including `admin` and `treasury`.
-Those constructor arguments must be byte-for-byte identical on every chain. Changing the treasury
-therefore produces a new factory address and requires a new route version.
+`ForwarderFactory` has no constructor arguments, no roles, and no admin
+([design D3](../docs/design/multi-tenant.md#d3-contracts)). Its init code is the build's creation
+code, so the CREATE2 address depends only on the build and the salt: the factory is
+`0xAD3c6285Ac6a57B3B55Fb16Af816C0D50AAF9a6f` and its implementation (the factory's first CREATE)
+`0xEe00439E91e7d57A95dbdAdb122987Aa3C7160CF` on every chain (`local-test-vectors.json` records
+both for the committed build). Anyone can deploy it; a treasury is chosen per forwarder, not per
+factory, so a treasury change never needs a new factory.
 
 ## Prerequisites
 
 - Foundry `1.8.3`, `jq`, and the repository dependencies.
 - Two RPC providers for each chain used by post-deployment verification.
 - A funded deployment EOA. Keep `PRIVATE_KEY` only in the operator's environment or secret manager.
-- The Finance Safe deployed at the same address on every target chain with the same owners and
-  threshold.
-- Finance approval of the Safe version: its proxy runtime code hash, singleton address, and
-  singleton runtime code hash; and of the Safe's enabled modules, guard, and fallback handler.
 
-Before deployment, replace the intentionally unconfigured values in
-`deploy/contracts/safe-expectations.json` and set `configured` to `true`. This file contains no
-secrets and is the single source of truth for the factory constructor inputs:
+`deploy/contracts/networks.json` maps each target network name to its chain id; Sepolia and
+mainnet are prefilled. Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects the expected
+chain id, which the RPC's `eth_chainId` must report, and the optional label distinguishes providers
+in the report.
 
-- `networks`: every target network name and its chain id. Sepolia and mainnet are prefilled.
-- `admin` and `treasury`: the factory `DEFAULT_ADMIN_ROLE` holder and the forwarder treasury.
-  Each must match exactly one entry in `safes`; they may be the same Safe.
-- `safes[]`: for each approved Safe, its `address`, `owners`, `threshold`, allowed
-  `proxy_code_hashes`, `singleton`, `singleton_code_hash`, enabled `modules` (usually `[]`),
-  `guard`, and `fallback_handler`. Use the zero address for "no guard" or "no fallback handler";
-  a Safe created through the Safe UI normally has the `CompatibilityFallbackHandler` set.
+### Treasury Safe
 
-`verify-safe.sh` checks each Safe on every target: the RPC's `eth_chainId` equals the committed
-chain id for the target network, the address has code (an EOA is rejected), the proxy runtime code
-hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton, the
-singleton's runtime code hash matches, owners match as a set, the threshold matches exactly, the
-enabled modules (`getModulesPaginated`) match as a set, and the guard and fallback handler storage
-slots of Safe v1.4.1 hold exactly the approved addresses.
-The singleton check matters because every Safe proxy has the same runtime code; only slot 0
-decides which implementation answers `getOwners()` and `getThreshold()` and executes transactions.
-Modules, the guard, and the fallback handler matter because a module can execute from the Safe
-without the owners' signatures, a guard can block Safe transactions, and the fallback handler
-answers calls the Safe does not implement itself.
-
-Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects the expected chain id and the optional
-label distinguishes providers in the report. Verify the Safes independently on every chain:
+Routes still name the treasury their quotes pay until addresses carry their own (design §16,
+PR 3). `verify-safe.sh` checks the approved treasury Safe in
+`deploy/contracts/safe-expectations.json` on every target: the RPC's `eth_chainId` equals the
+committed chain id for the target network, the address has code (an EOA is rejected), the proxy
+runtime code hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton,
+the singleton's runtime code hash matches, owners match as a set, the threshold matches exactly,
+the enabled modules (`getModulesPaginated`) match as a set, and the guard and fallback handler
+storage slots of Safe v1.4.1 hold exactly the approved addresses. The singleton check matters
+because every Safe proxy has the same runtime code; only slot 0 decides which implementation
+answers `getOwners()` and `getThreshold()` and executes transactions. Modules, the guard, and the
+fallback handler matter because a module can execute from the Safe without the owners'
+signatures, a guard can block Safe transactions, and the fallback handler answers calls the Safe
+does not implement itself.
 
 ```sh
 deploy/contracts/verify-safe.sh \
   --rpc sepolia/a="$SEPOLIA_RPC_A" \
-  --rpc sepolia/b="$SEPOLIA_RPC_B" \
-  --rpc mainnet/a="$MAINNET_RPC_A" \
-  --rpc mainnet/b="$MAINNET_RPC_B"
+  --rpc sepolia/b="$SEPOLIA_RPC_B"
 ```
 
-Do not deploy if any Safe check is false.
-
-`deploy-factory.sh` and `verify-deployment.sh` share one parameter validation: `ADMIN` and
-`TREASURY` from the environment must equal `admin` and `treasury` in the expectations file, and
-both Safes must pass every check above on each target. Any inconsistency stops the script before
-it simulates, broadcasts, or derives the reference deployment.
+Do not enable a route whose treasury fails any Safe check.
 
 ## Reproducible build
 
 `expected-codehashes.json` records the pinned compiler profile, canonical proxy hash, fixed salt,
-and build artifact hashes. Runtime template hashes intentionally exclude immutable substitutions;
-the deployment and verification scripts create a temporary local reference deployment with the
-actual constructor arguments to derive exact factory and implementation runtime hashes. The file
+and build artifact hashes. Runtime template hashes intentionally exclude immutable substitutions
+(the factory's `implementation`, the implementation's `factory`); the deployment and verification
+scripts create a temporary local reference deployment to derive exact factory and implementation
+runtime hashes. The file
 also records each immutable's 32-byte word offsets (`immutable_offsets`). At startup `topup run`
 requires the route's addresses at exactly those offsets and, with them zeroed, the runtime template
-hash; its compiled-in copies of these values are tested against this file.
+hash; its compiled-in copies of these values are tested against this file. It also compares the
+factory's `addressOf(treasury, sample salt)` with its own derivation.
 
 ```sh
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
@@ -94,8 +83,8 @@ make deploy-check
 If an intentional contract or compiler-profile change is approved, regenerate and review the
 fingerprints with `deploy/contracts/check-build.sh --write` and the local deployment vectors with
 `deploy/contracts/test-determinism.sh --write`. Never regenerate them merely to make a failed
-deployment check pass. A contract change reopens the no-external-audit decision in
-[architecture §4](../docs/architecture.md#4-contracts).
+deployment check pass. A contract change needs the independent review before mainnet
+([architecture §4](../docs/architecture.md#4-contracts)).
 
 ## Canonical proxy
 
@@ -123,15 +112,11 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-Use the Finance Safe as both factory admin and treasury unless the committed expectations name
-different approved Safes. `ADMIN` and `TREASURY` must match those entries. **HUMAN-ONLY**, with
-the deployer key in the environment only (the forge script reads `PRIVATE_KEY`; it never appears
-in argv):
+**HUMAN-ONLY**, with the deployer key in the environment only (the forge script reads
+`PRIVATE_KEY`; it never appears in argv):
 
 ```sh
 read -rsp "Deployer private key: " PRIVATE_KEY && printf '\n' && export PRIVATE_KEY
-export ADMIN="$(jq -er .admin deploy/contracts/safe-expectations.json)"
-export TREASURY="$(jq -er .treasury deploy/contracts/safe-expectations.json)"
 
 deploy/contracts/deploy-proxy.sh --rpc-url "$SEPOLIA_RPC_A"
 deploy/contracts/deploy-factory.sh --rpc sepolia/a="$SEPOLIA_RPC_A" --dry-run
@@ -148,16 +133,18 @@ The dry run and broadcast both hand `PRIVATE_KEY` to Foundry through the environ
 `DeployFactory.s.sol` reads it with `vm.envUint("PRIVATE_KEY")` and passes it to
 `vm.startBroadcast`, so the key is never a command-line argument (visible in the process list) and
 never written to a repository file. The Foundry script prints the predicted factory and
-implementation addresses before it sends. If the predicted factory already has code, it accepts
-only the exact runtime hashes derived from the local build and constructor arguments.
+implementation addresses before it sends. If the predicted factory already has code (anyone may
+have deployed it), it accepts only the exact runtime hashes derived from the local build.
+
+`verify-deployment.sh` checks, on every target, the chain id, the proxy, factory, and
+implementation runtime code hashes, `implementation()`, the implementation's `factory()`, and
+`addressOf(treasury, salt)` for every sample forwarder of `contracts/test-vectors/create2.json`.
 
 ## Mainnet
 
 Repeat only after Sepolia verification and the human release approval. **HUMAN-ONLY:**
 
 ```sh
-export ADMIN="$FINANCE_SAFE"
-export TREASURY="$FINANCE_SAFE"
 read -rsp "Deployment private key: " PRIVATE_KEY && printf '\n'
 export PRIVATE_KEY
 
@@ -174,12 +161,11 @@ jq -e '.passed == true' mainnet-contract-verification.json
 
 Each report entry records the target, network, expected chain id, and the chain id the RPC
 returned; a mismatch fails verification. Compare the Sepolia and mainnet JSON reports. Factory,
-implementation, every sample forwarder, constructor inputs, and runtime code hashes must be
-identical.
+implementation, every sample forwarder, and runtime code hashes must be identical.
 
 ## Route and compose update
 
-Copy the verified `factory`, `implementation`, and `treasury` values into the chain configuration,
+Copy the verified `factory` and `implementation`, and the verified treasury Safe, into the chain configuration,
 the route configuration, and the matching configuration embedded in `deploy/docker-compose.yml`.
 Create a new route version; never mutate the contract tuple of an enabled version. Then run:
 
@@ -199,6 +185,6 @@ record.
 ## Rollback and treasury changes
 
 There is no contract rollback, upgrade, or setter. A failed or superseded deployment remains on
-chain. Correct the input or code, deploy a new factory, create a new route version, update the
-attested compose, and leave historical versions available for existing deposits. A treasury change
-always follows this new-factory/new-route process.
+chain; correct the code and deploy a new factory under a new salt and route version, leaving
+historical versions available for existing deposits. A treasury change needs no new factory: new
+forwarders are derived for the new treasury, and existing forwarders keep paying theirs.

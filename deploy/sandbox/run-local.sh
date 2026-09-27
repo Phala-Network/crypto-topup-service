@@ -74,10 +74,10 @@ install_anvil_multicall3 "$rpc_url"
 
 echo "== deploying the forwarder factory and sandbox test contracts"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-(cd "$root/contracts" && ADMIN="$owner" TREASURY="$owner" FOUNDRY_BROADCAST="$tmp/broadcast" \
+(cd "$root/contracts" && FOUNDRY_BROADCAST="$tmp/broadcast" \
     PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script script/DeployFactory.s.sol:DeployFactory \
     --rpc-url "$rpc_url" --broadcast --silent)
-factory=$(predicted_factory "$owner" "$owner")
+factory=$(predicted_factory)
 implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url")
 "$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" \
     --rpc-url "$rpc_url" >"$tmp/contracts.json"
@@ -121,7 +121,7 @@ jq -n \
     '{service_url: "http://topup:8080", product_slug: $slug, product_keyid: $keyid,
       product_seed_file: "/sandbox/product.seed", route: $route, chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
-      token: $token, token_symbol: "PHA", unsupported_token: $unsupported,
+      treasury: $payer, token: $token, token_symbol: "PHA", unsupported_token: $unsupported,
       listen_host: "0.0.0.0", listen_port: 8089, public_url: $public_url, payer: $payer,
       restart_command: ["python", "/repo/deploy/sandbox/scenarios/docker_restart.py", $topup]}' \
     >"$tmp/sandbox.json"

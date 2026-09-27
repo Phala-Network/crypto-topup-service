@@ -9,9 +9,9 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 
 | Mechanism | Standard or reference | Adaptation |
 |---|---|---|
-| Deposit addresses | CREATE2 forwarders, EIP-1167 via OpenZeppelin `Clones` (BitGo `ForwarderFactory` as reference pattern) | Treasury is an `immutable` on the shared implementation instead of per-clone init |
-| Same address on every EVM chain | Arachnid deterministic deployment proxy `0x4e59b44847b379578588920cA78FbF26c0B4956C`, plain CREATE2 salts | Requires identical init code and constructor args per chain |
-| Contract roles | OpenZeppelin `AccessControl`; `DEFAULT_ADMIN_ROLE` = finance Safe, `OPERATOR_ROLE` = service key | — |
+| Deposit addresses | CREATE2 forwarders, EIP-1167 via OpenZeppelin `Clones` with immutable args (BitGo `ForwarderFactory` as reference pattern) | The treasury is each clone's only immutable argument instead of per-clone init |
+| Same address on every EVM chain | Arachnid deterministic deployment proxy `0x4e59b44847b379578588920cA78FbF26c0B4956C`, plain CREATE2 salts | The factory has no constructor arguments, so its init code is the build |
+| Contract roles | None: public `flush` (BitGo's `flush()`), per-target failure isolation (Multicall3 `allowFailure`) | — |
 | Rate-locked deposits | Invoice model (BTCPay Server, Coinbase Commerce): unique address, fixed amount, expiry | Exception rules (§9) are this service's policy profile, not a processor standard |
 | Chain reads | JSON-RPC `finalized` tag, `eth_getLogs`, two independent providers | — |
 | Price | Coin Metrics Reference Rate (benchmark methodology), checked against the deepest market | — |
@@ -90,42 +90,54 @@ exposure is the operator key's gas balance, kept small.
 
 ## 4. Contracts
 
+The contracts follow [design D3](design/multi-tenant.md#d3-contracts).
+
 ```solidity
-contract Forwarder {                                   // EIP-1167 implementation
-    address public immutable treasury;                 // shared by all clones
-    address public immutable factory;
-    function flush(address token) external onlyFactory; // SafeERC20 full balance → treasury; token == 0 → ETH via call
+contract Forwarder {                                   // EIP-1167 implementation; clone args = abi.encodePacked(treasury)
+    address public immutable factory;                  // the factory that created the implementation
+    uint256 public constant NATIVE_SEND_GAS = 50_000;
+    function treasury() public view returns (address); // Clones.fetchCloneArgs(address(this))
+    function flush(address token) external onlyFactory returns (uint256 amount);
+        // SafeERC20 full balance → treasury; token == 0 → ETH via call{gas: NATIVE_SEND_GAS}
 }
-contract ForwarderFactory is AccessControl {           // DEFAULT_ADMIN = finance Safe, OPERATOR = service key
-    Forwarder public immutable implementation;         // created in the constructor, so both immutables bind
-    function addressOf(bytes32 salt) external view returns (address);   // Clones.predictDeterministicAddress
-    function flush(bytes32[] calldata salts, address token) external onlyRole(OPERATOR_ROLE);
-        // per salt: cloneDeterministic if no code, then flush(token); emits Flushed(salt, token, amount)
+contract ForwarderFactory {                            // no roles, no admin, no constructor arguments
+    Forwarder public immutable implementation;         // created in the constructor
+    function addressOf(address treasury, bytes32 salt) external view returns (address);
+        // Clones.predictDeterministicAddressWithImmutableArgs
+    function flush(address treasury, bytes32[] calldata salts, address token) external; // anyone
+        // per salt: skip a forwarder holding nothing; clone if no code (ForwarderCreated); call its
+        // flush with revert data truncated to 256 bytes; Flushed on success, FlushFailed and continue
 }
 ```
 
+- A forwarder's CREATE2 address commits to the factory, the implementation, its treasury (the
+  clone's only immutable argument), and its salt, so its funds can reach only that treasury.
+  Anyone may call `flush`; its only effect is moving funds to their owner.
+- Events carry the treasury: `ForwarderCreated(salt, forwarder, treasury)`,
+  `Flushed(salt, forwarder, token, treasury, amount)`, and `FlushFailed(salt, forwarder, token,
+  reason)`. `amount` is what left the forwarder. The factory emits events for every caller and
+  treasury, so readers filter by treasury.
+- A failing target (a blacklisted forwarder or treasury, a treasury refusing ETH) emits
+  `FlushFailed` and the batch continues, like Multicall3's `allowFailure`. Native sends forward at
+  most `NATIVE_SEND_GAS` and copy no return data, so a treasury cannot consume the batch's gas;
+  the factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
+  refused.
 - `salt = keccak256(abi.encode(product_slug, account_id, "lock", quote_id))`, where
-  `quote_id` is the service-assigned `qt_…` id (quotes created before the ids existed used the
-  product's lock reference, and legacy persistent addresses `(product_slug, external_id,
-  version)`; their stored salts stay authoritative). The product holds every input, so it
-  recomputes an address before showing it.
-- Each chain configuration records the deployed `forwarder_factory`, its immutable
-  `implementation`, and the `treasury`. Address derivation uses the configured factory and
-  implementation; startup verifies both against the factory contract before serving traffic.
-- Deployed with the deterministic deployment proxy using plain salts, identical init code and
-  constructor args on every chain. The treasury is a Safe verified on each chain (deployed,
-  same owners and threshold) before a route is enabled.
-- Changing the treasury is a new factory and a new route version. The admin Safe only grants
-  or revokes `OPERATOR_ROLE`.
-- Pilot supports plain ERC-20 with verified behaviour (PHA). Fee-on-transfer or rebasing
-  tokens are out of scope; hook-bearing tokens require reentrancy tests before enabling.
+  `quote_id` is the service-assigned `qt_…` id. The product holds every input, including the
+  treasury, so it recomputes an address before showing it.
+- One factory per chain, deployed by anyone through the deterministic deployment proxy with the
+  fixed salt `keccak256("phala-pay.ForwarderFactory.v2")`: no constructor arguments, so the same
+  factory and implementation addresses on every chain. Each route records `forwarder_factory`,
+  its `implementation`, and (until addresses carry their own) the `treasury` its quotes use.
+- Plain ERC-20s with verified behaviour (PHA), including tokens whose `transfer` returns nothing.
+  Fee-on-transfer and rebasing tokens are unsupported and must not be enabled in a route.
 - Startup verifies on chain, on every provider: the canonical Multicall3 code hash (balance and
-  `addressOf` reads go through it, §14; `topup run` refuses a chain without it), factory code hash,
-  `implementation()`, `treasury()`, and `addressOf(sample salt)` against the route file.
-- No external audit; internal review + tests. The contracts are two files (~109 lines) built
-  from audited OpenZeppelin components (Clones, SafeERC20, AccessControl); funds can only move
-  to the immutable treasury; unit, fuzz, and invariant tests cover them; the pilot keeps
-  per-deposit and exposure caps. Revisit if caps are raised materially or the contracts change.
+  `addressOf` reads go through it, §14; `topup run` refuses a chain without it), the factory and
+  implementation runtime code against the recorded build, `implementation()`, the
+  implementation's `factory()`, and `addressOf(treasury, sample salt)` against local derivation.
+- The contracts are two files built from audited OpenZeppelin components (Clones, SafeERC20,
+  ReentrancyGuardTransient); unit, fuzz, and invariant tests cover them. The independent review
+  before mainnet (`docs/plan.md`) covers them.
 
 ## 5. Stack
 
@@ -353,15 +365,16 @@ pub trait Signer {
 
 `signer::dstack` derives `operator/v{n}` (secp256k1) and `settlement/v1` (ed25519) on demand
 and zeroizes them (dstack 0.5 derives a key from its domain alone; each domain has one algorithm); `n` is the route's attested `chain.operator_key_version` (≥ 1, initially 1),
-and a chain's flusher plans and sends only while that operator holds `OPERATOR_ROLE` on the
-factory. `GET /v1/attestation` reports and attests each chain's operator address (§14).
+and pays the gas of that chain's flushes; the factory is permissionless, so the operator needs no
+role. `GET /v1/attestation` reports and attests each chain's operator address (§14).
 
 **Flusher** on a schedule *(policy)*, per (chain, token): select addresses whose on-chain
 balance ≥ `min_flush_atomic` and whose share of batch gas ≤ `max_gas_ratio` of value
-*(policy)*; write `flushes(planned)`; send one `factory.flush(salts[], token)` under the
+*(policy)*; write `flushes(planned)`; send one `factory.flush(treasury, salts[], token)` under the
 operator nonce lock; replace with a higher fee on the same nonce if needed; confirm at
 `finalized`; write one `flushed` row per `Flushed` event in the receipt with its block number
-and log index. Deposits are then linked by the rule in §7, whatever their state. A plan whose
+and log index. A `FlushFailed` target raises `IsolatedAddress` and stays unswept; a planned target
+with no event held nothing when the transaction ran (anyone may flush it first). Deposits are then linked by the rule in §7, whatever their state. A plan whose
 route, product, or account has `flush` paused (§15) when it reaches the front of the operator's
 queue is voided unsigned; later plans move down onto its nonce, and its addresses are planned again
 once the pause lifts, so one pause never stalls the chain. Recovery after a
@@ -711,8 +724,7 @@ floors, before production, and a route overrides any it does not accept.
 Only `finalized` finality is supported, so it is not configurable. A product's key id is
 `{product}/v1`; the database stores only the product's slug, webhook URL, and public key.
 Changing a value, including a default, is a new version and compose hash; deposits keep the
-version that created them. Bumping `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
-new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
+version that created them. Bumping `operator_key_version` is such a new version; fund the new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
 other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
 is rendered into the compose, so it is attested too; a keyed RPC URL is attested with a `{key}`
 placeholder. The only dstack encrypted environment variables are the object-storage credentials,
@@ -788,8 +800,7 @@ address. With no operators this is the original `sha256(nonce ‖ settlement_pub
 run the official dstack verifier of the pinned release on it (`deploy/dstack-verifier.sh`: quote
 and TCB, RTMR3 event-log replay, OS image; then the app id and deployed compose hash), check that
 the verified report data is this hash zero-padded to 64 bytes, and then pin
-`(keyid, public key)`; the owner grants `OPERATOR_ROLE` to, and funds, only an operator address
-verified this way, since a production CVM exposes no logs or shell.
+`(keyid, public key)`; the owner funds only an operator address verified this way, since a production CVM exposes no logs or shell.
 
 ## 15. Operating policies
 
@@ -801,7 +812,7 @@ verified this way, since a production CVM exposes no logs or shell.
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open quote exposure up to the caps. |
-| Rotation | Operator key: grant `operator/v2`, revoke `v1` (admin Safe); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Operator key: fund `operator/v2` (the factory has no roles); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | operator key compromise, product key compromise, provider disagreement, price outage, outbox backlog (undelivered credits), restore, treasury change, gas refill, refund execution, rejected funds at treasury. |
@@ -816,7 +827,7 @@ linked to its runbook: `TopupDepositStateAgeExceeded` (age in state past the rou
 `TopupLockExpiryFailing`, `TopupUnsupportedInflows`, `TopupOperatorGasReserveLow` (the operator's
 native balance below `min_operator_balance_wei`, checked on each flusher maintenance tick), and
 the flusher's `Reverted`, `IsolatedAddress`, `MissingConsumedReceipt`, `PlanningExcluded`,
-`FeeCapReached`, `NativeBalance`, and `OperatorRoleMissing`. Each loop checks in to a Sentry Crons
+`FeeCapReached`, and `NativeBalance`. Each loop checks in to a Sentry Crons
 monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconciliation check, and
 any stopped loop; a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and
 age, unflushed balance, open lock exposure, undelivered `deposit.credited` events and their age,

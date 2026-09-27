@@ -38,6 +38,7 @@ class ProductConfig:
     rpc_url: str
     factory: str
     implementation: str
+    treasury: str
     token: str
     token_symbol: str
     public_url: str
@@ -74,5 +75,7 @@ class ProductConfig:
     def client(self) -> TopupClient:
         # The forwarder is pinned, so every open quote's address is recomputed before it is used.
         return TopupClient(
-            self.service_url, self.signer(), forwarder=(self.factory, self.implementation)
+            self.service_url,
+            self.signer(),
+            forwarder=(self.factory, self.implementation, self.treasury),
         )

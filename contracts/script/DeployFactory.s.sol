@@ -8,20 +8,17 @@ import { Forwarder } from "../src/Forwarder.sol";
 import { ForwarderFactory } from "../src/ForwarderFactory.sol";
 import { DeploymentConstants } from "./DeploymentConstants.sol";
 
+/// Deploys the permissionless `ForwarderFactory` through the deterministic deployment proxy. The
+/// factory has no constructor arguments, so its address depends only on the build and the salt.
 contract DeployFactory is Script {
-    error AdminRoleMissing(address admin);
     error DeploymentFailed();
     error ExistingCodeHashMismatch(address target, bytes32 expected, bytes32 actual);
-    error InvalidDeployment(address expectedFactory, address actualFactory);
+    error InvalidDeployment(address expected, address actual);
     error MissingExpectedCodeHash(address target);
     error ProxyCodeHashMismatch(bytes32 expected, bytes32 actual);
-    error TreasuryMismatch(address expected, address actual);
 
     function run() external returns (ForwarderFactory factory) {
-        address admin = vm.envAddress("ADMIN");
-        address treasury = vm.envAddress("TREASURY");
-        bytes memory initCode =
-            abi.encodePacked(type(ForwarderFactory).creationCode, abi.encode(admin, treasury));
+        bytes memory initCode = type(ForwarderFactory).creationCode;
         address predictedFactory = vm.computeCreate2Address(
             DeploymentConstants.FACTORY_SALT,
             keccak256(initCode),
@@ -54,7 +51,7 @@ contract DeployFactory is Script {
             _requireCodeHash(predictedFactory, expectedFactoryCodeHash);
             _requireCodeHash(predictedImplementation, expectedImplementationCodeHash);
             factory = ForwarderFactory(predictedFactory);
-            _validateDeployment(factory, predictedImplementation, admin, treasury);
+            _validateDeployment(factory, predictedImplementation);
             return factory;
         }
 
@@ -77,7 +74,7 @@ contract DeployFactory is Script {
         }
 
         factory = ForwarderFactory(predictedFactory);
-        _validateDeployment(factory, predictedImplementation, admin, treasury);
+        _validateDeployment(factory, predictedImplementation);
 
         if (expectedFactoryCodeHash != bytes32(0)) {
             _requireCodeHash(predictedFactory, expectedFactoryCodeHash);
@@ -93,24 +90,15 @@ contract DeployFactory is Script {
         if (actual != expected) revert ExistingCodeHashMismatch(target, expected, actual);
     }
 
-    function _validateDeployment(
-        ForwarderFactory factory,
-        address predictedImplementation,
-        address admin,
-        address treasury
-    ) private view {
+    function _validateDeployment(ForwarderFactory factory, address predictedImplementation)
+        private
+        view
+    {
         address actualImplementation = address(factory.implementation());
         if (actualImplementation != predictedImplementation) {
             revert InvalidDeployment(predictedImplementation, actualImplementation);
         }
-
-        Forwarder implementation = Forwarder(payable(actualImplementation));
-        if (implementation.treasury() != treasury) {
-            revert TreasuryMismatch(treasury, implementation.treasury());
-        }
-        if (implementation.factory() != address(factory)) {
-            revert InvalidDeployment(address(factory), implementation.factory());
-        }
-        if (!factory.hasRole(bytes32(0), admin)) revert AdminRoleMissing(admin);
+        address binding = Forwarder(payable(actualImplementation)).factory();
+        if (binding != address(factory)) revert InvalidDeployment(address(factory), binding);
     }
 }

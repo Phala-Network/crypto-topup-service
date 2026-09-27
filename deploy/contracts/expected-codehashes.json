@@ -11,33 +11,27 @@
     "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
     "runtime_code_hash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
   },
-  "factory_salt": "0x33f357abc669d0dae6ca878fa2e4435dd82ff4a983efd8a8dd4f2efa9437a426",
+  "factory_salt": "0x26f1d8427b0c2db52d02ee55402198e592a278fb8541ba4dfaefbd1ea7b09eee",
   "artifacts": {
     "ForwarderFactory": {
-      "creation_code_hash": "0x54db433717372550a65e25c5cf27b0f420985df80a5d128c719f3a02e9f9908c",
-      "runtime_template_code_hash": "0x7abfec3082d6440476f52c9cc04b271dfe4b802e47feeb39f69670253523f0ee",
+      "creation_code_hash": "0xc690cef8e3fb4b8e0665b3788af54c4591782b3f5f93e919b6751519d8f1db45",
+      "runtime_template_code_hash": "0xf367d23428e189bef80b8903d1f31453fcee4c31d75f57eb0df929df54561e23",
       "immutable_offsets": {
         "implementation": [
-          303,
-          750,
-          1150
+          83,
+          439,
+          565,
+          768
         ]
       }
     },
     "Forwarder": {
-      "creation_code_hash": "0xe03a154f456dea8313c0eaab15f33a9ccba62d73e3e8f322425dc8bce6185db6",
-      "runtime_template_code_hash": "0x1fa01f51e22b763abd13dfc194dd43ee02355f68b534985877bf6b08de7e2029",
+      "creation_code_hash": "0x99b6855f06cc6d306d60a29deeeec18110ef9f7a5f50282fa4b90b27e2c30b99",
+      "runtime_template_code_hash": "0xc34523cf7740433498fe0e3a7ef27417b28fe06207095d5a2482afb2d442a435",
       "immutable_offsets": {
-        "treasury": [
-          82,
-          356,
-          650,
-          783,
-          843
-        ],
         "factory": [
-          207,
-          253
+          208,
+          319
         ]
       }
     }

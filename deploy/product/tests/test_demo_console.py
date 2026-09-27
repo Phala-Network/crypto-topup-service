@@ -30,6 +30,7 @@ CONFIG = ProductConfig(
     rpc_url="http://rpc.test",
     factory="0x" + "aa" * 20,
     implementation="0x" + "bb" * 20,
+    treasury="0x" + "cc" * 20,
     token="0x" + "44" * 20,
     token_symbol="PHA",  # noqa: S106 - an asset symbol, not a secret
     public_url="https://acme.example",
@@ -38,7 +39,7 @@ CONFIG = ProductConfig(
 
 def _quote(account: str = "acct", **fields: Any) -> dict[str, Any]:
     address = forwarder_address(
-        CONFIG.factory, CONFIG.implementation, lock_salt("acme", account, QUOTE)
+        CONFIG.factory, CONFIG.implementation, CONFIG.treasury, lock_salt("acme", account, QUOTE)
     )
     return {
         "id": QUOTE,

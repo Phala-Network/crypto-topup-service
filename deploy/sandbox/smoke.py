@@ -55,6 +55,7 @@ class Integration:
     chain_id: int
     factory: str
     implementation: str
+    treasury: str
     token_symbol: str
 
     @classmethod
@@ -66,7 +67,11 @@ class Integration:
         """A client whose key id, `{product}/v1`, names the product; with the forwarder pinned,
         it recomputes every open quote's address before returning it."""
         signer = RequestSigner.from_seed_file(self.product_keyid, self.product_seed_file)
-        return TopupClient(self.service_url, signer, forwarder=(self.factory, self.implementation))
+        return TopupClient(
+            self.service_url,
+            signer,
+            forwarder=(self.factory, self.implementation, self.treasury),
+        )
 
 
 # 1. The settlement key ---------------------------------------------------------------------------
