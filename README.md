@@ -1,6 +1,6 @@
 # Crypto Top-up Service
 
-A private service, called by the Phala Cloud billing backend, that turns finalized ERC-20
+A service, called by the Phala Cloud billing backend, that turns finalized ERC-20
 deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that
 can only pay the treasury; the service runs inside a dstack confidential VM and tells products what
 to credit with signed `deposit.credited` webhooks, which they fulfill once per deposit. The default flow is quote first: the user locks a
@@ -81,3 +81,7 @@ adopts the product's answer for every deposit at or beyond `cleared`. Run it onl
 The service, contracts, and operations tooling in [the plan](docs/plan.md) are implemented on
 `main`. Nothing is deployed to mainnet: the pilot is gated on G2 (product integration and policy
 sign-off). Production policy values are set by finance, risk, and operations at pilot time.
+
+## License
+
+[Apache-2.0](LICENSE). Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
