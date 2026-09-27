@@ -3,7 +3,8 @@ set -eu
 
 # Verifies the certificate evidence that dstack-ingress publishes at https://DOMAIN/evidences/
 # (deploy/README.md, "Custom domain"), the chain of the dstack-ingress README:
-# 1. sha256sum.txt lists exactly acme-account.json and cert-DOMAIN.pem, and both match it;
+# 1. sha256sum.txt lists acme-account.json and cert-DOMAIN.pem, and both match it; other entries
+#    may only be cert-*.pem of domains the app served before (the certificate volume keeps them);
 # 2. quote.json, verified by the official dstack verifier (dstack-verifier.sh), is a valid TDX quote
 #    of app APP_ID whose report_data is SHA-256(sha256sum.txt) zero-padded to 64 bytes;
 # 3. the certificate DOMAIN serves on 443 is the leaf of cert-DOMAIN.pem.
@@ -29,12 +30,16 @@ for file in quote.json sha256sum.txt acme-account.json "cert-$domain.pem"; do
     curl -fsS --max-time 30 --retry 3 -o "$tmp/$file" "https://$domain/evidences/$file"
 done
 
-printf '%s\n' acme-account.json "cert-$domain.pem" >"$tmp/expected-files"
-awk '{ print $2 }' "$tmp/sha256sum.txt" | sort | cmp -s - "$tmp/expected-files" || {
-    echo "sha256sum.txt does not list exactly acme-account.json and cert-$domain.pem" >&2
+awk -v cert="cert-$domain.pem" '
+    $2 == "acme-account.json" || $2 == cert { print; found++; next }
+    $2 !~ /^cert-[a-z0-9.-]+\.pem$/ { bad = 1 }
+    END { exit (found == 2 && !bad) ? 0 : 1 }
+' "$tmp/sha256sum.txt" >"$tmp/checked.txt" || {
+    echo "sha256sum.txt does not list acme-account.json and cert-$domain.pem," \
+        "or lists a file other than certificates" >&2
     exit 1
 }
-(cd "$tmp" && sha256sum --check --quiet sha256sum.txt) || {
+(cd "$tmp" && sha256sum --check --quiet checked.txt) || {
     echo "the evidence files do not match sha256sum.txt" >&2
     exit 1
 }
