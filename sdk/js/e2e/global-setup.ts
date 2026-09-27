@@ -12,7 +12,7 @@ import { sepolia } from "viem/chains";
  * `ANVIL_URL`, `PAYER_ADDRESS`, and `TOKEN_ADDRESS`.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
-  const work = mkdtempSync(join(tmpdir(), "crypto-topup-e2e-"));
+  const work = mkdtempSync(join(tmpdir(), "phala-pay-e2e-"));
   execFileSync(
     process.env["FORGE"] ?? "forge",
     [

@@ -14,7 +14,7 @@ if [[ $image != *":v$version-"* ]]; then
 fi
 network="${PLAYWRIGHT_DOCKER_NETWORK:-host}"
 port="${PLAYWRIGHT_SERVER_PORT:-3799}"
-name="crypto-topup-playwright-$$"
+name="phala-pay-playwright-$$"
 
 docker run --detach --rm --init --name "$name" --network "$network" \
   --user pwuser --workdir /home/pwuser "$image" \

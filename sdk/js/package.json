@@ -1,7 +1,7 @@
 {
-  "name": "@phala/crypto-topup",
+  "name": "@phala/pay",
   "version": "0.1.0",
-  "description": "Checkout for the crypto top-up service: a framework-agnostic core and React bindings",
+  "description": "Phala Pay checkout: a framework-agnostic client and React bindings",
   "keywords": [
     "crypto",
     "checkout",
@@ -13,13 +13,13 @@
     "viem"
   ],
   "license": "Apache-2.0",
-  "homepage": "https://github.com/Phala-Network/crypto-topup-service/tree/main/sdk/js#readme",
+  "homepage": "https://github.com/Phala-Network/phala-pay/tree/main/sdk/js#readme",
   "bugs": {
-    "url": "https://github.com/Phala-Network/crypto-topup-service/issues"
+    "url": "https://github.com/Phala-Network/phala-pay/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Phala-Network/crypto-topup-service.git",
+    "url": "git+https://github.com/Phala-Network/phala-pay.git",
     "directory": "sdk/js"
   },
   "type": "module",

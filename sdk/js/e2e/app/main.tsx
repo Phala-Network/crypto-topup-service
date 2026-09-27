@@ -1,6 +1,6 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { CryptoTopupCheckout } from "../../dist/react/index.js";
+import { Checkout } from "../../dist/react/index.js";
 
 const params = new URLSearchParams(window.location.search);
 
@@ -8,7 +8,7 @@ function App() {
   const [events, setEvents] = useState<string[]>([]);
   return (
     <main>
-      <CryptoTopupCheckout
+      <Checkout
         clientSecret={params.get("client_secret") ?? ""}
         apiBase={params.get("api_base") ?? ""}
         pollInterval={500}

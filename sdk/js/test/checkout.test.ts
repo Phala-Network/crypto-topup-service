@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkoutStatus, createCheckout, type CheckoutState } from "../src/index.js";
+import { PhalaPay, checkoutStatus, createCheckout, type CheckoutState } from "../src/index.js";
 import { API_BASE, CLIENT_SECRET, QUOTE_ID, fakeFetch, quote } from "./fixtures.js";
 
 const NOW = (quote().expires_at - 600) * 1000;
@@ -119,5 +119,31 @@ describe("checkoutStatus", () => {
     [quote({ expires_at: now, payment_status: "seen" }), "seen"],
   ] as const)("%# is %s", (value, expected) => {
     expect(checkoutStatus(value, now)).toBe(expected);
+  });
+});
+
+describe("PhalaPay", () => {
+  it("retrieves the public view with the client secret", async () => {
+    const { fetch, calls } = fakeFetch(quote());
+    const pay = new PhalaPay({ apiBase: API_BASE, fetch });
+    await expect(pay.retrieveQuote(CLIENT_SECRET)).resolves.toEqual(quote());
+    expect(calls[0]).toBe(
+      `${API_BASE}/v1/quotes/${QUOTE_ID}?client_secret=${encodeURIComponent(CLIENT_SECRET)}`,
+    );
+  });
+
+  it("rejects an unknown client secret", async () => {
+    const pay = new PhalaPay({ apiBase: API_BASE, fetch: fakeFetch(404).fetch });
+    await expect(pay.retrieveQuote(CLIENT_SECRET)).rejects.toMatchObject({
+      code: "invalid_client_secret",
+    });
+  });
+
+  it("follows a checkout session", async () => {
+    const pay = new PhalaPay({ apiBase: API_BASE, fetch: fakeFetch(quote()).fetch });
+    const session = pay.checkout(CLIENT_SECRET, { pollInterval: 1000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.getState().status).toBe("waiting");
+    session.destroy();
   });
 });

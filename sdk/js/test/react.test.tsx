@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CryptoTopupCheckout } from "../src/react/index.js";
+import { Checkout } from "../src/react/index.js";
 import type { ClientQuote } from "../src/index.js";
 import { ADDRESS, API_BASE, CLIENT_SECRET, TOKEN, quote } from "./fixtures.js";
 
@@ -19,9 +19,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function renderCheckout(props: Partial<Parameters<typeof CryptoTopupCheckout>[0]> = {}) {
+async function renderCheckout(props: Partial<Parameters<typeof Checkout>[0]> = {}) {
   const view = render(
-    <CryptoTopupCheckout clientSecret={CLIENT_SECRET} apiBase={API_BASE} pollInterval={1000} {...props} />,
+    <Checkout clientSecret={CLIENT_SECRET} apiBase={API_BASE} pollInterval={1000} {...props} />,
   );
   await screen.findByText("Waiting for your payment");
   return view;
@@ -31,7 +31,7 @@ async function poll() {
   await act(() => vi.advanceTimersByTimeAsync(1000));
 }
 
-describe("CryptoTopupCheckout", () => {
+describe("Checkout", () => {
   it("states the exact amount, the network, and the time left", async () => {
     await renderCheckout();
     expect(screen.getByText("100.502512562814070352 PHA")).toBeDefined();
@@ -105,9 +105,9 @@ describe("CryptoTopupCheckout", () => {
     const { container } = await renderCheckout({
       appearance: { theme: "dark", variables: { colorPrimary: "#ff0000", borderRadius: "2px" } },
     });
-    const root = container.querySelector<HTMLElement>(".ctp-root");
+    const root = container.querySelector<HTMLElement>(".pp-root");
     expect(root?.dataset["theme"]).toBe("dark");
-    expect(root?.style.getPropertyValue("--ctp-color-primary")).toBe("#ff0000");
-    expect(root?.style.getPropertyValue("--ctp-border-radius")).toBe("2px");
+    expect(root?.style.getPropertyValue("--pp-color-primary")).toBe("#ff0000");
+    expect(root?.style.getPropertyValue("--pp-border-radius")).toBe("2px");
   });
 });

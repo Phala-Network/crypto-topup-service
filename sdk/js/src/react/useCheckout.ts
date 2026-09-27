@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createCheckout, type Checkout, type CheckoutState } from "../checkout.js";
+import { createCheckout, type CheckoutSession, type CheckoutState } from "../checkout.js";
 
 export interface UseCheckoutOptions {
   clientSecret: string;
@@ -21,7 +21,7 @@ export function useCheckout({
   pollInterval,
 }: UseCheckoutOptions): UseCheckoutResult {
   const [current, setCurrent] = useState({ key: "", state: LOADING });
-  const checkout = useRef<Checkout | null>(null);
+  const checkout = useRef<CheckoutSession | null>(null);
   const key = `${apiBase} ${clientSecret}`;
 
   useEffect(() => {

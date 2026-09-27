@@ -1,17 +1,17 @@
-# @phala/crypto-topup
+# @phala/pay
 
-Browser checkout for the crypto top-up service: a framework-agnostic client for a quote's public
+Browser checkout for Phala Pay: a framework-agnostic client for a quote's public
 view, and a React component that lets the payer pay from a browser wallet, by QR code, or manually,
 with live status. It is the browser half of the flow; your backend creates the quote with the
-Python SDK (`phala-crypto-topup`) and fulfils from the signed `deposit.credited` webhook.
+Python SDK (`phala-pay`) and fulfils from the signed `deposit.credited` webhook.
 
 ## Install
 
 ```sh
-npm install @phala/crypto-topup viem
+npm install @phala/pay viem
 ```
 
-Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/crypto-topup/react`. Nothing else:
+Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Nothing else:
 wallets are found with EIP-6963 (with a `window.ethereum` fallback), not wagmi or WalletConnect.
 
 Until the first npm release, install from the repository with pnpm (read access to the repository
@@ -19,13 +19,13 @@ is required). The package builds itself on install, which pnpm allows only for l
 dependencies:
 
 ```sh
-pnpm add "github:Phala-Network/crypto-topup-service#main&path:/sdk/js"
+pnpm add "github:Phala-Network/phala-pay#main&path:/sdk/js"
 ```
 
 ```yaml
 # pnpm-workspace.yaml
 allowBuilds:
-  "@phala/crypto-topup": true
+  "@phala/pay": true
 ```
 
 ## Quickstart
@@ -36,15 +36,16 @@ allowBuilds:
 
 ```tsx
 "use client";
-import { CryptoTopupCheckout } from "@phala/crypto-topup/react";
+import { Checkout } from "@phala/pay/react";
 
 export function TopUp(props: { clientSecret: string; onPaid: () => void; onRetry: () => void }) {
   return (
-    <CryptoTopupCheckout
+    <Checkout
       clientSecret={props.clientSecret}
-      apiBase="https://topup.example.com"
+      apiBase="https://pay.example.com"
       onSuccess={props.onPaid}
       onExpire={props.onRetry}
+      buttonText="Pay with crypto"
     />
   );
 }
@@ -77,7 +78,7 @@ amount, or after expiry, is still credited, at the market price instead of the q
 ## Appearance
 
 ```tsx
-<CryptoTopupCheckout
+<Checkout
   clientSecret={clientSecret}
   apiBase={apiBase}
   appearance={{
@@ -89,14 +90,16 @@ amount, or after expiry, is still credited, at the market price instead of the q
 
 Variables: `colorPrimary`, `colorBackground`, `colorText`, `colorTextSecondary`, `colorBorder`,
 `colorDanger`, `colorSuccess`, `fontFamily`, `borderRadius`. Each is also a CSS custom property on
-`.ctp-root` (`--ctp-color-primary`, …), so a stylesheet can set them too.
+`.pp-root` (`--pp-color-primary`, …), so a stylesheet can set them too.
 
 ## Without React
 
 ```ts
-import { createCheckout, payWithWallet, watchWallets, type Wallet } from "@phala/crypto-topup";
+import { PhalaPay, payWithWallet, watchWallets, type Wallet } from "@phala/pay";
 
-const checkout = createCheckout({ clientSecret, apiBase: "https://topup.example.com" });
+const pay = new PhalaPay({ apiBase: "https://pay.example.com" });
+const quote = await pay.retrieveQuote(clientSecret); // one read of the public view
+const checkout = pay.checkout(clientSecret); // or follow it until it settles
 const unsubscribe = checkout.subscribe(({ status, quote, error }) => render(status, quote, error));
 
 const stop = watchWallets((wallets) => showWalletButtons(wallets));

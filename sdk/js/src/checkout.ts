@@ -58,7 +58,7 @@ export interface CheckoutOptions {
   now?: () => number;
 }
 
-export interface Checkout {
+export interface CheckoutSession {
   getState(): CheckoutState;
   /** Calls `listener` on every state change; returns the unsubscribe function. */
   subscribe(listener: (state: CheckoutState) => void): () => void;
@@ -70,6 +70,41 @@ export interface Checkout {
 
 const DEFAULT_POLL_INTERVAL = 3000;
 const MAX_BACKOFF = 30_000;
+
+export interface RetrieveQuoteOptions {
+  clientSecret: string;
+  apiBase: string;
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * Reads a quote's public view once, as Stripe.js's `retrievePaymentIntent(clientSecret)` does.
+ * Rejects with a `CheckoutError`: `invalid_client_secret` for an unknown quote or secret.
+ */
+export async function retrieveQuote(options: RetrieveQuoteOptions): Promise<ClientQuote> {
+  const quoteId = quoteIdFromClientSecret(options.clientSecret);
+  const base = options.apiBase.replace(/\/+$/, "");
+  const url = `${base}/v1/quotes/${quoteId}?client_secret=${encodeURIComponent(options.clientSecret)}`;
+  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  // A simple GET with no custom headers, so the browser sends no CORS preflight.
+  const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
+  if (response.status === 404) {
+    throw new CheckoutError("invalid_client_secret", "the quote or its client secret is unknown");
+  }
+  if (response.status === 429) {
+    throw new CheckoutError("rate_limited", "too many status requests");
+  }
+  if (!response.ok) {
+    throw new CheckoutError("api_error", `the payment service answered ${response.status}`);
+  }
+  try {
+    return parseClientQuote(await response.json());
+  } catch (cause) {
+    throw new CheckoutError("invalid_response", "unexpected response from the payment service", {
+      cause,
+    });
+  }
+}
 
 /** The payer-facing status of a quote at `nowSeconds`. */
 export function checkoutStatus(quote: ClientQuote, nowSeconds: number): CheckoutStatus {
@@ -91,10 +126,8 @@ export function checkoutStatus(quote: ClientQuote, nowSeconds: number): Checkout
  * service, which expires quotes by chain time, still reports the quote open; polling continues
  * until then, so a payment sent just before expiry still shows.
  */
-export function createCheckout(options: CheckoutOptions): Checkout {
-  const quoteId = quoteIdFromClientSecret(options.clientSecret);
-  const url = `${options.apiBase.replace(/\/+$/, "")}/v1/quotes/${quoteId}?client_secret=${encodeURIComponent(options.clientSecret)}`;
-  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+export function createCheckout(options: CheckoutOptions): CheckoutSession {
+  quoteIdFromClientSecret(options.clientSecret);
   const now = options.now ?? Date.now;
   const interval = options.pollInterval ?? DEFAULT_POLL_INTERVAL;
   const listeners = new Set<(state: CheckoutState) => void>();
@@ -133,7 +166,7 @@ export function createCheckout(options: CheckoutOptions): Checkout {
 
   async function load(): Promise<void> {
     try {
-      const quote = await read();
+      const quote = await retrieveQuote(options);
       failures = 0;
       setState({ status: checkoutStatus(quote, now() / 1000), quote, error: null });
     } catch (cause) {
@@ -152,27 +185,6 @@ export function createCheckout(options: CheckoutOptions): Checkout {
           error,
         });
       }
-    }
-  }
-
-  async function read(): Promise<ClientQuote> {
-    // A simple GET with no custom headers, so the browser sends no CORS preflight.
-    const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
-    if (response.status === 404) {
-      throw new CheckoutError("invalid_client_secret", "the quote or its client secret is unknown");
-    }
-    if (response.status === 429) {
-      throw new CheckoutError("rate_limited", "too many status requests");
-    }
-    if (!response.ok) {
-      throw new CheckoutError("api_error", `the payment service answered ${response.status}`);
-    }
-    try {
-      return parseClientQuote(await response.json());
-    } catch (cause) {
-      throw new CheckoutError("invalid_response", "unexpected response from the payment service", {
-        cause,
-      });
     }
   }
 

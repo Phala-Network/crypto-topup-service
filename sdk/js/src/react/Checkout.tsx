@@ -12,7 +12,7 @@ import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
 import { QrCode } from "./QrCode.js";
 import { useCheckout } from "./useCheckout.js";
 
-export interface CryptoTopupCheckoutProps {
+export interface CheckoutProps {
   /** The quote's `client_secret`, from your backend's `POST /v1/quotes`. */
   clientSecret: string;
   /** The service origin, for example `https://topup.example.com`. */
@@ -25,6 +25,8 @@ export interface CryptoTopupCheckoutProps {
   /** Milliseconds between status reads; default 3000. */
   pollInterval?: number;
   className?: string;
+  /** The wallet button's label; default "Pay with crypto". */
+  buttonText?: string;
 }
 
 type Method = "wallet" | "qr" | "manual";
@@ -36,7 +38,7 @@ const METHODS: { id: Method; label: string }[] = [
 ];
 
 /** A checkout for one quote: pay from a browser wallet, by QR code, or manually, with live status. */
-export function CryptoTopupCheckout({
+export function Checkout({
   clientSecret,
   apiBase,
   onSuccess,
@@ -44,7 +46,8 @@ export function CryptoTopupCheckout({
   appearance,
   pollInterval,
   className,
-}: CryptoTopupCheckoutProps) {
+  buttonText = "Pay with crypto",
+}: CheckoutProps) {
   const { status, quote, error, refresh } = useCheckout({
     clientSecret,
     apiBase,
@@ -73,17 +76,17 @@ export function CryptoTopupCheckout({
 
   return (
     <div
-      className={className === undefined ? "ctp-root" : `ctp-root ${className}`}
+      className={className === undefined ? "pp-root" : `pp-root ${className}`}
       data-theme={appearance?.theme ?? "light"}
       style={appearanceStyle(appearance)}
     >
       <style>{STYLES}</style>
       {quote !== null && (
         <>
-          <p className="ctp-amount">
+          <p className="pp-amount">
             {formatTokenAmount(quote)} {quote.asset.toUpperCase()}
           </p>
-          <p className="ctp-subtitle">
+          <p className="pp-subtitle">
             {formatAmount(quote)} top-up · {networkName(quote.chain_id)}
           </p>
         </>
@@ -93,6 +96,7 @@ export function CryptoTopupCheckout({
       {status === "waiting" && quote !== null && (
         <PaymentOptions
           quote={quote}
+          buttonText={buttonText}
           now={now}
           onSent={(hash) => {
             setTxHash(hash);
@@ -122,13 +126,13 @@ function StatusLine({
         ? "danger"
         : "neutral";
   return (
-    <div className="ctp-status" data-tone={tone}>
+    <div className="pp-status" data-tone={tone}>
       <span role="status" aria-live="polite">
         {statusMessage(status, quote)}
         {reconnecting && status !== "error" ? " (reconnecting…)" : ""}
       </span>
       {status === "waiting" && quote !== null && (
-        <span className="ctp-countdown" aria-label="Time left to pay">
+        <span className="pp-countdown" aria-label="Time left to pay">
           {formatCountdown(quote.expires_at, now)}
         </span>
       )}
@@ -165,10 +169,10 @@ function Transaction({ hash, chainId }: { hash: Hash; chainId: number }) {
   const url = transactionUrl(chainId, hash);
   const short = `${hash.slice(0, 10)}…${hash.slice(-8)}`;
   return (
-    <p className="ctp-tx">
+    <p className="pp-tx">
       Transaction sent:{" "}
       {url === undefined ? (
-        <span className="ctp-value" title={hash}>
+        <span className="pp-value" title={hash}>
           {short}
         </span>
       ) : (
@@ -183,10 +187,12 @@ function Transaction({ hash, chainId }: { hash: Hash; chainId: number }) {
 function PaymentOptions({
   quote,
   now,
+  buttonText,
   onSent,
 }: {
   quote: ClientQuote;
   now: number;
+  buttonText: string;
   onSent: (hash: Hash) => void;
 }) {
   const [method, setMethod] = useState<Method>("wallet");
@@ -216,13 +222,13 @@ function PaymentOptions({
 
   return (
     <>
-      <p className="ctp-notice">
+      <p className="pp-notice">
         Send <strong>exactly {amount}</strong> on {networkName(quote.chain_id)} in one transfer
         before the timer ends. A different amount, or a payment after expiry, is credited at the
         market price instead of this quote. Exchanges may deduct a withdrawal fee, so the amount
         that arrives must be exact.
       </p>
-      <div className="ctp-tabs" role="tablist" aria-label="Payment method" onKeyDown={onKeyDown}>
+      <div className="pp-tabs" role="tablist" aria-label="Payment method" onKeyDown={onKeyDown}>
         {METHODS.map((m, index) => (
           <button
             key={m.id}
@@ -231,7 +237,7 @@ function PaymentOptions({
             }}
             type="button"
             role="tab"
-            className="ctp-tab"
+            className="pp-tab"
             id={`${id}-tab-${m.id}`}
             aria-selected={method === m.id}
             aria-controls={`${id}-panel-${m.id}`}
@@ -248,11 +254,11 @@ function PaymentOptions({
         aria-labelledby={`${id}-tab-${method}`}
         tabIndex={0}
       >
-        {method === "wallet" && <WalletPanel quote={quote} onSent={onSent} />}
+        {method === "wallet" && <WalletPanel quote={quote} buttonText={buttonText} onSent={onSent} />}
         {method === "qr" && (
-          <div className="ctp-qr-panel">
+          <div className="pp-qr-panel">
             <QrCode value={quote.payment_uri} label={`Payment request for ${amount}`} />
-            <p className="ctp-message">
+            <p className="pp-message">
               Scan with a wallet app that reads payment links, and check that it shows {amount} on{" "}
               {networkName(quote.chain_id)} before you confirm.
             </p>
@@ -269,7 +275,15 @@ type WalletStep =
   | { kind: "pending"; wallet: string }
   | { kind: "failed"; message: string };
 
-function WalletPanel({ quote, onSent }: { quote: ClientQuote; onSent: (hash: Hash) => void }) {
+function WalletPanel({
+  quote,
+  buttonText,
+  onSent,
+}: {
+  quote: ClientQuote;
+  buttonText: string;
+  onSent: (hash: Hash) => void;
+}) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [step, setStep] = useState<WalletStep>({ kind: "idle" });
   useEffect(() => watchWallets(setWallets), []);
@@ -289,28 +303,30 @@ function WalletPanel({ quote, onSent }: { quote: ClientQuote; onSent: (hash: Has
 
   if (wallets.length === 0) {
     return (
-      <p className="ctp-message">
+      <p className="pp-message">
         No browser wallet found. Scan the QR code with a mobile wallet, or send the payment
         manually.
       </p>
     );
   }
   return (
-    <div className="ctp-wallets">
+    <div className="pp-wallets">
       {wallets.map((wallet) => (
         <button
           key={wallet.info.uuid}
           type="button"
-          className="ctp-button"
+          className="pp-button"
           disabled={step.kind === "pending"}
           onClick={() => void pay(wallet)}
+          aria-label={`${buttonText} (${wallet.info.name})`}
         >
           {wallet.info.icon !== "" && <img src={wallet.info.icon} alt="" />}
-          Pay with {wallet.info.name}
+          <span>{buttonText}</span>
+          <span className="pp-wallet-name">{wallet.info.name}</span>
         </button>
       ))}
       <p
-        className="ctp-message"
+        className="pp-message"
         data-tone={step.kind === "failed" ? "danger" : undefined}
         aria-live="polite"
       >
@@ -324,7 +340,7 @@ function WalletPanel({ quote, onSent }: { quote: ClientQuote; onSent: (hash: Has
 function ManualPanel({ quote, now }: { quote: ClientQuote; now: number }) {
   const token = quoteTransfer(quote).token;
   return (
-    <dl className="ctp-fields">
+    <dl className="pp-fields">
       <Field label="Network" value={`${networkName(quote.chain_id)} (chain ID ${quote.chain_id})`} />
       <Field label={`Token (${quote.asset.toUpperCase()}) contract`} value={token} copy />
       <Field label="Send to address" value={quote.address} copy />
@@ -336,10 +352,10 @@ function ManualPanel({ quote, now }: { quote: ClientQuote; now: number }) {
 
 function Field({ label, value, copy = false }: { label: string; value: string; copy?: boolean }) {
   return (
-    <div className="ctp-field">
+    <div className="pp-field">
       <dt>{label}</dt>
       <dd>
-        <span className={copy ? "ctp-value" : undefined}>{value}</span>
+        <span className={copy ? "pp-value" : undefined}>{value}</span>
         {copy && <CopyButton value={value} label={label} />}
       </dd>
     </div>
@@ -362,7 +378,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
     );
   };
   return (
-    <button type="button" className="ctp-copy" onClick={onClick} aria-label={`Copy ${label}`}>
+    <button type="button" className="pp-copy" onClick={onClick} aria-label={`Copy ${label}`}>
       <span aria-live="polite">{copied === null ? "Copy" : copied ? "Copied" : "Copy failed"}</span>
     </button>
   );

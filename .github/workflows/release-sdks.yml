@@ -1,8 +1,8 @@
 name: Release SDKs
 
 # Publishes an SDK from the tagged commit, after its tests pass on that commit:
-# - `sdk-js-v<version>`: sdk/js to npm as @phala/crypto-topup;
-# - `sdk-py-v<version>`: sdk/python to PyPI (its `project.name`, phala-crypto-topup).
+# - `sdk-js-v<version>`: sdk/js to npm as @phala/pay;
+# - `sdk-py-v<version>`: sdk/python to PyPI (its `project.name`, phala-pay).
 # The tag must name the version in package.json or pyproject.toml.
 #
 # Publishing uses trusted publishing (OIDC) only: no token or secret is stored anywhere. The owner
