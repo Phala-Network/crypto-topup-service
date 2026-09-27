@@ -41,7 +41,7 @@ def test_raw_salts_match_the_contract_vectors() -> None:
 def test_deposit_id_matches_the_core_vector() -> None:
     # crates/core/src/identity.rs::matches_python_uuid5_vector
     tx_hash = "0x0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
-    assert str(deposit_id(1, tx_hash, 42)) == "20513a59-9b80-53df-9832-08749de3dcc5"
+    assert deposit_id(1, tx_hash, 42) == "dep_20513a599b8053df983208749de3dcc5"
     with pytest.raises(ValueError, match="32 bytes"):
         deposit_id(1, "0x01", 42)
 

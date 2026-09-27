@@ -7,7 +7,7 @@ without a ledger credit (`account_suspended`) and requests its refund, which wai
 
 from __future__ import annotations
 
-from harness import Context, check, deposit_uuid
+from harness import Context, check
 
 # A refund destination the user would supply; never the deposit's sender.
 REFUND_TO = "0x" + "11" * 20
@@ -20,7 +20,7 @@ def run(ctx: Context) -> None:
     deposit = ctx.deposit(team, quote.address)
     check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
     ctx.deposit_event("deposit.credited", deposit)
-    order = ctx.ledger.find_order(f"deposit:{deposit_uuid(deposit)}")
+    order = ctx.ledger.find_order(deposit.id)
     check(order is not None and order.status == "held", "the refusal was not recorded")
     check(order is not None and order.reason == "account_suspended", "wrong hold reason")
     check(ctx.ledger.credits_for(team) == [], "a refused deposit was credited")

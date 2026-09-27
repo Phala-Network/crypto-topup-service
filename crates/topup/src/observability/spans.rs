@@ -1,4 +1,3 @@
-use serde_json::Value;
 use tracing::{Span, field};
 
 use crate::db::Deposit;
@@ -33,28 +32,18 @@ pub fn scanner_window_span(chain: u64, from_block: u64, to_block: u64) -> Span {
 
 /// Creates a span for one outbox delivery attempt.
 #[must_use]
-pub fn outbox_delivery_span(event_id: uuid::Uuid, payload: &Value, attempt: i32) -> Span {
-    let deposit_id = payload
-        .get("deposit_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let chain_id = payload.get("chain_id").and_then(Value::as_u64);
-    let state = payload
-        .get("state")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let route = payload
-        .get("route")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+pub fn outbox_delivery_span(
+    event_id: uuid::Uuid,
+    event_type: &str,
+    object_id: Option<uuid::Uuid>,
+    attempt: i32,
+) -> Span {
     tracing::info_span!(
         "outbox.delivery",
         event_id = %event_id,
-        deposit_id,
-        chain_id = ?chain_id,
-        state,
+        event_type,
+        object_id = ?object_id,
         attempt,
-        route,
     )
 }
 
@@ -131,22 +120,16 @@ mod tests {
 
     #[traced_test]
     #[test]
-    fn outbox_step_event_populates_state_and_route_span_fields() {
-        let span = outbox_delivery_span(
-            Uuid::nil(),
-            &serde_json::json!({
-                "deposit_id": "018f47f0-a9b2-7c31-8fa5-776a08f65201",
-                "chain_id": 1,
-                "state": "credited",
-                "route": "route-a",
-            }),
-            2,
-        );
+    fn outbox_delivery_log_carries_event_span_fields() {
+        let object = Uuid::parse_str("018f47f0-a9b2-7c31-8fa5-776a08f65201").expect("fixture UUID");
+        let span = outbox_delivery_span(Uuid::nil(), "deposit.credited", Some(object), 2);
         let _guard = span.enter();
         tracing::info!("outbox step event test");
 
-        assert!(logs_contain("chain_id=Some(1)"));
-        assert!(logs_contain("state=\"credited\""));
-        assert!(logs_contain("route=\"route-a\""));
+        assert!(logs_contain("event_type=\"deposit.credited\""));
+        assert!(logs_contain(
+            "object_id=Some(018f47f0-a9b2-7c31-8fa5-776a08f65201)"
+        ));
+        assert!(logs_contain("attempt=2"));
     }
 }

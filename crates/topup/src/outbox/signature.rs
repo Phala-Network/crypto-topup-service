@@ -1,12 +1,11 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use topup_core::{Signer, SignerError};
-use uuid::Uuid;
 
 /// Standard Webhooks metadata and asymmetric `v1a` signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedWebhook {
-    /// Stable event identifier.
+    /// Stable event identifier: the `evt_` id, or the bare UUID of a format-1 event.
     pub id: String,
     /// Attempt timestamp as integer Unix seconds.
     pub timestamp: String,
@@ -18,11 +17,11 @@ impl SignedWebhook {
     /// Signs `{id}.{timestamp}.{body}` exactly as sent on the wire.
     pub async fn new(
         signer: &impl Signer,
-        event_id: Uuid,
+        event_id: &str,
         timestamp: i64,
         body: &[u8],
     ) -> Result<Self, SignerError> {
-        let id = event_id.to_string();
+        let id = event_id.to_owned();
         let timestamp = timestamp.to_string();
         let mut content = Vec::with_capacity(id.len() + timestamp.len() + body.len() + 2);
         content.extend_from_slice(id.as_bytes());
@@ -47,6 +46,8 @@ mod tests {
     use topup_core::{
         Ed25519PublicKey, Ed25519Signature, SignedTx, Signer, SignerError, TxRequest,
     };
+
+    use uuid::Uuid;
 
     use super::*;
 
@@ -76,7 +77,7 @@ mod tests {
         let event_id = Uuid::parse_str("018d5f8e-8a7b-7d65-bc44-2c4f5f0a6d31")
             .expect("fixed UUID should parse");
         let body = br#"{"type":"deposit.confirmed","data":{"deposit_id":"dep_123"}}"#;
-        let signed = SignedWebhook::new(&signer, event_id, 1_674_087_231, body)
+        let signed = SignedWebhook::new(&signer, &event_id.to_string(), 1_674_087_231, body)
             .await
             .expect("fixed signer should sign");
 

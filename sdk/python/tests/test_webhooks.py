@@ -70,17 +70,41 @@ def _signed(envelope: Mapping[str, object], webhook_id: str) -> tuple[dict[str, 
     return headers, body
 
 
-def test_envelope_is_parsed_and_bound_to_the_webhook_id() -> None:
+EVENT_ID = "evt_26a20351ab10595a852f9c1aa0372d73"
+
+
+def test_event_is_parsed_and_bound_to_the_webhook_id() -> None:
+    envelope = {
+        "id": EVENT_ID,
+        "object": "event",
+        "type": "deposit.credited",
+        "created": 1_790_410_321,
+        "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit"}},
+    }
+    headers, body = _signed(envelope, EVENT_ID)
+    event = verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+    assert (event.id, event.type, event.created) == (EVENT_ID, "deposit.credited", 1_790_410_321)
+    assert event.object == envelope["data"]["object"]  # type: ignore[index]
+
+    headers, body = _signed({**envelope, "id": "evt_" + "0" * 32}, EVENT_ID)
+    with pytest.raises(SignatureError, match="does not match"):
+        verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+    headers, body = _signed({**envelope, "object": "deposit"}, EVENT_ID)
+    with pytest.raises(SignatureError, match="malformed"):
+        verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+
+
+def test_an_event_in_the_old_envelope_is_still_parsed() -> None:
+    # An operator replay of an event delivered before prefixed ids is byte-identical to the
+    # original: a bare UUID id and a flat payload.
     envelope = {
         "event_id": RUST_ID,
         "type": "deposit.credited",
-        "created_at": "2026-09-22T00:00:00Z",
+        "created_at": "2026-09-22T00:00:00.123456789Z",
         "data": {"deposit_id": "d"},
     }
     headers, body = _signed(envelope, RUST_ID)
     event = verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
     assert (event.id, event.type, event.data) == (RUST_ID, "deposit.credited", {"deposit_id": "d"})
-
-    headers, body = _signed({**envelope, "event_id": "another"}, RUST_ID)
-    with pytest.raises(SignatureError, match="does not match"):
-        verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+    assert event.created == 1_790_035_200
+    assert event.object is None

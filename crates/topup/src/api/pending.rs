@@ -14,9 +14,9 @@ use uuid::Uuid;
 use crate::db::{self, PendingTransfer};
 use crate::locks::{RateLock, RateLockStatus};
 
-use super::AppState;
 use super::error::ApiError;
 use super::models::QuotePayment;
+use sqlx::PgPool;
 
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s (12.8 to 19 minutes).
@@ -28,11 +28,11 @@ const ESTIMATED_FINALITY_DELAY: TimeDelta = TimeDelta::minutes(15);
 /// first, then transfers seen above `finalized`); otherwise the first transfer at all. On a
 /// canceled quote no payment matches, because every payment is valued at spot.
 pub(super) async fn quote_payment(
-    state: &AppState,
+    pool: &PgPool,
     route: &RouteFile,
     lock: &RateLock,
 ) -> Result<Option<QuotePayment>, ApiError> {
-    let deposits = address_deposits(state, lock.address_id).await?;
+    let deposits = address_deposits(pool, lock.address_id).await?;
     if let Some(consumed) = deposits
         .iter()
         .find(|deposit| Some(deposit.deposit_id) == lock.consumed_by)
@@ -42,7 +42,7 @@ pub(super) async fn quote_payment(
     let observed = deposits
         .into_iter()
         .chain(
-            db::list_address_pending(&state.pool, lock.address_id)
+            db::list_address_pending(pool, lock.address_id)
                 .await?
                 .into_iter()
                 .map(Observed::from),
@@ -123,7 +123,7 @@ fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> QuotePaym
     }
 }
 
-async fn address_deposits(state: &AppState, address_id: Uuid) -> Result<Vec<Observed>, ApiError> {
+async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observed>, ApiError> {
     let rows = sqlx::query_as::<_, (i64, String, i64, DateTime<Utc>, String, String)>(
         r#"
         SELECT chain_id, tx_hash, log_index, block_time, asset_contract, amount_atomic::text
@@ -133,7 +133,7 @@ async fn address_deposits(state: &AppState, address_id: Uuid) -> Result<Vec<Obse
         "#,
     )
     .bind(address_id)
-    .fetch_all(&state.pool)
+    .fetch_all(pool)
     .await?;
     rows.into_iter()
         .map(

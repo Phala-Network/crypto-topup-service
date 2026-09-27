@@ -59,32 +59,39 @@ def _credited(
 ) -> tuple[dict[str, str], bytes]:
     tx_hash = "0x" + f"{number:02x}" * 32
     deposit = deposit_id(CONFIG.chain_id, tx_hash, 0)
-    event_id = str(credited_event_id(deposit))
+    event_id = credited_event_id(deposit)
     body = json.dumps(
         {
-            "event_id": event_id,
+            "id": event_id,
+            "object": "event",
             "type": "deposit.credited",
-            "created_at": "2026-09-28T00:00:00Z",
+            "created": 1_790_410_321,
             "data": {
-                "product_id": str(uuid.UUID(int=1)),
-                "external_id": team,
-                "deposit_id": str(deposit),
-                "state": "credited",
-                "unit": "USD",
-                "amount_minor": str(amount_minor),
-                "price_source": "lock",
-                "price_scaled": "10000000",
-                "price_scale": 8,
-                "valuation_at": "2026-09-28T00:00:00Z",
-                "product_lock_ref": "checkout-1",
-                "address": "0x" + "66" * 20,
-                "route": CONFIG.route,
-                "route_version": 1,
-                "chain_id": CONFIG.chain_id,
-                "asset_contract": CONFIG.token,
-                "tx_hash": tx_hash,
-                "log_index": 0,
-                "amount_atomic": "25000000000000000000",
+                "object": {
+                    "id": deposit,
+                    "object": "deposit",
+                    "account_id": team,
+                    "quote": "qt_" + "0c" * 16,
+                    "status": "credited",
+                    "rejection_reason": None,
+                    "chain_id": CONFIG.chain_id,
+                    "asset": "pha",
+                    "asset_contract": CONFIG.token,
+                    "amount_atomic": "25000000000000000000",
+                    "amount": amount_minor,
+                    "currency": "usd",
+                    "exchange_rate": "0.10000000",
+                    "price_source": "quote",
+                    "valued_at": 1_790_410_320,
+                    "address": "0x" + "66" * 20,
+                    "from_address": "0x" + "77" * 20,
+                    "tx_hash": tx_hash,
+                    "log_index": 0,
+                    "block_number": 100,
+                    "amount_refunded_atomic": "0",
+                    "refunded": False,
+                    "created": 1_790_410_300,
+                }
             },
         }
     ).encode()
@@ -98,7 +105,7 @@ def test_a_credit_is_applied_once_across_redeliveries() -> None:
         assert fulfillment.handle(headers, body).status == 204
     [(key, amount)] = fulfillment.ledger.credits_for(TEAM)
     assert amount == 2_500
-    assert key.startswith("deposit:")
+    assert key.startswith("dep_")
     assert len(fulfillment.ledger.events("deposit.credited")) == 1
 
 
@@ -143,22 +150,41 @@ def test_refused_credits_are_held_for_refund(
 def test_a_credit_for_an_unknown_workspace_is_held() -> None:
     fulfillment = _fulfillment()
     assert fulfillment.handle(*_credited(team="team-unknown")).status == 204
-    order = fulfillment.ledger.find_order(
-        f"deposit:{deposit_id(CONFIG.chain_id, '0x' + '01' * 32, 0)}"
-    )
+    order = fulfillment.ledger.find_order(deposit_id(CONFIG.chain_id, "0x" + "01" * 32, 0))
     assert order is not None
     assert (order.status, order.reason, order.team_id) == ("held", "unknown_account", None)
 
 
 def test_a_legacy_credited_event_is_acknowledged_without_a_credit() -> None:
+    # An operator replay of a credit delivered before prefixed ids keeps its old envelope.
     fulfillment = _fulfillment()
-    _, body = _credited()
-    legacy = json.loads(body)
-    del legacy["data"]["external_id"]
+    legacy_id = str(uuid.UUID(int=7))
+    legacy = {
+        "event_id": legacy_id,
+        "type": "deposit.credited",
+        "created_at": "2026-09-28T00:00:00Z",
+        "data": {"deposit_id": str(uuid.UUID(int=8)), "external_id": TEAM, "state": "credited"},
+    }
     legacy_body = json.dumps(legacy).encode()
-    legacy_headers = sign_webhook(SERVICE_KEY, legacy["event_id"], int(time.time()), legacy_body)
+    legacy_headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), legacy_body)
     assert fulfillment.handle(legacy_headers, legacy_body).status == 204
     assert fulfillment.ledger.credits_for(TEAM) == []
+
+
+def test_orders_keyed_by_the_old_deposit_key_are_migrated(tmp_path: Path) -> None:
+    deposit = uuid.UUID(int=9)
+    path = str(tmp_path / "ledger.sqlite")
+    before = ProductLedger(path)
+    before.add_team(TEAM)
+    with before.transaction() as db:
+        db.execute(
+            "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
+            "payload, status, created_at) VALUES ('o1', ?, 'crypto_topup', 'crypto-top-up', ?, "
+            "'{}', 'accepted', 0)",
+            (TEAM, f"deposit:{deposit}"),
+        )
+    # Opening the ledger applies the schema, which rewrites the old keys.
+    assert ProductLedger(path).find_order(f"dep_{deposit.hex}") is not None
 
 
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))

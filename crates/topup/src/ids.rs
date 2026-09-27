@@ -29,6 +29,12 @@ pub fn parse(prefix: &str, value: &str) -> Option<Uuid> {
     canonical.then(|| Uuid::try_parse(hex).ok()).flatten()
 }
 
+/// Parses a `webhook-id`: an `evt_` id, or the bare UUID of an event written before prefixed ids.
+#[must_use]
+pub fn parse_event(value: &str) -> Option<Uuid> {
+    parse(EVENT, value).or_else(|| Uuid::try_parse(value).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,8 +15,8 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use topup::db::{
-    self, AddressKind, ApplyTransitionResult, FlushedEvent, NewDeposit, NewFlush, OutboxEvent,
-    TransitionUpdate,
+    self, AddressKind, ApplyTransitionResult, EventObject, FlushedEvent, NewDeposit, NewFlush,
+    OutboxEvent, TransitionUpdate,
 };
 use topup::reconciler::{CheckName, Reconciler, ReconciliationChain, ReconciliationError};
 use topup::{heartbeat, restore};
@@ -859,20 +859,22 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
             );
             transaction.commit().await?;
 
-            // The second event cannot be stored (jsonb refuses NUL), after the state, transition,
-            // and first event were written: none of them may survive.
+            // The second event cannot be stored (its product does not exist), after the state,
+            // transition, and first event were written: none of them may survive.
             let first_event = Uuid::new_v4();
             let events = [
                 OutboxEvent {
                     id: first_event,
-                    event_type: "deposit.confirmed".to_owned(),
-                    payload: json!({"sequence": 1}),
+                    event_type: "deposit.rejected".to_owned(),
+                    product_id: seed.product_id,
+                    object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 },
                 OutboxEvent {
                     id: Uuid::new_v4(),
-                    event_type: "deposit.confirmed".to_owned(),
-                    payload: json!({"sequence": "\u{0}"}),
+                    event_type: "deposit.rejected".to_owned(),
+                    product_id: Uuid::new_v4(),
+                    object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 },
             ];
@@ -903,10 +905,11 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
 
             // A repeated event id is written once: deterministic ids make re-emission a no-op.
             let repeated = Uuid::new_v4();
-            let events = [1, 2].map(|sequence| OutboxEvent {
+            let events = [id, Uuid::new_v4()].map(|object| OutboxEvent {
                 id: repeated,
                 event_type: "deposit.credited".to_owned(),
-                payload: json!({"sequence": sequence}),
+                product_id: seed.product_id,
+                object: EventObject::Deposit(object),
                 next_attempt_at: Utc::now(),
             });
             let mut transaction = context.app_pool.begin().await?;
@@ -927,12 +930,12 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     == ApplyTransitionResult::Applied
             );
             transaction.commit().await?;
-            let payloads: Vec<serde_json::Value> =
-                sqlx::query_scalar("SELECT payload FROM outbox WHERE id = $1")
+            let objects: Vec<Uuid> =
+                sqlx::query_scalar("SELECT object_id FROM outbox WHERE id = $1")
                     .bind(repeated)
                     .fetch_all(&context.app_pool)
                     .await?;
-            ensure!(payloads == [json!({"sequence": 1})]);
+            ensure!(objects == [id]);
             Ok(())
         })
     })

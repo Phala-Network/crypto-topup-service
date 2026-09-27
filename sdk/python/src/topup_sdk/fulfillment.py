@@ -1,16 +1,17 @@
 """Typed `deposit.credited` events for product fulfillment.
 
 `deposit.credited` is the fulfillment event: the deposit is final, priced, and screened, and the
-service owes the product `amount_minor` for `external_id`. A product credits each deposit once,
-keyed by `fulfillment_key` under a unique index, and answers `2xx` after that commit:
+service owes the product `amount` cents for `account_id`. A product credits each deposit once,
+keyed by `fulfillment_key`, the deposit's `dep_` id, under a unique index, and answers `2xx`
+after that commit:
 
     event = verify_webhook(headers, raw_body, settlement_key)
     if event.type == CREDITED_EVENT:
         fulfill(CreditedDeposit.from_event(event))
 
-A repeated event for a deposit already fulfilled is a no-op. Its `amount_minor` can differ from
-the stored credit only after the service was restored from a backup and re-priced a spot
-deposit; keep the first credit and alert on the difference.
+A repeated event for a deposit already fulfilled is a no-op. Its `amount` can differ from the
+stored credit only after the service was restored from a backup and re-priced a spot deposit;
+keep the first credit and alert on the difference.
 """
 
 from __future__ import annotations
@@ -21,18 +22,21 @@ from typing import Any, Literal
 
 from .addresses import DEPOSIT_NAMESPACE
 from .errors import TopupError
+from .ids import DEPOSIT, EVENT, QUOTE, object_id, parse_id
 from .webhooks import WebhookEvent
 
 CREDITED_EVENT = "deposit.credited"
 
 
-def credited_event_id(deposit_id: uuid.UUID) -> uuid.UUID:
-    """The `webhook-id` of a deposit's `deposit.credited`: UUIDv5(NS, `deposit.credited:<id>`).
+def credited_event_id(deposit_id: str) -> str:
+    """The `webhook-id` of a deposit's `deposit.credited`: `evt_` and the hex of
+    UUIDv5(NS, `deposit.credited:<deposit UUID>`).
 
-    Derived from the deposit id, so every retry, replay, and re-emission after a service restore
+    Derived from the `dep_` id, so every retry, replay, and re-emission after a service restore
     carries the same id.
     """
-    return uuid.uuid5(DEPOSIT_NAMESPACE, f"{CREDITED_EVENT}:{deposit_id}")
+    deposit = parse_id(DEPOSIT, deposit_id)
+    return object_id(EVENT, uuid.uuid5(DEPOSIT_NAMESPACE, f"{CREDITED_EVENT}:{deposit}"))
 
 
 class FulfillmentError(TopupError):
@@ -41,75 +45,85 @@ class FulfillmentError(TopupError):
 
 @dataclass(frozen=True)
 class CreditedDeposit:
-    """The credit carried by one `deposit.credited` event."""
+    """The credit carried by one `deposit.credited` event: fields of its `data.object`."""
 
     event_id: str
-    deposit_id: uuid.UUID
-    product_id: uuid.UUID
-    external_id: str
-    unit: str
-    amount_minor: int
-    price_source: Literal["spot", "lock"]
-    price_scaled: int
-    price_scale: int
-    valuation_at: str
-    product_lock_ref: str | None
-    address: str
-    route: str
-    route_version: int
+    deposit_id: str
+    account_id: str
+    amount: int
+    currency: str
+    price_source: Literal["quote", "spot"]
+    exchange_rate: str
+    quote: str | None
     chain_id: int
+    asset: str | None
     asset_contract: str
+    amount_atomic: int
+    address: str
     tx_hash: str
     log_index: int
-    amount_atomic: int
 
     @property
     def fulfillment_key(self) -> str:
-        """The product's idempotency key for this credit: `deposit:<deposit_id>`."""
-        return f"deposit:{self.deposit_id}"
+        """The product's idempotency key for this credit: the deposit's `dep_` id."""
+        return self.deposit_id
 
     @classmethod
     def from_event(cls, event: WebhookEvent) -> CreditedDeposit:
         """Parses a verified event; raises `FulfillmentError` for any other shape.
 
-        Events written before `deposit.credited` became the fulfillment event carry no
-        `external_id` and are refused here; acknowledge them without crediting.
+        A `deposit.credited` in the old envelope (an operator replay of an event delivered before
+        prefixed ids) is refused here: it was fulfilled when first delivered, so acknowledge it
+        without crediting.
         """
         if event.type != CREDITED_EVENT:
             raise FulfillmentError(f"expected {CREDITED_EVENT}, got {event.type}")
-        data = event.data
+        deposit = event.object
+        if deposit is None or deposit.get("object") != "deposit":
+            raise FulfillmentError(f"{CREDITED_EVENT} carries no deposit object")
         try:
-            price_source = _string(data, "price_source")
-            if price_source not in ("spot", "lock"):
-                raise FulfillmentError("price_source must be spot or lock")
-            if data.get("state") != "credited":
-                raise FulfillmentError("state must be credited")
-            lock_ref = data.get("product_lock_ref")
-            if lock_ref is not None and not isinstance(lock_ref, str):
-                raise FulfillmentError("product_lock_ref must be a string or null")
+            # A deposit can be swept before its event is first delivered.
+            if deposit.get("status") not in ("credited", "swept"):
+                raise FulfillmentError("status must be credited or swept")
+            price_source = _string(deposit, "price_source")
+            if price_source not in ("quote", "spot"):
+                raise FulfillmentError("price_source must be quote or spot")
+            deposit_id = _string(deposit, "id")
+            parse_id(DEPOSIT, deposit_id)
+            quote = _quote_id(deposit.get("quote"))
+            asset = deposit.get("asset")
+            if asset is not None and not isinstance(asset, str):
+                raise FulfillmentError("asset must be a string or null")
             return cls(
                 event_id=event.id,
-                deposit_id=uuid.UUID(_string(data, "deposit_id")),
-                product_id=uuid.UUID(_string(data, "product_id")),
-                external_id=_string(data, "external_id"),
-                unit=_string(data, "unit"),
-                amount_minor=_decimal(data, "amount_minor"),
-                price_source="lock" if price_source == "lock" else "spot",
-                price_scaled=_decimal(data, "price_scaled"),
-                price_scale=_integer(data, "price_scale"),
-                valuation_at=_string(data, "valuation_at"),
-                product_lock_ref=lock_ref,
-                address=_string(data, "address"),
-                route=_string(data, "route"),
-                route_version=_integer(data, "route_version"),
-                chain_id=_integer(data, "chain_id"),
-                asset_contract=_string(data, "asset_contract"),
-                tx_hash=_string(data, "tx_hash"),
-                log_index=_integer(data, "log_index"),
-                amount_atomic=_decimal(data, "amount_atomic"),
+                deposit_id=deposit_id,
+                account_id=_string(deposit, "account_id"),
+                amount=_integer(deposit, "amount"),
+                currency=_string(deposit, "currency"),
+                price_source="quote" if price_source == "quote" else "spot",
+                exchange_rate=_string(deposit, "exchange_rate"),
+                quote=quote,
+                chain_id=_integer(deposit, "chain_id"),
+                asset=asset,
+                asset_contract=_string(deposit, "asset_contract"),
+                amount_atomic=_decimal(deposit, "amount_atomic"),
+                address=_string(deposit, "address"),
+                tx_hash=_string(deposit, "tx_hash"),
+                log_index=_integer(deposit, "log_index"),
             )
         except ValueError as error:
             raise FulfillmentError(f"malformed {CREDITED_EVENT}: {error}") from error
+
+
+def _quote_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("id")
+    if not isinstance(value, str):
+        raise FulfillmentError("quote must be a qt_ id, an expanded quote, or null")
+    parse_id(QUOTE, value)
+    return value
 
 
 def _string(data: dict[str, Any], name: str) -> str:

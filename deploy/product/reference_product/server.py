@@ -229,8 +229,7 @@ class AccountApi:
 
     def _account_view(self, team: str) -> dict[str, Any]:
         deposits = list(self._service().list_deposits(account_id=team))
-        # Webhook events name deposits by their UUID.
-        ids = {str(parse_id(DEPOSIT, deposit.id)) for deposit in deposits}
+        ids = {deposit.id for deposit in deposits}
         return {
             "account_id": team,
             "deposits": [deposit.to_dict() for deposit in deposits],
@@ -242,8 +241,8 @@ class AccountApi:
             "events": [
                 event
                 for event in self.ledger.all_events()
-                if event["data"].get("deposit_id") in ids
-                or event["data"].get("external_id") == team
+                if (event["data"].get("object") or {}).get("id") in ids
+                or (event["data"].get("object") or {}).get("account_id") == team
             ],
         }
 

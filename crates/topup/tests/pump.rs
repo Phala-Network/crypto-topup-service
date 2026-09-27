@@ -13,7 +13,9 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
-use topup::db::{self, AddressKind, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects};
+use topup::db::{
+    self, AddressKind, EventObject, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects,
+};
 use topup::jitter::JitterSource;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
@@ -161,8 +163,9 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 evidence: json!({"provider": "test", "confirmed": true}),
                 events: vec![OutboxEvent {
                     id: event_id,
-                    event_type: "deposit.confirmed".to_owned(),
-                    payload: json!({"deposit_id": id}),
+                    event_type: "deposit.credited".to_owned(),
+                    product_id: seed.product_id,
+                    object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 }],
                 effects: TransitionEffects {
@@ -476,7 +479,7 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             ensure!(lock_status == "consumed" && !reserved);
             ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
             let expired_events: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
+                "SELECT count(*) FROM outbox WHERE event_type = 'quote.expired'",
             )
             .fetch_one(&context.app_pool)
             .await?;
@@ -956,6 +959,7 @@ fn transfer_log(deposit: &db::Deposit, recipient: Address) -> TransferLog {
 
 #[derive(Clone, Copy)]
 struct Seed {
+    product_id: Uuid,
     account_id: Uuid,
     address_id: Uuid,
 }
@@ -989,6 +993,7 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
     };
     seed::insert_address(pool, &address).await?;
     Ok(Seed {
+        product_id: product.id,
         account_id: account.id,
         address_id: address.id,
     })

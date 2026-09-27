@@ -24,7 +24,9 @@ forever by themselves. One product's receiver or every product.
 - Receiver down or answering `5xx`: fix the receiver; deliveries resume by themselves.
 - An event is still missing after the fix, or the receiver lost one it accepted: replay it. A
   delivered event is sent again and a pending one becomes due now, with the same id and payload;
-  a repeat while it is due changes nothing:
+  a repeat while it is due changes nothing. `EVENT_ID` is the `webhook-id` (`evt_…`, or the UUID
+  of an event delivered before prefixed ids), listed under `events` by
+  `GET /v1/admin/deposits/{id}`:
 
   ```sh
   admin POST "/v1/admin/outbox/$EVENT_ID/replay" '{"reason":"INC-123: receiver lost the event"}'

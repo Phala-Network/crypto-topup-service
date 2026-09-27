@@ -88,8 +88,6 @@ pub struct HeadCommit {
     pub seen: u64,
     /// Rows removed as reorged, unwatched, or finalized.
     pub removed: u64,
-    /// `deposit.pending` events written for the first time.
-    pub announced: u64,
 }
 
 /// Addresses the head scan watches: quote addresses whose quote is neither completed nor
@@ -130,8 +128,8 @@ pub async fn list_watched_addresses(
 /// Replaces the pending view of blocks `from_block..=head_block` with `transfers`, in one
 /// transaction: rows in that range not seen this time (reorged or no longer watched) and rows at
 /// or below the finalized cursor are deleted; seen rows are upserted. Rows above `head_block`
-/// (a provider briefly behind) are left for the next scan that covers them. The first sighting of a
-/// transfer writes one `deposit.pending` event, at most once per chain event ever.
+/// (a provider briefly behind) are left for the next scan that covers them. No event is written:
+/// products read unfinalized payments from `GET /v1/quotes/{id}`.
 pub async fn commit_head_scan(
     pool: &PgPool,
     chain_id: u64,
@@ -198,9 +196,6 @@ pub async fn commit_head_scan(
         }
         upsert(&mut transaction, chain, head, transfer).await?;
         commit.seen = commit.seen.saturating_add(1);
-        commit.announced = commit
-            .announced
-            .saturating_add(announce(&mut transaction, chain, transfer).await?);
     }
     transaction.commit().await?;
     Ok(commit)
@@ -247,59 +242,6 @@ async fn upsert(
     .execute(&mut **transaction)
     .await?;
     Ok(())
-}
-
-/// Writes `deposit.pending` under an identifier derived from the chain event, so a transfer that
-/// is reorged out and seen again, or seen by a second process, is announced only once.
-async fn announce(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain: i64,
-    transfer: &NewPendingTransfer,
-) -> Result<u64, sqlx::Error> {
-    let deposit_id = deposit_id(transfer.chain_id, transfer.tx_hash, transfer.log_index);
-    let event_id = Uuid::new_v5(&deposit_id, b"deposit.pending");
-    let result = sqlx::query(
-        r#"
-        INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-        SELECT $1, 'deposit.pending',
-               jsonb_build_object(
-                   'product_id', account.product_id,
-                   'external_id', account.external_id,
-                   'deposit_id', $2::uuid,
-                   'chain_id', $3::bigint,
-                   'tx_hash', $4::text,
-                   'log_index', $5::bigint,
-                   'block_number', $6::bigint,
-                   'address', address.address,
-                   'product_lock_ref', address.lock_ref,
-                   'asset_contract', $7::text,
-                   'from_address', $8::text,
-                   'amount_atomic', $9::text,
-                   'provisional', true
-               ),
-               now()
-        FROM addresses AS address
-        JOIN accounts AS account ON account.id = address.account_id
-        WHERE address.id = $10
-        ON CONFLICT (id) DO NOTHING
-        "#,
-    )
-    .bind(event_id)
-    .bind(deposit_id)
-    .bind(chain)
-    .bind(b256_hex(transfer.tx_hash))
-    .bind(to_i64(transfer.log_index, "pending_transfers.log_index")?)
-    .bind(to_i64(
-        transfer.block_number,
-        "pending_transfers.block_number",
-    )?)
-    .bind(address_hex(transfer.asset_contract))
-    .bind(address_hex(transfer.from_address))
-    .bind(atomic_decimal(transfer.amount_atomic))
-    .bind(transfer.address_id)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(result.rows_affected())
 }
 
 /// Deletes pending rows the finalized scanner now covers; runs in the cursor-advance transaction.

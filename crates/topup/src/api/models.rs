@@ -90,8 +90,9 @@ pub struct SupportDepositResponse {
 /// One webhook event about a deposit and its delivery state.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DepositEventResponse {
-    /// Stable event identifier, sent as the `webhook-id` header.
-    pub id: Uuid,
+    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
+    /// older event.
+    pub id: String,
     /// Event type, such as `deposit.credited`.
     pub event_type: String,
     /// Event creation time.
@@ -501,8 +502,9 @@ pub struct ReconciliationBlockLiftResponse {
 /// A webhook event queued for delivery again.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct OutboxReplayResponse {
-    /// Stable event identifier, sent as the `webhook-id` header.
-    pub event_id: Uuid,
+    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
+    /// older event.
+    pub event_id: String,
     /// Event type, such as `deposit.credited`.
     pub event_type: String,
     /// When the delivery worker next attempts the event.

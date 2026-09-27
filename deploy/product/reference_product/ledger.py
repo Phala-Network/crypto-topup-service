@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS webhook_events (
     data TEXT NOT NULL,
     received_at REAL NOT NULL
 );
+-- Orders credited before prefixed ids were keyed `deposit:<uuid>`; the key is now the deposit's
+-- `dep_` id, the same UUID in 32 hex digits, so a replayed old credit is still recognized.
+UPDATE orders
+SET provider_order_id = 'dep_' || replace(substr(provider_order_id, 9), '-', '')
+WHERE provider_order_id LIKE 'deposit:%';
 """
 
 

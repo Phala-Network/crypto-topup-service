@@ -7,7 +7,7 @@ integrator, and only the printed public key and key id are sent to the service o
 synthetic `deposit.credited` with a test seed the receiver's test instance pins in place of the
 service key, delivers it, delivers it again, and delivers it once more with a foreign signature.
 It passes when the first two answers are `2xx` and the third is `4xx`; the product then checks
-its ledger holds exactly one credit of `--amount-minor` for `--external-id`.
+its ledger holds exactly one credit of `--amount` cents for `--account-id`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import os
 import secrets
 import sys
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     test.add_argument(
         "--seed-file", required=True, type=Path, help="test seed the receiver pins as service key"
     )
-    test.add_argument("--external-id", required=True, help="a test account of the receiver")
-    test.add_argument("--amount-minor", type=int, default=100)
-    test.add_argument("--product-id", type=uuid.UUID, default=uuid.UUID(int=0))
+    test.add_argument("--account-id", required=True, help="a test account of the receiver")
+    test.add_argument("--amount", type=int, default=100, help="credit in cents")
     args = parser.parse_args(argv)
 
     if args.command == "send-test-event":
@@ -57,9 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         report = send_test_event(
             args.url,
             Ed25519PrivateKey.from_private_bytes(seed),
-            external_id=args.external_id,
-            amount_minor=args.amount_minor,
-            product_id=args.product_id,
+            account_id=args.account_id,
+            amount=args.amount,
         )
         print(json.dumps(report, indent=2))
         return 0 if report["passed"] else 1
@@ -83,40 +80,47 @@ def send_test_event(
     url: str,
     key: Ed25519PrivateKey,
     *,
-    external_id: str,
-    amount_minor: int,
-    product_id: uuid.UUID,
+    account_id: str,
+    amount: int,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     """Delivers one synthetic `deposit.credited` three times and reports the answers."""
     tx_hash = "0x" + secrets.token_hex(32)
     deposit = deposit_id(31337, tx_hash, 0)
-    event_id = str(credited_event_id(deposit))
+    event_id = credited_event_id(deposit)
+    now = int(time.time())
     body = json.dumps(
         {
-            "event_id": event_id,
+            "id": event_id,
+            "object": "event",
             "type": CREDITED_EVENT,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "created": now,
             "data": {
-                "product_id": str(product_id),
-                "external_id": external_id,
-                "deposit_id": str(deposit),
-                "state": "credited",
-                "unit": "USD",
-                "amount_minor": str(amount_minor),
-                "price_source": "spot",
-                "price_scaled": "10000000",
-                "price_scale": 8,
-                "valuation_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "product_lock_ref": None,
-                "address": "0x" + "00" * 20,
-                "route": "test",
-                "route_version": 1,
-                "chain_id": 31337,
-                "asset_contract": "0x" + "00" * 20,
-                "tx_hash": tx_hash,
-                "log_index": 0,
-                "amount_atomic": str(amount_minor),
+                "object": {
+                    "id": deposit,
+                    "object": "deposit",
+                    "account_id": account_id,
+                    "quote": None,
+                    "status": "credited",
+                    "rejection_reason": None,
+                    "chain_id": 31337,
+                    "asset": "test",
+                    "asset_contract": "0x" + "00" * 20,
+                    "amount_atomic": str(amount),
+                    "amount": amount,
+                    "currency": "usd",
+                    "exchange_rate": "0.10000000",
+                    "price_source": "spot",
+                    "valued_at": now,
+                    "address": "0x" + "00" * 20,
+                    "from_address": "0x" + "00" * 20,
+                    "tx_hash": tx_hash,
+                    "log_index": 0,
+                    "block_number": 1,
+                    "amount_refunded_atomic": "0",
+                    "refunded": False,
+                    "created": now,
+                }
             },
         },
         separators=(",", ":"),
@@ -135,11 +139,11 @@ def send_test_event(
             ok = status is not None and (200 <= status < 300 if accept else 400 <= status < 500)
             results.append({"case": case, "status": status, "ok": ok})
     return {
-        "deposit_id": str(deposit),
+        "deposit_id": deposit,
         "event_id": event_id,
         "results": results,
         "passed": all(result["ok"] for result in results),
-        "then_check": f"exactly one credit of {amount_minor} for {external_id}",
+        "then_check": f"exactly one credit of {amount} cents for {account_id}",
     }
 
 

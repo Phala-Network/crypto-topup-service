@@ -12,6 +12,7 @@ use sqlx::{PgPool, Row};
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
 use topup_adapters::pricing::PriceSource;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
+use topup_core::identity::event_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::RouteFile;
 use topup_core::valuation::{
@@ -20,7 +21,8 @@ use topup_core::valuation::{
 use uuid::Uuid;
 
 use crate::db::{
-    CanonicalEvidence, Deposit, LockConsumption, OutboxEvent, StoredValuation, TransitionEffects,
+    CanonicalEvidence, Deposit, EventObject, LockConsumption, OutboxEvent, StoredValuation,
+    TransitionEffects,
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
@@ -316,26 +318,6 @@ impl ConfirmStep {
             valuation.credit_minor,
             quote.evidence.clone(),
         ));
-        let event = OutboxEvent {
-            id: Uuid::new_v4(),
-            event_type: "deposit.confirmed".to_owned(),
-            payload: json!({
-                "product_id": context.product_id,
-                "deposit_id": deposit.id,
-                "chain_id": deposit.chain_id,
-                "route": runtime.route.route,
-                "route_version": runtime.route.version,
-                "tx_hash": format!("{:#x}", deposit.tx_hash),
-                "log_index": deposit.log_index,
-                "amount_atomic": canonical.amount.value().to_string(),
-                "price_scaled": valuation.price.value().to_string(),
-                "price_scale": PRICE_SCALE,
-                "price_source": valuation_source_code(valuation.source),
-                "credit_minor": valuation.credit_minor.value().to_string(),
-                "valuation_at": valuation_at,
-            }),
-            next_attempt_at: valuation_at,
-        };
         StepResult {
             outcome: StepOutcome::Advance,
             evidence: json!({
@@ -350,7 +332,7 @@ impl ConfirmStep {
                     "valuation_at": valuation_at,
                 },
             }),
-            events: vec![event],
+            events: Vec::new(),
             effects,
         }
     }
@@ -650,23 +632,17 @@ fn rejected_result(
     StepResult {
         outcome: StepOutcome::Reject(reason),
         evidence,
-        events: vec![rejected_event(deposit, product_id, reason)],
+        events: vec![rejected_event(deposit, product_id)],
         effects,
     }
 }
 
-fn rejected_event(deposit: &Deposit, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit, product_id: Uuid) -> OutboxEvent {
     OutboxEvent {
-        id: Uuid::new_v4(),
+        id: event_id("deposit.rejected", deposit.id),
         event_type: "deposit.rejected".to_owned(),
-        payload: json!({
-            "product_id": product_id,
-            "deposit_id": deposit.id,
-            "chain_id": deposit.chain_id,
-            "state": "rejected",
-            "route": deposit.route.as_deref(),
-            "reason": reason.code(),
-        }),
+        product_id,
+        object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     }
 }
@@ -942,7 +918,6 @@ mod tests {
             ),
         };
         let context = context(None);
-        let product_id = context.product_id;
         let step = ConfirmStep {
             context_lookup: Arc::new(MockContext(context)),
             routes: BTreeMap::from([
@@ -970,12 +945,8 @@ mod tests {
             result.effects.valuation.expect("valuation").credit_minor,
             MinorAmount::new(10)
         );
-        assert_eq!(
-            result.events[0].payload["product_id"],
-            product_id.to_string()
-        );
-        assert_eq!(result.events[0].payload["route"], "canonical-token-route");
-        assert_eq!(result.events[0].payload["route_version"], 7);
+        // Confirmation announces nothing; the product learns of the deposit when it is credited.
+        assert!(result.events.is_empty());
     }
 
     #[tokio::test]
@@ -998,11 +969,7 @@ mod tests {
             result.outcome,
             StepOutcome::Reject(RejectReason::UnsupportedAsset)
         );
-        assert_rejected_event(
-            &result.events[0],
-            RejectReason::UnsupportedAsset,
-            product_id,
-        );
+        assert_rejected_event(&result.events[0], deposit.id, product_id);
     }
 
     #[tokio::test]
@@ -1186,7 +1153,7 @@ mod tests {
         let valuation = result.effects.valuation.expect("valuation");
         assert_eq!(valuation.credit_minor, MinorAmount::new(100));
         assert!(valuation.quote.is_object());
-        assert_rejected_event(&result.events[0], RejectReason::BelowMinimum, product_id);
+        assert_rejected_event(&result.events[0], deposit.id, product_id);
     }
 
     #[tokio::test]
@@ -1210,7 +1177,7 @@ mod tests {
             result.outcome,
             StepOutcome::Reject(RejectReason::OutOfRange)
         );
-        assert_rejected_event(&result.events[0], RejectReason::OutOfRange, product_id);
+        assert_rejected_event(&result.events[0], deposit.id, product_id);
     }
 
     struct PriceSet {
@@ -1364,14 +1331,11 @@ mod tests {
         u64::try_from(Utc::now().timestamp()).expect("current timestamp")
     }
 
-    fn assert_rejected_event(event: &OutboxEvent, reason: RejectReason, product_id: Uuid) {
+    fn assert_rejected_event(event: &OutboxEvent, deposit_id: Uuid, product_id: Uuid) {
         assert_eq!(event.event_type, "deposit.rejected");
-        assert_eq!(event.payload["product_id"], product_id.to_string());
-        assert!(event.payload["deposit_id"].as_str().is_some());
-        assert!(event.payload["chain_id"].as_u64().is_some());
-        assert_eq!(event.payload["state"], "rejected");
-        assert!(event.payload["route"].as_str().is_some());
-        assert_eq!(event.payload["reason"], reason.code());
+        assert_eq!(event.id, event_id("deposit.rejected", deposit_id));
+        assert_eq!(event.product_id, product_id);
+        assert_eq!(event.object, EventObject::Deposit(deposit_id));
     }
 
     fn recipient() -> Address {

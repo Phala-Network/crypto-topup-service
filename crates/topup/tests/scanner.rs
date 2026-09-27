@@ -393,10 +393,10 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Result<()> {
     let rows = sqlx::query(
         r#"
-        SELECT event.payload
+        SELECT event.id, event.product_id, event.object_id, deposit.reason
         FROM outbox AS event
-        JOIN deposits AS deposit ON deposit.id = (event.payload->>'deposit_id')::uuid
-        WHERE event.event_type = 'deposit.rejected'
+        JOIN deposits AS deposit ON deposit.id = event.object_id
+        WHERE event.event_type = 'deposit.rejected' AND event.object_type = 'deposit'
         "#,
     )
     .fetch_all(pool)
@@ -406,26 +406,22 @@ async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Res
         "expected one deposit.rejected event, got {}",
         rows.len()
     );
-    let payload: Value = rows[0].try_get("payload")?;
     let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
         .bind(account_id)
         .fetch_one(pool)
         .await?;
+    let deposit: Uuid = rows[0].try_get("object_id")?;
     ensure!(
-        payload["reason"] == "unsupported_asset",
-        "unexpected reason: {payload}"
+        rows[0].try_get::<Option<String>, _>("reason")?.as_deref() == Some("unsupported_asset")
     );
     ensure!(
-        payload["product_id"] == product_id.to_string(),
-        "event does not name the owning product: {payload}"
+        rows[0].try_get::<Option<Uuid>, _>("product_id")? == Some(product_id),
+        "event does not name the owning product"
     );
     ensure!(
-        payload["chain_id"].is_u64() && payload["state"] == "rejected",
-        "event lacks the shared deposit event fields: {payload}"
-    );
-    ensure!(
-        payload.get("route").is_some(),
-        "event lacks the route field: {payload}"
+        rows[0].try_get::<Uuid, _>("id")?
+            == topup_core::identity::event_id("deposit.rejected", deposit),
+        "event id is not derived from the deposit"
     );
     Ok(())
 }
@@ -624,13 +620,12 @@ async fn run_confirm_scenario(
             .fetch_one(&database.app_pool)
             .await?;
     ensure!(evidence["stage"] == "confirmed");
-    let outbox_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM outbox WHERE event_type = 'deposit.confirmed' AND payload->>'deposit_id' = $1",
-    )
-    .bind(confirmed_id.to_string())
-    .fetch_one(&database.app_pool)
-    .await?;
-    ensure!(outbox_count == 1);
+    // Confirmation announces nothing.
+    let outbox_count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox WHERE object_id = $1")
+        .bind(confirmed_id)
+        .fetch_one(&database.app_pool)
+        .await?;
+    ensure!(outbox_count == 0);
 
     transfer(&primary_anvil.rpc_url, token, tracked, 2_000)?;
     primary_anvil.mine(2)?;

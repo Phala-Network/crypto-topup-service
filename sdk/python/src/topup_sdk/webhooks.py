@@ -2,8 +2,10 @@
 
 Events carry `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers. The signature
 is the asymmetric `v1a` scheme: ed25519 over `{id}.{timestamp}.{body}` with the settlement key
-pinned from attestation. Receivers deduplicate by `webhook-id`; `deposit.credited` is the
-fulfillment event (`topup_sdk.fulfillment`), every other type is informational.
+pinned from attestation. The body is Stripe's Event object, `{id, object: "event", type, created,
+data: {object}}`, where `data.object` is the deposit or quote the event is about. Receivers
+deduplicate by `webhook-id`, the event's `evt_` id; `deposit.credited` is the fulfillment event
+(`topup_sdk.fulfillment`), every other type is informational.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -26,12 +29,23 @@ DEFAULT_TOLERANCE_SECONDS = 300
 
 @dataclass(frozen=True)
 class WebhookEvent:
-    """A verified event envelope."""
+    """A verified event: its `evt_` id, type, creation time in Unix seconds, and `data`.
+
+    `data["object"]` is the object the event is about. An event written before prefixed ids and
+    replayed by the operator keeps its old envelope: its id is a bare UUID and its `data` the old
+    flat payload, without `object`.
+    """
 
     id: str
     type: str
-    created_at: str
+    created: int
     data: dict[str, Any]
+
+    @property
+    def object(self) -> dict[str, Any] | None:
+        """The deposit or quote the event is about; `None` for an event in the old envelope."""
+        value = self.data.get("object")
+        return value if isinstance(value, dict) else None
 
 
 def verify_webhook(
@@ -48,12 +62,23 @@ def verify_webhook(
     )
     try:
         envelope = json.loads(body)
-        event = WebhookEvent(
-            id=str(envelope["event_id"]),
-            type=str(envelope["type"]),
-            created_at=str(envelope["created_at"]),
-            data=dict(envelope["data"]),
-        )
+        if "event_id" in envelope:
+            # The envelope of events written before prefixed ids.
+            event = WebhookEvent(
+                id=str(envelope["event_id"]),
+                type=str(envelope["type"]),
+                created=int(datetime.fromisoformat(envelope["created_at"]).timestamp()),
+                data=dict(envelope["data"]),
+            )
+        else:
+            if envelope["object"] != "event" or not isinstance(envelope["created"], int):
+                raise ValueError("not an event object")
+            event = WebhookEvent(
+                id=str(envelope["id"]),
+                type=str(envelope["type"]),
+                created=envelope["created"],
+                data=dict(envelope["data"]),
+            )
     except (ValueError, KeyError, TypeError) as error:
         raise SignatureError("webhook body malformed") from error
     if event.id != webhook_id:

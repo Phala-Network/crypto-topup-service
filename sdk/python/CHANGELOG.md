@@ -8,6 +8,12 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Changed
 
+- **Breaking**: `verify_webhook` parses Stripe-style events: `WebhookEvent(id, type, created, data)`
+  with `object` (the event's `data.object`), still accepting the old envelope of a replayed old
+  event. `CreditedDeposit` carries the deposit's fields (`deposit_id` `dep_…`, `account_id`,
+  `amount` in cents, `price_source` `quote` or `spot`, `quote`, …) and its `fulfillment_key` is
+  the `dep_` id; `deposit_id` returns `dep_…` and `credited_event_id` `evt_…`.
+  `topup-sdk send-test-event` takes `--account-id` and `--amount` and sends the new envelope.
 - **Breaking**: `TopupClient(base_url, signer, *, forwarder=None, …)`: the product is the signer's
   key id, `{product}/v1`; there is no `product_slug` argument. With `forwarder=(factory,
   implementation)` pinned, `create_quote` and `get_quote` recompute an open quote's address and

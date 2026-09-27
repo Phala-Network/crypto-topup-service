@@ -6,7 +6,7 @@ product never receives `deposit.credited` for it.
 
 from __future__ import annotations
 
-from harness import TOKEN_UNIT, Context, ScenarioSkipped, check, deposit_uuid
+from harness import TOKEN_UNIT, Context, ScenarioSkipped, check
 
 
 def run(ctx: Context) -> None:
@@ -18,9 +18,12 @@ def run(ctx: Context) -> None:
     deposit = ctx.deposit(team, quote.address)
     check(deposit.status == "rejected", f"deposit is {deposit.status}, not rejected")
     rejected = ctx.deposit_event("deposit.rejected", deposit)
-    check(rejected["reason"] == "unsupported_asset", f"reason is {rejected['reason']}")
     check(
-        ctx.ledger.find_order(f"deposit:{deposit_uuid(deposit)}") is None,
+        rejected["rejection_reason"] == "unsupported_asset",
+        f"reason is {rejected['rejection_reason']}",
+    )
+    check(
+        ctx.ledger.find_order(deposit.id) is None,
         "product recorded an order",
     )
     check(ctx.fulfillment.deliveries[team] == 0, "product received deposit.credited")

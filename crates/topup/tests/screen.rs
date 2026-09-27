@@ -18,7 +18,7 @@ use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup_adapters::chain::evm::EvmClient;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
-use topup_core::identity::{credited_event_id, deposit_id};
+use topup_core::identity::{credited_event_id, deposit_id, event_id};
 use topup_core::money::AtomicAmount;
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
@@ -130,55 +130,34 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             ensure!(rejected_evidence["provider_a"] == "sanctioned");
             ensure!(rejected_evidence["oracle"] == format!("{:#x}", Address::repeat_byte(9)));
 
-            let outbox = sqlx::query(
-                "SELECT event_type, payload FROM outbox WHERE payload->>'deposit_id' = $1",
-            )
-            .bind(sanctioned_id.to_string())
-            .fetch_one(&context.app_pool)
-            .await?;
-            let event_type: String = outbox.try_get("event_type")?;
-            let payload: Value = outbox.try_get("payload")?;
-            ensure!(event_type == "deposit.rejected");
-            ensure!(payload["reason"] == "sanctioned");
-            ensure!(payload["product_id"] == seed.product_id.to_string());
-
-            // Crediting writes the fulfillment event, keyed by the deposit id, with the transition.
-            let credited = sqlx::query(
-                "SELECT id, event_type, payload FROM outbox WHERE payload->>'deposit_id' = $1",
-            )
-            .bind(clear_id.to_string())
-            .fetch_one(&context.app_pool)
-            .await?;
-            let event_id: Uuid = credited.try_get("id")?;
-            let event_type: String = credited.try_get("event_type")?;
-            let payload: Value = credited.try_get("payload")?;
-            ensure!(event_id == credited_event_id(clear_id));
-            ensure!(event_type == "deposit.credited");
-            ensure!(
-                payload
-                    == serde_json::json!({
-                        "product_id": seed.product_id,
-                        "external_id": "workspace-c5",
-                        "deposit_id": clear_id,
-                        "state": "credited",
-                        "unit": "USD",
-                        "amount_minor": "37",
-                        "price_source": "spot",
-                        "price_scaled": "250000000",
-                        "price_scale": 8,
-                        "valuation_at": "2026-09-28T00:00:00Z",
-                        "product_lock_ref": null,
-                        "address": format!("{:#x}", Address::repeat_byte(0x44)),
-                        "route": "screen",
-                        "route_version": 1,
-                        "chain_id": 31_337,
-                        "asset_contract": format!("{:#x}", Address::repeat_byte(0x55)),
-                        "tx_hash": format!("{:#x}", B256::repeat_byte(1)),
-                        "log_index": 0,
-                        "amount_atomic": "15",
-                    }),
-                "{payload}"
-            );
+            // Each event names its product and deposit; its data, the deposit's API
+            // representation, is rendered when it is first delivered.
+            for (deposit, event_type, id) in [
+                (
+                    sanctioned_id,
+                    "deposit.rejected",
+                    event_id("deposit.rejected", sanctioned_id),
+                ),
+                (clear_id, "deposit.credited", credited_event_id(clear_id)),
+            ] {
+                let event = sqlx::query(
+                    "SELECT id, event_type, product_id, object_type, payload FROM outbox \
+                     WHERE object_id = $1",
+                )
+                .bind(deposit)
+                .fetch_one(&context.app_pool)
+                .await?;
+                ensure!(event.try_get::<Uuid, _>("id")? == id);
+                ensure!(event.try_get::<String, _>("event_type")? == event_type);
+                ensure!(event.try_get::<Option<Uuid>, _>("product_id")? == Some(seed.product_id));
+                ensure!(
+                    event
+                        .try_get::<Option<String>, _>("object_type")?
+                        .as_deref()
+                        == Some("deposit")
+                );
+                ensure!(event.try_get::<Value, _>("payload")? == serde_json::json!({}));
+            }
             Ok(())
         })
     })
@@ -246,7 +225,6 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
             ensure!(rejected.outcome == StepOutcome::Reject(RejectReason::Sanctioned));
             ensure!(rejected.events.len() == 1);
             ensure!(rejected.events[0].event_type == "deposit.rejected");
-            ensure!(rejected.events[0].payload["reason"] == "sanctioned");
             ensure!(rejected.evidence["provider_a"] == "sanctioned");
             ensure!(rejected.evidence["provider_b"] == "sanctioned");
 

@@ -13,6 +13,7 @@ use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
+use sqlx::Row as _;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::locks::pricing::ValidatedQuote;
 use topup::locks::{self, QuoteProvider, RateLockError};
@@ -663,18 +664,24 @@ async fn account_product_global_caps_and_expiry_release_are_atomic() -> Result<(
         .await?;
         finalize_chain_past_now(&database.app_pool).await?;
         ensure!(locks::expire_once(&database.app_pool).await? == 1);
-        let event: Value =
-            sqlx::query_scalar("SELECT payload FROM outbox WHERE event_type = 'rate_lock.expired'")
-                .fetch_one(&database.app_pool)
-                .await?;
-        ensure!(event["product_id"] == first.id.to_string());
-        ensure!(event["external_id"] == "first");
-        ensure!(event.get("account_id").is_none());
-        ensure!(event["product_lock_ref"] == locks::quote_id(expiring.address_id));
-        ensure!(event["address"] == format!("{:#x}", expiring.address));
-        ensure!(event["chain_id"] == 1);
-        ensure!(event["amount_atomic"] == "100");
-        ensure!(event["credit_minor"] == "100");
+        let event = sqlx::query(
+            "SELECT id, product_id, object_type, object_id FROM outbox \
+             WHERE event_type = 'quote.expired'",
+        )
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(
+            event.try_get::<Uuid, _>("id")?
+                == topup_core::identity::event_id("quote.expired", expiring.address_id)
+        );
+        ensure!(event.try_get::<Option<Uuid>, _>("product_id")? == Some(first.id));
+        ensure!(
+            event
+                .try_get::<Option<String>, _>("object_type")?
+                .as_deref()
+                == Some("quote")
+        );
+        ensure!(event.try_get::<Option<Uuid>, _>("object_id")? == Some(expiring.address_id));
         ensure!(exposure(&database.app_pool, "global").await? == 0);
         let first_status: String =
             sqlx::query_scalar("SELECT status FROM rate_locks WHERE address_id = $1")
@@ -731,11 +738,10 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
             Err(RateLockError::WindowClosed)
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 100);
-        let events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
-        )
-        .fetch_one(&database.app_pool)
-        .await?;
+        let events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM outbox WHERE event_type = 'quote.expired'")
+                .fetch_one(&database.app_pool)
+                .await?;
         ensure!(events == 0);
 
         set_finalized_time(
@@ -755,11 +761,10 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
             Err(RateLockError::NotOpen(_))
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 0);
-        let events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM outbox WHERE event_type = 'rate_lock.expired'",
-        )
-        .fetch_one(&database.app_pool)
-        .await?;
+        let events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM outbox WHERE event_type = 'quote.expired'")
+                .fetch_one(&database.app_pool)
+                .await?;
         ensure!(events == 1);
         Ok(())
     }
@@ -1103,7 +1108,7 @@ async fn failing_expiry_scans_alert_and_recover() -> Result<()> {
         .bind(lock.address_id)
         .execute(&database.app_pool)
         .await?;
-        // The batch fails at its `rate_lock.expired` event and rolls back.
+        // The batch fails at its `quote.expired` event and rolls back.
         sqlx::query("REVOKE INSERT ON outbox FROM topup_app")
             .execute(&database.owner_pool)
             .await?;
