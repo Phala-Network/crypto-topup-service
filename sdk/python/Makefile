@@ -25,7 +25,7 @@ check-generated: generate
 lint:
 	$(UV) run --locked ruff check . ../examples ../../deploy/product ../../deploy/sandbox/scenarios
 	$(UV) run --locked ruff format --check . ../examples ../../deploy/product ../../deploy/sandbox/scenarios
-	$(UV) run --locked mypy src/topup_sdk tests ../examples ../../deploy/product ../../deploy/sandbox/scenarios
+	$(UV) run --locked mypy src/phala_pay src/topup_sdk tests ../examples ../../deploy/product ../../deploy/sandbox/scenarios
 
 test:
 	$(UV) run --locked pytest
