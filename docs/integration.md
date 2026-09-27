@@ -802,6 +802,6 @@ test:
 cargo test -p topup --lib api::auth
 ```
 
-Also in this repository: [sdk/examples/phala_cloud_integration.py](../sdk/examples/phala_cloud_integration.py)
-(pin, register, recompute, quote, verify) and the local sandbox, `make sandbox-local`
+Also in this repository: the local sandbox, `make sandbox-local`, whose smoke check
+[deploy/sandbox/smoke.py](../deploy/sandbox/smoke.py) pins, quotes, recomputes, and verifies
 ([deploy/sandbox/README.md](../deploy/sandbox/README.md)).
