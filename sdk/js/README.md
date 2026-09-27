@@ -73,6 +73,10 @@ status. Keep the client secret out of logs and URLs you share; anyone holding it
 | `expired`, `canceled` | The address is hidden; `onExpire` is called once |
 | `error` | The client secret is not valid |
 
+`onChange(state)` is called once per status change with `{ status, quote, error }`, like Stripe
+Elements' `onChange`, for example to hide your own "new payment" control while a payment is
+`seen` or `confirming`.
+
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's.
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { Hash } from "viem";
-import type { CheckoutStatus } from "../checkout.js";
+import type { CheckoutState, CheckoutStatus } from "../checkout.js";
 import { networkName, transactionUrl } from "../chains.js";
 import { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "../format.js";
 import { quoteTransfer } from "../payment.js";
@@ -21,6 +21,9 @@ export interface CheckoutProps {
   onSuccess?: (quote: ClientQuote) => void;
   /** Called once when the quote expires or is canceled without a payment. */
   onExpire?: (quote: ClientQuote) => void;
+  /** Called whenever the checkout's status changes, like Stripe Elements' `onChange`: for example,
+   * to hide your own "new payment" control while a payment is `seen` or `confirming`. */
+  onChange?: (state: CheckoutState) => void;
   appearance?: Appearance;
   /** Milliseconds between status reads; default 3000. */
   pollInterval?: number;
@@ -43,6 +46,7 @@ export function Checkout({
   apiBase,
   onSuccess,
   onExpire,
+  onChange,
   appearance,
   pollInterval,
   className,
@@ -56,10 +60,16 @@ export function Checkout({
   const [txHash, setTxHash] = useState<Hash | null>(null);
   const now = useNow(status === "waiting");
 
-  const callbacks = useRef({ onSuccess, onExpire });
+  const callbacks = useRef({ onSuccess, onExpire, onChange });
+  const state = useRef<CheckoutState>({ status, quote, error });
   useEffect(() => {
-    callbacks.current = { onSuccess, onExpire };
+    callbacks.current = { onSuccess, onExpire, onChange };
+    state.current = { status, quote, error };
   });
+  // Once per status change, not on every poll.
+  useEffect(() => {
+    callbacks.current.onChange?.(state.current);
+  }, [status]);
   const notified = useRef<string | null>(null);
   useEffect(() => {
     if (quote === null || notified.current === quote.id) {
