@@ -6,6 +6,18 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `<Checkout walletClient>` and `payWithWallet(walletClient, quote)`: pay with the page's own viem
+  `WalletClient`, such as wagmi's `useWalletClient()` (RainbowKit, ConnectKit, AppKit). The wallet
+  tab then uses its account and switches its chain, without listing the browser's wallets.
+
+### Changed
+
+- `watchWallets` discovers EIP-6963 wallets through [mipd](https://github.com/wevm/mipd), wagmi's
+  discovery store, now a dependency; the `window.ethereum` fallback stays. Wallet errors are
+  classified with viem's `UserRejectedRequestError` and `SwitchChainError`.
+
 ## [0.1.2] - 2026-09-27
 
 ### Added

@@ -1,5 +1,6 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
+import { createWalletClient, custom } from "viem";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Checkout } from "../src/react/index.js";
 import type { CheckoutState, ClientQuote, EthereumProvider } from "../src/index.js";
@@ -157,5 +158,34 @@ describe("Checkout", () => {
     await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
     const link = await screen.findByRole("link", { name: hash });
     expect(link.getAttribute("href")).toBe(`https://sepolia.etherscan.io/tx/${hash}`);
+  });
+
+  it("pays with the page's own wallet client instead of discovered wallets", async () => {
+    const hash = `0x${"cd".repeat(32)}`;
+    const methods: string[] = [];
+    const provider: EthereumProvider = {
+      request: ({ method }) => {
+        methods.push(method);
+        switch (method) {
+          case "eth_chainId":
+            return Promise.resolve(`0x${quote().chain_id.toString(16)}`);
+          case "eth_sendTransaction":
+            return Promise.resolve(hash);
+          default:
+            return Promise.reject(new Error(`unexpected ${method}`));
+        }
+      },
+    };
+    vi.stubGlobal("ethereum", provider);
+    const walletClient = createWalletClient({ account: ADDRESS, transport: custom(provider) });
+    const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
+    await renderCheckout({ walletClient });
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Pay with crypto",
+    ]);
+    await user.click(within(panel).getByRole("button", { name: "Pay with crypto" }));
+    await screen.findByRole("link", { name: hash });
+    expect(methods).not.toContain("eth_requestAccounts");
   });
 });

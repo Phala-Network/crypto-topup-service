@@ -1,13 +1,19 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import type { Hash } from "viem";
+import type { Hash, WalletClient } from "viem";
 import type { CheckoutState, CheckoutStatus } from "../checkout.js";
 import { networkName, transactionUrl } from "../chains.js";
 import { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "../format.js";
 import { quoteTransfer } from "../payment.js";
 import type { ClientQuote } from "../quote.js";
-import { WalletError, payWithWallet, watchWallets, type Wallet } from "../wallet.js";
+import {
+  WalletError,
+  payWithWallet,
+  watchWallets,
+  type EthereumProvider,
+  type Wallet,
+} from "../wallet.js";
 import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
 import { QrCode } from "./QrCode.js";
 import { useCheckout } from "./useCheckout.js";
@@ -30,6 +36,9 @@ export interface CheckoutProps {
   className?: string;
   /** The wallet button's label; default "Pay with crypto". */
   buttonText?: string;
+  /** Your page's connected wallet, for example wagmi's `useWalletClient().data`. When set, the
+   * wallet tab pays with it and its account instead of listing the browser's wallets. */
+  walletClient?: WalletClient | undefined;
 }
 
 type Method = "wallet" | "qr" | "manual";
@@ -51,6 +60,7 @@ export function Checkout({
   pollInterval,
   className,
   buttonText = "Pay with crypto",
+  walletClient,
 }: CheckoutProps) {
   const { status, quote, error, refresh } = useCheckout({
     clientSecret,
@@ -107,6 +117,7 @@ export function Checkout({
         <PaymentOptions
           quote={quote}
           buttonText={buttonText}
+          walletClient={walletClient}
           now={now}
           onSent={(hash) => {
             setTxHash(hash);
@@ -195,11 +206,13 @@ function PaymentOptions({
   quote,
   now,
   buttonText,
+  walletClient,
   onSent,
 }: {
   quote: ClientQuote;
   now: number;
   buttonText: string;
+  walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
 }) {
   const [method, setMethod] = useState<Method>("wallet");
@@ -261,7 +274,14 @@ function PaymentOptions({
         aria-labelledby={`${id}-tab-${method}`}
         tabIndex={0}
       >
-        {method === "wallet" && <WalletPanel quote={quote} buttonText={buttonText} onSent={onSent} />}
+        {method === "wallet" && (
+          <WalletPanel
+            quote={quote}
+            buttonText={buttonText}
+            walletClient={walletClient}
+            onSent={onSent}
+          />
+        )}
         {method === "qr" && (
           <div className="pp-qr-panel">
             <QrCode value={quote.payment_uri} label={`Payment request for ${amount}`} />
@@ -285,20 +305,29 @@ type WalletStep =
 function WalletPanel({
   quote,
   buttonText,
+  walletClient,
   onSent,
 }: {
   quote: ClientQuote;
   buttonText: string;
+  walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
 }) {
-  const [wallets, setWallets] = useState<Wallet[]>([]);
+  const [discovered, setDiscovered] = useState<Wallet[]>([]);
   const [step, setStep] = useState<WalletStep>({ kind: "idle" });
-  useEffect(() => watchWallets(setWallets), []);
+  useEffect(
+    () => (walletClient === undefined ? watchWallets(setDiscovered) : undefined),
+    [walletClient],
+  );
+  const wallets: { id: string; name: string; icon: string; wallet: WalletClient | EthereumProvider }[] =
+    walletClient === undefined
+      ? discovered.map(({ info: { uuid, name, icon }, provider }) => ({ id: uuid, name, icon, wallet: provider }))
+      : [{ id: "client", name: "your wallet", icon: "", wallet: walletClient }];
 
-  const pay = async (wallet: Wallet) => {
-    setStep({ kind: "pending", wallet: wallet.info.name });
+  const pay = async ({ name, wallet }: (typeof wallets)[number]) => {
+    setStep({ kind: "pending", wallet: name });
     try {
-      onSent(await payWithWallet(wallet.provider, quote));
+      onSent(await payWithWallet(wallet, quote));
       setStep({ kind: "idle" });
     } catch (error) {
       setStep({
@@ -318,18 +347,18 @@ function WalletPanel({
   }
   return (
     <div className="pp-wallets">
-      {wallets.map((wallet) => (
+      {wallets.map((choice) => (
         <button
-          key={wallet.info.uuid}
+          key={choice.id}
           type="button"
           className="pp-button"
           disabled={step.kind === "pending"}
-          onClick={() => void pay(wallet)}
-          aria-label={`${buttonText} (${wallet.info.name})`}
+          onClick={() => void pay(choice)}
+          aria-label={walletClient === undefined ? `${buttonText} (${choice.name})` : buttonText}
         >
-          {wallet.info.icon !== "" && <img src={wallet.info.icon} alt="" />}
+          {choice.icon !== "" && <img src={choice.icon} alt="" />}
           <span>{buttonText}</span>
-          <span className="pp-wallet-name">{wallet.info.name}</span>
+          {walletClient === undefined && <span className="pp-wallet-name">{choice.name}</span>}
         </button>
       ))}
       <p

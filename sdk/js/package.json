@@ -57,6 +57,7 @@
     "check": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build"
   },
   "dependencies": {
+    "mipd": "^0.0.7",
     "uqr": "^0.1.3"
   },
   "peerDependencies": {

@@ -1,7 +1,11 @@
+import { createStore } from "mipd";
 import {
+  BaseError,
   createWalletClient,
   custom,
   erc20Abi,
+  SwitchChainError,
+  UserRejectedRequestError,
   type Hash,
   type WalletClient,
 } from "viem";
@@ -31,57 +35,52 @@ export interface Wallet {
 /** The legacy `window.ethereum` provider, offered when no wallet announces itself (EIP-6963). */
 export const INJECTED_WALLET_UUID = "injected";
 
-interface AnnounceProviderEvent extends Event {
-  detail?: { info?: Partial<WalletInfo>; provider?: EthereumProvider };
-}
-
 /**
- * Discovers browser wallets with EIP-6963, falling back to `window.ethereum`, and calls `onChange`
- * with the current list whenever a wallet announces itself. Returns the function that stops
- * listening.
+ * Discovers browser wallets with EIP-6963 (through mipd's store), falling back to
+ * `window.ethereum`, and calls `onChange` with the current list whenever a wallet announces
+ * itself. Returns the function that stops listening.
  */
 export function watchWallets(onChange: (wallets: Wallet[]) => void): () => void {
   if (typeof window === "undefined") {
     onChange([]);
     return () => undefined;
   }
-  const announced = new Map<string, Wallet>();
-  const emit = () => {
-    const wallets = [...announced.values()];
-    const injected = (window as { ethereum?: EthereumProvider }).ethereum;
-    if (wallets.length === 0 && injected !== undefined) {
-      wallets.push({
-        info: { uuid: INJECTED_WALLET_UUID, name: "Browser wallet", icon: "", rdns: "" },
-        provider: injected,
-      });
-    }
-    onChange(wallets);
+  const store = createStore();
+  const unsubscribe = store.subscribe((details) => onChange(walletsFrom(details)), {
+    emitImmediately: true,
+  });
+  return () => {
+    unsubscribe();
+    store.destroy();
   };
-  const onAnnounce = (event: Event) => {
-    const detail = (event as AnnounceProviderEvent).detail;
-    const info = detail?.info;
-    if (
-      detail?.provider === undefined ||
-      typeof info?.uuid !== "string" ||
-      typeof info.name !== "string"
-    ) {
-      return;
+}
+
+type Announcement = { info?: Partial<WalletInfo>; provider?: unknown };
+
+/** Announcements are untrusted page events: keep well-formed ones, and only data-URI icons. */
+function walletsFrom(announcements: readonly Announcement[]): Wallet[] {
+  const wallets: Wallet[] = [];
+  for (const { info, provider } of announcements) {
+    if (!isProvider(provider) || typeof info?.uuid !== "string" || typeof info.name !== "string") {
+      continue;
     }
-    announced.set(info.uuid, {
-      info: {
-        uuid: info.uuid,
-        name: info.name,
-        icon: typeof info.icon === "string" && info.icon.startsWith("data:image/") ? info.icon : "",
-        rdns: typeof info.rdns === "string" ? info.rdns : "",
-      },
-      provider: detail.provider,
+    const icon = typeof info.icon === "string" && info.icon.startsWith("data:image/") ? info.icon : "";
+    const rdns = typeof info.rdns === "string" ? info.rdns : "";
+    wallets.push({ info: { uuid: info.uuid, name: info.name, icon, rdns }, provider });
+  }
+  // Wallets that predate EIP-6963, such as some in-app mobile browsers, only set `window.ethereum`.
+  const injected = (window as { ethereum?: EthereumProvider }).ethereum;
+  if (wallets.length === 0 && injected !== undefined) {
+    wallets.push({
+      info: { uuid: INJECTED_WALLET_UUID, name: "Browser wallet", icon: "", rdns: "" },
+      provider: injected,
     });
-    emit();
-  };
-  window.addEventListener("eip6963:announceProvider", onAnnounce);
-  window.dispatchEvent(new Event("eip6963:requestProvider"));
-  emit();
-  return () => window.removeEventListener("eip6963:announceProvider", onAnnounce);
+  }
+  return wallets;
+}
+
+function isProvider(value: unknown): value is EthereumProvider {
+  return typeof (value as Partial<EthereumProvider> | null | undefined)?.request === "function";
 }
 
 export type WalletErrorCode = "rejected" | "no_account" | "wrong_chain" | "failed";
@@ -99,20 +98,25 @@ export class WalletError extends Error {
 }
 
 /**
- * Pays a quote from a browser wallet: connects, switches to (or adds) the quote's chain, and sends
- * the ERC-20 `transfer` that the quote's `payment_uri` states. Resolves with the transaction hash
- * once the wallet has broadcast it; the checkout's status follows the payment from there.
+ * Pays a quote from a wallet: a viem `WalletClient` (for example wagmi's `useWalletClient()`), or an
+ * EIP-1193 provider such as a discovered `Wallet`'s. Connects (unless the client already has an
+ * account), switches to (or adds) the quote's chain, and sends the ERC-20 `transfer` that the quote's
+ * `payment_uri` states. Resolves with the transaction hash once the wallet has broadcast it; the
+ * checkout's status follows the payment from there.
  */
-export async function payWithWallet(provider: EthereumProvider, quote: ClientQuote): Promise<Hash> {
+export async function payWithWallet(
+  wallet: WalletClient | EthereumProvider,
+  quote: ClientQuote,
+): Promise<Hash> {
   const transfer = quoteTransfer(quote);
-  const wallet = createWalletClient({ transport: custom(provider) });
+  const client = isWalletClient(wallet) ? wallet : createWalletClient({ transport: custom(wallet) });
   try {
-    const [account] = await wallet.requestAddresses();
+    const account = client.account ?? (await client.requestAddresses())[0];
     if (account === undefined) {
       throw new WalletError("no_account", "The wallet shared no account");
     }
-    await ensureChain(wallet, transfer.chainId);
-    return await wallet.writeContract({
+    await ensureChain(client, transfer.chainId);
+    return await client.writeContract({
       account,
       chain: knownChain(transfer.chainId) ?? null,
       address: transfer.token,
@@ -124,11 +128,15 @@ export async function payWithWallet(provider: EthereumProvider, quote: ClientQuo
     if (error instanceof WalletError) {
       throw error;
     }
-    if (hasCode(error, 4001)) {
+    if (isRejection(error)) {
       throw new WalletError("rejected", "The request was rejected in the wallet", { cause: error });
     }
     throw new WalletError("failed", "The wallet could not send the payment", { cause: error });
   }
+}
+
+function isWalletClient(wallet: WalletClient | EthereumProvider): wallet is WalletClient {
+  return "writeContract" in wallet;
 }
 
 async function ensureChain(wallet: WalletClient, chainId: number): Promise<void> {
@@ -138,10 +146,9 @@ async function ensureChain(wallet: WalletClient, chainId: number): Promise<void>
   try {
     await wallet.switchChain({ id: chainId });
   } catch (error) {
-    // 4902: the wallet does not know the chain yet.
     const chain = knownChain(chainId);
-    if (!hasCode(error, 4902) || chain === undefined) {
-      throw hasCode(error, 4001)
+    if (!isUnknownChain(error) || chain === undefined) {
+      throw isRejection(error)
         ? error
         : new WalletError("wrong_chain", `Switch your wallet to ${networkName(chainId)}`, {
             cause: error,
@@ -157,19 +164,18 @@ async function ensureChain(wallet: WalletClient, chainId: number): Promise<void>
   }
 }
 
-/** Whether an error or any of its causes carries an EIP-1193 error code; some mobile wallets nest
- * the original error under `data.originalError`. */
-function hasCode(error: unknown, code: number): boolean {
-  for (let current = error; typeof current === "object" && current !== null; ) {
-    const value = current as { code?: unknown; cause?: unknown; data?: { originalError?: unknown } };
-    if (value.code === code) {
-      return true;
-    }
-    const nested = value.data?.originalError;
-    if (typeof nested === "object" && nested !== null && hasCode(nested, code)) {
-      return true;
-    }
-    current = value.cause;
-  }
-  return false;
+function isRejection(error: unknown): boolean {
+  return error instanceof BaseError && error.walk((e) => e instanceof UserRejectedRequestError) !== null;
+}
+
+/** Whether the wallet does not know the chain (4902). MetaMask Mobile nests that code in an internal
+ * error's `data.originalError`, which wagmi's injected connector also unwraps. */
+function isUnknownChain(error: unknown): boolean {
+  return (
+    error instanceof BaseError &&
+    error.walk((e) => {
+      const nested = (e as { data?: { originalError?: { code?: unknown } } } | null)?.data;
+      return e instanceof SwitchChainError || nested?.originalError?.code === SwitchChainError.code;
+    }) !== null
+  );
 }

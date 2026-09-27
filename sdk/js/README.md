@@ -11,8 +11,11 @@ Python SDK (`phala-pay`) and fulfils from the signed `deposit.credited` webhook.
 npm install @phala/pay viem
 ```
 
-Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Nothing else:
-wallets are found with EIP-6963 (with a `window.ethereum` fallback), not wagmi or WalletConnect.
+Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Browser wallets are
+found with EIP-6963 through [mipd](https://github.com/wevm/mipd), wagmi's discovery store (with a
+`window.ethereum` fallback for wallets that do not announce themselves). If your page already
+connects a wallet with wagmi, RainbowKit, ConnectKit, or AppKit, pass it in instead; see
+[Your own wallet connection](#your-own-wallet-connection).
 
 ## Quickstart
 
@@ -68,6 +71,29 @@ payer who is waiting that finality takes about 15 minutes and the credit arrives
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's.
+
+### Your own wallet connection
+
+By default the wallet tab lists the browser's wallets. If your page already connects one, pass its
+viem `WalletClient` as `walletClient`: the wallet tab then pays with that client and its account
+(switching its chain to the quote's) and lists nothing else. With wagmi, including RainbowKit,
+ConnectKit, and AppKit, that is `useWalletClient()`:
+
+```tsx
+"use client";
+import { Checkout } from "@phala/pay/react";
+import { useWalletClient } from "wagmi";
+
+export function TopUp({ clientSecret }: { clientSecret: string }) {
+  const { data: walletClient } = useWalletClient();
+  return (
+    <Checkout clientSecret={clientSecret} apiBase="https://pay.example.com" walletClient={walletClient} />
+  );
+}
+```
+
+While no wallet is connected (`walletClient` is `undefined`), the tab lists the browser's wallets
+as usual. The QR code and manual tabs do not change.
 
 ## Appearance
 
@@ -131,7 +157,9 @@ unsubscribe();
 checkout.destroy();
 ```
 
-`payWithWallet` connects, switches the wallet to the quote's chain (adding Ethereum, Sepolia,
+`payWithWallet` takes a discovered wallet's EIP-1193 provider or a viem `WalletClient` (such as
+wagmi's `useWalletClient()` or `getWalletClient(config)`; its account is used without asking to
+connect again). It connects, switches the wallet to the quote's chain (adding Ethereum, Sepolia,
 Base, or Base Sepolia when the wallet lacks it), and sends the ERC-20 `transfer` stated by the
 quote's `payment_uri`, after checking that it pays exactly `amount_atomic` to `address`.
 
@@ -145,7 +173,8 @@ pnpm run e2e:docker  # the same, with Chromium from Playwright's image (as CI ru
 ```
 
 The end-to-end tests start Anvil as Sepolia, deploy a test token, and pay a quote from a mocked
-EIP-6963 wallet backed by the node, then decode the QR code and exercise the manual details.
+EIP-6963 wallet backed by the node (and again through a viem `WalletClient` passed as
+`walletClient`), then decode the QR code and exercise the manual details.
 
 ## Releases
 
