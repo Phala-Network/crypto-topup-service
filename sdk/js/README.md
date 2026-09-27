@@ -126,6 +126,7 @@ quote's `payment_uri`, after checking that it pays exactly `amount_atomic` to `a
 pnpm install
 pnpm run check   # typecheck, lint, unit tests, build
 pnpm run e2e     # Playwright against Anvil; needs Foundry (anvil, forge) on PATH
+pnpm run e2e:docker  # the same, with Chromium from Playwright's image (as CI runs it)
 ```
 
 The end-to-end tests start Anvil as Sepolia, deploy a test token, and pay a quote from a mocked

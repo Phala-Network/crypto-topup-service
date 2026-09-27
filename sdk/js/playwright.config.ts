@@ -1,6 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const PORT = 5179;
+// Set by e2e/docker.sh: the browser runs in Playwright's image instead of on this host.
+const wsEndpoint = process.env["PLAYWRIGHT_WS_ENDPOINT"];
 
 export default defineConfig({
   testDir: "e2e",
@@ -12,6 +14,7 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: "retain-on-failure",
+    ...(wsEndpoint === undefined ? {} : { connectOptions: { wsEndpoint } }),
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {

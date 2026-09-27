@@ -108,8 +108,9 @@ jobs:
       - uses: ./.github/actions/sdk-js
       - name: Typecheck, lint, unit tests, and build
         run: pnpm run check
+      # Chromium runs in Playwright's image: the runner lacks its system libraries.
       - name: End-to-end tests on Anvil
-        run: pnpm run e2e
+        run: pnpm run e2e:docker
       - name: Keep the Playwright report of a failed run
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,10 +1,11 @@
 name: JavaScript SDK toolchain
 description: >-
   Installs Node.js 24, the pnpm version named by sdk/js/package.json, and the locked dependencies of
-  sdk/js; with `e2e`, also Foundry (anvil, forge) and Playwright's Chromium for the end-to-end tests.
+  sdk/js; with `e2e`, also Foundry (anvil, forge) for the end-to-end tests, whose browser runs in
+  Playwright's image (sdk/js/e2e/docker.sh).
 inputs:
   e2e:
-    description: Install Foundry and Playwright's Chromium
+    description: Install Foundry
     required: false
     default: "true"
 runs:
@@ -26,9 +27,3 @@ runs:
       uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
       with:
         version: v1.8.3
-    - name: Install Playwright's Chromium
-      if: inputs.e2e == 'true'
-      shell: bash
-      working-directory: sdk/js
-      # System libraries need root, which only GitHub-hosted runners grant.
-      run: pnpm exec playwright install ${{ runner.environment == 'github-hosted' && '--with-deps' || '' }} chromium
