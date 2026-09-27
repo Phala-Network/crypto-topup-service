@@ -28,9 +28,9 @@ Foundry. There, database and Anvil tests fail instead of skipping: the test help
 
 ## Branches and pull requests
 
-Create one branch per work package from `main`, named `wp/<id>-<slug>`, for example
-`wp/b1-workspace-scaffold`. Keep the pull request scoped to that work package and cite the
-implemented sections of `docs/architecture.md` and `docs/plan.md`.
+Create one branch per change from `main`, named `<type>/<slug>` after the Conventional Commits
+type, for example `fix/flusher-stall`. Keep the pull request scoped to that change and cite the
+sections of `docs/architecture.md` it implements.
 
 ## Lint policy
 

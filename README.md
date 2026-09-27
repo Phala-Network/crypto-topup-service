@@ -39,7 +39,7 @@ balance, debt, entitlements, and billing policy.
 - [Design](docs/architecture.md) — goal, trust model, schema, state machine, contracts, deployment, policies, acceptance
 - [First route profile](examples/phala-cloud-pha.yaml)
 - [Integration guide](docs/integration.md) — quickstart, quotes, webhooks and fulfillment, refunds, testing, reference
-- [Delivery plan](docs/plan.md) — lanes, work packages, gates, agent rules; no dates
+- [Plan to production](docs/plan.md) — what is done, what remains, and who owns it
 
 ## Database roles
 
@@ -78,9 +78,8 @@ adopts the product's answer for every deposit at or beyond `cleared`. Run it onl
 
 ## Status
 
-The service, contracts, and operations tooling in [the plan](docs/plan.md) are implemented on
-`main`. Nothing is deployed to mainnet: the pilot is gated on G2 (product integration and policy
-sign-off). Production policy values are set by finance, risk, and operations at pilot time.
+Staging runs on Sepolia at `https://pay-api-staging.phala.com`. Nothing is deployed to mainnet:
+[the plan to production](docs/plan.md) lists the remaining integration, inputs, and reviews.
 
 ## License
 
