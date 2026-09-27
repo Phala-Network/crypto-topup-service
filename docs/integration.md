@@ -27,15 +27,17 @@ same.
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install.** Once released: `uv add phala-pay` and `npm install @phala/pay viem`.
-Until then, from this repository. pnpm builds the package on install only for an allowed git
-dependency: the first `pnpm add` stops and prints an `allowBuilds` entry for the exact commit; add
-it to `pnpm-workspace.yaml` and run the command again (sdk/js/README.md):
+**Install.** `@phala/pay` is on npm (0.1.2); `phala-pay` installs from this repository until its
+first PyPI release:
 
 ```sh
+npm install @phala/pay viem
 uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
-pnpm add "github:Phala-Network/phala-pay#main&path:/sdk/js"
 ```
+
+Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to uv, for
+example) and fail to find the package; install it with `uv` or `pip` directly, and switch to
+`phala-pay` from PyPI once it is released.
 
 **Configure.** Create the product key and send the printed public key to the operator (§5.1),
 and pin the service's settlement key from its attestation (§5.3):
@@ -79,7 +81,8 @@ import { Checkout } from "@phala/pay/react";
 ```
 
 Its wallet button reads "Pay with crypto" (`buttonText`); `appearance` themes it to match the
-page. Without React, `new PhalaPay({ apiBase }).checkout(clientSecret)` gives the same live status.
+page, and `onChange` reports every status change (§1.2). Without React,
+`new PhalaPay({ apiBase }).checkout(clientSecret)` gives the same live status.
 
 **3. Webhook: verify and fulfil once.** Credit `amount` cents to `account_id` once per deposit id,
 commit, then answer `2xx`; `onSuccess` in the browser is display only (§2).
@@ -145,9 +148,11 @@ sequenceDiagram
 
 ### 1.2 Creating and showing a quote
 
-Read `GET /v1/config` for what the page shows instead of hardcoding: the payable assets (chain,
-asset code, contract, decimals), the minimum `amount`, the maximum deposit, the refund floor, the
-quote window, spread, and tolerance, and the typical finality time. Quotes are priced at
+Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead of hardcoding:
+the payable assets (chain, asset code, contract, decimals), the minimum `amount` in cents
+(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), the per-account cap on
+open quotes in cents (`max_open_amount_per_account`), the refund floor, the quote window, spread,
+and tolerance, and the typical finality time. Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is the service's
 and never reduces a credit.
@@ -188,6 +193,18 @@ and never reduces a credit.
 - A quote above the remaining open exposure fails with `409 exposure_cap_exceeded`; its message
   states what is left.
 
+Validate the amount against `/v1/config` before creating the quote, and map a refused creation
+(`ApiError.code` in Python) to a message the user can act on; never show the service's message
+verbatim:
+
+| `code` | Tell the user |
+|---|---|
+| `amount_too_small` (400) | The minimum top-up is `min_amount`. |
+| `amount_too_large` (400) | The amount is above the maximum for one payment; split it. |
+| `exposure_cap_exceeded` (409) | Too many unpaid quotes are open; pay or wait for one to expire, or enter a smaller amount. |
+| `paused`, `chain_frozen` (409) | Crypto top-ups are temporarily unavailable. |
+| `unavailable` (503), `rate_limit` (429) | Try again in a minute. |
+
 Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 [architecture §9](architecture.md#9-quotes).
 
@@ -207,6 +224,36 @@ screened), `credited`, or `rejected` (contact support). It carries no account, p
 or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
 repeat with the same `Idempotency-Key` returns the same quote with a new secret, and the earlier
 one stops working. `@phala/pay`'s `<Checkout>` is this page.
+
+**Resume a checkout.** Keep the quote's `client_secret` in the browser (for example
+`localStorage`, keyed by the signed-in account) until the checkout reaches `credited`, `expired`,
+or `canceled`, or reports `error` (the secret was replaced by a repeat create). A payer who closes
+the tab after paying then reopens the page on the same quote's progress instead of an empty form,
+and does not pay twice.
+
+**Drive the page from the checkout.** `<Checkout onChange>` is called once per status change with
+`{ status, quote, error }`, like Stripe Elements' `onChange`. Hide your own "new payment" or
+amount controls while the status is `seen` or `confirming`, so that a payer waiting for finality
+does not start a second payment. While waiting, tell the payer that finality takes about 15
+minutes (`typical_finality_seconds`), that they can close the page, and that the credit arrives
+automatically.
+
+**Theme it.** `appearance` takes a `theme` (`light` or `dark`) and `variables` named as in Stripe's
+Appearance API: `colorPrimary`, `accessibleColorOnColorPrimary` (text on the primary color; set a
+dark one with a light brand color), `colorBackground`, `colorText`, `colorTextSecondary`,
+`colorBorder`, `colorDanger`, `colorSuccess`, `fontFamily`, `borderRadius`
+([sdk/js/README.md](../sdk/js/README.md#appearance)).
+
+```tsx
+<Checkout
+  clientSecret={clientSecret}
+  apiBase={PHALA_PAY_API_BASE}
+  appearance={{ theme: "dark", variables: { colorPrimary: "#cdfa50", accessibleColorOnColorPrimary: "#161616" } }}
+  onChange={({ status }) => setPaymentInFlight(status === "seen" || status === "confirming")}
+  onSuccess={() => { forgetClientSecret(account.id); router.refresh(); }}
+  onExpire={() => forgetClientSecret(account.id)}
+/>
+```
 
 ### 1.3 Payment outcomes
 
@@ -287,7 +334,7 @@ def fulfill(credit: CreditedDeposit) -> None:
     with db.transaction():
         if orders.exists(provider_order_id=credit.fulfillment_key):  # "dep_…", unique
             return  # already done; a differing amount only follows a service restore: report it
-        if refuses(credit):  # closed or suspended workspace, your own caps
+        if refuses(credit):  # unknown, closed, or suspended workspace; your own caps
             orders.insert(credit.fulfillment_key, status="held")
             return  # support later requests a refund (§2.4)
         orders.insert(credit.fulfillment_key, status="paid")
@@ -318,9 +365,9 @@ events, and the event follows the `credited` commit within a second.
 
 ### 2.4 Refusing a credit
 
-The service never asks whether you accept a deposit. To refuse one (a closed or suspended
-workspace, your own caps), record it as held and answer `2xx`; when support has a destination
-address from the user, request its refund with `POST /v1/refunds` (§3).
+The service never asks whether you accept a deposit. To refuse one (an account you do not know, a
+closed or suspended workspace, your own caps), record it as held and answer `2xx`; when support
+has a destination address from the user, an operator refunds it from your admin (§3).
 Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
 stop crediting an account before deposits arrive, pause its `settlement` scope
 (the operator's `POST /v1/admin/products/phala-cloud/accounts/{account_id}/pause`): its deposits
@@ -380,13 +427,42 @@ the service's public key.
 Every object names its `account_id`. Before finality nothing is sent: a checkout page shows the
 payment from the quote's `payment` (or the payer's `payment_status` read by `client_secret`).
 
+### 2.7 Receipts
+
+Recommended if you already bill with Stripe, and not required: record each credited deposit in
+Stripe, so the customer gets the same invoice and receipt as for a card top-up.
+
+- On `deposit.credited`, after the credit commits, create an invoice for the customer with one
+  line of `amount` cents, finalize it, and mark it paid with
+  [`Invoice.pay(paid_out_of_band=True)`](https://docs.stripe.com/api/invoices/pay): no charge
+  is made. Make the line's price tax-inclusive
+  ([`tax_behavior: "inclusive"`](https://docs.stripe.com/tax/products-prices-tax-codes-tax-behavior)),
+  so the invoice total equals the credited amount.
+- Do it once per `dep_` id. Store the invoice id against the deposit right after creating it,
+  and resume from the stored id (finalize, then pay) instead of creating another. Stripe
+  idempotency keys alone are not enough: Stripe
+  [keeps them 24 hours](https://docs.stripe.com/api/idempotent_requests), and a retry can come
+  later.
+- On `deposit.refunded`, issue a
+  [credit note](https://docs.stripe.com/api/credit_notes/create) on that invoice with
+  `out_of_band_amount` for the reversed credit, once per refund.
+- Do this from a queue, not inside the webhook's `2xx` path: a Stripe outage must not hold a
+  credit (§2.3, obligation 3).
+
 ## 3. Refunds
 
 A rejected deposit is refundable unless the reason is `sanctioned` or its amount is below the
 route's `min_refund_atomic` (in `/v1/config`). A credited deposit is refunded only when you ask,
-for a credit you did not apply or have reversed, such as a held credit (§2.4;
-[architecture §15](architecture.md#15-operating-policies)). Ask the user for a destination
-address they control (never default to `from_address`, which may be an exchange), then:
+for a credit you did not apply or reverse, such as a held credit (§2.4;
+[architecture §15](architecture.md#15-operating-policies)).
+
+Refunds are operator actions, as in Stripe's Dashboard: your support or finance staff start one
+from your own internal admin, whose backend holds the product signing key. Never offer a refund
+as a self-service action to the paying user: a crypto refund is irreversible, and a credited
+balance may already be spent. Request it by deposit id, not through the user's account, so that a
+payment to an account that no longer exists (a deleted workspace, a mistyped id) is refundable
+too. Ask the user for a destination address they control (never default to `from_address`,
+which may be an exchange), then:
 
 ```http
 POST /v1/refunds
@@ -407,6 +483,8 @@ Idempotency-Key: "…"
   `amount_refunded_atomic` (and `refunded`, once whole) shows it. `GET /v1/refunds/{id}` reads it.
 - An ineligible deposit is `409 deposit_not_refundable`; a paused `refunds` scope is
   `409 paused`. The same `Idempotency-Key` with the same parameters returns the same refund.
+- When `deposit.refunded` arrives, reverse the credit you applied for that deposit (a held
+  credit was never applied), once per event id.
 
 ## 4. Testing and go-live
 
@@ -465,10 +543,17 @@ finality takes about 15 minutes per deposit.
 - [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
       state.
 - [ ] Quote, waiting, history, and exception UI per
-      [architecture §12](architecture.md#customer-experience-obligations-product-ui); refund
-      request flow with a user-supplied address, also for held credits.
-- [ ] Alerts on your side: webhook verification failures, a repeated `deposit.credited` with a
-      different amount, and held credits waiting for a refund.
+      [architecture §12](architecture.md#customer-experience-obligations-product-ui); amounts
+      validated against `/v1/config` and quote-creation errors mapped to messages (§1.2); a
+      checkout resumes after a reload; "new payment" hidden while a payment is `seen` or
+      `confirming`.
+- [ ] Refund path in your internal admin, by deposit id with a user-supplied address, also for
+      held credits and unknown accounts; `deposit.refunded` reverses the credit (§3).
+- [ ] Alerts on your side: webhook signature failures (rate-limited, for example through error
+      tracking rather than paging, since anyone can post to the URL), a repeated deposit id with a
+      different amount, payments to unknown accounts, and held credits waiting for a refund.
+- [ ] Receipts, if you issue them with Stripe: one out-of-band paid invoice per deposit, and a
+      credit note per refund (§2.7).
 - [ ] Optional hardening decided: caps, `GET /v1/deposits/{id}` check, own-node log verification.
 - [ ] One quote-first deposit credited end to end on staging.
 

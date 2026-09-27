@@ -14,21 +14,6 @@ npm install @phala/pay viem
 Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Nothing else:
 wallets are found with EIP-6963 (with a `window.ethereum` fallback), not wagmi or WalletConnect.
 
-Until the first npm release, install from the repository with pnpm. The package builds itself
-on install, which pnpm allows only for listed git dependencies: the first `pnpm add` stops and
-prints an `allowBuilds` entry naming the exact commit; add it to `pnpm-workspace.yaml` and run the
-same command again.
-
-```sh
-pnpm add "github:Phala-Network/phala-pay#main&path:/sdk/js"
-```
-
-```yaml
-# pnpm-workspace.yaml: the entry pnpm printed
-allowBuilds:
-  "@phala/pay@https://codeload.github.com/Phala-Network/phala-pay/tar.gz/<commit>#path:/sdk/js": true
-```
-
 ## Quickstart
 
 1. Your backend creates a quote (`POST /v1/quotes`, signed with the product key) and returns only its
@@ -76,6 +61,10 @@ status. Keep the client secret out of logs and URLs you share; anyone holding it
 `onChange(state)` is called once per status change with `{ status, quote, error }`, like Stripe
 Elements' `onChange`, for example to hide your own "new payment" control while a payment is
 `seen` or `confirming`.
+
+To resume after a reload, keep the client secret in the browser (for example `localStorage`, per
+signed-in account) until the status is `credited`, `expired`, `canceled`, or `error`. Tell a
+payer who is waiting that finality takes about 15 minutes and the credit arrives on its own.
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's.

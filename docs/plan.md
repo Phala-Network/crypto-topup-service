@@ -15,7 +15,7 @@ each item. The design is [architecture.md](architecture.md); integrators read
 - **Paths verified on staging** (2026-09-27): exact payment, underpayment, late payment,
   unsupported token, over the deposit limit with refund, product hold with refund, and the demo
   checkout.
-- **SDKs**: `@phala/pay` 0.1.0 on npm (provenance, trusted publisher); `phala-pay` installs from
+- **SDKs**: `@phala/pay` 0.1.2 on npm (provenance, trusted publisher); `phala-pay` installs from
   GitHub until its first PyPI release.
 - **Demo**: the staging reference product serves the Phala Pay demo at `/demo/`.
 
@@ -24,8 +24,8 @@ each item. The design is [architecture.md](architecture.md); integrators read
 ### Integration
 
 - [ ] Phala Cloud: create quotes, render `<Checkout>`, fulfill `deposit.credited` through the
-      existing Order and credit path (draft PR in phala-cloud-monorepo). Owner: engineering;
-      review: Phala Cloud team.
+      existing Order and credit path. A draft PR is open in the Phala Cloud monorepo, pending the
+      `phala-pay` PyPI release and a staging run. Owner: engineering; review: Phala Cloud team.
 - [ ] Register Phala Cloud as the production product (`PUT /v1/admin/products/phala-cloud`:
       webhook URL, product public key). Owner: operator.
 
