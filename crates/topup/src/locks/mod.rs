@@ -284,6 +284,7 @@ pub async fn create(
     let address = forwarder_address(
         route.chain.contracts.forwarder_factory,
         route.chain.contracts.implementation,
+        route.chain.contracts.treasury,
         salt,
     );
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only

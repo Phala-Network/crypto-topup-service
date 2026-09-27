@@ -24,9 +24,10 @@ class PhalaPay:
 
     `key_id` is `{product}/v1`; the key is the product's ed25519 seed, from `key_file` (64 hex
     characters, as `topup-sdk keygen` writes it) or `seed` (32 bytes, or 64 hex characters).
-    `forwarder`, the `(factory, implementation)` pair pinned from the attested deployment, makes
-    `quotes.create` and `quotes.retrieve` recompute every open quote's address and raise
-    `AddressMismatchError` rather than return one the product did not derive.
+    `forwarder`, the `(factory, implementation, treasury)` triple pinned from the attested
+    deployment and the product's treasury, makes `quotes.create` and `quotes.retrieve` recompute
+    every open quote's address and raise `AddressMismatchError` rather than return one the
+    product did not derive.
 
     Requests that fail with a transport error, `429`, or `5xx` are retried with backoff; `POST`s
     reuse one `Idempotency-Key` across retries, so a retry never creates a second object.
@@ -39,7 +40,7 @@ class PhalaPay:
         *,
         key_file: str | Path | None = None,
         seed: bytes | str | None = None,
-        forwarder: tuple[str, str] | None = None,
+        forwarder: tuple[str, str, str] | None = None,
         timeout: float = 15.0,
         max_attempts: int = 4,
         transport: httpx.BaseTransport | None = None,

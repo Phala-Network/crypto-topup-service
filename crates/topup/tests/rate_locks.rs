@@ -139,6 +139,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let expected = topup_core::address::forwarder_address(
             route.chain.contracts.forwarder_factory,
             route.chain.contracts.implementation,
+            route.chain.contracts.treasury,
             salt,
         );
         ensure!(created["address"] == format!("{expected:#x}"));

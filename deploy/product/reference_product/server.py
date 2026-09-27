@@ -355,7 +355,10 @@ def create_quote(
 
 def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
     return forwarder_address(
-        config.factory, config.implementation, lock_salt(config.product_slug, team, quote_id)
+        config.factory,
+        config.implementation,
+        config.treasury,
+        lock_salt(config.product_slug, team, quote_id),
     )
 
 

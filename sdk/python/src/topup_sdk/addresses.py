@@ -14,7 +14,10 @@ from .ids import DEPOSIT, object_id
 
 DEPOSIT_NAMESPACE = uuid.UUID("d55bab89-f656-5796-a6a2-bddfa1dd9631")
 
-_CLONE_CREATION_PREFIX = bytes.fromhex("3d602d80600a3d3981f3")
+# OpenZeppelin 5.x `Clones` with immutable arguments: `PUSH2 <runtime length>`, a creation
+# header, the 45-byte EIP-1167 proxy, then the arguments (here the 20 treasury bytes).
+_CLONE_RUNTIME_LENGTH = (0x2D + 20).to_bytes(2, "big")
+_CLONE_CREATION_SUFFIX = bytes.fromhex("3d81600a3d39f3")
 _CLONE_RUNTIME_PREFIX = bytes.fromhex("363d3d373d3d3d363d73")
 _CLONE_RUNTIME_SUFFIX = bytes.fromhex("5af43d82803e903d91602b57fd5bf3")
 
@@ -39,15 +42,20 @@ def lock_salt(product_slug: str, external_id: str, lock_ref: str) -> bytes:
     return keccak256(_abi_encode(product_slug, external_id, "lock", lock_ref))
 
 
-def forwarder_address(factory: str, implementation: str, salt: bytes) -> str:
-    """Predicts the OpenZeppelin EIP-1167 clone address deployed by `factory` with `salt`."""
+def forwarder_address(factory: str, implementation: str, treasury: str, salt: bytes) -> str:
+    """Predicts the forwarder `factory` deploys for `treasury` and `salt`: an EIP-1167 clone of
+    `implementation` whose only immutable argument is the treasury, so the address commits to
+    all four inputs (OpenZeppelin `Clones.predictDeterministicAddressWithImmutableArgs`)."""
     if len(salt) != 32:
         raise ValueError("salt must be 32 bytes")
     init_code = (
-        _CLONE_CREATION_PREFIX
+        b"\x61"
+        + _CLONE_RUNTIME_LENGTH
+        + _CLONE_CREATION_SUFFIX
         + _CLONE_RUNTIME_PREFIX
         + _address_bytes(implementation)
         + _CLONE_RUNTIME_SUFFIX
+        + _address_bytes(treasury)
     )
     preimage = b"\xff" + _address_bytes(factory) + salt + keccak256(init_code)
     return to_checksum_address(keccak256(preimage)[12:])

@@ -79,8 +79,8 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 
 Every request is signed with the product key (RFC 9421). Transport errors, `429`, and `5xx` are
 retried with backoff, reusing one `Idempotency-Key` per `POST`. Failures raise `ApiError` with the
-service's stable `code`, `error_type`, and `param`. With `forwarder=(factory, implementation)`
-pinned from the attested deployment, `quotes.create` and `quotes.retrieve` also recompute the
+service's stable `code`, `error_type`, and `param`. With `forwarder=(factory, implementation,
+treasury)` pinned from the attested deployment and the product's treasury, `quotes.create` and `quotes.retrieve` also recompute the
 deposit address and raise `AddressMismatchError` on a difference.
 
 Lower-level modules: `topup_sdk` (request signing and verification, address derivation,

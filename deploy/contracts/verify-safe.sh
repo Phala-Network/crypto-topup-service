@@ -26,12 +26,8 @@ MODULES_PAGE_SIZE=100
 
 load_expectations "$expectations"
 
-# Verify each approved Safe once, reporting every role it fills.
-mapfile -t safes_to_check < <(jq -c '
-    [{role: "admin", address: .admin}, {role: "treasury", address: .treasury}]
-    | group_by(.address | ascii_downcase)
-    | .[] | {address: .[0].address, roles: map(.role)}
-' "$expectations")
+# The factory has no admin: the treasury Safe is the only approved Safe to verify.
+mapfile -t safes_to_check < <(jq -c '{address: .treasury, roles: ["treasury"]}' "$expectations")
 
 reports="$(mktemp "${TMPDIR:-/tmp}/phala-pay-safe-report.XXXXXX")"
 trap 'rm -f "$reports"' EXIT

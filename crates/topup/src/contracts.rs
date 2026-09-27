@@ -17,20 +17,17 @@ use crate::routes::RouteSet;
 
 /// `ForwarderFactory` runtime code hash with its immutable words zeroed.
 const FACTORY_RUNTIME_TEMPLATE_HASH: B256 =
-    b256!("7abfec3082d6440476f52c9cc04b271dfe4b802e47feeb39f69670253523f0ee");
+    b256!("f367d23428e189bef80b8903d1f31453fcee4c31d75f57eb0df929df54561e23");
 
 /// Byte offsets of the 32-byte `implementation` words in `ForwarderFactory` runtime code.
-const FACTORY_IMPLEMENTATION_OFFSETS: &[usize] = &[303, 750, 1150];
+const FACTORY_IMPLEMENTATION_OFFSETS: &[usize] = &[83, 439, 565, 768];
 
 /// `Forwarder` runtime code hash with its immutable words zeroed.
 const FORWARDER_RUNTIME_TEMPLATE_HASH: B256 =
-    b256!("1fa01f51e22b763abd13dfc194dd43ee02355f68b534985877bf6b08de7e2029");
-
-/// Byte offsets of the 32-byte `treasury` words in `Forwarder` runtime code.
-const FORWARDER_TREASURY_OFFSETS: &[usize] = &[82, 356, 650, 783, 843];
+    b256!("c34523cf7740433498fe0e3a7ef27417b28fe06207095d5a2482afb2d442a435");
 
 /// Byte offsets of the 32-byte `factory` words in `Forwarder` runtime code.
-const FORWARDER_FACTORY_OFFSETS: &[usize] = &[207, 253];
+const FORWARDER_FACTORY_OFFSETS: &[usize] = &[208, 319];
 
 /// Runtime code hash of the canonical Multicall3, identical on Ethereum mainnet and Sepolia; a
 /// unit test keeps it equal to `deploy/contracts/multicall3.json`.
@@ -73,7 +70,9 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
 
 /// Compares one provider's view of the contracts with the route. The getters come first so a
 /// mismatch names the differing address; the code hashes then prove the immutables are the only
-/// difference from the audited build.
+/// difference from the audited build. The treasury is not in any contract: it is each clone's
+/// argument, so the sample `addressOf(treasury, salt)` proves the factory derives the route
+/// treasury's addresses as the service does.
 async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> {
     let contracts = &route.chain.contracts;
     let factory = contracts.forwarder_factory;
@@ -107,16 +106,6 @@ async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> 
             "factory implementation() is {actual:#x}, route expects {implementation:#x}"
         ));
     }
-    let treasury = client
-        .contract_address(implementation, ContractAddressGetter::Treasury)
-        .await
-        .map_err(read)?;
-    if treasury != contracts.treasury {
-        return Err(format!(
-            "implementation treasury() is {treasury:#x}, route expects {:#x}",
-            contracts.treasury
-        ));
-    }
     let owner = client
         .contract_address(implementation, ContractAddressGetter::Factory)
         .await
@@ -136,23 +125,21 @@ async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> 
     let implementation_code = client.code_at(implementation).await.map_err(read)?;
     verify_code(
         &implementation_code,
-        &[
-            (contracts.treasury, FORWARDER_TREASURY_OFFSETS),
-            (factory, FORWARDER_FACTORY_OFFSETS),
-        ],
+        &[(factory, FORWARDER_FACTORY_OFFSETS)],
         FORWARDER_RUNTIME_TEMPLATE_HASH,
     )
     .map_err(|error| {
         format!("implementation {implementation:#x} {error} of the Forwarder build")
     })?;
     let sample = client
-        .factory_addresses(factory, &[sample_salt()])
+        .factory_addresses(factory, contracts.treasury, &[sample_salt()])
         .await
         .map_err(read)?;
-    let expected = forwarder_address(factory, implementation, sample_salt());
+    let expected = forwarder_address(factory, implementation, contracts.treasury, sample_salt());
     if sample.as_slice() != [expected] {
         return Err(format!(
-            "factory addressOf(sample) is {sample:?}, local derivation gives {expected:#x}"
+            "factory addressOf(treasury, sample) is {sample:?}, local derivation gives \
+             {expected:#x}"
         ));
     }
     Ok(())
@@ -241,7 +228,6 @@ mod tests {
             offsets("ForwarderFactory", "implementation"),
             FACTORY_IMPLEMENTATION_OFFSETS
         );
-        assert_eq!(offsets("Forwarder", "treasury"), FORWARDER_TREASURY_OFFSETS);
         assert_eq!(offsets("Forwarder", "factory"), FORWARDER_FACTORY_OFFSETS);
     }
 

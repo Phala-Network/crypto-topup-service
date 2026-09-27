@@ -10,22 +10,16 @@ use anyhow::{Context, Result, ensure};
 use support::chain::{Anvil, forge_create, run_checked};
 use topup_core::route::RouteFile;
 
-const ADMIN_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 const TREASURY: &str = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc";
-const OTHER_TREASURY: &str = "0x90f79bf6eb2c4f870365e785982e1f101e93b906";
 const FIXTURE: &str = include_str!("fixtures/phala-cloud-pha.yaml");
 
 #[tokio::test]
-async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -> Result<()> {
+async fn run_refuses_to_start_when_the_contracts_differ_from_the_route_or_build() -> Result<()> {
     let Some(anvil) = Anvil::start_if_available(&[]).await? else {
         return Ok(());
     };
     let rpc_url = anvil.rpc_url.clone();
-    let factory = forge_create(
-        &rpc_url,
-        "src/ForwarderFactory.sol:ForwarderFactory",
-        &[ADMIN_ADDRESS, TREASURY],
-    )?;
+    let factory = forge_create(&rpc_url, "src/ForwarderFactory.sol:ForwarderFactory", &[])?;
     let implementation = implementation_of(&rpc_url, factory)?;
 
     let yaml = route_yaml(&anvil, factory, TREASURY);
@@ -92,8 +86,11 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
         .map_err(anyhow::Error::msg)
         .context("the canonical Multicall3 must pass again")?;
 
+    // `topup run` refuses a factory whose code is not the recorded build.
+    let original = cast(&["code", &format!("{factory:#x}"), "--rpc-url", &rpc_url])?;
+    set_code(&rpc_url, factory, &format!("{original}00"))?;
     let path = std::env::temp_dir().join(format!("topup-startup-{}.yaml", uuid::Uuid::new_v4()));
-    std::fs::write(&path, route_yaml(&anvil, factory, OTHER_TREASURY))?;
+    std::fs::write(&path, route_yaml(&anvil, factory, TREASURY))?;
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .args(["run", "--route"])
         .arg(&path)
@@ -117,8 +114,9 @@ async fn run_refuses_to_start_when_the_route_treasury_differs_from_the_chain() -
     );
     ensure!(!output.status.success(), "run must refuse to start: {logs}");
     ensure!(
-        logs.contains("on-chain contract check failed") && logs.contains("treasury()"),
-        "run must name the treasury mismatch: {logs}"
+        logs.contains("on-chain contract check failed")
+            && logs.contains("differs from the recorded code hash"),
+        "run must name the code mismatch: {logs}"
     );
     ensure!(
         !logs.contains("failed to connect to database"),

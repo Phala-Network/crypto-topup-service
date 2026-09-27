@@ -393,15 +393,17 @@ impl EvmClient {
             .await
     }
 
-    /// Reads deterministic forwarder addresses at the latest block through Multicall3.
+    /// Reads the deterministic forwarder addresses of `treasury` at the latest block through
+    /// Multicall3.
     pub async fn factory_addresses(
         &self,
         factory: Address,
+        treasury: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ChainError> {
         let calls = salts
             .iter()
-            .map(|salt| CallItem::<addressOfCall>::new(factory, encode_address_of(*salt)))
+            .map(|salt| CallItem::<addressOfCall>::new(factory, encode_address_of(treasury, *salt)))
             .collect();
         self.aggregate("addressOf multicall", calls, BlockId::latest())
             .await
@@ -1120,7 +1122,9 @@ mod tests {
             .token_balances(Address::ZERO, &addresses, BlockNumberOrTag::Number(7))
             .await;
         let natives = client.native_balances(&addresses[..6]).await;
-        let derived = client.factory_addresses(Address::ZERO, &salts).await;
+        let derived = client
+            .factory_addresses(Address::ZERO, Address::ZERO, &salts)
+            .await;
         server.abort();
 
         assert_eq!(tokens.expect("token balances"), vec![U256::from(1); count]);

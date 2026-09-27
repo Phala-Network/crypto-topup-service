@@ -5,41 +5,62 @@ import { Script } from "forge-std/Script.sol";
 
 import { ForwarderFactory } from "../src/ForwarderFactory.sol";
 
+/// Writes `test-vectors/create2.json`: forwarder addresses computed by the factory itself, which
+/// the Rust core and the Python SDK must reproduce.
 contract GenerateCreate2Vectors is Script {
     struct LockVector {
         string productSlug;
         string externalId;
         string lockRef;
+        address treasury;
         bytes32 salt;
         address predictedAddress;
     }
 
     address private constant DEPLOYER = 0x000000000000000000000000000000000000a11c;
-    address private constant ADMIN = 0x000000000000000000000000000000000000AD01;
     address private constant TREASURY = 0x0000000000000000000000000000000000007EA5;
+    address private constant OTHER_TREASURY = 0x936c1991f8dA9a919fa11b557a3514719f5A4504;
+    uint256 private constant SALT_COUNT = 5;
 
     function run() external returns (ForwarderFactory factory) {
         vm.startBroadcast(DEPLOYER);
-        factory = new ForwarderFactory(ADMIN, TREASURY);
+        factory = new ForwarderFactory();
         vm.stopBroadcast();
 
-        bytes32[] memory salts = new bytes32[](5);
-        address[] memory predicted = new address[](5);
-        for (uint256 i; i < salts.length; ++i) {
-            salts[i] = keccak256(abi.encode("crypto-topup-create2-vector", i));
-            predicted[i] = factory.addressOf(salts[i]);
+        // The same salts under two treasuries give different addresses.
+        address[2] memory treasuries = [TREASURY, OTHER_TREASURY];
+        string[] memory forwarders = new string[](SALT_COUNT * treasuries.length);
+        for (uint256 t; t < treasuries.length; ++t) {
+            for (uint256 i; i < SALT_COUNT; ++i) {
+                bytes32 salt = keccak256(abi.encode("crypto-topup-create2-vector", i));
+                uint256 index = t * SALT_COUNT + i;
+                string memory key = string.concat("forwarder-", vm.toString(index));
+                vm.serializeAddress(key, "treasury", treasuries[t]);
+                vm.serializeBytes32(key, "salt", salt);
+                forwarders[index] = vm.serializeAddress(
+                    key, "predicted_address", factory.addressOf(treasuries[t], salt)
+                );
+            }
         }
 
-        string memory objectKey = "create2";
-        vm.serializeAddress(objectKey, "factory", address(factory));
-        vm.serializeAddress(objectKey, "implementation", address(factory.implementation()));
-        vm.serializeBytes32(objectKey, "salts", salts);
-        string memory json = vm.serializeAddress(objectKey, "predictedAddresses", predicted);
-        string memory path = string.concat(vm.projectRoot(), "/test-vectors/create2.json");
-        vm.writeJson(json, path);
-
         LockVector[3] memory locks = _lockVectors(factory);
-        vm.writeJson(_lockJson(locks), path, ".lock");
+        string[] memory lockJson = new string[](locks.length);
+        for (uint256 i; i < locks.length; ++i) {
+            lockJson[i] = _lockEntryJson(locks[i], i);
+        }
+
+        string memory json = string.concat(
+            "{\"factory\":\"",
+            vm.toString(address(factory)),
+            "\",\"implementation\":\"",
+            vm.toString(address(factory.implementation())),
+            "\",\"forwarders\":",
+            _array(forwarders),
+            ",\"lock\":",
+            _array(lockJson),
+            "}"
+        );
+        vm.writeJson(json, string.concat(vm.projectRoot(), "/test-vectors/create2.json"));
     }
 
     function _lockVectors(ForwarderFactory factory)
@@ -47,10 +68,12 @@ contract GenerateCreate2Vectors is Script {
         view
         returns (LockVector[3] memory vectors)
     {
-        vectors[0] = _lock(factory, "phala-cloud", "invoice-2026-0001", "checkout-0001");
-        vectors[1] = _lock(factory, "builder", "quote-0042", "rate-lock:builder:0042");
+        vectors[0] = _lock(factory, TREASURY, "phala-cloud", "invoice-2026-0001", "checkout-0001");
+        vectors[1] =
+            _lock(factory, OTHER_TREASURY, "builder", "quote-0042", "rate-lock:builder:0042");
         vectors[2] = _lock(
             factory,
+            TREASURY,
             "enterprise",
             "invoice-long-reference",
             string.concat(
@@ -64,6 +87,7 @@ contract GenerateCreate2Vectors is Script {
 
     function _lock(
         ForwarderFactory factory,
+        address treasury,
         string memory productSlug,
         string memory externalId,
         string memory lockRef
@@ -73,16 +97,10 @@ contract GenerateCreate2Vectors is Script {
             productSlug: productSlug,
             externalId: externalId,
             lockRef: lockRef,
+            treasury: treasury,
             salt: salt,
-            predictedAddress: factory.addressOf(salt)
+            predictedAddress: factory.addressOf(treasury, salt)
         });
-    }
-
-    function _lockJson(LockVector[3] memory vectors) private returns (string memory) {
-        string memory first = _lockEntryJson(vectors[0], 0);
-        string memory second = _lockEntryJson(vectors[1], 1);
-        string memory third = _lockEntryJson(vectors[2], 2);
-        return string.concat("[", first, ",", second, ",", third, "]");
     }
 
     function _lockEntryJson(LockVector memory vector, uint256 index)
@@ -93,7 +111,16 @@ contract GenerateCreate2Vectors is Script {
         vm.serializeString(key, "product_slug", vector.productSlug);
         vm.serializeString(key, "external_id", vector.externalId);
         vm.serializeString(key, "lock_ref", vector.lockRef);
+        vm.serializeAddress(key, "treasury", vector.treasury);
         vm.serializeBytes32(key, "salt", vector.salt);
         return vm.serializeAddress(key, "predicted_address", vector.predictedAddress);
+    }
+
+    function _array(string[] memory items) private pure returns (string memory json) {
+        json = "[";
+        for (uint256 i; i < items.length; ++i) {
+            json = string.concat(json, i == 0 ? "" : ",", items[i]);
+        }
+        json = string.concat(json, "]");
     }
 }

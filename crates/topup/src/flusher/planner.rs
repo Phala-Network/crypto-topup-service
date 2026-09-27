@@ -248,6 +248,7 @@ impl Planner {
             .estimate_flush_gas(
                 route.chain.contracts.forwarder_factory,
                 operator,
+                route.chain.contracts.treasury,
                 &salts,
                 route.asset.contract,
             )
@@ -309,6 +310,7 @@ impl Planner {
             config_version: route.version,
             factory: format!("{:#x}", route.chain.contracts.forwarder_factory),
             token: format!("{:#x}", route.asset.contract),
+            treasury: format!("{:#x}", route.chain.contracts.treasury),
             salts: plan.iter().map(|item| item.salt.clone()).collect(),
         };
         FlushEvidence::planned(binding, plan, gas)

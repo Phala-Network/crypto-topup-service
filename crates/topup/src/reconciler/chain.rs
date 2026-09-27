@@ -39,19 +39,22 @@ pub trait ReconciliationChain: Send + Sync {
         block: u64,
     ) -> Result<Vec<U256>, ReconciliationError>;
 
-    /// Returns the sum of finalized on-chain `Flushed` events for one token.
+    /// Returns the sum of finalized on-chain `Flushed` events for one token and treasury. The
+    /// factory is permissionless, so events for other treasuries are not ours.
     async fn flushed_total(
         &self,
         factory: Address,
+        treasury: Address,
         token: Address,
         from_block: u64,
         to_block: u64,
     ) -> Result<U256, ReconciliationError>;
 
-    /// Returns factory-derived forwarder addresses in bounded batches.
+    /// Returns factory-derived forwarder addresses of `treasury` in bounded batches.
     async fn factory_addresses(
         &self,
         factory: Address,
+        treasury: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ReconciliationError>;
 }
@@ -107,6 +110,7 @@ impl ReconciliationChain for FinalizedReader {
     async fn flushed_total(
         &self,
         factory: Address,
+        treasury: Address,
         token: Address,
         from_block: u64,
         to_block: u64,
@@ -120,6 +124,9 @@ impl ReconciliationChain for FinalizedReader {
             for event in
                 backing_off(|| self.client().flushed_events(factory, token, start, end)).await?
             {
+                if event.treasury != treasury {
+                    continue;
+                }
                 total = total
                     .checked_add(event.amount)
                     .ok_or(ReconciliationError::Invariant(
@@ -139,9 +146,10 @@ impl ReconciliationChain for FinalizedReader {
     async fn factory_addresses(
         &self,
         factory: Address,
+        treasury: Address,
         salts: &[B256],
     ) -> Result<Vec<Address>, ReconciliationError> {
-        Ok(backing_off(|| self.client().factory_addresses(factory, salts)).await?)
+        Ok(backing_off(|| self.client().factory_addresses(factory, treasury, salts)).await?)
     }
 }
 
@@ -225,7 +233,7 @@ mod tests {
         ));
 
         let error = chain
-            .flushed_total(Address::ZERO, Address::ZERO, 1, 1)
+            .flushed_total(Address::ZERO, Address::ZERO, Address::ZERO, 1, 1)
             .await
             .expect_err("closed connections fail the log request");
         server.abort();

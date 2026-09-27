@@ -4,7 +4,9 @@ use std::sync::Arc;
 use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use serde_json::{Value, json, to_value};
 use sqlx::PgPool;
-use topup_adapters::chain::flush::{decode_flushed, encode_flush, flushed_signature};
+use topup_adapters::chain::flush::{
+    decode_flush_failed, decode_flushed, encode_flush, flush_failed_signature, flushed_signature,
+};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_core::route::RouteFile;
 use topup_core::{Signer, TxRequest};
@@ -51,15 +53,6 @@ pub enum RunResult {
     },
 }
 
-/// The flusher's operator and whether it may call `ForwarderFactory.flush`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OperatorRole {
-    /// Address of the configured operator key.
-    pub operator: Address,
-    /// Whether the operator holds `OPERATOR_ROLE` on the route's factory.
-    pub granted: bool,
-}
-
 /// Flush transaction lifecycle coordinator.
 pub struct Flusher {
     pool: PgPool,
@@ -86,17 +79,6 @@ impl Flusher {
             alerts,
             policy,
         }
-    }
-
-    /// Reads whether the configured operator holds `OPERATOR_ROLE` on the route's factory.
-    pub async fn operator_role(&self, route: &RouteFile) -> Result<OperatorRole, FlusherError> {
-        let operator = self.signer.operator_address().await.map_err(map_signer)?;
-        let granted = self
-            .chain
-            .has_operator_role(route.chain.contracts.forwarder_factory, operator)
-            .await
-            .map_err(map_chain)?;
-        Ok(OperatorRole { operator, granted })
     }
 
     /// Reads the configured operator and its native balance, which pays every flush's gas.
@@ -139,7 +121,7 @@ impl Flusher {
                 return Ok(RunResult::Idle);
             };
             let mut evidence = parse_evidence(&flush)?;
-            let (factory, token, salts) = bound_call(&flush, &evidence)?;
+            let (factory, treasury, token, salts) = bound_call(&flush, &evidence)?;
             let max_fee = fees.max_fee_per_gas.min(self.policy.max_fee_per_gas);
             let priority = fees.max_priority_fee_per_gas.min(max_fee);
             let gas_limit = buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?;
@@ -148,7 +130,7 @@ impl Flusher {
                 nonce: flush.nonce,
                 to: factory,
                 value: U256::ZERO,
-                data: encode_flush(salts, token),
+                data: encode_flush(treasury, salts, token),
                 gas_limit,
                 max_fee_per_gas: max_fee,
                 max_priority_fee_per_gas: priority,
@@ -374,13 +356,13 @@ impl Flusher {
             transaction.commit().await?;
             return Ok(RunResult::Idle);
         }
-        let (factory, token, salts) = bound_call(&current, &evidence)?;
+        let (factory, treasury, token, salts) = bound_call(&current, &evidence)?;
         let request = TxRequest {
             chain_id: flush.chain_id,
             nonce: flush.nonce,
             to: factory,
             value: U256::ZERO,
-            data: encode_flush(salts, token),
+            data: encode_flush(treasury, salts, token),
             gas_limit: buffered_gas(evidence.estimated_gas, self.policy.gas_limit_bps)?,
             max_fee_per_gas: required_max_fee,
             max_priority_fee_per_gas: required_priority,
@@ -445,17 +427,45 @@ impl Flusher {
                 "bound token differs from flush row",
             ));
         }
+        let treasury = parse_address(&evidence.binding.treasury)?;
         let planned = planned_by_salt(&evidence.plan)?;
         let mut seen = BTreeSet::new();
         let mut events = Vec::new();
+        let mut failed = Vec::new();
         for log in &receipt.logs {
-            if log.address != factory || log.topics.first() != Some(&flushed_signature()) {
+            if log.address != factory {
+                continue;
+            }
+            let topic = log.topics.first();
+            if topic == Some(&flush_failed_signature()) {
+                // The factory isolates a failing target (a blacklisted forwarder or treasury) and
+                // flushes the rest; its deposits stay unswept and it is alerted below.
+                let log_data = LogData::new(log.topics.clone(), log.data.clone()).ok_or(
+                    FlusherError::StoredEvidence("invalid FlushFailed topic count"),
+                )?;
+                let decoded = decode_flush_failed(&log_data)
+                    .map_err(|_| FlusherError::StoredEvidence("invalid FlushFailed event"))?;
+                let item = planned.get(&decoded.salt).ok_or(FlusherError::Invariant(
+                    "FlushFailed event salt was not planned",
+                ))?;
+                if !seen.insert(decoded.salt) {
+                    return Err(FlusherError::Invariant("duplicate flush event salt"));
+                }
+                failed.push((*item).clone());
+                continue;
+            }
+            if topic != Some(&flushed_signature()) {
                 continue;
             }
             let log_data = LogData::new(log.topics.clone(), log.data.clone())
                 .ok_or(FlusherError::StoredEvidence("invalid Flushed topic count"))?;
             let decoded = decode_flushed(&log_data)
                 .map_err(|_| FlusherError::StoredEvidence("invalid Flushed event"))?;
+            if decoded.treasury != treasury {
+                return Err(FlusherError::Invariant(
+                    "Flushed event treasury differs from the bound treasury",
+                ));
+            }
             if decoded.token != flush.token {
                 return Err(FlusherError::Invariant(
                     "Flushed event token differs from the flush row",
@@ -470,7 +480,7 @@ impl Flusher {
                 ));
             }
             if !seen.insert(decoded.salt) {
-                return Err(FlusherError::Invariant("duplicate Flushed event salt"));
+                return Err(FlusherError::Invariant("duplicate flush event salt"));
             }
             events.push(FlushedEvent {
                 flush_id: flush.id,
@@ -480,11 +490,8 @@ impl Flusher {
                 log_index: log.log_index,
             });
         }
-        if events.len() != evidence.plan.len() {
-            return Err(FlusherError::Invariant(
-                "successful flush receipt did not contain one event per planned salt",
-            ));
-        }
+        // A planned salt without an event held nothing when the transaction ran: anyone may flush
+        // a forwarder, so another sender can empty it first. Its deposits stay unswept here.
         let mut confirmed = evidence;
         confirmed.chain_receipt = Some(receipt_json(&receipt));
         db::confirm_flush(
@@ -495,6 +502,15 @@ impl Flusher {
             &events,
         )
         .await?;
+        for item in failed {
+            self.alerts.emit(FlushAlert::IsolatedAddress {
+                chain_id: flush.chain_id,
+                token: flush.token,
+                address_id: item.address_id,
+                address: parse_address(&item.address)?,
+                salt: parse_salt(&item.salt)?,
+            });
+        }
         Ok(Some(RunResult::Confirmed { flush_id: flush.id }))
     }
 
@@ -580,8 +596,9 @@ fn plan_salts(plan: &[PlannedAddress]) -> Result<Vec<B256>, FlusherError> {
 fn bound_call(
     flush: &Flush,
     evidence: &FlushEvidence,
-) -> Result<(Address, Address, Vec<B256>), FlusherError> {
+) -> Result<(Address, Address, Address, Vec<B256>), FlusherError> {
     let factory = parse_address(&evidence.binding.factory)?;
+    let treasury = parse_address(&evidence.binding.treasury)?;
     let token = parse_address(&evidence.binding.token)?;
     if token != flush.token {
         return Err(FlusherError::StoredEvidence(
@@ -599,7 +616,7 @@ fn bound_call(
             "bound salts differ from planned addresses",
         ));
     }
-    Ok((factory, token, salts))
+    Ok((factory, treasury, token, salts))
 }
 
 fn planned_by_salt(
@@ -693,6 +710,7 @@ mod tests {
             config_version: 1,
             factory: format!("{:#x}", Address::from([9; 20])),
             token: format!("{:#x}", Address::from([8; 20])),
+            treasury: format!("{:#x}", Address::from([7; 20])),
             salts: items.iter().map(|item| item.salt.clone()).collect(),
         }
     }

@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use async_trait::async_trait;
 use serde_json::Value;
 use topup_adapters::chain::evm::{ChainError, EvmClient, FeeQuote};
-use topup_adapters::chain::flush::{decode_has_role, encode_flush, encode_has_role, operator_role};
+use topup_adapters::chain::flush::encode_flush;
 
 use super::{ChainClient, ChainLog, ChainReceipt, NonceReceiptSearch};
 
@@ -27,28 +27,16 @@ impl ChainClient for EvmClient {
         &self,
         factory: Address,
         operator: Address,
+        treasury: Address,
         salts: &[B256],
         token: Address,
     ) -> Result<u64, ChainError> {
-        self.estimate_gas(operator, factory, encode_flush(salts.to_vec(), token))
-            .await
-    }
-
-    async fn has_operator_role(
-        &self,
-        factory: Address,
-        operator: Address,
-    ) -> Result<bool, ChainError> {
-        let output = self
-            .call(
-                "hasRole call",
-                factory,
-                encode_has_role(operator_role(), operator),
-                None,
-            )
-            .await?;
-        decode_has_role(&output)
-            .map_err(|error| ChainError::InvalidResponse(format!("decode hasRole result: {error}")))
+        self.estimate_gas(
+            operator,
+            factory,
+            encode_flush(treasury, salts.to_vec(), token),
+        )
+        .await
     }
 
     async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError> {
@@ -173,20 +161,13 @@ impl ChainClient for BroadcastingChain {
         &self,
         factory: Address,
         operator: Address,
+        treasury: Address,
         salts: &[B256],
         token: Address,
     ) -> Result<u64, ChainError> {
         self.reads
-            .estimate_flush_gas(factory, operator, salts, token)
+            .estimate_flush_gas(factory, operator, treasury, salts, token)
             .await
-    }
-
-    async fn has_operator_role(
-        &self,
-        factory: Address,
-        operator: Address,
-    ) -> Result<bool, ChainError> {
-        self.reads.has_operator_role(factory, operator).await
     }
 
     async fn pending_nonce(&self, operator: Address) -> Result<u64, ChainError> {

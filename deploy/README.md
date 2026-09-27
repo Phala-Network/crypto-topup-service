@@ -271,7 +271,7 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
   | `topup-lock-expiry` | after each successful expiry scan, every minute | 5 min |
   | `topup-reconciler` | `ok` after a complete round, `error` after failed checks, every 10 min | 10 min |
   | `topup-backup` | `ok` while the WAL-G success marker is at most 120 s old, else `error`; 3 errors open an issue | 2 min |
-  | `topup-flush-<route>` | on the route's `flush.schedule` (UTC): `ok` after planning, `error` when planning failed or the operator lacks `OPERATOR_ROLE` | 15 min |
+  | `topup-flush-<route>` | on the route's `flush.schedule` (UTC): `ok` after planning, `error` when planning failed | 15 min |
 
 - **Uptime**: `/healthz` of each Environment ([One-time setup](#one-time-setup-human-only-repository-owner)).
 - **Egress**: `topup` sends HTTPS to the DSN's ingest host.
@@ -336,26 +336,20 @@ host, DNS, and the Phala/dstack platform endpoints, and record the rules.
 ### Flusher operator
 
 `operators` in the attestation lists, per chain, the key the flusher signs `flush` with
-(`chain_id`, `operator_key_version`, `keyid`, `address`). It needs `OPERATOR_ROLE` on the chain's
-factory and native gas; without the role the flusher sends nothing, raises `OperatorRoleMissing`,
-and resumes by itself once granted. With an address from a verified response:
+(`chain_id`, `operator_key_version`, `keyid`, `address`). The factory is permissionless, so the
+operator needs no role, only native gas. With an address from a verified response:
 
 ```sh
 export OPERATOR_ADDRESS="$(jq -er --argjson chain "$CHAIN_ID" \
   '.operators[] | select(.chain_id == $chain) | .address' public-attestation.json)"
-export OPERATOR_ROLE="$(cast keccak OPERATOR_ROLE)"
-cast calldata 'grantRole(bytes32,address)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"
 ```
 
-**HUMAN-ONLY, admin Safe:** execute the calldata on the factory and confirm
-`cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$OPERATOR_ADDRESS"` is
-`true`; fund the address ([gas refill](runbooks/gas-refill.md)).
+**HUMAN-ONLY:** fund the address ([gas refill](runbooks/gas-refill.md)).
 
 Rotating the operator: bump `operator_key_version` in a new version of every current route on the
-chain and Deploy `upgrade`; read the new address from a fresh verified attestation, grant and fund
-it (new flushes wait for the grant; in-flight flushes of the old operator keep confirming), then
-revoke the old role once none of its flushes is in flight. Emergency revocation:
-[operator key compromise](runbooks/operator-key-compromise.md).
+chain and Deploy `upgrade`; read the new address from a fresh verified attestation and fund it
+(in-flight flushes of the old operator keep confirming). The flusher and operator keys are removed
+by [design PR 4](../docs/design/multi-tenant.md#16-plan).
 
 ## Product credentials
 
@@ -442,7 +436,7 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the locked amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),
    `product_slug`, `product_keyid`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`,
-   `token`, `token_symbol`, and `public_url` (the product URL), with the route's values.
+   `treasury`, `token`, `token_symbol`, and `public_url` (the product URL), with the route's values.
 
    ```sh
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer ETH_PASSWORD=~/staging/payer.password

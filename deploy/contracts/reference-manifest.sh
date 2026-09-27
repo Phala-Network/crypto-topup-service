@@ -3,18 +3,13 @@
 set -euo pipefail
 source "$(dirname -- "$0")/common.sh"
 
-admin=""
-treasury=""
 output=""
 while (($#)); do
     case "$1" in
-        --admin) admin="${2:-}"; shift 2 ;;
-        --treasury) treasury="${2:-}"; shift 2 ;;
         --output) output="${2:-}"; shift 2 ;;
-        *) die "usage: $0 --admin ADDRESS --treasury ADDRESS [--output FILE]" ;;
+        *) die "usage: $0 [--output FILE]" ;;
     esac
 done
-[[ -n "$admin" && -n "$treasury" ]] || die "--admin and --treasury are required"
 
 require_command anvil
 require_command cast
@@ -38,13 +33,13 @@ rpc_url="$ANVIL_RPC_URL"
 
 "$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$rpc_url" --local-fund --broadcast >&2
 
-factory="$(predicted_factory "$admin" "$treasury")"
+factory="$(predicted_factory)"
 implementation="$(predicted_implementation "$factory")"
-init_code_hash="$(cast keccak "$(factory_init_code "$admin" "$treasury")")"
+init_code_hash="$(cast keccak "$(factory_init_code)")"
 
 (
     cd "$CONTRACTS_DIR"
-    ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
+    FOUNDRY_BROADCAST="$tmp_dir/broadcast" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
         script/DeployFactory.s.sol:DeployFactory \
         --rpc-url "$rpc_url" \
         --broadcast \
@@ -55,16 +50,16 @@ actual_implementation="$(cast call "$factory" 'implementation()(address)' --rpc-
 [[ "$(lower "$actual_implementation")" == "$(lower "$implementation")" ]] || \
     die "reference deployment implementation mismatch"
 
+# Sample forwarder addresses as this build's factory derives them, for the create2.json vectors.
 vectors='[]'
-while IFS= read -r salt; do
-    address="$(cast call "$factory" 'addressOf(bytes32)(address)' "$salt" --rpc-url "$rpc_url")"
-    vectors="$(jq -c --arg salt "$salt" --arg address "$address" \
-        '. + [{salt: $salt, address: $address}]' <<<"$vectors")"
-done < <(jq -r '.salts[]' "$CONTRACTS_DIR/test-vectors/create2.json")
+while IFS=$'\t' read -r treasury salt; do
+    address="$(cast call "$factory" 'addressOf(address,bytes32)(address)' "$treasury" "$salt" \
+        --rpc-url "$rpc_url")"
+    vectors="$(jq -c --arg treasury "$treasury" --arg salt "$salt" --arg address "$address" \
+        '. + [{treasury: $treasury, salt: $salt, address: $address}]' <<<"$vectors")"
+done < <(jq -r '.forwarders[] | [.treasury, .salt] | @tsv' "$CONTRACTS_DIR/test-vectors/create2.json")
 
 manifest="$(jq -n \
-    --arg admin "$admin" \
-    --arg treasury "$treasury" \
     --arg proxy "$DETERMINISTIC_PROXY" \
     --arg proxy_code_hash "$(code_hash "$rpc_url" "$DETERMINISTIC_PROXY")" \
     --arg salt "$FACTORY_SALT" \
@@ -75,8 +70,6 @@ manifest="$(jq -n \
     --arg implementation_code_hash "$(code_hash "$rpc_url" "$implementation")" \
     --argjson vectors "$vectors" \
     '{
-        admin: $admin,
-        treasury: $treasury,
         proxy: $proxy,
         proxy_code_hash: $proxy_code_hash,
         factory_salt: $salt,

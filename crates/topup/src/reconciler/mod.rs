@@ -269,9 +269,9 @@ impl Reconciler {
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let mut failure = None;
-        for (chain_id, factory) in self.chain_factories()? {
+        for (chain_id, factory, treasury) in self.chain_factories()? {
             if let Err(error) = self
-                .address_derivation_for_chain(chain_id, factory, findings)
+                .address_derivation_for_chain(chain_id, factory, treasury, findings)
                 .await
             {
                 tracing::error!(chain_id, %error, "address derivation check failed for chain");
@@ -285,6 +285,7 @@ impl Reconciler {
         &self,
         chain_id: u64,
         factory: Address,
+        treasury: Address,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let chain = self.chain(chain_id)?;
@@ -293,7 +294,7 @@ impl Reconciler {
             .iter()
             .map(|address| address.salt)
             .collect::<Vec<_>>();
-        let derived = chain.factory_addresses(factory, &salts).await?;
+        let derived = chain.factory_addresses(factory, treasury, &salts).await?;
         if derived.len() != addresses.len() {
             return Err(ReconciliationError::Invariant(
                 "addressOf response length did not match address count",
@@ -307,7 +308,7 @@ impl Reconciler {
                 &self.pool,
                 chain_id,
                 CheckName::AddressDerivation.code(),
-                "factory addressOf(salt) disagrees with stored address",
+                "factory addressOf(treasury, salt) disagrees with stored address",
             )
             .await?;
             findings.push(Finding::new(
@@ -687,7 +688,7 @@ impl Reconciler {
         });
         for (from_block, to_block) in bounded_windows(start, finalized)? {
             let flushed = chain
-                .flushed_total(factory, token, from_block, to_block)
+                .flushed_total(factory, treasury, token, from_block, to_block)
                 .await?;
             let inflow =
                 treasury_inflow(&chain, treasury, token, &forwarders, from_block, to_block).await?;
@@ -754,23 +755,27 @@ impl Reconciler {
         self.routes.current().collect()
     }
 
-    fn chain_factories(&self) -> Result<Vec<(u64, Address)>, ReconciliationError> {
+    /// Returns each chain's factory and treasury. Until addresses record their own treasury,
+    /// every route of a chain must share both.
+    fn chain_factories(&self) -> Result<Vec<(u64, Address, Address)>, ReconciliationError> {
         let mut factories = BTreeMap::new();
         for route in self.routes.routes() {
-            match factories.insert(
-                route.chain.chain_id,
-                route.chain.contracts.forwarder_factory,
-            ) {
-                Some(existing) if existing != route.chain.contracts.forwarder_factory => {
+            let contracts = &route.chain.contracts;
+            let pair = (contracts.forwarder_factory, contracts.treasury);
+            match factories.insert(route.chain.chain_id, pair) {
+                Some(existing) if existing != pair => {
                     return Err(ReconciliationError::Configuration(format!(
-                        "routes disagree on factory for chain {}",
+                        "routes disagree on factory or treasury for chain {}",
                         route.chain.chain_id
                     )));
                 }
                 Some(_) | None => {}
             }
         }
-        Ok(factories.into_iter().collect())
+        Ok(factories
+            .into_iter()
+            .map(|(chain_id, (factory, treasury))| (chain_id, factory, treasury))
+            .collect())
     }
 }
 

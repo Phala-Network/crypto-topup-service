@@ -17,9 +17,8 @@ require_command jq
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 safe_singleton="$(cast compute-address "$owner" --nonce 0)"
 treasury="$(cast compute-address "$owner" --nonce 1)"
-admin="$treasury"
-operator_role="$(cast keccak 'OPERATOR_ROLE')"
-sample_salt="$(jq -er '.salts[0]' "$CONTRACTS_DIR/test-vectors/create2.json")"
+# A sample forwarder paying the owner EOA, funded and flushed by anyone on both chains.
+sample_salt="$(jq -er '.forwarders[0].salt' "$CONTRACTS_DIR/test-vectors/create2.json")"
 expected="$DEPLOY_CONTRACTS_DIR/local-test-vectors.json"
 [[ "$mode" == --write || -f "$expected" ]] || die "missing local deterministic vectors: $expected"
 
@@ -39,6 +38,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
+export FOUNDRY_BROADCAST="$tmp_dir/broadcast"
 
 rpcs=()
 chain_ids=(31337 31338)
@@ -49,8 +49,10 @@ for index in 0 1; do
     rpcs+=("$ANVIL_RPC_URL")
 done
 
-factory="$(predicted_factory "$admin" "$treasury")"
+factory="$(predicted_factory)"
 implementation="$(predicted_implementation "$factory")"
+networks="$tmp_dir/networks.json"
+jq -n '{networks: {"anvil-31337": {chain_id: 31337}, "anvil-31338": {chain_id: 31338}}}' >"$networks"
 safe_expectations="$tmp_dir/safe-expectations.json"
 
 reports='[]'
@@ -78,30 +80,28 @@ for index in 0 1; do
             --arg zero "$ZERO_ADDRESS" \
             '{configured: true,
               networks: {"anvil-31337": {chain_id: 31337}, "anvil-31338": {chain_id: 31338}},
-              admin: $treasury, treasury: $treasury,
+              treasury: $treasury,
               safes: [{address: $treasury, owners: [$owner], threshold: 1,
                        proxy_code_hashes: [$code_hash],
                        singleton: $singleton, singleton_code_hash: $singleton_code_hash,
                        modules: [], guard: $zero, fallback_handler: $zero}]}' \
             >"$safe_expectations"
-        ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
-            "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
+        PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
             --rpc "anvil-31337=$rpc_url" \
             --dry-run \
-            --safe-expectations "$safe_expectations" >/dev/null 2>"$tmp_dir/deploy-dry-run.err" || \
+            --networks "$networks" >/dev/null 2>"$tmp_dir/deploy-dry-run.err" || \
             die "deploy-factory.sh --dry-run failed: $(cat "$tmp_dir/deploy-dry-run.err")"
         [[ "$(cast code "$factory" --rpc-url "$rpc_url")" == "0x" ]] || \
             die "dry-run wrote factory code to the target chain"
-        ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
-            "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
+        PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
             --rpc "anvil-31337=$rpc_url" \
             --broadcast \
-            --safe-expectations "$safe_expectations" >/dev/null 2>"$tmp_dir/deploy-broadcast.err" || \
+            --networks "$networks" >/dev/null 2>"$tmp_dir/deploy-broadcast.err" || \
             die "deploy-factory.sh --broadcast failed: $(cat "$tmp_dir/deploy-broadcast.err")"
     else
         (
             cd "$CONTRACTS_DIR"
-            ADMIN="$admin" TREASURY="$treasury" PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
+            PRIVATE_KEY="$ANVIL_PRIVATE_KEY" forge script \
                 script/DeployFactory.s.sol:DeployFactory \
                 --rpc-url "$rpc_url" \
                 --broadcast \
@@ -109,16 +109,15 @@ for index in 0 1; do
         ) >/dev/null
     fi
 
-    grant_calldata="$(cast calldata 'grantRole(bytes32,address)' "$operator_role" "$owner")"
-    cast send "$treasury" 'exec(address,bytes)' "$factory" "$grant_calldata" \
-        --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
-    cast send "$factory" 'flush(bytes32[],address)' "[$sample_salt]" \
-        0x0000000000000000000000000000000000000000 \
-        --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
-
     actual_implementation="$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url")"
-    forwarder="$(cast call "$factory" 'addressOf(bytes32)(address)' "$sample_salt" --rpc-url "$rpc_url")"
+    forwarder="$(cast call "$factory" 'addressOf(address,bytes32)(address)' "$owner" \
+        "$sample_salt" --rpc-url "$rpc_url")"
+    cast send "$forwarder" --value 1gwei \
+        --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
+    cast send "$factory" 'flush(address,bytes32[],address)' "$owner" "[$sample_salt]" \
+        "$ZERO_ADDRESS" --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" >/dev/null
     [[ "$(cast code "$forwarder" --rpc-url "$rpc_url")" != "0x" ]] || die "forwarder was not deployed"
+    [[ "$(cast balance "$forwarder" --rpc-url "$rpc_url")" == 0 ]] || die "forwarder was not flushed"
 
     reports="$(jq -c \
         --argjson chain_id "${chain_ids[$index]}" \
@@ -140,17 +139,20 @@ if [[ "$mode" == --write ]]; then
     jq . <<<"$actual" >"$expected"
 fi
 committed="$(jq -c '{factory, implementation, forwarder, factory_code_hash, implementation_code_hash}' "$expected")"
-[[ "$actual" == "$committed" ]] || die "local deterministic vectors drifted; inspect compiler or constructor input changes"
+[[ "$actual" == "$committed" ]] || die "local deterministic vectors drifted; inspect compiler or build changes"
 
 verification="$tmp_dir/verification.json"
-ADMIN="$admin" TREASURY="$treasury" "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
-    --safe-expectations "$safe_expectations" \
+"$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
+    --networks "$networks" \
     --rpc "anvil-31337=${rpcs[0]}" \
     --rpc "anvil-31338=${rpcs[1]}" >"$verification"
 jq -e '.passed == true' "$verification" >/dev/null
-jq -e '[.chains[], .safe.chains[]] | length == 4 and
+jq -e '[.chains[]] | length == 2 and
     all(.chain_id == .expected_chain_id and .checks.chain_id)' "$verification" >/dev/null || \
     die "verification report does not bind every target to its expected chain id"
+"$DEPLOY_CONTRACTS_DIR/verify-safe.sh" --expectations "$safe_expectations" \
+    --rpc "anvil-31337=${rpcs[0]}" --rpc "anvil-31338=${rpcs[1]}" >/dev/null || \
+    die "the approved treasury Safe was rejected"
 
 rejected='[]'
 # Runs a command that must fail and keeps its stdout/stderr for the reason assertions below.
@@ -176,39 +178,22 @@ deploy_factory=("$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" --dry-run)
 verify_deployment=("$DEPLOY_CONTRACTS_DIR/verify-deployment.sh")
 
 # A target whose RPC is on another network is rejected, and the report shows both chain ids.
-expect_rejection wrong_network_verify env ADMIN="$admin" TREASURY="$treasury" \
-    "${verify_deployment[@]}" --safe-expectations "$safe_expectations" \
+expect_rejection wrong_network_verify "${verify_deployment[@]}" --networks "$networks" \
     --rpc "anvil-31337=${rpcs[1]}"
-require_report wrong_network_verify '.passed == false and (.safe.chains[0] |
+require_report wrong_network_verify '.passed == false and (.chains[0] |
     .network == "anvil-31337" and .expected_chain_id == 31337 and .chain_id == 31338 and
-    .checks.chain_id == false and all(.safes[]; .passed))'
-expect_rejection wrong_network_deploy env ADMIN="$admin" TREASURY="$treasury" \
-    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
-    --safe-expectations "$safe_expectations" --rpc "anvil-31338=${rpcs[0]}"
+    .checks.chain_id == false and (.checks | del(.chain_id) | all))'
+expect_rejection wrong_network_deploy env PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
+    "${deploy_factory[@]}" --networks "$networks" --rpc "anvil-31338=${rpcs[0]}"
 require_error wrong_network_deploy "expects chain id 31338 but the RPC reports 31337"
 
-# ADMIN and TREASURY must be exactly the approved Safes from the expectations file.
-expect_rejection treasury_mismatch_verify env ADMIN="$admin" TREASURY="$owner" \
-    "${verify_deployment[@]}" --safe-expectations "$safe_expectations" \
-    --rpc "anvil-31337=${rpcs[0]}"
-require_error treasury_mismatch_verify "does not match the approved treasury Safe"
-expect_rejection treasury_mismatch_deploy env ADMIN="$admin" TREASURY="$owner" \
-    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
-    --safe-expectations "$safe_expectations" --rpc "anvil-31337=${rpcs[0]}"
-require_error treasury_mismatch_deploy "does not match the approved treasury Safe"
-expect_rejection admin_mismatch_deploy env ADMIN="$owner" TREASURY="$treasury" \
-    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
-    --safe-expectations "$safe_expectations" --rpc "anvil-31337=${rpcs[0]}"
-require_error admin_mismatch_deploy "does not match the approved admin Safe"
-
-# An EOA is never accepted as the admin, even if the expectations file lists it as a Safe.
-eoa_expectations="$tmp_dir/eoa-admin-expectations.json"
-jq --arg owner "$owner" '.admin = $owner | .safes += [.safes[0] | .address = $owner]' \
+# An EOA is never accepted as the treasury Safe, even if the expectations file lists it as one.
+eoa_expectations="$tmp_dir/eoa-treasury-expectations.json"
+jq --arg owner "$owner" '.treasury = $owner | .safes += [.safes[0] | .address = $owner]' \
     "$safe_expectations" >"$eoa_expectations"
-expect_rejection eoa_admin_deploy env ADMIN="$owner" TREASURY="$treasury" \
-    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
-    --safe-expectations "$eoa_expectations" --rpc "anvil-31337=${rpcs[0]}"
-require_error eoa_admin_deploy "admin $owner has no code (EOA or undeployed)"
+expect_rejection eoa_treasury_verify "$DEPLOY_CONTRACTS_DIR/verify-safe.sh" \
+    --expectations "$eoa_expectations" --rpc "anvil-31337=${rpcs[0]}"
+require_error eoa_treasury_verify "treasury $owner has no code (EOA or undeployed)"
 
 # A module, guard, or fallback handler the expectations do not list is rejected; listing them
 # approves them. The changes go through the Safe itself and are rolled back afterwards.
@@ -263,7 +248,7 @@ malicious_safe="$(cast compute-address "$owner" --nonce $((nonce + 1)))"
 [[ "$(code_hash "${rpcs[0]}" "$malicious_safe")" == "$(code_hash "${rpcs[0]}" "$treasury")" ]] || \
     die "malicious Safe proxy code differs from the approved proxy code"
 malicious_expectations="$tmp_dir/malicious-singleton-expectations.json"
-jq --arg safe "$malicious_safe" '.admin = $safe | .treasury = $safe | .safes[0].address = $safe' \
+jq --arg safe "$malicious_safe" '.treasury = $safe | .safes[0].address = $safe' \
     "$safe_expectations" >"$malicious_expectations"
 expect_rejection wrong_singleton_verify "$DEPLOY_CONTRACTS_DIR/verify-safe.sh" \
     --expectations "$malicious_expectations" --rpc "anvil-31337=${rpcs[0]}"
@@ -272,17 +257,10 @@ require_report wrong_singleton_verify --arg singleton "$(lower "$malicious_singl
     (.master_copy | ascii_downcase) == $singleton and
     (.checks | .contract and .safe_proxy_code_hash and .owners and .threshold and
     .singleton_code_hash and (.singleton | not) and (.master_copy | not))'
-expect_rejection wrong_singleton_deploy env ADMIN="$malicious_safe" TREASURY="$malicious_safe" \
-    PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "${deploy_factory[@]}" \
-    --safe-expectations "$malicious_expectations" --rpc "anvil-31337=${rpcs[0]}"
-require_error wrong_singleton_deploy "singleton (slot 0) is"
-
 cast rpc --rpc-url "${rpcs[1]}" anvil_setCode "$factory" 0x60006000f3 >/dev/null
 if (
     cd "$CONTRACTS_DIR"
-    ADMIN="$admin" \
-        TREASURY="$treasury" \
-        EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$expected")" \
+    EXPECTED_FACTORY_CODE_HASH="$(jq -er '.factory_code_hash' "$expected")" \
         EXPECTED_IMPLEMENTATION_CODE_HASH="$(jq -er '.implementation_code_hash' "$expected")" \
         PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
         forge script script/DeployFactory.s.sol:DeployFactory \
@@ -308,7 +286,6 @@ jq -n \
     --argjson rejected "$rejected" \
     '{chains: $chains,
       verification: {
-        safe: $verification[0].safe.passed,
         chains: [$verification[0].chains[] | {target, expected_chain_id, chain_id, passed}]
       },
       mismatched_code_rejected: true,

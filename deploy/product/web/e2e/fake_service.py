@@ -216,6 +216,7 @@ class FakeTopup:
         address = forwarder_address(
             self.args.factory,
             self.args.implementation,
+            self.args.treasury,
             lock_salt(self.args.product, account, quote_id),
         )
         atomic = str(amount * 4 * 10**16)  # cents / 100 / 0.25 USD per token * 10**18

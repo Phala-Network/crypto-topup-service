@@ -61,9 +61,7 @@ jobs:
           status=0
           deploy/contracts/verify-safe.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
             >reports/sepolia-safe-verification.json || status=1
-          ADMIN=$(jq -r .admin deploy/contracts/safe-expectations.json) \
-          TREASURY=$(jq -r .treasury deploy/contracts/safe-expectations.json) \
-            deploy/contracts/verify-deployment.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
+          deploy/contracts/verify-deployment.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
             >reports/sepolia-contract-verification.json || status=1
           jq '{passed, chains: [.chains[] | {target, passed}]}' reports/*.json || true
           exit "$status"

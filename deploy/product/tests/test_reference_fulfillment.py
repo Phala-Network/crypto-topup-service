@@ -36,6 +36,7 @@ CONFIG = ProductConfig(
     rpc_url="http://rpc.test",
     factory="0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
     implementation="0xfeb1871c9897251C74b39DFC74e577888290faE6",
+    treasury="0x0000000000000000000000000000000000007EA5",
     token="0x" + "44" * 20,
     token_symbol="PHA",  # noqa: S106 - an asset symbol, not a secret
     listen_host="127.0.0.1",

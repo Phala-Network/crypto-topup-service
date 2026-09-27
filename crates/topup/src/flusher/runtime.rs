@@ -22,8 +22,8 @@ use topup_core::route::RouteFile;
 use tracing::Instrument as _;
 
 use super::{
-    AlertSink, BroadcastingChain, ChainClient, FlushAlert, Flusher, FlusherPolicy, OperatorRole,
-    Planner, PriceError, PriceSource, RunResult,
+    AlertSink, BroadcastingChain, ChainClient, FlushAlert, Flusher, FlusherPolicy, Planner,
+    PriceError, PriceSource,
 };
 use crate::observability::FlushPlanningOutcome;
 use crate::routes::RouteSet;
@@ -37,26 +37,19 @@ pub struct FlusherTask {
     route: RouteFile,
     planner: Planner,
     flusher: Flusher,
-    alerts: Arc<dyn AlertSink>,
     schedule: Cron,
     maintenance_interval: Duration,
 }
 
 impl FlusherTask {
     /// Creates a task whose schedule comes from the route's chain policy.
-    pub fn new(
-        route: RouteFile,
-        planner: Planner,
-        flusher: Flusher,
-        alerts: Arc<dyn AlertSink>,
-    ) -> Result<Self, String> {
+    pub fn new(route: RouteFile, planner: Planner, flusher: Flusher) -> Result<Self, String> {
         let schedule = Cron::from_str(&route.chain.flush.schedule)
             .map_err(|error| format!("invalid flush schedule for `{}`: {error}", route.route))?;
         Ok(Self {
             route,
             planner,
             flusher,
-            alerts,
             schedule,
             maintenance_interval: MAINTENANCE_INTERVAL,
         })
@@ -93,7 +86,6 @@ impl FlusherTask {
                 "flush schedule is not a five-field crontab; Sentry Crons cannot monitor it"
             );
         }
-        let mut authorized = false;
         let startup_span = crate::observability::flush_action_span(
             self.route.chain.chain_id,
             &self.route.route,
@@ -121,65 +113,49 @@ impl FlusherTask {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = maintenance.tick() => {
-                    authorized = self.operator_authorized(authorized).await;
-                    if authorized {
-                        self.check_operator_gas().await;
-                    }
+                    self.check_operator_gas().await;
                     let span = crate::observability::flush_action_span(
                         self.route.chain.chain_id,
                         &self.route.route,
                         "maintenance",
                         0,
                     );
-                    let result = if authorized {
-                        self.flusher.run_once(&self.route).instrument(span).await
-                    } else {
-                        self.flusher
-                            .maintain_sent(&self.route)
-                            .instrument(span)
-                            .await
-                            .map(|result| result.unwrap_or(RunResult::Idle))
-                    };
-                    if let Err(error) = result {
+                    if let Err(error) = self.flusher.run_once(&self.route).instrument(span).await {
                         tracing::error!(%error, route = %self.route.route, "flush maintenance failed");
                     }
                 }
                 () = sleep_until(next_plan) => {
-                    authorized = self.operator_authorized(authorized).await;
-                    let mut planned = false;
-                    let mut outcome = (FlushPlanningOutcome::OperatorNotAuthorized, None);
-                    if authorized {
-                        let plan_span = crate::observability::flush_action_span(
-                            self.route.chain.chain_id,
-                            &self.route.route,
-                            "planning",
-                            0,
-                        );
-                        match self.planner.plan(&self.route).instrument(plan_span).await {
-                            Ok(flush_id) => {
-                                planned = true;
-                                outcome = (FlushPlanningOutcome::Idle, None);
-                                if flush_id.is_some() {
-                                    outcome.0 = FlushPlanningOutcome::Planned;
-                                }
-                                tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
-                                let send_span = crate::observability::flush_action_span(
-                                    self.route.chain.chain_id,
-                                    &self.route.route,
-                                    "planned_send",
-                                    0,
-                                );
-                                if let Err(error) = self.flusher.run_once(&self.route).instrument(send_span).await {
-                                    tracing::error!(%error, route = %self.route.route, "planned flush send failed");
-                                    outcome = (FlushPlanningOutcome::SendFailed, Some(error.to_string()));
-                                }
+                    let plan_span = crate::observability::flush_action_span(
+                        self.route.chain.chain_id,
+                        &self.route.route,
+                        "planning",
+                        0,
+                    );
+                    let (planned, outcome) = match self.planner.plan(&self.route).instrument(plan_span).await {
+                        Ok(flush_id) => {
+                            tracing::info!(route = %self.route.route, ?flush_id, "flush planning completed");
+                            let mut outcome = if flush_id.is_some() {
+                                (FlushPlanningOutcome::Planned, None)
+                            } else {
+                                (FlushPlanningOutcome::Idle, None)
+                            };
+                            let send_span = crate::observability::flush_action_span(
+                                self.route.chain.chain_id,
+                                &self.route.route,
+                                "planned_send",
+                                0,
+                            );
+                            if let Err(error) = self.flusher.run_once(&self.route).instrument(send_span).await {
+                                tracing::error!(%error, route = %self.route.route, "planned flush send failed");
+                                outcome = (FlushPlanningOutcome::SendFailed, Some(error.to_string()));
                             }
-                            Err(error) => {
-                                tracing::error!(%error, route = %self.route.route, "flush planning failed");
-                                outcome = (FlushPlanningOutcome::Failed, Some(error.to_string()));
-                            }
+                            (true, outcome)
                         }
-                    }
+                        Err(error) => {
+                            tracing::error!(%error, route = %self.route.route, "flush planning failed");
+                            (false, (FlushPlanningOutcome::Failed, Some(error.to_string())))
+                        }
+                    };
                     crate::observability::record_flush_planning(&self.route.route, outcome.0, outcome.1);
                     if let Some(monitor) = &monitor {
                         monitor.check_in(planned);
@@ -206,64 +182,6 @@ impl FlusherTask {
                 route = %self.route.route,
                 "flusher operator balance check failed"
             ),
-        }
-    }
-
-    /// Checks `OPERATOR_ROLE`, keeping `current` when the check itself fails.
-    async fn operator_authorized(&self, current: bool) -> bool {
-        let chain_id = self.route.chain.chain_id;
-        let route = self.route.route.as_str();
-        let operator_key_version = self.route.chain.operator_key_version;
-        let factory = self.route.chain.contracts.forwarder_factory;
-        match self.flusher.operator_role(&self.route).await {
-            Ok(OperatorRole {
-                operator,
-                granted: true,
-            }) => {
-                if !current {
-                    tracing::info!(
-                        chain_id,
-                        route,
-                        operator_key_version,
-                        %operator,
-                        %factory,
-                        "flusher operator holds OPERATOR_ROLE"
-                    );
-                }
-                true
-            }
-            Ok(OperatorRole {
-                operator,
-                granted: false,
-            }) => {
-                tracing::error!(
-                    tags.alert = "OperatorRoleMissing",
-                    chain_id,
-                    route,
-                    operator_key_version,
-                    %operator,
-                    %factory,
-                    "flusher paused: the configured operator does not hold OPERATOR_ROLE on the \
-                     factory; grant it from the admin Safe"
-                );
-                self.alerts.emit(FlushAlert::OperatorRoleMissing {
-                    chain_id,
-                    factory,
-                    operator,
-                    operator_key_version,
-                });
-                false
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    chain_id,
-                    route,
-                    operator_key_version,
-                    "flusher operator role check failed"
-                );
-                current
-            }
         }
     }
 }
@@ -344,7 +262,7 @@ pub fn configure_tasks(
             ..FlusherPolicy::default()
         };
         let flusher = Flusher::new(pool.clone(), chain, signer, alerts.clone(), policy);
-        tasks.push(FlusherTask::new(route, planner, flusher, alerts)?);
+        tasks.push(FlusherTask::new(route, planner, flusher)?);
     }
     Ok(tasks)
 }

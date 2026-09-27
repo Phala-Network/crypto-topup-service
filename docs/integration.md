@@ -210,8 +210,9 @@ Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 [architecture §9](architecture.md#9-quotes).
 
 **Recompute every address before you show it.** A quote's address salt is
-`keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`; with the forwarder factory
-and implementation pinned from the attested deployment, `TopupClient` recomputes it and raises
+`keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`, and the address commits to
+the factory, the implementation, your treasury, and that salt; with all three addresses pinned,
+`TopupClient` recomputes it and raises
 `AddressMismatchError`, so a user never pays an address you did not derive. You need no address
 records of your own to credit: `deposit.credited` carries the deposit, which names the workspace
 (`account_id`) and the quote (`quote`), also for a late or wrong-amount payment.
@@ -667,8 +668,12 @@ from topup_sdk import RequestSigner, TopupClient
 
 signer = RequestSigner.from_seed_file("phala-cloud/v1", "/secrets/phala-cloud-staging.seed")
 # The forwarder factory and implementation, pinned from the attested deployment like the settlement
-# key (§5.3): the client recomputes every open quote's address before returning it.
-forwarder = ("0x2407bE5Be2b632F5b166872A49E4946a70CCa531", "0x70B714508BFa441449DC09f790Ca03Baa5170360")
+# key (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
+forwarder = (
+    "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",  # factory
+    "0x70B714508BFa441449DC09f790Ca03Baa5170360",  # implementation
+    "0x936c1991f8dA9a919fa11b557a3514719f5A4504",  # treasury
+)
 with TopupClient(
     "https://pay-api-staging.phala.com", signer, forwarder=forwarder
 ) as client:

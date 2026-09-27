@@ -26,16 +26,21 @@ VECTORS: dict[str, Any] = json.loads(
 def test_lock_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]) -> None:
     salt = lock_salt(vector["product_slug"], vector["external_id"], vector["lock_ref"])
     assert "0x" + salt.hex() == vector["salt"]
-    address = forwarder_address(VECTORS["factory"], VECTORS["implementation"], salt)
+    address = forwarder_address(
+        VECTORS["factory"], VECTORS["implementation"], vector["treasury"], salt
+    )
     assert address == vector["predicted_address"]
 
 
-def test_raw_salts_match_the_contract_vectors() -> None:
-    for salt, expected in zip(VECTORS["salts"], VECTORS["predictedAddresses"], strict=True):
-        address = forwarder_address(
-            VECTORS["factory"], VECTORS["implementation"], bytes.fromhex(salt[2:])
-        )
-        assert address == expected
+@pytest.mark.parametrize("vector", VECTORS["forwarders"], ids=lambda vector: vector["salt"][:10])
+def test_raw_salts_match_the_contract_vectors(vector: dict[str, Any]) -> None:
+    address = forwarder_address(
+        VECTORS["factory"],
+        VECTORS["implementation"],
+        vector["treasury"],
+        bytes.fromhex(vector["salt"][2:]),
+    )
+    assert address == vector["predicted_address"]
 
 
 def test_deposit_id_matches_the_core_vector() -> None:
