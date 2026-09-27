@@ -29,8 +29,10 @@ class EventData:
 
 @dataclass(frozen=True)
 class Event:
-    """A verified event: `deposit.credited`, `deposit.rejected`, `deposit.refunded`, or
-    `quote.expired`. Its `id` is stable across retries and replays; process each id once."""
+    """A verified event: `deposit.credited`, `deposit.rejected`, `deposit.reversed`,
+    `deposit.refunded`, or `quote.expired`. Its `id` is stable across retries and replays;
+    process each id once. Claw back the credit of a `deposit.reversed` deposit as for
+    `deposit.refunded`."""
 
     id: str
     type: str

@@ -1,4 +1,5 @@
-//! Detected-to-confirmed deposit step.
+//! Detected-to-confirmed deposit step: both providers show the same log at the transfer's receipt
+//! position, in the same block, at the route's required confirmation; then the deposit is valued.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -9,12 +10,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
+use topup_adapters::chain::evm::{
+    ChainError, ChainReader, FinalizedReader, ReceiptLookup, TransferLog,
+};
 use topup_adapters::pricing::PriceSource;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::event_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::RouteFile;
+use topup_core::route::{ChainHeads, Confirmations, RouteFile};
 use topup_core::valuation::{
     LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
 };
@@ -29,36 +32,43 @@ use crate::pump::{Step, StepResult};
 use crate::routes::RouteSet;
 
 #[async_trait]
-trait FinalityReader: Send + Sync {
-    async fn finalized_head(&self) -> Result<u64, ChainError>;
-    async fn transfer_log_by_identity(
+trait ConfirmationReader: Send + Sync {
+    async fn confirmation_heads(
+        &self,
+        confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError>;
+    async fn receipt_transfer(
         &self,
         tx_hash: B256,
-        log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError>;
+        receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError>;
 }
 
 #[async_trait]
-impl<R> FinalityReader for R
+impl<R> ConfirmationReader for R
 where
     R: ChainReader + Send + Sync,
 {
-    async fn finalized_head(&self) -> Result<u64, ChainError> {
-        Ok(ChainReader::finalized_head(self).await?.number)
+    async fn confirmation_heads(
+        &self,
+        confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        ChainReader::confirmation_heads(self, confirmations).await
     }
 
-    async fn transfer_log_by_identity(
+    async fn receipt_transfer(
         &self,
         tx_hash: B256,
-        log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
-        ChainReader::transfer_log_by_identity(self, tx_hash, log_index).await
+        receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await
     }
 }
 
 struct ChainPair {
-    primary: Arc<dyn FinalityReader>,
-    secondary: Arc<dyn FinalityReader>,
+    confirmations: Confirmations,
+    primary: Arc<dyn ConfirmationReader>,
+    secondary: Arc<dyn ConfirmationReader>,
 }
 
 struct RouteRuntime {
@@ -104,15 +114,20 @@ impl ConfirmStep {
             .collect();
         let mut chains = BTreeMap::new();
         for chain_id in routes.chain_ids() {
-            let reader = |index| -> Result<Arc<dyn FinalityReader>, ConfirmConfigError> {
+            let reader = |index| -> Result<Arc<dyn ConfirmationReader>, ConfirmConfigError> {
                 let client = routes
                     .provider(chain_id, index)
                     .map_err(|error| ConfirmConfigError(error.to_string()))?;
                 Ok(Arc::new(FinalizedReader::new(Arc::clone(client))))
             };
+            let confirmations = routes
+                .chain(chain_id)
+                .ok_or_else(|| ConfirmConfigError(format!("chain {chain_id} has no route")))?
+                .confirmations;
             chains.insert(
                 chain_id,
                 ChainPair {
+                    confirmations,
                     primary: reader(0)?,
                     secondary: reader(1)?,
                 },
@@ -142,6 +157,7 @@ impl ConfirmStep {
         R2: ChainReader + Send + Sync + 'static,
     {
         let chain_id = route.chain.chain_id;
+        let confirmations = route.chain.confirmations;
         let asset_contract = route.asset.contract;
         let key = (route.route.clone(), route.version);
         Self {
@@ -157,6 +173,7 @@ impl ConfirmStep {
             chains: BTreeMap::from([(
                 chain_id,
                 ChainPair {
+                    confirmations,
                     primary: Arc::new(primary_chain),
                     secondary: Arc::new(secondary_chain),
                 },
@@ -184,15 +201,16 @@ impl ConfirmStep {
             );
         };
 
-        let canonical = match finalized_evidence(chains, deposit, context.address).await {
-            FinalityResult::Ready(log) => log,
+        let (canonical, is_final) = match confirmed_evidence(chains, deposit, context.address).await
+        {
+            FinalityResult::Ready { log, is_final } => (log, is_final),
             FinalityResult::Wait(evidence) => {
-                return StepResult::new(
-                    StepOutcome::Wait {
-                        reason: WaitReason::Finality,
-                    },
-                    evidence,
-                );
+                let reason = if chains.confirmations == Confirmations::Finalized {
+                    WaitReason::Finality
+                } else {
+                    WaitReason::Confirmations
+                };
+                return StepResult::new(StepOutcome::Wait { reason }, evidence);
             }
             FinalityResult::Retry(error, evidence) => {
                 return retry(error, evidence, TransitionEffects::default());
@@ -208,6 +226,7 @@ impl ConfirmStep {
         let canonical_effect = canonical_effect(deposit, &canonical, selected_route);
         let mut effects = TransitionEffects {
             canonical_evidence: canonical_effect,
+            mark_final: is_final,
             ..TransitionEffects::default()
         };
         let Some((route_name, route_version)) = selected_route else {
@@ -449,62 +468,81 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
 }
 
 enum FinalityResult {
-    Ready(TransferLog),
+    Ready { log: TransferLog, is_final: bool },
     Wait(Value),
     Retry(RetryError, Value),
 }
 
-async fn finalized_evidence(
+fn receipt_block(lookup: &ReceiptLookup) -> Option<u64> {
+    match lookup {
+        ReceiptLookup::Missing => None,
+        ReceiptLookup::Included { block_number, .. } => Some(*block_number),
+    }
+}
+
+/// Reads the transfer at the deposit's receipt position on both providers and returns it once
+/// both show the same log in the same block and the block has reached the route's confirmation
+/// on both. The block is final too when both providers' `finalized` covers it.
+async fn confirmed_evidence(
     chains: &ChainPair,
     deposit: &Deposit,
     address: Address,
 ) -> FinalityResult {
-    let (primary_head, secondary_head, primary_log, secondary_log) = tokio::join!(
-        chains.primary.finalized_head(),
-        chains.secondary.finalized_head(),
+    let confirmations = chains.confirmations;
+    let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = tokio::join!(
+        chains.primary.confirmation_heads(confirmations),
+        chains.secondary.confirmation_heads(confirmations),
         chains
             .primary
-            .transfer_log_by_identity(deposit.tx_hash, deposit.log_index),
+            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
         chains
             .secondary
-            .transfer_log_by_identity(deposit.tx_hash, deposit.log_index),
+            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
     );
-    let (primary_head, secondary_head, primary, secondary) =
-        match (primary_head, secondary_head, primary_log, secondary_log) {
-            (Ok(primary_head), Ok(secondary_head), Ok(primary), Ok(secondary)) => {
-                (primary_head, secondary_head, primary, secondary)
-            }
-            (primary_head, secondary_head, primary_log, secondary_log) => {
-                return FinalityResult::Retry(
-                    RetryError::RpcDisagreement,
-                    json!({
-                        "stage": "finality",
-                        "error": "rpc_failure",
-                        "provider_a_head": chain_result_code(&primary_head),
-                        "provider_b_head": chain_result_code(&secondary_head),
-                        "provider_a_receipt": chain_result_code(&primary_log),
-                        "provider_b_receipt": chain_result_code(&secondary_log),
-                    }),
-                );
-            }
-        };
-    let required_block = primary
-        .as_ref()
-        .map(|log| log.block_number)
+    let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = match (
+        primary_heads,
+        secondary_heads,
+        primary_receipt,
+        secondary_receipt,
+    ) {
+        (Ok(primary_heads), Ok(secondary_heads), Ok(primary), Ok(secondary)) => {
+            (primary_heads, secondary_heads, primary, secondary)
+        }
+        (primary_heads, secondary_heads, primary_receipt, secondary_receipt) => {
+            return FinalityResult::Retry(
+                RetryError::RpcDisagreement,
+                json!({
+                    "stage": "finality",
+                    "error": "rpc_failure",
+                    "provider_a_head": chain_result_code(&primary_heads),
+                    "provider_b_head": chain_result_code(&secondary_heads),
+                    "provider_a_receipt": chain_result_code(&primary_receipt),
+                    "provider_b_receipt": chain_result_code(&secondary_receipt),
+                }),
+            );
+        }
+    };
+    let required_block = receipt_block(&primary_receipt)
         .into_iter()
-        .chain(secondary.as_ref().map(|log| log.block_number))
+        .chain(receipt_block(&secondary_receipt))
         .max()
         .unwrap_or(deposit.block_number);
-    if primary_head < required_block || secondary_head < required_block {
+    if !confirmations.reached(required_block, primary_heads)
+        || !confirmations.reached(required_block, secondary_heads)
+    {
         return FinalityResult::Wait(json!({
             "stage": "finality",
-            "result": "not_final",
+            "result": "not_confirmed",
             "required_block": required_block,
-            "provider_a_finalized": primary_head,
-            "provider_b_finalized": secondary_head,
+            "provider_a_horizon": confirmations.horizon(primary_heads),
+            "provider_b_horizon": confirmations.horizon(secondary_heads),
+            "provider_a_finalized": primary_heads.finalized,
+            "provider_b_finalized": secondary_heads.finalized,
         }));
     }
-    match (primary, secondary) {
+    let is_final =
+        required_block <= primary_heads.finalized && required_block <= secondary_heads.finalized;
+    match (primary_receipt.transfer(), secondary_receipt.transfer()) {
         (Some(primary), Some(secondary)) if primary == secondary => {
             if primary.to != address {
                 return FinalityResult::Retry(
@@ -513,31 +551,41 @@ async fn finalized_evidence(
                         "stage": "finality",
                         "error": "recipient_mismatch",
                         "expected_to": format!("{address:#x}"),
-                        "provider_a": provider_evidence(&primary),
-                        "provider_b": provider_evidence(&secondary),
+                        "provider_a": provider_evidence(primary),
+                        "provider_b": provider_evidence(secondary),
                     }),
                 );
             }
-            FinalityResult::Ready(primary)
+            FinalityResult::Ready {
+                log: primary.clone(),
+                is_final,
+            }
         }
-        // Deposits are born final, so both providers denying the log past its block is a
-        // finality or provider fault, not a disagreement between them.
-        (None, None) => FinalityResult::Retry(
+        // Past finality on both providers, a missing transfer is a finality or provider fault
+        // until the finality watch proves the transaction dropped and reverses the deposit.
+        (None, None) if is_final => FinalityResult::Retry(
             RetryError::InvariantViolation,
             json!({
                 "stage": "finality",
                 "error": "log_absent_at_finality",
-                "provider_a_finalized": primary_head,
-                "provider_b_finalized": secondary_head,
+                "provider_a_finalized": primary_heads.finalized,
+                "provider_b_finalized": secondary_heads.finalized,
             }),
         ),
+        // Before finality the transaction may be re-included; the finality watch follows it.
+        (None, None) => FinalityResult::Wait(json!({
+            "stage": "finality",
+            "result": "transfer_absent",
+            "provider_a_receipt": receipt_block(&primary_receipt),
+            "provider_b_receipt": receipt_block(&secondary_receipt),
+        })),
         (primary, secondary) => FinalityResult::Retry(
             RetryError::RpcDisagreement,
             json!({
                 "stage": "finality",
                 "error": "rpc_disagreement",
-                "provider_a": primary.as_ref().map(provider_evidence),
-                "provider_b": secondary.as_ref().map(provider_evidence),
+                "provider_a": primary.map(provider_evidence),
+                "provider_b": secondary.map(provider_evidence),
             }),
         ),
     }
@@ -561,6 +609,7 @@ fn canonical_effect(
     let selected_name = selected_route.map(|(name, _)| name.as_str());
     let selected_version = selected_route.map(|(_, version)| version);
     let changed = deposit.block_number != canonical.block_number
+        || deposit.log_index != canonical.log_index
         || deposit.block_hash != canonical.block_hash
         || deposit.block_time != canonical.block_time
         || deposit.asset_contract != canonical.token
@@ -569,6 +618,7 @@ fn canonical_effect(
         || deposit.route.as_deref() != selected_name
         || deposit.route_version != selected_version;
     changed.then_some(CanonicalEvidence {
+        log_index: canonical.log_index,
         block_number: canonical.block_number,
         block_hash: canonical.block_hash,
         block_time: canonical.block_time,
@@ -663,6 +713,7 @@ fn unix_seconds(time: DateTime<Utc>) -> Option<UnixSeconds> {
 fn provider_evidence(log: &TransferLog) -> Value {
     json!({
         "tx_hash": format!("{:#x}", log.tx_hash),
+        "receipt_log_index": log.receipt_log_index,
         "log_index": log.log_index,
         "block_number": log.block_number,
         "block_hash": format!("{:#x}", log.block_hash),
@@ -690,6 +741,7 @@ mod tests {
     #[derive(Clone)]
     struct MockChain {
         head: Result<u64, ChainError>,
+        latest_ahead: u64,
         logs: Result<Vec<TransferLog>, ChainError>,
     }
 
@@ -703,6 +755,26 @@ mod tests {
             }))
         }
 
+        fn confirmation_heads(
+            &self,
+            confirmations: Confirmations,
+        ) -> impl std::future::Future<Output = Result<ChainHeads, ChainError>> + Send {
+            // `latest` is two blocks past `finalized` when the route asks for it.
+            ready(self.head.clone().map(|finalized| {
+                ChainHeads {
+                    latest: confirmations
+                        .needs_latest()
+                        .then(|| finalized + self.latest_ahead),
+                    safe: None,
+                    finalized,
+                }
+            }))
+        }
+
+        async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+            panic!("the confirm step never reads nonces")
+        }
+
         async fn transfer_logs_to(
             &self,
             _addresses: &[Address],
@@ -712,15 +784,21 @@ mod tests {
             panic!("confirm finality must locate the log by receipt identity")
         }
 
-        fn transfer_log_by_identity(
+        fn receipt_transfer(
             &self,
             tx_hash: B256,
-            log_index: u64,
-        ) -> impl std::future::Future<Output = Result<Option<TransferLog>, ChainError>> + Send
-        {
+            receipt_log_index: u64,
+        ) -> impl std::future::Future<Output = Result<ReceiptLookup, ChainError>> + Send {
             ready(self.logs.clone().map(|logs| {
                 logs.into_iter()
-                    .find(|log| log.tx_hash == tx_hash && log.log_index == log_index)
+                    .find(|log| {
+                        log.tx_hash == tx_hash && log.receipt_log_index == receipt_log_index
+                    })
+                    .map_or(ReceiptLookup::Missing, |log| ReceiptLookup::Included {
+                        block_number: log.block_number,
+                        block_hash: log.block_hash,
+                        transfer: Some(Box::new(log)),
+                    })
             }))
         }
     }
@@ -843,6 +921,97 @@ mod tests {
         );
     }
 
+    fn depth_route() -> RouteFile {
+        let mut route = route(PricingMode::Spot);
+        route.chain.confirmations = Confirmations::Depth(2);
+        route
+    }
+
+    fn chain_at(finalized: u64, latest: u64, logs: Vec<TransferLog>) -> MockChain {
+        MockChain {
+            head: Ok(finalized),
+            latest_ahead: latest - finalized,
+            logs: Ok(logs),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_depth_route_confirms_before_finality_without_marking_final() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        // Block 10 with the heads at 11: two blocks, the transfer's own included.
+        let result = step(
+            depth_route(),
+            chain_at(4, 11, vec![log.clone()]),
+            chain_at(4, 11, vec![log]),
+            prices(now_seconds()),
+            context(None),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(result.outcome, StepOutcome::Advance);
+        assert!(!result.effects.mark_final);
+    }
+
+    #[tokio::test]
+    async fn a_depth_route_waits_for_a_lagging_provider_at_the_head_poll_interval() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let result = step(
+            depth_route(),
+            chain_at(4, 11, vec![log.clone()]),
+            chain_at(4, 10, vec![log]),
+            prices(now_seconds()),
+            context(None),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Confirmations
+            }
+        );
+        assert_eq!(result.evidence["result"], "not_confirmed");
+    }
+
+    #[tokio::test]
+    async fn a_transfer_gone_before_finality_waits_for_the_finality_watch() {
+        let result = step(
+            depth_route(),
+            chain_at(4, 20, Vec::new()),
+            chain_at(4, 20, Vec::new()),
+            prices(now_seconds()),
+            context(None),
+        )
+        .run(&deposit(1_000))
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Confirmations
+            }
+        );
+        assert_eq!(result.evidence["result"], "transfer_absent");
+    }
+
+    #[tokio::test]
+    async fn a_block_final_on_both_providers_marks_the_deposit_final() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let result = step(
+            depth_route(),
+            chain_at(10, 12, vec![log.clone()]),
+            chain_at(10, 12, vec![log]),
+            prices(now_seconds()),
+            context(None),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(result.outcome, StepOutcome::Advance);
+        assert!(result.effects.mark_final);
+    }
+
     #[tokio::test]
     async fn agreed_canonical_evidence_corrects_provisional_row() {
         let deposit = deposit(1_000);
@@ -931,6 +1100,7 @@ mod tests {
             chains: BTreeMap::from([(
                 deposit.chain_id,
                 ChainPair {
+                    confirmations: Confirmations::Finalized,
                     primary: Arc::new(chain(100, vec![canonical.clone()])),
                     secondary: Arc::new(chain(100, vec![canonical])),
                 },
@@ -1194,6 +1364,7 @@ mod tests {
         context: ConfirmationContext,
     ) -> ConfirmStep {
         let chain_id = route.chain.chain_id;
+        let route_confirmations = route.chain.confirmations;
         let asset_contract = route.asset.contract;
         let key = (route.route.clone(), route.version);
         ConfirmStep {
@@ -1217,6 +1388,7 @@ mod tests {
             chains: BTreeMap::from([(
                 chain_id,
                 ChainPair {
+                    confirmations: route_confirmations,
                     primary: Arc::new(primary_chain),
                     secondary: Arc::new(secondary_chain),
                 },
@@ -1244,6 +1416,7 @@ mod tests {
             id: Uuid::new_v4(),
             chain_id: 1,
             tx_hash: B256::repeat_byte(1),
+            receipt_log_index: 0,
             log_index: 3,
             block_number: 10,
             block_hash: B256::repeat_byte(2),
@@ -1255,6 +1428,9 @@ mod tests {
             asset_contract: asset(),
             from_address: Address::repeat_byte(4),
             amount_atomic: AtomicAmount::new(U256::from(amount)),
+            tx_from: Some(Address::repeat_byte(4)),
+            tx_nonce: Some(0),
+            final_at: None,
             state: DepositState::Detected,
             reason: None,
             attempt: 0,
@@ -1275,10 +1451,13 @@ mod tests {
     fn transfer(deposit: &Deposit) -> TransferLog {
         TransferLog {
             tx_hash: deposit.tx_hash,
+            receipt_log_index: deposit.receipt_log_index,
             log_index: deposit.log_index,
             block_number: deposit.block_number,
             block_hash: deposit.block_hash,
             block_time: deposit.block_time,
+            tx_from: Address::repeat_byte(4),
+            tx_nonce: 0,
             token: deposit.asset_contract,
             from: deposit.from_address,
             to: recipient(),
@@ -1289,6 +1468,7 @@ mod tests {
     fn chain(head: u64, logs: Vec<TransferLog>) -> MockChain {
         MockChain {
             head: Ok(head),
+            latest_ahead: 2,
             logs: Ok(logs),
         }
     }

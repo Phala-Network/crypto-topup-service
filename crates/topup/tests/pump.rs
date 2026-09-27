@@ -21,12 +21,14 @@ use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
 use topup::steps::confirm::ConfirmStep;
-use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedHead, TransferLog};
+use topup_adapters::chain::evm::{
+    ChainError, ChainReader, FinalizedHead, ReceiptLookup, TransferLog,
+};
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{DepositState, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
-use topup_core::route::RouteFile;
+use topup_core::route::{ChainHeads, Confirmations, RouteFile};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
@@ -169,6 +171,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     next_attempt_at: Utc::now(),
                 }],
                 effects: TransitionEffects {
+                    mark_final: false,
                     canonical_evidence: None,
                     valuation: Some(StoredValuation {
                         valuation_at: Utc::now(),
@@ -880,16 +883,37 @@ impl ChainReader for ConfirmChain {
         panic!("confirm must locate transfers by receipt identity")
     }
 
-    async fn transfer_log_by_identity(
+    async fn confirmation_heads(
+        &self,
+        _confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        let finalized = self.finalized_head().await?.number;
+        Ok(ChainHeads {
+            latest: Some(finalized),
+            safe: Some(finalized),
+            finalized,
+        })
+    }
+
+    async fn receipt_transfer(
         &self,
         tx_hash: B256,
-        log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
+        receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
         Ok(self
             .logs
             .iter()
-            .find(|log| log.tx_hash == tx_hash && log.log_index == log_index)
-            .cloned())
+            .find(|log| log.tx_hash == tx_hash && log.receipt_log_index == receipt_log_index)
+            .cloned()
+            .map_or(ReceiptLookup::Missing, |log| ReceiptLookup::Included {
+                block_number: log.block_number,
+                block_hash: log.block_hash,
+                transfer: Some(Box::new(log)),
+            }))
+    }
+
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+        panic!("the confirm step never reads nonces")
     }
 }
 
@@ -948,6 +972,9 @@ fn transfer_log(deposit: &db::Deposit, recipient: Address) -> TransferLog {
     TransferLog {
         tx_hash: deposit.tx_hash,
         log_index: deposit.log_index,
+        receipt_log_index: deposit.log_index,
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
         block_number: deposit.block_number,
         block_hash: deposit.block_hash,
         block_time: deposit.block_time,
@@ -1005,6 +1032,10 @@ async fn insert_deposit(pool: &PgPool, seed: Seed, number: u8) -> Result<Uuid> {
         chain_id: 1,
         tx_hash: b256(number),
         log_index: 0,
+        receipt_log_index: 0,
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
+        is_final: true,
         block_number: 100 + u64::from(number),
         block_hash: b256(number.wrapping_add(1)),
         block_time: Utc::now(),

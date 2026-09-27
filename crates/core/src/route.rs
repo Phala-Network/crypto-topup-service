@@ -64,6 +64,7 @@ impl RouteFile {
         }
         validate_address("asset.contract", self.asset.contract)?;
         validate_address("chain.sanctions_oracle", self.screening.sanctions_oracle)?;
+        self.chain.confirmations.validate(self.chain.chain_id)?;
         validate_slug("asset.symbol", &self.asset.symbol)?;
         validate_slug("product", &self.destination.product)?;
         self.chain.operator_key_version()?;
@@ -153,6 +154,8 @@ impl RouteFile {
 pub struct ChainConfig {
     /// EVM chain identifier.
     pub chain_id: u64,
+    /// Confirmation a transfer's block must reach before it is credited.
+    pub confirmations: Confirmations,
     /// Independent RPC provider identifiers.
     pub rpc_providers: Vec<String>,
     /// Derivation version of the operator key, selecting the `operator/v{n}` signer domain.
@@ -169,6 +172,183 @@ impl ChainConfig {
         NonZeroU32::new(self.operator_key_version).ok_or_else(|| {
             RouteError::validation("chain.operator_key_version", "must be at least 1")
         })
+    }
+}
+
+/// The family of a chain, which decides the confirmation values it accepts (design D1).
+///
+/// A chain joins a family only through a reviewed code change, because the credit rule depends on
+/// how the chain reorganizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainFamily {
+    /// Ethereum L1 proof-of-stake (mainnet, testnets, and Anvil's L1 simulation): a depth or
+    /// `finalized`.
+    EthereumL1,
+    /// OP-stack L2: `safe` (derived from data posted to L1) or `finalized`; never the sequencer's
+    /// unsafe head.
+    OpStack,
+}
+
+impl ChainFamily {
+    /// The reviewed family of `chain_id`, if any. A chain outside every family is credited only at
+    /// `finalized`.
+    #[must_use]
+    pub const fn of(chain_id: u64) -> Option<Self> {
+        match chain_id {
+            // Mainnet, Sepolia, Holesky, Hoodi, and Anvil.
+            1 | 11_155_111 | 17_000 | 560_048 | 31_337 => Some(Self::EthereumL1),
+            // OP Mainnet, Base, Base Sepolia, OP Sepolia.
+            10 | 8_453 | 84_532 | 11_155_420 => Some(Self::OpStack),
+            _ => None,
+        }
+    }
+
+    /// The family's default confirmation.
+    #[must_use]
+    pub const fn default_confirmations(self) -> Confirmations {
+        match self {
+            Self::EthereumL1 => Confirmations::Depth(DEFAULT_ETHEREUM_CONFIRMATION_DEPTH),
+            Self::OpStack => Confirmations::Safe,
+        }
+    }
+}
+
+/// The confirmation a transfer's block must reach before it is credited (design D1).
+///
+/// Written in a route file as a positive integer (a depth: the block and the blocks on top of it,
+/// `head - block + 1`), `safe`, or `finalized`. A block at or below `finalized` always qualifies,
+/// so `finalized` credits only final deposits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ConfirmationsRepr", into = "ConfirmationsRepr")]
+pub enum Confirmations {
+    /// At least this many blocks, the transfer's own included, on provider heads (`latest`).
+    Depth(u64),
+    /// The provider's `safe` block is at or past the transfer's block.
+    Safe,
+    /// The provider's `finalized` block is at or past the transfer's block.
+    Finalized,
+}
+
+/// A provider's heads read for one confirmation check. `latest` and `safe` are read only when the
+/// confirmation needs them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChainHeads {
+    /// The `latest` block number, when read.
+    pub latest: Option<u64>,
+    /// The `safe` block number, when read.
+    pub safe: Option<u64>,
+    /// The `finalized` block number.
+    pub finalized: u64,
+}
+
+impl Confirmations {
+    /// Whether the provider heads must include `latest`.
+    #[must_use]
+    pub const fn needs_latest(self) -> bool {
+        matches!(self, Self::Depth(_))
+    }
+
+    /// Whether the provider heads must include `safe`.
+    #[must_use]
+    pub const fn needs_safe(self) -> bool {
+        matches!(self, Self::Safe)
+    }
+
+    /// The highest block that has reached this confirmation on a provider with `heads`: every
+    /// block at or below it qualifies. A missing head counts as not reached.
+    #[must_use]
+    pub fn horizon(self, heads: ChainHeads) -> u64 {
+        let reached = match self {
+            // head - block + 1 >= n  <=>  block <= head + 1 - n
+            Self::Depth(depth) => heads
+                .latest
+                .and_then(|latest| latest.checked_add(1)?.checked_sub(depth)),
+            Self::Safe => heads.safe,
+            Self::Finalized => None,
+        };
+        reached.map_or(heads.finalized, |block| block.max(heads.finalized))
+    }
+
+    /// Whether `block` has reached this confirmation on a provider with `heads`.
+    #[must_use]
+    pub fn reached(self, block: u64, heads: ChainHeads) -> bool {
+        block <= self.horizon(heads)
+    }
+
+    /// Typical seconds from paying to the `deposit.credited` event on a 12-second-slot chain: half
+    /// a slot waiting for inclusion, the remaining blocks, then polling and delivery; for `safe`
+    /// and `finalized`, the typical delay of those tags (about 15 minutes on Ethereum L1).
+    #[must_use]
+    pub const fn typical_credit_seconds(self) -> u64 {
+        match self {
+            Self::Depth(depth) => depth.saturating_mul(12).saturating_add(6),
+            Self::Safe => TYPICAL_SAFE_SECONDS,
+            Self::Finalized => TYPICAL_FINALIZED_SECONDS,
+        }
+    }
+
+    fn validate(self, chain_id: u64) -> Result<(), RouteError> {
+        const FIELD: &str = "chain.confirmations";
+        match (self, ChainFamily::of(chain_id)) {
+            (Self::Depth(0), _) => Err(RouteError::validation(FIELD, "a depth must be at least 1")),
+            (Self::Finalized, _)
+            | (Self::Depth(_), Some(ChainFamily::EthereumL1))
+            | (Self::Safe, Some(ChainFamily::OpStack)) => Ok(()),
+            (Self::Depth(_), Some(ChainFamily::OpStack)) => Err(RouteError::validation(
+                FIELD,
+                "an OP-stack chain accepts `safe` or `finalized`, never a depth on the sequencer's unsafe head",
+            )),
+            (Self::Safe, Some(ChainFamily::EthereumL1)) => Err(RouteError::validation(
+                FIELD,
+                "an Ethereum L1 chain accepts a depth or `finalized`",
+            )),
+            (Self::Depth(_) | Self::Safe, None) => Err(RouteError::validation(
+                FIELD,
+                format!(
+                    "chain {chain_id} has no reviewed chain family; only `finalized` is accepted"
+                ),
+            )),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ConfirmationsRepr {
+    Depth(u64),
+    Tag(ConfirmationTag),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfirmationTag {
+    Safe,
+    Finalized,
+}
+
+impl TryFrom<ConfirmationsRepr> for Confirmations {
+    type Error = RouteError;
+
+    fn try_from(repr: ConfirmationsRepr) -> Result<Self, Self::Error> {
+        match repr {
+            ConfirmationsRepr::Depth(0) => Err(RouteError::validation(
+                "chain.confirmations",
+                "a depth must be at least 1",
+            )),
+            ConfirmationsRepr::Depth(depth) => Ok(Self::Depth(depth)),
+            ConfirmationsRepr::Tag(ConfirmationTag::Safe) => Ok(Self::Safe),
+            ConfirmationsRepr::Tag(ConfirmationTag::Finalized) => Ok(Self::Finalized),
+        }
+    }
+}
+
+impl From<Confirmations> for ConfirmationsRepr {
+    fn from(confirmations: Confirmations) -> Self {
+        match confirmations {
+            Confirmations::Depth(depth) => Self::Depth(depth),
+            Confirmations::Safe => Self::Tag(ConfirmationTag::Safe),
+            Confirmations::Finalized => Self::Tag(ConfirmationTag::Finalized),
+        }
     }
 }
 
@@ -392,6 +572,10 @@ pub struct ChainSpec {
     pub forwarder_factory: Address,
     /// Treasury address, immutable in the factory's implementation.
     pub treasury: Address,
+    /// Confirmation required before crediting; default [`ChainFamily::default_confirmations`], or
+    /// `finalized` for a chain outside every family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmations: Option<Confirmations>,
     /// Forwarder implementation; default the factory's first `CREATE` ([`factory_implementation`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementation: Option<Address>,
@@ -573,6 +757,14 @@ impl StuckAfterSpec {
 
 /// USD cents.
 pub const DEFAULT_UNIT_DECIMALS: u8 = 2;
+/// Two blocks on Ethereum L1: depth-1 reorgs are routine, deeper ones were not observed (design
+/// D1), and a reversal is recoverable.
+pub const DEFAULT_ETHEREUM_CONFIRMATION_DEPTH: u64 = 2;
+/// Typical delay of an OP-stack `safe` head behind the sequencer: a few L1 batch intervals.
+pub const TYPICAL_SAFE_SECONDS: u64 = 300;
+/// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
+/// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s.
+pub const TYPICAL_FINALIZED_SECONDS: u64 = 900;
 /// Provider ids whose URLs are `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL`.
 pub const DEFAULT_RPC_PROVIDERS: [&str; 2] = ["provider-a", "provider-b"];
 /// The first operator key; bumped only after an operator rotation.
@@ -706,9 +898,15 @@ impl TryFrom<RouteSpec> for RouteFile {
             (None, PricingMode::Stablecoin) => None,
         };
         let stuck = spec.alerts.stuck_after_s;
+        let confirmations = spec.chain.confirmations.unwrap_or_else(|| {
+            ChainFamily::of(chain_id).map_or(Confirmations::Finalized, |family| {
+                family.default_confirmations()
+            })
+        });
         Ok(Self {
             chain: ChainConfig {
                 chain_id,
+                confirmations,
                 rpc_providers: spec.chain.rpc_providers.unwrap_or_else(|| {
                     DEFAULT_RPC_PROVIDERS
                         .iter()
@@ -823,6 +1021,7 @@ impl From<RouteFile> for RouteSpec {
                 chain_id: route.chain.chain_id,
                 forwarder_factory: route.chain.contracts.forwarder_factory,
                 treasury: route.chain.contracts.treasury,
+                confirmations: Some(route.chain.confirmations),
                 implementation: Some(route.chain.contracts.implementation),
                 sanctions_oracle: Some(route.screening.sanctions_oracle),
                 rpc_providers: Some(route.chain.rpc_providers),
@@ -1031,5 +1230,77 @@ mod tests {
                 .to_string()
                 .contains("must not be empty")
         );
+    }
+
+    #[test]
+    fn confirmation_horizon_follows_the_chain_family_rule() {
+        let heads = ChainHeads {
+            latest: Some(100),
+            safe: Some(90),
+            finalized: 60,
+        };
+        // Depth 2: the head block and its parent's block count; block 99 has two.
+        assert_eq!(Confirmations::Depth(2).horizon(heads), 99);
+        assert!(Confirmations::Depth(2).reached(99, heads));
+        assert!(!Confirmations::Depth(2).reached(100, heads));
+        assert!(Confirmations::Depth(1).reached(100, heads));
+        assert_eq!(Confirmations::Safe.horizon(heads), 90);
+        assert_eq!(Confirmations::Finalized.horizon(heads), 60);
+        // A block at or below finalized always qualifies, and an unread head never adds blocks.
+        let lagging = ChainHeads {
+            latest: None,
+            safe: None,
+            finalized: 60,
+        };
+        assert_eq!(Confirmations::Depth(2).horizon(lagging), 60);
+        assert_eq!(Confirmations::Safe.horizon(lagging), 60);
+        assert_eq!(
+            Confirmations::Depth(200).horizon(ChainHeads {
+                latest: Some(100),
+                ..lagging
+            }),
+            60
+        );
+    }
+
+    #[test]
+    fn confirmations_parse_as_a_depth_or_a_tag_and_are_checked_per_family() {
+        for (yaml, expected) in [
+            ("2", Confirmations::Depth(2)),
+            ("safe", Confirmations::Safe),
+            ("finalized", Confirmations::Finalized),
+        ] {
+            let parsed: Confirmations = serde_json::from_str(&match yaml {
+                "2" => "2".to_owned(),
+                tag => format!("\"{tag}\""),
+            })
+            .expect("valid confirmations");
+            assert_eq!(parsed, expected);
+            let encoded = serde_json::to_string(&parsed).expect("serializes");
+            assert_eq!(
+                serde_json::from_str::<Confirmations>(&encoded).expect("round trip"),
+                parsed
+            );
+        }
+        assert!(serde_json::from_str::<Confirmations>("0").is_err());
+        assert!(serde_json::from_str::<Confirmations>("\"latest\"").is_err());
+
+        assert_eq!(
+            ChainFamily::of(1).map(ChainFamily::default_confirmations),
+            Some(Confirmations::Depth(2))
+        );
+        assert_eq!(
+            ChainFamily::of(8_453).map(ChainFamily::default_confirmations),
+            Some(Confirmations::Safe)
+        );
+        assert!(Confirmations::Depth(2).validate(1).is_ok());
+        assert!(Confirmations::Finalized.validate(1).is_ok());
+        assert!(Confirmations::Safe.validate(1).is_err());
+        assert!(Confirmations::Safe.validate(8_453).is_ok());
+        assert!(Confirmations::Depth(10).validate(8_453).is_err());
+        assert!(Confirmations::Finalized.validate(137).is_ok());
+        assert!(Confirmations::Depth(2).validate(137).is_err());
+        assert_eq!(Confirmations::Depth(2).typical_credit_seconds(), 30);
+        assert_eq!(Confirmations::Finalized.typical_credit_seconds(), 900);
     }
 }

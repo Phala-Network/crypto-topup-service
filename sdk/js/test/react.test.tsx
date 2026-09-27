@@ -81,7 +81,9 @@ describe("Checkout", () => {
 
     served = quote({ payment_status: "seen", confirmations: 2 });
     await poll();
-    expect(screen.getByRole("status").textContent).toBe("Payment received, 2 confirmations");
+    expect(screen.getByRole("status").textContent).toBe(
+      "Payment received, 2 confirmations. Crediting in about 30 seconds",
+    );
     expect(screen.queryByRole("tablist")).toBeNull();
 
     served = quote({ status: "complete", payment_status: "credited" });

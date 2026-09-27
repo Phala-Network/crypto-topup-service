@@ -642,6 +642,59 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
 }
 
 #[tokio::test]
+async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[63; 32]);
+        let admin_key = SigningKey::from_bytes(&[64; 32]);
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let deposit =
+            seed_rejected_deposit(&database.app_pool, product.id, "not-final-yet", 100).await?;
+        sqlx::query("UPDATE deposits SET final_at = NULL WHERE id = $1")
+            .bind(deposit)
+            .execute(&database.app_pool)
+            .await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let response = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
+                PRODUCT_KID,
+                &product_key,
+                now,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response_json(response).await?["error"]["code"] == "deposit_not_final");
+
+        sqlx::query("UPDATE deposits SET final_at = now() WHERE id = $1")
+            .bind(deposit)
+            .execute(&database.app_pool)
+            .await?;
+        let response = app
+            .oneshot(signed_request(
+                Method::POST,
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
 async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
@@ -1580,6 +1633,10 @@ async fn seed_deposit(
             chain_id: 1,
             tx_hash,
             log_index: 0,
+            receipt_log_index: 0,
+            tx_from: alloy_primitives::Address::ZERO,
+            tx_nonce: 0,
+            is_final: true,
             block_number: 80,
             block_hash: B256::from(U256::from(
                 index.checked_add(2).context("test block overflow")?,
@@ -1775,6 +1832,10 @@ async fn seed_same_address_deposits(
                 chain_id: 1,
                 tx_hash: B256::from(U256::from(index)),
                 log_index: 0,
+                receipt_log_index: 0,
+                tx_from: alloy_primitives::Address::ZERO,
+                tx_nonce: 0,
+                is_final: true,
                 block_number: index,
                 block_hash: B256::from(U256::from(index.checked_add(1).context("block hash")?)),
                 block_time: Utc::now(),

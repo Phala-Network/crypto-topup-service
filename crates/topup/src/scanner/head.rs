@@ -1,6 +1,8 @@
-//! Display-only head scan (architecture §8): transfers to watched addresses in
-//! `[finalized + 1, latest]` on provider A, stored in `pending_transfers` so products can show
-//! "received, N confirmations" before finality. Nothing here can create or change a deposit.
+//! The head loop (architecture §8): every 2 s on provider A it runs the fast scan at the route's
+//! confirmation, which records deposits, and the display-only head scan: transfers to watched
+//! addresses in `[finalized + 1, latest]`, stored in `pending_transfers` so the checkout shows
+//! "payment received" within seconds of the block. The head scan never creates or changes a
+//! deposit.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,12 +14,13 @@ use topup_adapters::chain::evm::{ChainReader as _, FinalizedReader};
 
 use super::ChainRoutes;
 
-use super::{MAX_SCAN_WINDOW, ScannerError};
+use super::{MAX_SCAN_WINDOW, ScannerError, confirmed_scan_once};
 use crate::db::{self, HeadCommit, NewPendingTransfer};
 
-/// Longest interval between head scans: about one Ethereum slot. A shorter scanner poll interval
-/// (`--scanner-poll-interval-s`) also shortens the head scan.
-pub const HEAD_SCAN_INTERVAL: Duration = Duration::from_secs(12);
+/// Longest interval between head polls: a sixth of a 12-second Ethereum slot, so a transfer is
+/// seen, and credited once it reaches the route's confirmation, within about 2 s of its block. A
+/// shorter scanner poll interval (`--scanner-poll-interval-s`) also shortens it.
+pub const HEAD_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Outcome of one head scan.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -71,6 +74,7 @@ pub async fn head_scan_once(
             transfers.push(NewPendingTransfer {
                 chain_id,
                 tx_hash: log.tx_hash,
+                receipt_log_index: log.receipt_log_index,
                 log_index: log.log_index,
                 block_number: log.block_number,
                 block_hash: log.block_hash,
@@ -90,9 +94,10 @@ pub async fn head_scan_once(
     }))
 }
 
-/// Runs the head scan every `interval` until cancellation. Failures only delay the
-/// pending view, so they are logged and retried. When provider A's `finalized` advances, the
-/// finalized scanner is woken instead of waiting for its poll interval.
+/// Runs the fast scan and the head scan every `interval` until cancellation. Failures only delay
+/// credit (the finalized scanner is the backstop) and the pending view, so they are logged and
+/// retried. When provider A's `finalized` advances, the finalized scanner is woken instead of
+/// waiting for its poll interval.
 pub(super) async fn run_head_loop(
     pool: &PgPool,
     reader: &FinalizedReader,
@@ -104,6 +109,25 @@ pub(super) async fn run_head_loop(
     let chain_id = routes.chain.chain_id;
     let mut last_finalized = None;
     loop {
+        let confirmed = tokio::select! {
+            () = cancellation.cancelled() => return,
+            result = confirmed_scan_once(pool, reader, routes) => result,
+        };
+        match confirmed {
+            Ok(Some(scan)) if scan.inserted > 0 => tracing::info!(
+                chain_id,
+                horizon = scan.horizon,
+                inserted = scan.inserted,
+                "deposits recorded at the route confirmation"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                chain_id,
+                error_category = error.category(),
+                %error,
+                "fast scan failed; retrying"
+            ),
+        }
         let result = tokio::select! {
             () = cancellation.cancelled() => return,
             result = head_scan_once(pool, reader, routes) => result,

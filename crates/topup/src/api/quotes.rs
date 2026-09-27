@@ -25,8 +25,7 @@ use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-/// Typical Ethereum delay from inclusion to the `finalized` tag (architecture §12).
-const TYPICAL_FINALITY_SECONDS: u64 = 900;
+use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
 
 #[utoipa::path(
     get,
@@ -67,7 +66,13 @@ pub(crate) async fn get_config(
             quote_ttl_seconds: route.rate_lock.window_s,
             quote_spread_bps: route.rate_lock.spread_bps.value(),
             quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
-            typical_finality_seconds: TYPICAL_FINALITY_SECONDS,
+            confirmations: match route.chain.confirmations {
+                Confirmations::Depth(depth) => depth.to_string(),
+                Confirmations::Safe => "safe".to_owned(),
+                Confirmations::Finalized => "finalized".to_owned(),
+            },
+            typical_credit_seconds: route.chain.confirmations.typical_credit_seconds(),
+            typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
         })
         .collect();
     Ok(Json(Config {

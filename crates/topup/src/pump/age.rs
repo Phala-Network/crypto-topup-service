@@ -40,7 +40,7 @@ impl AgeAlertConfig {
             DepositState::Detected => Some(stuck_after.detected),
             DepositState::Confirmed => Some(stuck_after.confirmed),
             DepositState::Credited => Some(stuck_after.credited),
-            DepositState::Swept | DepositState::Rejected => None,
+            DepositState::Swept | DepositState::Rejected | DepositState::Reversed => None,
         }
     }
 }
@@ -164,6 +164,7 @@ const fn state_code(state: DepositState) -> &'static str {
         DepositState::Credited => "credited",
         DepositState::Swept => "swept",
         DepositState::Rejected => "rejected",
+        DepositState::Reversed => "reversed",
     }
 }
 

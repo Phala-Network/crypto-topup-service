@@ -1422,10 +1422,10 @@ async fn insert_deposit_in(
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, asset_contract, from_address, amount_atomic, state, reason,
-            next_attempt_at
+            next_attempt_at, receipt_log_index
         )
         VALUES ($1, 1, $2, 0, 10, $3, now(), $4, $5, $6, $7, 100, 'rejected',
-                'unsupported_asset', now())
+                'unsupported_asset', now(), 0)
         "#,
     )
     .bind(id)
@@ -1546,6 +1546,10 @@ async fn insert_rejected_deposit(
             chain_id: route.chain.chain_id,
             tx_hash: B256::repeat_byte(0x71),
             log_index: 0,
+            receipt_log_index: 0,
+            tx_from: alloy_primitives::Address::ZERO,
+            tx_nonce: 0,
+            is_final: true,
             block_number: 10,
             block_hash: B256::repeat_byte(0x72),
             block_time: Utc::now(),

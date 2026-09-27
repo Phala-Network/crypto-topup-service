@@ -28,6 +28,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::time::timeout;
 use topup_core::money::AtomicAmount;
+use topup_core::route::{ChainHeads, Confirmations};
 
 /// Maximum inclusive block count in one `eth_getLogs` request.
 pub const MAX_BLOCKS_PER_REQUEST: u64 = 2_000;
@@ -40,19 +41,28 @@ sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
 }
 
-/// One finalized ERC-20 transfer to a tracked address.
+/// One ERC-20 transfer to a tracked address.
+///
+/// Its identity is `(tx_hash, receipt_log_index)`, which survives the transaction's re-inclusion in
+/// another block; the block fields and the block-wide `log_index` are evidence that may change.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransferLog {
     /// Transaction hash containing the event.
     pub tx_hash: B256,
+    /// Position of the log among the logs of the transaction's receipt.
+    pub receipt_log_index: u64,
     /// Log index within the block.
     pub log_index: u64,
-    /// Finalized block number.
+    /// Block number.
     pub block_number: u64,
-    /// Finalized block hash.
+    /// Block hash.
     pub block_hash: B256,
-    /// Timestamp of the finalized block.
+    /// Timestamp of the block.
     pub block_time: DateTime<Utc>,
+    /// Sender of the transaction (not necessarily the token sender).
+    pub tx_from: Address,
+    /// Nonce of the transaction, which proves it dropped once another transaction consumed it.
+    pub tx_nonce: u64,
     /// Token contract that emitted the event.
     pub token: Address,
     /// Transfer sender.
@@ -61,6 +71,33 @@ pub struct TransferLog {
     pub to: Address,
     /// Atomic token amount.
     pub amount: AtomicAmount,
+}
+
+/// A transaction's receipt as one provider reports it, with the transfer at one receipt position.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptLookup {
+    /// The provider has no receipt: the transaction is not in its canonical chain.
+    Missing,
+    /// The transaction is included in `block_hash`.
+    Included {
+        /// Including block number.
+        block_number: u64,
+        /// Including block hash.
+        block_hash: B256,
+        /// The ERC-20 `Transfer` at the requested receipt position, if that log is one.
+        transfer: Option<Box<TransferLog>>,
+    },
+}
+
+impl ReceiptLookup {
+    /// The transfer at the requested position, when the transaction is included.
+    #[must_use]
+    pub fn transfer(&self) -> Option<&TransferLog> {
+        match self {
+            Self::Missing => None,
+            Self::Included { transfer, .. } => transfer.as_deref(),
+        }
+    }
 }
 
 /// The provider's current finalized block.
@@ -121,6 +158,10 @@ pub enum ChainError {
     /// The provider health lock was poisoned.
     #[error("provider health state unavailable")]
     HealthStateUnavailable,
+    /// The chain moved between two reads that must describe the same block, such as a log and its
+    /// transaction's receipt; the read is retried.
+    #[error("chain reorganized during {0}")]
+    Reorganized(&'static str),
     /// Every provider a signed transaction was broadcast to failed; one error per provider, in
     /// configuration order.
     #[error("every provider failed to broadcast the transaction: {}", join_errors(.0))]
@@ -159,10 +200,17 @@ pub struct FeeQuote {
     pub max_priority_fee_per_gas: u128,
 }
 
-/// Chain reads required by the scanner and confirm step.
+/// Chain reads required by the scanner, the confirm step, and the finality watch.
 pub trait ChainReader: Send + Sync {
     /// Returns the provider's current finalized block number and time.
     fn finalized_head(&self) -> impl Future<Output = Result<FinalizedHead, ChainError>> + Send;
+
+    /// Returns the heads `confirmations` is evaluated on: `finalized` always, `latest` for a depth,
+    /// `safe` for `safe`.
+    fn confirmation_heads(
+        &self,
+        confirmations: Confirmations,
+    ) -> impl Future<Output = Result<ChainHeads, ChainError>> + Send;
 
     /// Returns ERC-20 transfers to any supplied recipient in the inclusive block range.
     fn transfer_logs_to(
@@ -172,12 +220,20 @@ pub trait ChainReader: Send + Sync {
         to_block: u64,
     ) -> impl Future<Output = Result<Vec<TransferLog>, ChainError>> + Send;
 
-    /// Locates one log by its immutable transaction hash and block-wide log index.
-    fn transfer_log_by_identity(
+    /// Reads the transaction's receipt and the ERC-20 transfer at `receipt_log_index` in it.
+    fn receipt_transfer(
         &self,
         tx_hash: B256,
-        log_index: u64,
-    ) -> impl Future<Output = Result<Option<TransferLog>, ChainError>> + Send;
+        receipt_log_index: u64,
+    ) -> impl Future<Output = Result<ReceiptLookup, ChainError>> + Send;
+
+    /// Returns `account`'s nonce at block `block`: the number of its transactions included up to
+    /// and including that block.
+    fn nonce_at(
+        &self,
+        account: Address,
+        block: u64,
+    ) -> impl Future<Output = Result<u64, ChainError>> + Send;
 }
 
 #[derive(Debug, Default)]
@@ -202,32 +258,44 @@ impl ProviderHealth {
     }
 }
 
-/// Bounded FIFO block-timestamp cache keyed by block hash, so a reorged block at the same height
-/// never lends its time to a log from another block. It evicts the oldest insertion, not the least
-/// recently used entry: a hash's time never changes, and the head scan reads the newest blocks,
-/// which are the newest insertions, so recency tracking would buy nothing.
-#[derive(Debug, Default)]
-struct BlockTimes {
-    times: HashMap<B256, DateTime<Utc>>,
-    order: VecDeque<B256>,
+/// Bounded FIFO cache of values that never change for their key, such as a block's time by its
+/// hash, so a reorged block at the same height never lends its data to a log from another block.
+/// It evicts the oldest insertion, not the least recently used entry: a key's value never changes,
+/// and the head scan reads the newest blocks, which are the newest insertions, so recency
+/// tracking would buy nothing.
+#[derive(Debug)]
+struct FifoCache<K, V> {
+    values: HashMap<K, V>,
+    order: VecDeque<K>,
 }
 
-impl BlockTimes {
-    fn get(&self, hash: &B256) -> Option<DateTime<Utc>> {
-        self.times.get(hash).copied()
+impl<K, V> Default for FifoCache<K, V> {
+    fn default() -> Self {
+        Self {
+            values: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> FifoCache<K, V> {
+    fn get(&self, key: &K) -> Option<V> {
+        self.values.get(key).cloned()
     }
 
-    fn insert(&mut self, hash: B256, time: DateTime<Utc>) {
-        if self.times.insert(hash, time).is_none() {
-            self.order.push_back(hash);
+    fn insert(&mut self, key: K, value: V) {
+        if self.values.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
             if self.order.len() > BLOCK_TIME_CACHE_CAPACITY
                 && let Some(oldest) = self.order.pop_front()
             {
-                self.times.remove(&oldest);
+                self.values.remove(&oldest);
             }
         }
     }
 }
+
+type BlockTimes = FifoCache<B256, DateTime<Utc>>;
 
 /// Timeout for one bounded RPC request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -617,14 +685,19 @@ fn is_execution_revert(code: i64, message: &str) -> bool {
             .starts_with("execution reverted")
 }
 
-/// Finalized-log reader for one consumer of a shared [`EvmClient`].
+/// Chain-log reader for one consumer of a shared [`EvmClient`].
 ///
-/// Each consumer keeps its own finalized-head regression guard and block-time cache, so one
-/// consumer's observations never change what another consumer reads.
+/// Each consumer keeps its own finalized-head regression guard and caches, so one consumer's
+/// observations never change what another consumer reads. Every transfer it returns carries its
+/// receipt position and its transaction's sender and nonce, read once per transaction.
 pub struct FinalizedReader {
     client: Arc<EvmClient>,
     health: Mutex<ProviderHealth>,
     block_times: Mutex<BlockTimes>,
+    /// Block-wide log indexes of a receipt's logs, in receipt order, by `(tx_hash, block_hash)`.
+    receipt_logs: Mutex<FifoCache<(B256, B256), Vec<u64>>>,
+    /// A transaction's sender and nonce, which its hash commits to.
+    origins: Mutex<FifoCache<B256, (Address, u64)>>,
 }
 
 impl fmt::Debug for FinalizedReader {
@@ -636,14 +709,52 @@ impl fmt::Debug for FinalizedReader {
     }
 }
 
+/// A decoded `Transfer` log before its receipt position and transaction origin are known.
+struct DecodedTransfer {
+    tx_hash: B256,
+    log_index: u64,
+    block_number: u64,
+    block_hash: B256,
+    token: Address,
+    from: Address,
+    to: Address,
+    amount: AtomicAmount,
+}
+
+impl DecodedTransfer {
+    fn complete(
+        self,
+        receipt_log_index: u64,
+        block_time: DateTime<Utc>,
+        (tx_from, tx_nonce): (Address, u64),
+    ) -> TransferLog {
+        TransferLog {
+            tx_hash: self.tx_hash,
+            receipt_log_index,
+            log_index: self.log_index,
+            block_number: self.block_number,
+            block_hash: self.block_hash,
+            block_time,
+            tx_from,
+            tx_nonce,
+            token: self.token,
+            from: self.from,
+            to: self.to,
+            amount: self.amount,
+        }
+    }
+}
+
 impl FinalizedReader {
-    /// Creates a reader with a fresh regression guard and block-time cache.
+    /// Creates a reader with a fresh regression guard and caches.
     #[must_use]
     pub fn new(client: Arc<EvmClient>) -> Self {
         Self {
             client,
             health: Mutex::new(ProviderHealth::default()),
             block_times: Mutex::new(BlockTimes::default()),
+            receipt_logs: Mutex::new(FifoCache::default()),
+            origins: Mutex::new(FifoCache::default()),
         }
     }
 
@@ -682,6 +793,97 @@ impl FinalizedReader {
         Ok(time)
     }
 
+    async fn receipt(&self, tx_hash: B256) -> Result<Option<TransactionReceipt>, ChainError> {
+        self.client
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| self.client.transport("transaction receipt fetch", &error))
+    }
+
+    /// The transaction's sender and nonce. A transaction the provider no longer knows was
+    /// reorganized away between the reads.
+    async fn origin(&self, tx_hash: B256) -> Result<(Address, u64), ChainError> {
+        use alloy::consensus::Transaction as _;
+        use alloy::network::TransactionResponse as _;
+
+        let cached = self
+            .origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&tx_hash);
+        if let Some(origin) = cached {
+            return Ok(origin);
+        }
+        let transaction = self
+            .client
+            .provider
+            .get_transaction_by_hash(tx_hash)
+            .await
+            .map_err(|error| self.client.transport("transaction fetch", &error))?
+            .ok_or(ChainError::Reorganized("transaction fetch"))?;
+        let origin = (transaction.from(), transaction.nonce());
+        self.origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(tx_hash, origin);
+        Ok(origin)
+    }
+
+    /// The position of the log with block-wide index `log_index` in its transaction's receipt,
+    /// which must be in `block_hash`.
+    async fn receipt_position(
+        &self,
+        tx_hash: B256,
+        block_hash: B256,
+        log_index: u64,
+    ) -> Result<u64, ChainError> {
+        let cached = self
+            .receipt_logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(tx_hash, block_hash));
+        let indexes = match cached {
+            Some(indexes) => indexes,
+            None => {
+                let receipt = self
+                    .receipt(tx_hash)
+                    .await?
+                    .ok_or(ChainError::Reorganized("receipt fetch"))?;
+                if receipt.block_hash != Some(block_hash) {
+                    return Err(ChainError::Reorganized("receipt fetch"));
+                }
+                let indexes = receipt
+                    .logs()
+                    .iter()
+                    .map(|log| {
+                        log.log_index
+                            .ok_or(ChainError::MissingField("log.log_index"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.receipt_logs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert((tx_hash, block_hash), indexes.clone());
+                indexes
+            }
+        };
+        let position = indexes
+            .iter()
+            .position(|index| *index == log_index)
+            .ok_or(ChainError::MissingField("receipt log"))?;
+        u64::try_from(position).map_err(|_| ChainError::MissingField("receipt log position"))
+    }
+
+    async fn complete(&self, decoded: DecodedTransfer) -> Result<TransferLog, ChainError> {
+        let block_time = self.block_time(decoded.block_hash).await?;
+        let position = self
+            .receipt_position(decoded.tx_hash, decoded.block_hash, decoded.log_index)
+            .await?;
+        let origin = self.origin(decoded.tx_hash).await?;
+        Ok(decoded.complete(position, block_time, origin))
+    }
+
     async fn transfer_logs_request(
         &self,
         tokens: &[Address],
@@ -709,12 +911,8 @@ impl FinalizedReader {
             .map_err(|error| self.client.transport("transfer log fetch", &error))?;
         let mut transfers = Vec::with_capacity(logs.len());
         for log in logs {
-            let block_hash = log
-                .block_hash
-                .ok_or(ChainError::MissingField("log.block_hash"))?;
-            let block_time = self.block_time(block_hash).await?;
-            if let Some(transfer) = decode_transfer_log(&log, block_time)? {
-                transfers.push(transfer);
+            if let Some(decoded) = decode_transfer_log(&log)? {
+                transfers.push(self.complete(decoded).await?);
             }
         }
         Ok(transfers)
@@ -763,6 +961,23 @@ impl FinalizedReader {
         self.transfer_logs(tokens, addresses, from_block, to_block)
             .await
     }
+
+    async fn tagged_block_number(
+        &self,
+        tag: BlockNumberOrTag,
+        operation: &'static str,
+    ) -> Result<u64, ChainError> {
+        Ok(self
+            .client
+            .provider
+            .get_block_by_number(tag)
+            .await
+            .map_err(|error| self.client.transport(operation, &error))?
+            .ok_or(ChainError::MissingField("tagged block"))?
+            .header
+            .inner
+            .number)
+    }
 }
 
 fn utc_timestamp(timestamp: u64) -> Result<DateTime<Utc>, ChainError> {
@@ -772,10 +987,7 @@ fn utc_timestamp(timestamp: u64) -> Result<DateTime<Utc>, ChainError> {
         .ok_or(ChainError::InvalidTimestamp(timestamp))
 }
 
-fn decode_transfer_log(
-    log: &Log,
-    block_time: DateTime<Utc>,
-) -> Result<Option<TransferLog>, ChainError> {
+fn decode_transfer_log(log: &Log) -> Result<Option<DecodedTransfer>, ChainError> {
     let topic_count = log.topics().len();
     let data_length = log.data().data.len();
     if topic_count != 3 || data_length != 32 {
@@ -800,7 +1012,7 @@ fn decode_transfer_log(
             return Ok(None);
         }
     };
-    Ok(Some(TransferLog {
+    Ok(Some(DecodedTransfer {
         tx_hash: decoded
             .transaction_hash
             .ok_or(ChainError::MissingField("log.transaction_hash"))?,
@@ -813,12 +1025,16 @@ fn decode_transfer_log(
         block_hash: decoded
             .block_hash
             .ok_or(ChainError::MissingField("log.block_hash"))?,
-        block_time,
         token: decoded.address(),
         from: decoded.inner.data.from,
         to: decoded.inner.data.to,
         amount: AtomicAmount::new(decoded.inner.data.amount),
     }))
+}
+
+/// Whether `log` is an ERC-20 `Transfer` event: the signature topic and the ERC-20 layout.
+fn is_transfer(log: &Log) -> bool {
+    log.topics().first() == Some(&Transfer::SIGNATURE_HASH)
 }
 
 impl ChainReader for FinalizedReader {
@@ -851,6 +1067,31 @@ impl ChainReader for FinalizedReader {
         })
     }
 
+    async fn confirmation_heads(
+        &self,
+        confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        let finalized = ChainReader::finalized_head(self).await?.number;
+        let latest = if confirmations.needs_latest() {
+            Some(self.client.latest_head().await?)
+        } else {
+            None
+        };
+        let safe = if confirmations.needs_safe() {
+            Some(
+                self.tagged_block_number(BlockNumberOrTag::Safe, "safe head fetch")
+                    .await?,
+            )
+        } else {
+            None
+        };
+        Ok(ChainHeads {
+            latest,
+            safe,
+            finalized,
+        })
+    }
+
     async fn transfer_logs_to(
         &self,
         addresses: &[Address],
@@ -861,19 +1102,13 @@ impl ChainReader for FinalizedReader {
             .await
     }
 
-    async fn transfer_log_by_identity(
+    async fn receipt_transfer(
         &self,
         tx_hash: B256,
-        log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
-        let Some(receipt) = self
-            .client
-            .provider
-            .get_transaction_receipt(tx_hash)
-            .await
-            .map_err(|error| self.client.transport("transaction receipt fetch", &error))?
-        else {
-            return Ok(None);
+        receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        let Some(receipt) = self.receipt(tx_hash).await? else {
+            return Ok(ReceiptLookup::Missing);
         };
         let block_number = receipt
             .block_number
@@ -881,21 +1116,47 @@ impl ChainReader for FinalizedReader {
         let block_hash = receipt
             .block_hash
             .ok_or(ChainError::MissingField("receipt.block_hash"))?;
-        let Some(log) = receipt
-            .logs()
-            .iter()
-            .find(|log| log.log_index == Some(log_index))
-        else {
-            return Ok(None);
+        let log = usize::try_from(receipt_log_index)
+            .ok()
+            .and_then(|position| receipt.logs().get(position));
+        let decoded = match log {
+            Some(log) if is_transfer(log) => {
+                if log.transaction_hash != Some(tx_hash)
+                    || log.block_number != Some(block_number)
+                    || log.block_hash != Some(block_hash)
+                {
+                    return Err(ChainError::MissingField("receipt.log_identity"));
+                }
+                decode_transfer_log(log)?
+            }
+            _ => None,
         };
-        if log.transaction_hash != Some(tx_hash)
-            || log.block_number != Some(block_number)
-            || log.block_hash != Some(block_hash)
-        {
-            return Err(ChainError::MissingField("receipt.log_identity"));
-        }
-        let block_time = self.block_time(block_hash).await?;
-        decode_transfer_log(log, block_time)
+        let transfer = match decoded {
+            Some(decoded) => {
+                let block_time = self.block_time(block_hash).await?;
+                let origin = (receipt.from, self.origin(tx_hash).await?.1);
+                Some(Box::new(decoded.complete(
+                    receipt_log_index,
+                    block_time,
+                    origin,
+                )))
+            }
+            None => None,
+        };
+        Ok(ReceiptLookup::Included {
+            block_number,
+            block_hash,
+            transfer,
+        })
+    }
+
+    async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
+        self.client
+            .provider
+            .get_transaction_count(account)
+            .block_id(BlockId::number(block))
+            .await
+            .map_err(|error| self.client.transport("nonce fetch", &error))
     }
 }
 
@@ -936,7 +1197,7 @@ mod tests {
         for index in 0..=BLOCK_TIME_CACHE_CAPACITY {
             times.insert(hash(index), time(i64::try_from(index).expect("index")));
         }
-        assert_eq!(times.times.len(), BLOCK_TIME_CACHE_CAPACITY);
+        assert_eq!(times.values.len(), BLOCK_TIME_CACHE_CAPACITY);
         assert_eq!(times.get(&hash(0)), None, "oldest entry is evicted");
         assert_eq!(times.get(&hash(1)), Some(time(1)));
         // A different block at the same height has a different hash and never shares a time.

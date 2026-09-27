@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        WITH candidate AS (\n            SELECT id\n            FROM deposits\n            WHERE state NOT IN ('swept', 'rejected')\n              AND next_attempt_at <= now()\n              AND (lease_until IS NULL OR lease_until <= now())\n            ORDER BY next_attempt_at, created_at, id\n            FOR UPDATE SKIP LOCKED\n            LIMIT 1\n        )\n        UPDATE deposits AS deposit\n        SET lease_token = $1,\n            lease_until = now() + interval '5 minutes',\n            updated_at = now()\n        FROM candidate\n        WHERE deposit.id = candidate.id\n        RETURNING\n            deposit.id, deposit.chain_id, deposit.tx_hash, deposit.log_index,\n            deposit.block_number, deposit.block_hash, deposit.block_time, deposit.address_id,\n            deposit.account_id, deposit.route, deposit.route_version, deposit.asset_contract,\n            deposit.from_address, deposit.amount_atomic::text AS \"amount_atomic!\",\n            deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,\n            deposit.lease_token, deposit.lease_until, deposit.valuation_at,\n            deposit.price_scaled::text AS price_scaled, deposit.price_source,\n            deposit.credit_minor::text AS credit_minor, deposit.quote, deposit.flush_id,\n            deposit.created_at, deposit.updated_at\n        ",
+  "query": "\n        SELECT\n            id, chain_id, tx_hash, receipt_log_index, log_index, block_number, block_hash,\n            block_time, address_id, account_id, route, route_version, asset_contract,\n            from_address, amount_atomic::text AS \"amount_atomic!\", tx_from,\n            tx_nonce::text AS tx_nonce, final_at, state, reason, attempt, next_attempt_at,\n            lease_token, lease_until, valuation_at, price_scaled::text AS price_scaled,\n            price_source, credit_minor::text AS credit_minor, quote, flush_id, created_at, updated_at\n        FROM deposits\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,17 @@
       },
       {
         "ordinal": 3,
+        "name": "receipt_log_index",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "deposits",
+            "name": "receipt_log_index"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
         "name": "log_index",
         "type_info": "Int8",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "block_number",
         "type_info": "Int8",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "block_hash",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "block_time",
         "type_info": "Timestamptz",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "address_id",
         "type_info": "Uuid",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "account_id",
         "type_info": "Uuid",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "route",
         "type_info": "Text",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "route_version",
         "type_info": "Int8",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "asset_contract",
         "type_info": "Text",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "from_address",
         "type_info": "Text",
         "origin": {
@@ -147,13 +158,41 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "amount_atomic!",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
+        "name": "tx_from",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deposits",
+            "name": "tx_from"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "tx_nonce",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 17,
+        "name": "final_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "deposits",
+            "name": "final_at"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
         "name": "state",
         "type_info": "Text",
         "origin": {
@@ -164,7 +203,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 19,
         "name": "reason",
         "type_info": "Text",
         "origin": {
@@ -175,7 +214,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 20,
         "name": "attempt",
         "type_info": "Int4",
         "origin": {
@@ -186,7 +225,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 21,
         "name": "next_attempt_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -197,7 +236,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 22,
         "name": "lease_token",
         "type_info": "Uuid",
         "origin": {
@@ -208,7 +247,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 23,
         "name": "lease_until",
         "type_info": "Timestamptz",
         "origin": {
@@ -219,7 +258,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 24,
         "name": "valuation_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -230,13 +269,13 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 25,
         "name": "price_scaled",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 22,
+        "ordinal": 26,
         "name": "price_source",
         "type_info": "Text",
         "origin": {
@@ -247,13 +286,13 @@
         }
       },
       {
-        "ordinal": 23,
+        "ordinal": 27,
         "name": "credit_minor",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 24,
+        "ordinal": 28,
         "name": "quote",
         "type_info": "Jsonb",
         "origin": {
@@ -264,7 +303,7 @@
         }
       },
       {
-        "ordinal": 25,
+        "ordinal": 29,
         "name": "flush_id",
         "type_info": "Uuid",
         "origin": {
@@ -275,7 +314,7 @@
         }
       },
       {
-        "ordinal": 26,
+        "ordinal": 30,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -286,7 +325,7 @@
         }
       },
       {
-        "ordinal": 27,
+        "ordinal": 31,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -312,11 +351,15 @@
       false,
       false,
       false,
+      false,
       true,
       true,
       false,
       false,
       null,
+      true,
+      null,
+      true,
       false,
       true,
       false,
@@ -333,5 +376,5 @@
       false
     ]
   },
-  "hash": "5f3c70beca3dcdd636dbdedf722c0a6639380f0a431a3305f771d8c2e4ddfe29"
+  "hash": "eb390a2aee3258dc64e5385502410ba261359af27f0de67d5afbbe03e16291af"
 }

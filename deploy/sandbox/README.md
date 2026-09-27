@@ -49,7 +49,7 @@ from the product API, the verified webhooks, and the product ledger of the refer
 
 | Scenario | Payment | Expected |
 |---|---|---|
-| `happy_path` | Exact quoted amount, then a second payment to the same address | Before finality the quote shows `payment.status == "seen"` with `matches_quote`; then `credited` at the quoted price with exactly the quoted credit, and the quote `complete`; the second payment `credited` at spot; the payer's view by `client_secret` shows the payment; `deposit.credited` delivered; one ledger credit each. |
+| `happy_path` | Exact quoted amount, then a second payment to the same address | The quote shows the payment (`payment.status` `seen`, or `final` once recorded at two blocks) with `matches_quote`; then `credited` at the quoted price with exactly the quoted credit, and the quote `complete`; the second payment `credited` at spot; the payer's view by `client_secret` shows the payment; `deposit.credited` delivered; one ledger credit each. |
 | `late_payment` | Exact locked amount after `quote.expired` | `credited` at spot; lock stays `expired`. |
 | `underpayment` | 97% of the locked amount (tolerance is 1%) | `credited` at spot below the quote; lock not consumed; cancel is refused (`409 quote_payment_received` while the quote is open). |
 | `overpayment` | +0.5%, then +5% on a second lock | Within tolerance: lock price, exact quoted credit, `consumed`. Beyond: spot for the full amount, lock not consumed. |
@@ -183,8 +183,9 @@ PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m referen
 uv run --locked --project sdk/python python deploy/sandbox/scenarios/run.py --config sandbox.json
 ```
 
-Sepolia finality takes about 15 minutes per deposit, so a full run takes a few hours; pass
-scenario names to run a subset. The sandbox route's rate-lock window is 120 seconds, so the late
+Sepolia deposits are credited about 30 seconds after paying (the route's default confirmation,
+two blocks), but quote expiry and sweeps follow finality, about 15 minutes, so a full run still
+takes a few hours; pass scenario names to run a subset. The sandbox route's rate-lock window is 120 seconds, so the late
 payment scenario waits at least that long. `restart_mid_flow` is reported as `SKIP` without a
 `restart_command`.
 

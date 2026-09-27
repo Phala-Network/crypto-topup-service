@@ -24,6 +24,8 @@ pub struct NewPendingTransfer {
     pub chain_id: u64,
     /// Transaction hash.
     pub tx_hash: B256,
+    /// Position of the log in its transaction's receipt.
+    pub receipt_log_index: u64,
     /// Block-wide log index.
     pub log_index: u64,
     /// Block number at observation time.
@@ -211,11 +213,12 @@ async fn upsert(
         r#"
         INSERT INTO pending_transfers (
             chain_id, tx_hash, log_index, block_number, block_hash, block_time, head_block,
-            address_id, asset_contract, from_address, amount_atomic
+            address_id, asset_contract, from_address, amount_atomic, receipt_log_index
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::numeric)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::numeric, $12)
         ON CONFLICT (chain_id, tx_hash, log_index) DO UPDATE
         SET block_number = EXCLUDED.block_number,
+            receipt_log_index = EXCLUDED.receipt_log_index,
             block_hash = EXCLUDED.block_hash,
             block_time = EXCLUDED.block_time,
             head_block = EXCLUDED.head_block,
@@ -239,6 +242,10 @@ async fn upsert(
     .bind(address_hex(transfer.asset_contract))
     .bind(address_hex(transfer.from_address))
     .bind(atomic_decimal(transfer.amount_atomic))
+    .bind(to_i64(
+        transfer.receipt_log_index,
+        "pending_transfers.receipt_log_index",
+    )?)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -262,6 +269,7 @@ pub(crate) async fn delete_finalized_in(
 struct PendingRecord {
     chain_id: i64,
     tx_hash: String,
+    receipt_log_index: i64,
     log_index: i64,
     block_number: i64,
     block_time: DateTime<Utc>,
@@ -280,8 +288,12 @@ impl TryFrom<PendingRecord> for PendingTransfer {
         let chain_id = to_u64(record.chain_id, "pending_transfers.chain_id")?;
         let tx_hash = parse_b256(&record.tx_hash)?;
         let log_index = to_u64(record.log_index, "pending_transfers.log_index")?;
+        let receipt_log_index = to_u64(
+            record.receipt_log_index,
+            "pending_transfers.receipt_log_index",
+        )?;
         Ok(Self {
-            deposit_id: deposit_id(chain_id, tx_hash, log_index),
+            deposit_id: deposit_id(chain_id, tx_hash, receipt_log_index),
             chain_id,
             tx_hash,
             log_index,
@@ -298,7 +310,8 @@ impl TryFrom<PendingRecord> for PendingTransfer {
 }
 
 const PENDING_SELECT: &str = r#"
-    SELECT pending.chain_id, pending.tx_hash, pending.log_index, pending.block_number,
+    SELECT pending.chain_id, pending.tx_hash, pending.receipt_log_index, pending.log_index,
+           pending.block_number,
            pending.block_time, pending.head_block, address.address, pending.asset_contract,
            pending.from_address, pending.amount_atomic::text AS amount_atomic,
            pending.first_seen_at

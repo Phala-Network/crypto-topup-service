@@ -161,6 +161,17 @@ impl ApiError {
         )
     }
 
+    /// Returns a refund refused because the deposit is not final yet and could still be reversed
+    /// (design D1, D5).
+    #[must_use]
+    pub fn deposit_not_final() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "deposit_not_final",
+            "the deposit is not final yet; request the refund once it is (about 15 minutes after its block on Ethereum)",
+        )
+    }
+
     /// Returns an `Idempotency-Key` reused with different parameters.
     #[must_use]
     pub fn idempotency_key_reused() -> Self {

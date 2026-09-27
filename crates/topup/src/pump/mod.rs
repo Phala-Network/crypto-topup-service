@@ -33,6 +33,9 @@ const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 /// Wait while a provider has not finalized the deposit block yet: about one slot, so a deposit
 /// confirms soon after the lagging provider catches up instead of a full wait interval later.
 const FINALITY_WAIT_INTERVAL: Duration = Duration::from_secs(12);
+/// Wait while a provider has not reached the route's depth or `safe` confirmation: the head
+/// poll interval, so a lagging provider delays a fast credit by seconds, not a slot.
+const CONFIRMATION_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// One asynchronous operation for a non-terminal deposit state.
 #[async_trait]
@@ -66,6 +69,7 @@ impl StepResult {
                 canonical_evidence: None,
                 valuation: None,
                 lock_consumption: None,
+                mark_final: false,
             },
         }
     }
@@ -108,7 +112,7 @@ impl StepSet {
             DepositState::Detected => Some(self.detected.as_ref()),
             DepositState::Confirmed => Some(self.confirmed.as_ref()),
             DepositState::Credited => Some(self.credited.as_ref()),
-            DepositState::Swept | DepositState::Rejected => None,
+            DepositState::Swept | DepositState::Rejected | DepositState::Reversed => None,
         }
     }
 }
@@ -118,6 +122,9 @@ fn wait_delay(outcome: &StepOutcome, wait_interval: Duration) -> Duration {
         StepOutcome::Wait {
             reason: WaitReason::Finality,
         } => wait_interval.min(FINALITY_WAIT_INTERVAL),
+        StepOutcome::Wait {
+            reason: WaitReason::Confirmations,
+        } => wait_interval.min(CONFIRMATION_WAIT_INTERVAL),
         _ => wait_interval,
     }
 }
@@ -314,7 +321,9 @@ impl Pump {
         let attempt = match transition.kind {
             TransitionKind::Advanced => 0,
             TransitionKind::Retry => deposit.attempt.saturating_add(1),
-            TransitionKind::Wait | TransitionKind::Rejected => deposit.attempt,
+            TransitionKind::Wait | TransitionKind::Rejected | TransitionKind::Reversed => {
+                deposit.attempt
+            }
         };
         let delay = match transition.kind {
             TransitionKind::Retry => {
@@ -322,7 +331,9 @@ impl Pump {
                 backoff(retry_attempt, self.jitter.next_u64())
             }
             TransitionKind::Wait => wait_delay(&result.outcome, self.config.wait_interval),
-            TransitionKind::Advanced | TransitionKind::Rejected => Duration::ZERO,
+            TransitionKind::Advanced | TransitionKind::Rejected | TransitionKind::Reversed => {
+                Duration::ZERO
+            }
         };
         let chrono_delay =
             chrono::Duration::from_std(delay).map_err(|_| PumpError::ScheduleOutsideChronoRange)?;
@@ -468,6 +479,10 @@ mod tests {
         assert_eq!(
             wait(WaitReason::Finality),
             std::time::Duration::from_secs(12)
+        );
+        assert_eq!(
+            wait(WaitReason::Confirmations),
+            std::time::Duration::from_secs(2)
         );
         assert_eq!(wait(WaitReason::Paused), interval);
         assert_eq!(

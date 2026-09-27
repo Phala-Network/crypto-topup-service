@@ -19,12 +19,20 @@ pub struct DepositResponse {
     pub chain_id: u64,
     /// Canonical transaction hash.
     pub tx_hash: String,
-    /// Transfer log index.
+    /// Position of the transfer log in its transaction's receipt; with the chain and transaction,
+    /// the deposit's identity. Optional in the schema so clients also parse responses from
+    /// servers that predate it.
+    #[schema(required = false)]
+    pub receipt_log_index: u64,
+    /// Block-wide transfer log index; it follows the transaction's re-inclusion.
     pub log_index: u64,
-    /// Finalized block number.
+    /// Including block number.
     pub block_number: u64,
-    /// Finalized block time.
+    /// Including block time.
     pub block_time: DateTime<Utc>,
+    /// When both providers showed the transfer at or below `finalized`; `null` while the deposit
+    /// can still be reversed.
+    pub final_at: Option<DateTime<Utc>>,
     /// Receiving forwarder address.
     pub address: String,
     /// Rate-lock reference, when applicable.
@@ -208,9 +216,9 @@ pub struct ClientQuote {
     /// End of the payment window, Unix seconds.
     pub expires_at: i64,
     /// Progress of the payment shown on the page; display only, never a reason to deliver
-    /// anything: `none`; `seen` (in a block that is not final yet and may still disappear);
-    /// `confirming` (final, being valued and screened); `credited`; or `rejected` (final and not
-    /// credited; the payer should contact the product's support).
+    /// anything: `none`; `seen` (in a block, below the route's confirmation, and may still
+    /// disappear); `confirming` (at the route's confirmation, being valued and screened);
+    /// `credited`; or `rejected` (not credited; the payer should contact the product's support).
     pub payment_status: String,
     /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
     pub confirmations: Option<u64>,
@@ -231,8 +239,8 @@ pub enum QuoteView {
 /// final, may still disappear in a reorg, and nothing has been credited.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct QuotePayment {
-    /// `seen` (above the finalized head) or `final` (recorded as a deposit). New values may be
-    /// added.
+    /// `seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the
+    /// route's confirmation; it is final once its block is). New values may be added.
     pub status: String,
     /// Canonical transaction hash.
     pub tx_hash: String,
@@ -245,7 +253,7 @@ pub struct QuotePayment {
     /// Whether the payment is the quote's asset, in time, and within tolerance, so it will be
     /// credited at the quoted price; otherwise it is credited at spot once final.
     pub matches_quote: bool,
-    /// `dep_` id the deposit has, or will have once final.
+    /// `dep_` id the deposit has, or will have once recorded.
     pub deposit: String,
 }
 
@@ -271,11 +279,13 @@ pub enum ExpandableDeposit {
     Object(Box<Deposit>),
 }
 
-/// A final transfer to a quote's address: valued, screened, and credited, or rejected.
+/// A transfer to a quote's address at the route's confirmation: valued, screened, and credited,
+/// or rejected; `reversed` if its transaction left the chain before finality.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Deposit {
     /// `dep_` and the hex of the deposit's deterministic UUID,
-    /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{log_index}")`.
+    /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
+    /// `receipt_log_index` is the transfer's position among its transaction's receipt logs.
     pub id: String,
     /// Always `deposit`.
     pub object: String,
@@ -283,7 +293,9 @@ pub struct Deposit {
     pub account_id: String,
     /// The quote whose address received the transfer; `null` for a persistent address.
     pub quote: Option<ExpandableQuote>,
-    /// `detected`, `confirmed`, `credited`, `swept`, or `rejected`. New values may be added.
+    /// `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
+    /// not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
+    /// added.
     pub status: String,
     /// Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,
     /// `out_of_range`, `sanctioned`, or `product_refused` (historical).
@@ -312,9 +324,9 @@ pub struct Deposit {
     pub from_address: String,
     /// Transaction hash.
     pub tx_hash: String,
-    /// Log index of the transfer.
+    /// Block-wide log index of the transfer; it changes if the transaction is re-included.
     pub log_index: u64,
-    /// Finalized block number.
+    /// Number of the block the transfer is in; it changes if the transaction is re-included.
     pub block_number: u64,
     /// Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.
     pub amount_refunded_atomic: String,
@@ -408,7 +420,16 @@ pub struct ConfigAsset {
     pub quote_spread_bps: u16,
     /// A payment within this many basis points of the quoted amount completes the quote.
     pub quote_tolerance_bps: u16,
-    /// Typical time from payment to finality, in seconds.
+    /// The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
+    /// block and one more), `"safe"`, or `"finalized"`. A credit before finality can still be
+    /// reversed (`deposit.reversed`). Optional in the schema, like `typical_credit_seconds`, so
+    /// clients also parse responses from servers that predate fast credit.
+    #[schema(required = false)]
+    pub confirmations: String,
+    /// Typical time from payment to the `deposit.credited` event, in seconds.
+    #[schema(required = false)]
+    pub typical_credit_seconds: u64,
+    /// Typical time from payment to finality, in seconds; refunds wait for it.
     pub typical_finality_seconds: u64,
 }
 

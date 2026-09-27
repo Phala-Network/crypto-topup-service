@@ -69,6 +69,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | `TopupOperatorGasReserveLow` | [Gas refill](gas-refill.md) |
 | `OperatorRoleMissing`, `MissingConsumedReceipt`, unexplained operator transaction | [Operator key compromise](operator-key-compromise.md) |
 | `TopupUnsupportedInflows`, rejected funds at the treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
+| `TopupDepositReversed`, `TopupDepositPendingAfterReorg`, `topup-finality-watch` | [Deposit reversed or pending after a reorg](deposit-reversed.md) |
 | Product reports its request-signing key exposed, or product requests it did not make | [Product key compromise](product-key-compromise.md) |
 | `NativeBalance` (native coin at a forwarder; the flusher never sweeps it) | No runbook: escalate to Finance and Engineering |
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |

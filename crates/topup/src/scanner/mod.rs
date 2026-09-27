@@ -1,7 +1,10 @@
-//! Finalized ERC-20 deposit scanner.
+//! ERC-20 deposit scanners: the fast scan at the route's confirmation, driven by the head loop
+//! every 2 s, and the finalized scan, which records any transfer the fast scan missed.
 
+mod confirmed;
 mod head;
 
+pub use confirmed::{ConfirmedScan, confirmed_scan_once};
 pub use head::{HEAD_SCAN_INTERVAL, HeadScan, head_scan_once};
 
 use std::collections::BTreeMap;
@@ -70,6 +73,7 @@ impl ScannerError {
                         | ChainError::MissingField(_)
                         | ChainError::InvalidTimestamp(_)
                         | ChainError::InvalidTransfer(_)
+                        | ChainError::Reorganized(_)
                 )
         )
     }
@@ -504,6 +508,7 @@ fn resolve_logs(
             Ok(NewDeposit {
                 chain_id: routes.chain.chain_id,
                 tx_hash: log.tx_hash,
+                receipt_log_index: log.receipt_log_index,
                 log_index: log.log_index,
                 block_number: log.block_number,
                 block_hash: log.block_hash,
@@ -522,6 +527,9 @@ fn resolve_logs(
                 },
                 reason: selected.is_none().then_some(RejectReason::UnsupportedAsset),
                 next_attempt_at,
+                tx_from: log.tx_from,
+                tx_nonce: log.tx_nonce,
+                is_final: false,
             })
         })
         .collect()
@@ -647,10 +655,13 @@ mod tests {
         let routes = test_routes(Address::from([2_u8; 20]));
         let log = TransferLog {
             tx_hash: B256::from([3_u8; 32]),
+            receipt_log_index: 0,
             log_index: 0,
             block_number: 1,
             block_hash: B256::from([4_u8; 32]),
             block_time: DateTime::from_timestamp(1, 0).expect("timestamp"),
+            tx_from: Address::from([6_u8; 20]),
+            tx_nonce: 0,
             token: Address::from([5_u8; 20]),
             from: Address::from([6_u8; 20]),
             to: recipient,

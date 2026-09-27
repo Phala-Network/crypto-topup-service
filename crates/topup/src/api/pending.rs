@@ -1,11 +1,10 @@
-//! Display-only views of transfers seen before finality (architecture §12).
+//! Display-only views of transfers seen before they are recorded as deposits (architecture §12).
 //!
 //! Support, amount matching, and timeliness are computed here at read time and never stored, so
 //! an unfinalized transfer can never produce a stored rejection or credit.
 
 use alloy_primitives::Address as EvmAddress;
 use chrono::{DateTime, TimeDelta, Utc};
-use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use topup_core::valuation::amount_within_tolerance;
@@ -24,9 +23,10 @@ use sqlx::PgPool;
 const ESTIMATED_FINALITY_DELAY: TimeDelta = TimeDelta::minutes(15);
 
 /// The payment the quote page shows, following the consumption rule of §9: the deposit that
-/// consumed the quote; otherwise the first transfer that would consume it (finalized deposits
-/// first, then transfers seen above `finalized`); otherwise the first transfer at all. On a
-/// canceled quote no payment matches, because every payment is valued at spot.
+/// consumed the quote; otherwise the first transfer that would consume it (recorded deposits
+/// first, then transfers seen above `finalized` that are not deposits yet); otherwise the first
+/// transfer at all. A reversed deposit is no payment. On a canceled quote no payment matches,
+/// because every payment is valued at spot.
 pub(super) async fn quote_payment(
     pool: &PgPool,
     route: &RouteFile,
@@ -39,14 +39,20 @@ pub(super) async fn quote_payment(
     {
         return Ok(Some(payment(route, lock, consumed)));
     }
+    let pending = db::list_address_pending(pool, lock.address_id)
+        .await?
+        .into_iter()
+        .filter(|transfer| {
+            !deposits
+                .iter()
+                .any(|deposit| deposit.deposit_id == transfer.deposit_id)
+        })
+        .map(Observed::from)
+        .collect::<Vec<_>>();
     let observed = deposits
         .into_iter()
-        .chain(
-            db::list_address_pending(pool, lock.address_id)
-                .await?
-                .into_iter()
-                .map(Observed::from),
-        )
+        .filter(|deposit| !deposit.reversed)
+        .chain(pending)
         .collect::<Vec<_>>();
     let shown = observed
         .iter()
@@ -57,6 +63,7 @@ pub(super) async fn quote_payment(
 
 struct Observed {
     status: &'static str,
+    reversed: bool,
     deposit_id: Uuid,
     tx_hash: alloy_primitives::B256,
     block_time: DateTime<Utc>,
@@ -70,6 +77,7 @@ impl From<PendingTransfer> for Observed {
     fn from(transfer: PendingTransfer) -> Self {
         Self {
             status: "seen",
+            reversed: false,
             confirmations: Some(transfer.confirmations()),
             deposit_id: transfer.deposit_id,
             tx_hash: transfer.tx_hash,
@@ -123,10 +131,12 @@ fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> QuotePaym
     }
 }
 
+type DepositRow = (Uuid, i64, String, String, DateTime<Utc>, String, String);
+
 async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observed>, ApiError> {
-    let rows = sqlx::query_as::<_, (i64, String, i64, DateTime<Utc>, String, String)>(
+    let rows = sqlx::query_as::<_, DepositRow>(
         r#"
-        SELECT chain_id, tx_hash, log_index, block_time, asset_contract, amount_atomic::text
+        SELECT id, chain_id, tx_hash, state, block_time, asset_contract, amount_atomic::text
         FROM deposits
         WHERE address_id = $1
         ORDER BY block_number, log_index
@@ -137,13 +147,13 @@ async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observe
     .await?;
     rows.into_iter()
         .map(
-            |(chain_id, tx_hash, log_index, block_time, asset, amount)| {
+            |(id, chain_id, tx_hash, state, block_time, asset, amount)| {
                 let chain_id = u64::try_from(chain_id).ok()?;
                 let tx_hash = tx_hash.parse().ok()?;
-                let log_index = u64::try_from(log_index).ok()?;
                 Some(Observed {
                     status: "final",
-                    deposit_id: deposit_id(chain_id, tx_hash, log_index),
+                    reversed: state == "reversed",
+                    deposit_id: id,
                     tx_hash,
                     block_time,
                     confirmations: None,

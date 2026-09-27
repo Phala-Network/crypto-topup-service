@@ -169,8 +169,8 @@ function statusMessage(status: CheckoutStatus, quote: ClientQuote | null): strin
       return "Waiting for your payment";
     case "seen":
       return quote?.confirmations == null
-        ? "Payment received, waiting for confirmations"
-        : `Payment received, ${quote.confirmations} confirmation${quote.confirmations === 1 ? "" : "s"}`;
+        ? "Payment received, crediting in about 30 seconds"
+        : `Payment received, ${quote.confirmations} confirmation${quote.confirmations === 1 ? "" : "s"}. Crediting in about 30 seconds`;
     case "confirming":
       return "Payment confirmed on chain, crediting…";
     case "credited":

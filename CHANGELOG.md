@@ -9,6 +9,33 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- Fast credit and reversal (docs/design/multi-tenant.md §4, D1). A route's
+  `chain.confirmations` (a depth, `safe`, or `finalized`, per chain family; default 2 on
+  Ethereum L1, `safe` on OP-stack, `finalized` elsewhere) sets when a deposit is credited: at the
+  default, `deposit.credited` is sent about 30 seconds after paying instead of about 15 minutes.
+  Deposits are watched to finality. A transaction re-included in another block keeps its deposit
+  and is followed; one proven dropped (its nonce consumed by another transaction), or whose
+  transfer is missing from its final receipt, makes the deposit `reversed` and sends
+  **`deposit.reversed`** (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`) when the
+  deposit was reported credited or rejected. Claw the credit back as for `deposit.refunded`. A
+  quote the deposit completed opens again while its window lasts, otherwise expires with
+  `quote.expired`. `confirmations: finalized` keeps the earlier behaviour.
+- `GET /v1/config` assets carry `confirmations` (`"2"`, `"safe"`, or `"finalized"`) and
+  `typical_credit_seconds`; the admin deposit view carries `receipt_log_index` and `final_at`.
+- `POST /v1/refunds` answers `409 deposit_not_final` for a deposit that is not final yet, so
+  nothing is paid back for a payment that could still be reversed.
+
+### Changed
+
+- **Breaking** for deposits recorded from now on: a deposit id is `uuid_v5(NS,
+  "{chain_id}:{tx_hash}:{receipt_log_index}")`, the transfer's position among its transaction's
+  receipt logs (0 for a plain token transfer), instead of the block-wide `log_index`, so a
+  re-included transaction keeps its id. `log_index` and `block_number` stay on the deposit as
+  evidence and change when the transaction is re-included. Deposits recorded before keep their
+  ids; staging is reset before multi-tenancy.
+- Deposit `status` gains `reversed`; the quote's `payment.status` `final` now means recorded at
+  the route's confirmation, and the payer's `payment_status` `confirming` likewise.
+
 - `POST /v1/products/{p}/accounts/{ext}/rate-locks` and `POST …/deposit-address` create the
   account when it does not exist, so a quote or an address is one call; `POST …/accounts` is no
   longer required. Reads (`GET`, rotate, cancel, pause) of an unknown account still answer `404`.
