@@ -1,4 +1,4 @@
-"""Integrating a product with the Phala Pay service through the Python SDK.
+"""Sandbox smoke check: the calls a product makes against a Phala Pay service, with their checks.
 
 These are the calls a product such as Phala Cloud makes, and the checks it adds to each:
 
@@ -14,7 +14,7 @@ answering `2xx`. deploy/product/reference_product is a complete product that doe
 
 Run steps 1-3 against the sandbox (deploy/sandbox/README.md):
 
-    uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py \\
+    uv run --locked --project sdk/python python deploy/sandbox/smoke.py \\
         --config sandbox.json
 """
 
@@ -138,7 +138,7 @@ def main() -> int:
         )
         deposits = [(item.id, item.status) for item in client.list_deposits(account_id=account)]
         print(f"deposits: {deposits}")
-    print("phala_cloud_integration: OK")
+    print("smoke: OK")
     return 0
 
 

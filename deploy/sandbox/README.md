@@ -32,8 +32,8 @@ deploy/sandbox/run-local.sh happy_path      # examples, then selected scenarios
 The script builds the images, starts PostgreSQL, the dstack simulator, and an Anvil chain with
 Sepolia's chain id (one-second blocks, `finalized` eight blocks behind), deploys the forwarder
 factory and the sandbox test contracts, creates a product key, renders and validates the route
-with a 45-second rate-lock window, issues the product, starts the service, runs the SDK example
-`sdk/examples/phala_cloud_integration.py`, the reference product (`deploy/product`) with one
+with a 45-second rate-lock window, issues the product, starts the service, runs the smoke check
+`deploy/sandbox/smoke.py`, the reference product (`deploy/product`) with one
 deposit driven through it, and then `scenarios/run.py`. They run in a pinned uv/Python 3.12 container on the compose network, where the service
 reaches the product endpoints as `http://product:8089`; this works even where a host firewall drops
 traffic from containers to the host. `restart_mid_flow` runs last in its own container, the
@@ -125,7 +125,7 @@ gas from a public faucet.
    holds only the sandbox's own secrets (the `staging.env.example` names). Integrators sign the
    URL they call and the service verifies `@target-uri` against the rendered
    `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every signed request fail with `401`. Run
-   `sdk/examples/phala_cloud_integration.py` against the deployed sandbox URL before opening it to
+   `deploy/sandbox/smoke.py` against the deployed sandbox URL before opening it to
    integrators.
 5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
    against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
@@ -177,7 +177,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
 Then run:
 
 ```sh
-uv run --locked --project sdk/python python sdk/examples/phala_cloud_integration.py --config sandbox.json
+uv run --locked --project sdk/python python deploy/sandbox/smoke.py --config sandbox.json
 PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product --config sandbox.json
 uv run --locked --project sdk/python python deploy/sandbox/scenarios/run.py --config sandbox.json
 ```

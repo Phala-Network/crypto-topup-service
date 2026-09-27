@@ -144,7 +144,7 @@ run_product() {
 }
 
 echo "== running the SDK integration example"
-run_product sdk/examples/phala_cloud_integration.py --config /sandbox/sandbox.json
+run_product deploy/sandbox/smoke.py --config /sandbox/sandbox.json
 
 echo "== serving the reference product and driving one deposit through it"
 run_product -m reference_product --config /sandbox/sandbox.json
