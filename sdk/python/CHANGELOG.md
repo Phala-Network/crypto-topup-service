@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `crypto-topup-sdk` are recorded here. The format follows
+All notable changes to `phala-crypto-topup` (formerly `crypto-topup-sdk`) are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
 (section 9); versions follow [Semantic Versioning](https://semver.org/).
 
@@ -8,6 +8,8 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Changed
 
+- **Breaking**: the distribution is `phala-crypto-topup` (was `crypto-topup-sdk`), published to
+  PyPI from `sdk-py-v*` tags. The `topup_sdk` and `topup_client` imports are unchanged.
 - **Breaking**: `verify_webhook` parses Stripe-style events: `WebhookEvent(id, type, created, data)`
   with `object` (the event's `data.object`), still accepting the old envelope of a replayed old
   event. `CreditedDeposit` carries the deposit's fields (`deposit_id` `dep_…`, `account_id`,
@@ -35,6 +37,11 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Added
 
+- `crypto_topup`: the Stripe-style facade. `CryptoTopup(api_base, key_id, key_file=… | seed=…,
+  forwarder=…)` with `quotes.create/retrieve/cancel`, `deposits.list` (auto-paginating) and
+  `retrieve`, `refunds.create/retrieve`, and `config.retrieve`; `Webhook.construct_event(payload,
+  headers, public_key)` verifies a delivery and returns a typed `Event` (`data.object` is a
+  `Deposit` or `Quote`), raising `SignatureVerificationError`.
 - `TopupClient.create_refund` (sends an `Idempotency-Key`) and `get_refund`; `topup_sdk.ids`
   (`object_id`, `parse_id`, and the `qt_`/`dep_`/`re_`/`evt_` prefixes).
 - `TopupClient.get_config`, `create_quote` (sends an `Idempotency-Key`, generated unless given,

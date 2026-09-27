@@ -10,11 +10,92 @@ service. Where this guide and the code disagree, the code wins. The contract is 
 - [architecture.md](architecture.md): the design, especially §11 (the fulfillment webhook), §12
   (API, events, product UI), §14 (attestation), and §15 (refunds and policies).
 
-The SDK is [sdk/python](../sdk/python): `topup_sdk` (signing, webhook verification, typed
-`deposit.credited` credits, address and deposit-id recomputation, a retrying client, and
-`topup-sdk send-test-event`) over `topup_client`, generated from the OpenAPI document. It is
-not published to a package index; install it from this repository. Samples below use it; every
-step is plain HTTP and ed25519, so any backend language can do the same.
+Two SDKs, both in this repository:
+
+- [sdk/python](../sdk/python), `phala-crypto-topup` (import `crypto_topup`): the backend client,
+  `CryptoTopup(...).quotes.create(...)` and `Webhook.construct_event(...)` in Stripe's shape, over
+  `topup_sdk` (signing, verification, address recomputation, `topup-sdk send-test-event`) and
+  `topup_client`, generated from the OpenAPI document.
+- [sdk/js](../sdk/js), `@phala/crypto-topup`: the browser checkout, `<CryptoTopupCheckout>` for
+  React and a framework-agnostic core.
+
+Samples below use them; every step is plain HTTP and ed25519, so any backend language can do the
+same.
+
+## Quickstart
+
+The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
+quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
+
+**Install.** Once released: `uv add phala-crypto-topup` and `npm install @phala/crypto-topup viem`.
+Until then, from this repository (read access required; pnpm builds the package on install only
+when `pnpm-workspace.yaml` lists it under `allowBuilds: {"@phala/crypto-topup": true}`):
+
+```sh
+uv add "phala-crypto-topup @ git+https://github.com/Phala-Network/crypto-topup-service#subdirectory=sdk/python"
+pnpm add "github:Phala-Network/crypto-topup-service#main&path:/sdk/js"
+```
+
+**Configure.** Create the product key and send the printed public key to the operator (§3.1),
+and pin the service's settlement key from its attestation (§3.3):
+
+```sh
+uvx --from phala-crypto-topup topup-sdk keygen --keyid phala-cloud/v1 --seed-out product.seed
+```
+
+**1. Backend: create a quote, return its client secret.** Only the create response carries
+`client_secret`; repeating the call with the same `idempotency_key` returns the same quote with a
+new secret (the old one stops working), which is how a reloaded page resumes.
+
+```python
+from crypto_topup import CryptoTopup
+
+topup = CryptoTopup(TOPUP_API_BASE, "phala-cloud/v1", key_file="product.seed")
+
+@app.post("/topups")
+def create_topup(body: TopupRequest, team: Team = Depends(current_team)) -> dict[str, str]:
+    quote = topup.quotes.create(
+        account_id=team.id, amount=body.amount, chain_id=11155111, asset="pha",
+        idempotency_key=body.order_id,
+    )
+    return {"client_secret": quote.client_secret}
+```
+
+**2. Frontend: render the checkout.** The component reads the quote's public view with the client
+secret (no signature, CORS `*`) and offers a browser wallet (EIP-6963), a QR code (EIP-681), and
+manual payment, with live status until the payment is credited.
+
+```tsx
+"use client";
+import { CryptoTopupCheckout } from "@phala/crypto-topup/react";
+
+<CryptoTopupCheckout
+  clientSecret={clientSecret}
+  apiBase={TOPUP_API_BASE}
+  onSuccess={() => router.refresh()}
+  onExpire={() => startOver()}
+/>
+```
+
+**3. Webhook: verify and fulfil once.** Credit `amount` cents to `account_id` once per deposit id,
+commit, then answer `2xx`; `onSuccess` in the browser is display only (§5).
+
+```python
+from crypto_topup import SignatureVerificationError, Webhook
+
+@app.post("/webhooks/crypto-topup")
+async def webhook(request: Request) -> Response:
+    try:
+        event = Webhook.construct_event(await request.body(), request.headers, SETTLEMENT_KEY)
+    except (SignatureVerificationError, ValueError):
+        return Response(status_code=400)
+    if event.type == "deposit.credited":
+        credit_once(event.deposit.id, event.deposit.account_id, event.deposit.amount)
+    return Response(status_code=200)
+```
+
+[sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) is this backend in full, with an
+idempotent SQLite ledger and tests; the staging reference product serves a demo checkout page.
 
 ## 1. What the service does
 
@@ -522,8 +603,9 @@ finality takes about 15 minutes per deposit.
 
 ### SDK
 
-- `crypto-topup-sdk` follows SemVer independently: MAJOR for a breaking change to the public
-  Python API (`topup_sdk` exports, generated `topup_client` names) or a new API major version;
+- `phala-crypto-topup` and `@phala/crypto-topup` follow SemVer independently: MAJOR for a breaking
+  change to the public API (`crypto_topup` and `topup_sdk` exports, generated `topup_client`
+  names, the JavaScript exports and component props) or a new API major version;
   MINOR for regeneration against an additive OpenAPI change or new helpers; PATCH for fixes.
 - Each release records the `info.version` it was generated from.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
@@ -556,7 +638,13 @@ come first.
 make -C sdk/python sync      # uv sync --locked --all-groups
 make -C sdk/python check     # ruff, mypy --strict, pytest, and the regeneration no-op check
 make -C sdk/python generate  # after an openapi.json change
+(cd sdk/js && pnpm install && pnpm run check && pnpm run e2e)  # typecheck, lint, tests, build
 ```
+
+Releases are tags: `sdk-py-v<version>` publishes `phala-crypto-topup` to PyPI and
+`sdk-js-v<version>` publishes `@phala/crypto-topup` to npm, from `.github/workflows/release-sdks.yml`
+after the SDK's tests pass on the tagged commit, with trusted publishing (no stored tokens) in the
+`release` environment.
 
 Regenerate the signing vectors only after an intentional profile change, then rerun the Rust
 test:
