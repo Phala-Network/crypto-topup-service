@@ -68,12 +68,6 @@ def main() -> int:
         action="store_true",
         help="pay the quoted amount after the quote window (credited at spot)",
     )
-    deposit.add_argument(
-        "--persistent",
-        type=int,
-        metavar="ATOMIC",
-        help="pay ATOMIC to the workspace's persistent address instead of a quote",
-    )
     deposit.add_argument("--token", help="pay with this token instead of the route's")
     deposit.add_argument("--refund-to", help="refund destination for --until refunded")
     args = parser.parse_args()
@@ -81,10 +75,8 @@ def main() -> int:
         parser.error("--config or SANDBOX_CONFIG is required")
     if args.mode == "deposit" and not args.driver_seed_file:
         parser.error("deposit needs --driver-seed-file")
-    if args.pay_bps <= 0 or (args.persistent is not None and args.persistent <= 0):
-        parser.error("--pay-bps and --persistent must be positive")
-    if args.persistent is not None and (args.pay_bps != 10_000 or args.pay_after_expiry):
-        parser.error("--persistent pays no quote: drop --pay-bps and --pay-after-expiry")
+    if args.pay_bps <= 0:
+        parser.error("--pay-bps must be positive")
     if (args.until == "refunded") != (args.refund_to is not None):
         parser.error("--refund-to goes with --until refunded, and only with it")
     if args.refund_to is not None and not EVM_ADDRESS.fullmatch(args.refund_to):
@@ -105,7 +97,6 @@ def main() -> int:
             timeout=args.timeout,
             pay_bps=args.pay_bps,
             pay_after_expiry=args.pay_after_expiry,
-            persistent_atomic=args.persistent,
             token=args.token,
             refund_to=args.refund_to,
         )

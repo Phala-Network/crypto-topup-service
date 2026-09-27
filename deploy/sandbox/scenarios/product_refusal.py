@@ -7,16 +7,17 @@ without a ledger credit (`account_suspended`) and requests its refund, which wai
 
 from __future__ import annotations
 
-from harness import TOKEN_UNIT, Context, check, deposit_uuid
+from harness import Context, check, deposit_uuid
 
 # A refund destination the user would supply; never the deposit's sender.
 REFUND_TO = "0x" + "11" * 20
 
 
 def run(ctx: Context) -> None:
-    team, persistent = ctx.team("refused", suspended=True)
-    ctx.pay(persistent, 1000 * TOKEN_UNIT)
-    deposit = ctx.deposit(team, persistent)
+    team = ctx.team("refused", suspended=True)
+    _, quote = ctx.lock(team, amount_minor=2500)
+    ctx.pay(quote.address, int(quote.amount_atomic))
+    deposit = ctx.deposit(team, quote.address)
     check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
     ctx.deposit_event("deposit.credited", deposit)
     order = ctx.ledger.find_order(f"deposit:{deposit_uuid(deposit)}")

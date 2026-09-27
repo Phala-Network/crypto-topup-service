@@ -104,11 +104,11 @@ class Context:
     payer: Payer
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
-    def team(self, name: str, *, suspended: bool = False) -> tuple[str, str]:
-        """Registers a fresh workspace and returns `(team_id, persistent_address)`."""
+    def team(self, name: str, *, suspended: bool = False) -> str:
+        """Registers a fresh workspace and returns its id; its first quote creates its account."""
         team = f"{name}-{self.run_id}"
-        address = register_team(self.config, self.client, self.ledger, team, suspended=suspended)
-        return team, address
+        register_team(self.ledger, team, suspended=suspended)
+        return team
 
     def lock(self, team: str, amount_minor: int) -> tuple[str, Quote]:
         """Creates a quote and returns `(quote_id, quote)`."""
@@ -120,13 +120,20 @@ class Context:
         LOG.info("sent %s atomic to %s in %s", amount_atomic, to, tx_hash)
         return tx_hash
 
-    def deposit(self, team: str, address: str, states: set[str] = FINAL_STATES) -> Deposit:
-        """Polls the account's deposits until one to `address` reaches one of `states`."""
+    def deposit(
+        self,
+        team: str,
+        address: str,
+        states: set[str] = FINAL_STATES,
+        tx_hash: str | None = None,
+    ) -> Deposit:
+        """Polls the account's deposits until one to `address` (in `tx_hash`, if given) reaches
+        one of `states`."""
         deadline = time.monotonic() + DEPOSIT_TIMEOUT_S
         last_state = None
         while time.monotonic() < deadline:
             for deposit in self.client.list_deposits(account_id=team):
-                if same_address(deposit.address, address):
+                if same_address(deposit.address, address) and tx_hash in {None, deposit.tx_hash}:
                     if deposit.status != last_state:
                         LOG.info("deposit %s is %s", deposit.id, deposit.status)
                         last_state = deposit.status
@@ -144,10 +151,10 @@ class Context:
         return self.event(event_type, lambda data: data.get("deposit_id") == deposit_uuid(deposit))
 
     def credited(
-        self, team: str, address: str, lock: Quote | None = None
+        self, team: str, address: str, lock: Quote | None = None, tx_hash: str | None = None
     ) -> tuple[Deposit, dict[str, Any]]:
         """Waits for credit and checks the webhook and product ledger agree with the service."""
-        deposit = self.deposit(team, address)
+        deposit = self.deposit(team, address, tx_hash=tx_hash)
         check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
         confirmed = self.deposit_event("deposit.confirmed", deposit)
         credited = self.deposit_event("deposit.credited", deposit)

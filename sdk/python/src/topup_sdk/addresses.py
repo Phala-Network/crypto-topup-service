@@ -30,13 +30,9 @@ def deposit_id(chain_id: int, tx_hash: str, log_index: int) -> uuid.UUID:
     return uuid.uuid5(DEPOSIT_NAMESPACE, f"{chain_id}:{tx_hash}:{log_index}")
 
 
-def persistent_salt(product_slug: str, external_id: str, version: int) -> bytes:
-    """keccak256(abi.encode(product_slug, external_id, uint256 version))."""
-    return keccak256(_abi_encode(product_slug, external_id, version))
-
-
 def lock_salt(product_slug: str, external_id: str, lock_ref: str) -> bytes:
-    """keccak256(abi.encode(product_slug, external_id, "lock", lock_ref))."""
+    """keccak256(abi.encode(product_slug, external_id, "lock", lock_ref)): a quote's address
+    salt, where `external_id` is the quote's `account_id` and `lock_ref` its id."""
     return keccak256(_abi_encode(product_slug, external_id, "lock", lock_ref))
 
 
@@ -85,17 +81,12 @@ def _hex_bytes(value: str) -> bytes:
     return bytes.fromhex(value[2:])
 
 
-def _abi_encode(*fields: str | int) -> bytes:
-    """ABI-encodes a tuple of `string` and `uint256` fields, as `abi.encode` does."""
+def _abi_encode(*fields: str) -> bytes:
+    """ABI-encodes a tuple of `string` fields, as `abi.encode` does."""
     head = b""
     tail = b""
     offset = 32 * len(fields)
     for field in fields:
-        if isinstance(field, int):
-            if not 0 <= field < 2**256:
-                raise ValueError("uint256 out of range")
-            head += field.to_bytes(32, "big")
-            continue
         encoded = field.encode("utf-8")
         head += (offset + len(tail)).to_bytes(32, "big")
         tail += len(encoded).to_bytes(32, "big") + encoded + b"\x00" * (-len(encoded) % 32)

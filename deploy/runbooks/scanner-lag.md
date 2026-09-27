@@ -15,7 +15,7 @@ cast block finalized --json --rpc-url "$RPC_PROVIDER_B_URL" | jq '(.data // .) |
 ```
 
 When the lag is material, pause issuance (existing addresses stay valid and watched):
-`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","addresses"]}'`.
+`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes"]}'`.
 
 ## Decide
 

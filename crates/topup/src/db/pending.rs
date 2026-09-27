@@ -7,7 +7,6 @@
 use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Transaction};
-use topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
@@ -93,32 +92,16 @@ pub struct HeadCommit {
     pub announced: u64,
 }
 
-/// Addresses the head scan watches: open lock addresses until one hour after expiry, and
-/// persistent addresses. When persistent addresses exceed one log request, only those issued or
-/// fetched (`requested_at`) in the last 24 hours are watched, most recent first.
+/// Addresses the head scan watches: quote addresses whose quote is neither completed nor
+/// canceled, until one hour after expiry. Payments to any other issued address are still found by
+/// the finalized scanner; they only show no `payment` before finality.
 pub async fn list_watched_addresses(
     pool: &PgPool,
     chain_id: u64,
 ) -> Result<Vec<ScanAddress>, sqlx::Error> {
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let limit = i64::try_from(MAX_ADDRESSES_PER_REQUEST)
-        .map_err(|error| sqlx::Error::Encode(error.to_string().into()))?;
     let rows = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
-        WITH persistent AS (
-            SELECT id, account_id, address, requested_at
-            FROM addresses
-            WHERE chain_id = $1 AND kind = 'persistent'
-        )
-        (
-            SELECT id, account_id, address
-            FROM persistent
-            WHERE (SELECT count(*) FROM persistent) <= $2
-               OR requested_at > now() - interval '24 hours'
-            ORDER BY requested_at DESC, id
-            LIMIT $2
-        )
-        UNION ALL
         SELECT address.id, address.account_id, address.address
         FROM addresses AS address
         JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
@@ -129,7 +112,6 @@ pub async fn list_watched_addresses(
         "#,
     )
     .bind(chain_id)
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
@@ -386,22 +368,6 @@ const PENDING_SELECT: &str = r#"
     )
 "#;
 
-/// Pending transfers to an account's persistent addresses, oldest first.
-pub async fn list_account_pending(
-    pool: &PgPool,
-    account_id: Uuid,
-) -> Result<Vec<PendingTransfer>, sqlx::Error> {
-    let query = format!(
-        "{PENDING_SELECT} AND address.account_id = $1 AND address.kind = 'persistent' \
-         ORDER BY pending.block_number, pending.log_index"
-    );
-    let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
-        .bind(account_id)
-        .fetch_all(pool)
-        .await?;
-    records.into_iter().map(TryInto::try_into).collect()
-}
-
 /// Pending transfers to one address, oldest first.
 pub async fn list_address_pending(
     pool: &PgPool,
@@ -416,25 +382,4 @@ pub async fn list_address_pending(
         .fetch_all(pool)
         .await?;
     records.into_iter().map(TryInto::try_into).collect()
-}
-
-/// Records that the product issued or fetched an account's persistent addresses, so the head scan
-/// keeps watching them when persistent addresses exceed one log request. Writes at most once an
-/// hour per address.
-pub async fn touch_persistent_requested(
-    pool: &PgPool,
-    account_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        UPDATE addresses
-        SET requested_at = now()
-        WHERE account_id = $1 AND kind = 'persistent'
-          AND requested_at < now() - interval '1 hour'
-        "#,
-    )
-    .bind(account_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }

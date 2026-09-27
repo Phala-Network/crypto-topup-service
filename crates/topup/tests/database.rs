@@ -650,7 +650,7 @@ async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutate
 }
 
 #[tokio::test]
-async fn addresses_are_canonical_and_enforce_both_unique_keys() -> Result<()> {
+async fn addresses_are_canonical_and_unique_per_chain() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let first_account = seed_account_without_address(&context.app_pool, 20).await?;
@@ -669,19 +669,7 @@ async fn addresses_are_canonical_and_enforce_both_unique_keys() -> Result<()> {
                 .err(),
             )?;
 
-            assert_unique(
-                seed::insert_address(
-                    &context.app_pool,
-                    &new_address(first_account.account_id, 1, 2, evm_address(23), 23),
-                )
-                .await
-                .err(),
-            )?;
-
-            sqlx::query("UPDATE addresses SET retired_at = now() WHERE id = $1")
-                .bind(first.id)
-                .execute(&context.app_pool)
-                .await?;
+            // One account may hold several addresses on a chain.
             seed::insert_address(
                 &context.app_pool,
                 &new_address(first_account.account_id, 1, 2, evm_address(23), 23),

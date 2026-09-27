@@ -1,11 +1,10 @@
-"""Quote-first payment of the exact locked amount, then a persistent-address payment.
+"""Payment of a quote's exact amount, then a second payment to the same address.
 
-Expect: before finality, the lock shows the payment as `seen` (in time, within tolerance), a
-provisional `deposit.pending` webhook arrives, and the persistent payment is listed as a pending
-deposit; neither is credited yet. Then the lock deposit is credited at the lock price with exactly
-the quoted credit and the quote becomes `complete`; the persistent deposit is credited at spot;
-both produce verified `deposit.confirmed` and `deposit.credited` webhooks and one product ledger
-credit each.
+Expect: before finality, the quote shows the payment as `seen` and matching, and a provisional
+`deposit.pending` webhook arrives; nothing is credited yet. Then the deposit is credited at the
+quoted price with exactly the quoted credit and the quote becomes `complete`. The second payment,
+to the completed quote's address, is credited at spot. Both produce verified `deposit.confirmed`
+and `deposit.credited` webhooks and one product ledger credit each.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ SEEN_TIMEOUT_S = 60.0
 
 
 def run(ctx: Context) -> None:
-    team, persistent = ctx.team("happy")
+    team = ctx.team("happy")
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
     tx_hash = ctx.pay(lock.address, int(lock.amount_atomic))
     payment = seen_lock_payment(ctx, team, lock_ref)
@@ -36,14 +35,10 @@ def run(ctx: Context) -> None:
     check(deposit.quote == lock_ref, "deposit does not reference its quote")
     check(ctx.client.get_quote(lock_ref).status == "complete", "lock not completed")
 
-    tx_hash = ctx.pay(persistent, 1000 * TOKEN_UNIT)
-    ctx.wait_until(
-        lambda: any(item.tx_hash == tx_hash for item in ctx.client.list_pending_deposits(team)),
-        "persistent payment was never listed as pending before finality",
-        SEEN_TIMEOUT_S,
-    )
-    _, confirmed = ctx.credited(team, persistent)
-    check(confirmed["price_source"] == "spot", "persistent payment was not valued at spot")
+    tx_hash = ctx.pay(lock.address, 1000 * TOKEN_UNIT)
+    second, confirmed = ctx.credited(team, lock.address, tx_hash=tx_hash)
+    check(confirmed["price_source"] == "spot", "a second payment was not valued at spot")
+    check(second.quote == lock_ref, "the second deposit does not name its quote")
 
 
 def seen_lock_payment(ctx: Context, team: str, lock_ref: str) -> QuotePayment:

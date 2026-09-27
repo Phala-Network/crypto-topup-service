@@ -1,6 +1,6 @@
 //! Anvil and PostgreSQL coverage for the display-only pending view (architecture §8, §12): the
-//! head scan, reorg removal, the finalized hand-off, the lock `payment` object, the
-//! `pending-deposits` endpoint, and the `deposit.pending` event.
+//! head scan, reorg removal, the finalized hand-off, the quote `payment` object, and the
+//! `deposit.pending` event.
 
 mod support;
 
@@ -108,25 +108,14 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "unpaid quote has a payment"
     );
     ensure!(api.client_progress("checkout-1").await? == ("none".to_owned(), None));
-    let persistent = api
-        .call(
-            Method::POST,
-            "/v1/products/phala-cloud/accounts/ws-pending/deposit-address",
-            Value::Null,
-        )
-        .await?;
-    let persistent_address = Address::from_str(
-        persistent["address"]
-            .as_str()
-            .context("persistent address")?,
-    )?;
+    let other_quote = api.lock("checkout-0").await?;
     let before = Ledger::read(pool).await?;
 
     let snapshot = snapshot(anvil)?;
     transfer(&anvil.rpc_url, token, lock_address, 100)?;
-    transfer(&anvil.rpc_url, other_token, persistent_address, 5)?;
-    transfer(&anvil.rpc_url, token, persistent_address, 7)?;
-    transfer(&anvil.rpc_url, token, persistent_address, 0)?;
+    transfer(&anvil.rpc_url, other_token, other_quote, 5)?;
+    transfer(&anvil.rpc_url, token, other_quote, 7)?;
+    transfer(&anvil.rpc_url, token, other_quote, 0)?;
 
     let scan = head_scan_once(pool, &reader, &chain_routes)
         .await?
@@ -168,21 +157,13 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         "estimated_final_at is not block time plus 15 minutes: {payment}"
     );
 
-    let pending = api
-        .call(
-            Method::GET,
-            "/v1/products/phala-cloud/accounts/ws-pending/pending-deposits",
-            Value::Null,
-        )
-        .await?;
-    let items = pending["pending_deposits"]
-        .as_array()
-        .context("pending list")?;
-    ensure!(items.len() == 1, "unexpected pending deposits {pending}");
-    let supported = &items[0];
-    ensure!(supported["amount_atomic"] == "7");
-    ensure!(supported["supported"] == true);
-    ensure!(supported["address"] == format!("{persistent_address:#x}"));
+    // The routed token's non-zero transfer is shown, not matching its quote; the other token
+    // and the zero transfer are not seen at all.
+    let other = api.payment("checkout-0").await?;
+    ensure!(
+        other["amount_atomic"] == "7" && other["matches_quote"] == false,
+        "{other}"
+    );
 
     let again = head_scan_once(pool, &reader, &chain_routes)
         .await?
@@ -336,7 +317,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 }
 
 #[tokio::test]
-async fn head_scan_watches_open_locks_and_recently_requested_persistent_addresses() -> Result<()> {
+async fn head_scan_watches_only_open_quote_addresses() -> Result<()> {
     with_database(|database| Box::pin(run_watched_scenario(&database.app_pool))).await
 }
 
@@ -349,20 +330,18 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
     .bind(product_id)
     .execute(pool)
     .await?;
-    // 1 001 persistent addresses exceed one log request; only the one requested in the last
-    // 24 hours stays watched. Addresses are `0x…<index>`; index 0 is the recent one.
+    // A persistent address from before quotes were the only flow is found by the finalized
+    // scanner, but the head scan no longer watches it. Its address is `0x0…0`.
     sqlx::query(
         r#"
         WITH account AS (
             INSERT INTO accounts (id, product_id, external_id)
-            SELECT gen_random_uuid(), $1, 'ws-' || index FROM generate_series(0, 1000) AS index
-            RETURNING id, external_id
+            VALUES (gen_random_uuid(), $1, 'ws-0')
+            RETURNING id
         )
-        INSERT INTO addresses (id, account_id, chain_id, kind, version, salt, address, requested_at)
+        INSERT INTO addresses (id, account_id, chain_id, kind, version, salt, address)
         SELECT gen_random_uuid(), account.id, $2, 'persistent', 1, '0x' || repeat('0', 64),
-               '0x' || lpad(to_hex(substr(account.external_id, 4)::int), 40, '0'),
-               CASE WHEN account.external_id = 'ws-0' THEN now()
-                    ELSE now() - interval '2 days' END
+               '0x' || repeat('0', 40)
         FROM account
         "#,
     )
@@ -424,16 +403,12 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
             "lock {status} expiring {expires}: watched = {listed}"
         );
     }
-    let persistent = topup::db::list_watched_addresses(pool, CHAIN_ID)
-        .await?
-        .into_iter()
-        .map(|watched| watched.address)
-        .filter(|address| U256::from_be_slice(address.as_slice()) <= U256::from(1_000_u64))
-        .collect::<Vec<_>>();
     ensure!(
-        persistent == [Address::ZERO],
-        "expected only the recently requested persistent address, got {} addresses",
-        persistent.len()
+        topup::db::list_watched_addresses(pool, CHAIN_ID)
+            .await?
+            .iter()
+            .all(|watched| watched.address != Address::ZERO),
+        "the head scan watches a persistent address"
     );
 
     // A head scan from a provider that lags behind a stored row leaves the row alone; the next

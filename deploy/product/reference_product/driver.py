@@ -4,7 +4,7 @@ It registers a workspace through the product's account API, gets a quote and rec
 address locally, pays the exact locked amount with the test token, polls until the deposit is
 credited, and checks that the product ledger credited the locked amount exactly once and received
 the verified `deposit.credited` webhook. Its options drive the abnormal paths instead: a different
-amount, a payment after the quote window, a payment to the persistent address, another token, and
+amount, a payment after the quote window, another token, and
 a refund request for a rejected deposit (deploy/README.md, "Abnormal paths").
 """
 
@@ -117,8 +117,8 @@ class ProductApi:
     def __exit__(self, *_: object) -> None:
         self._http.close()
 
-    def register(self, team: str) -> str:
-        return str(self._call("POST", "/accounts", {"account_id": team})["address"])
+    def register(self, team: str) -> None:
+        self._call("POST", "/accounts", {"account_id": team})
 
     def quote(self, team: str, amount_minor: int) -> Quote:
         body = {"amount_minor": amount_minor}
@@ -155,59 +155,48 @@ def run_deposit(
     timeout: float = 1800,
     pay_bps: int = 10_000,
     pay_after_expiry: bool = False,
-    persistent_atomic: int | None = None,
     token: str | None = None,
     refund_to: str | None = None,
 ) -> None:
-    """Registers a workspace through the product, pays one deposit, and checks its outcome.
+    """Registers a workspace through the product, pays one quote, and checks the outcome.
 
     By default it pays the exact amount of a fresh quote and expects exactly the quoted credit
-    at the lock price. `pay_bps` pays that fraction of the quote instead, `pay_after_expiry`
-    pays it after the quote's window, and `persistent_atomic` pays the workspace's persistent
-    address without a quote; those deposits must be credited at spot. `token` pays another
-    token. `until` is `credited` or `swept` for a credit, `rejected` for a rejection, or
-    `refunded`: a rejection, then a refund request to `refund_to` for the whole deposit, which
-    finance approves and executes (deploy/runbooks/refund-execution.md) while this waits for the
-    `deposit.refunded` webhook.
+    at the quoted price. `pay_bps` pays that fraction of the quote instead, and
+    `pay_after_expiry` pays it after the quote's window; those deposits must be credited at spot.
+    `token` pays another token. `until` is `credited` or `swept` for a credit, `rejected` for a
+    rejection, or `refunded`: a rejection, then a refund request to `refund_to` for the whole
+    deposit, which finance approves and executes (deploy/runbooks/refund-execution.md) while this
+    waits for the `deposit.refunded` webhook.
     """
     payer = Payer(config)
     with ProductApi(config.public_url, driver) as api:
         team = f"team-{uuid.uuid4().hex[:12]}"
-        persistent = api.register(team)
-        LOG.info("registered workspace %s (persistent address %s)", team, persistent)
+        api.register(team)
+        LOG.info("registered workspace %s", team)
 
-        lock: Quote | None = None
-        lock_ref = None
-        if persistent_atomic is not None:
-            address, amount_atomic = persistent, persistent_atomic
-        else:
-            lock = api.quote(team, amount_minor)
-            lock_ref = lock.id
-            # Pay only an address recomputed here from the product slug, workspace, and quote id.
-            if not same_address(quote_address(config, team, lock.id), lock.address):
-                raise RuntimeError("quote address does not match the driver's own computation")
-            address = lock.address
-            amount_atomic = int(lock.amount_atomic) * pay_bps // 10_000
-            LOG.info(
-                "quote %s: pay %s atomic to %s before %s for %s cents (%s)",
-                lock.id,
-                lock.amount_atomic,
-                lock.address,
-                datetime.fromtimestamp(lock.expires_at, UTC).isoformat(),
-                lock.amount,
-                lock.payment_uri,
-            )
+        quote = api.quote(team, amount_minor)
+        # Pay only an address recomputed here from the product slug, workspace, and quote id.
+        if not same_address(quote_address(config, team, quote.id), quote.address):
+            raise RuntimeError("quote address does not match the driver's own computation")
+        address = quote.address
+        amount_atomic = int(quote.amount_atomic) * pay_bps // 10_000
+        LOG.info(
+            "quote %s: pay %s atomic to %s before %s for %s cents (%s)",
+            quote.id,
+            quote.amount_atomic,
+            quote.address,
+            datetime.fromtimestamp(quote.expires_at, UTC).isoformat(),
+            quote.amount,
+            quote.payment_uri,
+        )
         if amount_atomic < min_atomic:
-            hint = ""
-            if lock is not None:
-                needed = -(-amount_minor * min_atomic // amount_atomic)
-                hint = f"; rerun with --amount-minor of at least {needed}"
+            needed = -(-amount_minor * min_atomic // amount_atomic)
             raise RuntimeError(
                 f"the payment would be {amount_atomic} atomic, below --min-atomic {min_atomic}; "
-                f"nothing was paid{hint}"
+                f"nothing was paid; rerun with --amount-minor of at least {needed}"
             )
-        if lock is not None and pay_after_expiry:
-            wait_s = lock.expires_at + LATE_MARGIN_S - time.time()
+        if pay_after_expiry:
+            wait_s = quote.expires_at + LATE_MARGIN_S - time.time()
             LOG.info("waiting %.0fs to pay after the quote window", max(wait_s, 0))
             time.sleep(max(wait_s, 0))
 
@@ -216,35 +205,33 @@ def run_deposit(
         if until in {"rejected", "refunded"}:
             _check_rejection(api, team, address, refund_to, timeout)
             return
-        at_lock_price = lock is not None and pay_bps == 10_000 and not pay_after_expiry
+        at_quote_price = pay_bps == 10_000 and not pay_after_expiry
         states = {"credited", "swept"} if until == "credited" else {"swept"}
-        expired_ref = lock_ref if pay_after_expiry else None
+        expired_ref = quote.id if pay_after_expiry else None
         deposit, view = _wait_for_account(
             api, team, timeout, lambda view: _credited(view, address, states, expired_ref)
         )
         credited = _event(view, "deposit.credited", deposit_id=_uuid(deposit))
-        if credited["price_source"] != ("lock" if at_lock_price else "spot"):
+        if credited["price_source"] != ("lock" if at_quote_price else "spot"):
             raise RuntimeError(f"deposit was valued at the {credited['price_source']} price")
-        if credited["external_id"] != team or credited["product_lock_ref"] != lock_ref:
+        if credited["external_id"] != team or credited["product_lock_ref"] != quote.id:
             raise RuntimeError(f"deposit.credited names another account or quote: {credited}")
-        expected_minor = str(deposit.amount)
-        if lock is not None and at_lock_price:
-            expected_minor = str(lock.amount)
+        expected_minor = str(quote.amount if at_quote_price else deposit.amount)
         if credited["amount_minor"] != expected_minor:
             raise RuntimeError("credited amount differs from the expected credit")
-        if lock is not None and deposit.quote != lock_ref:
+        if deposit.quote != quote.id:
             raise RuntimeError("deposit does not reference its quote")
         credits = [(c["provider_order_id"], c["amount_minor"]) for c in view["credits"]]
         if credits != [(f"deposit:{_uuid(deposit)}", int(credited["amount_minor"]))]:
             raise RuntimeError(f"unexpected product ledger credits: {credits}")
         LOG.info(
-            "deposit %s is %s: credited %s minor at the %s price (quoted %s); "
+            "deposit %s is %s: credited %s cents at the %s price (quoted %s); "
             "the ledger holds one credit",
             deposit.id,
             deposit.status,
             credited["amount_minor"],
             credited["price_source"],
-            None if lock is None else lock.amount,
+            quote.amount,
         )
 
 

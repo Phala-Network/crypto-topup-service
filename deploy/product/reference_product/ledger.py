@@ -105,23 +105,14 @@ class ProductLedger:
             ).fetchone()
         return None if row is None else bool(row[0])
 
-    def record_address(
-        self, address: str, team_id: str, *, version: int | None = None, lock_ref: str | None = None
-    ) -> None:
-        kind = "persistent" if lock_ref is None else "lock"
+    def record_quote_address(self, address: str, team_id: str, quote_id: str) -> None:
+        """Records a quote's address for the workspace (history only: credits name the account)."""
         with self.transaction() as db:
             db.execute(
                 "INSERT OR IGNORE INTO team_addresses (address, team_id, kind, version, lock_ref) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (address.lower(), team_id, kind, version, lock_ref),
+                "VALUES (?, ?, 'lock', NULL, ?)",
+                (address.lower(), team_id, quote_id),
             )
-
-    def address_owner(self, address: str) -> str | None:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT team_id FROM team_addresses WHERE address = ?", (address.lower(),)
-            ).fetchone()
-        return None if row is None else str(row[0])
 
     def find_order(self, provider_order_id: str) -> StoredOrder | None:
         with self._lock:

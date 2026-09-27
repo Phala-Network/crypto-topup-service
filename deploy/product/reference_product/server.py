@@ -35,7 +35,7 @@ from topup_sdk import (
     verify_attestation_binding,
     verify_request,
 )
-from topup_sdk.addresses import forwarder_address, lock_salt, persistent_salt, same_address
+from topup_sdk.addresses import forwarder_address, lock_salt
 from topup_sdk.ids import DEPOSIT, object_id, parse_id
 
 from .config import (
@@ -167,8 +167,8 @@ class AccountApi:
         try:
             if method == "POST" and not parts:
                 team = _account_ref(_json_object(body).get("account_id"))
-                address = register_team(self.config, self._service(), self.ledger, team)
-                return Answer(HTTPStatus.OK, {"account_id": team, "address": address})
+                register_team(self.ledger, team)
+                return Answer(HTTPStatus.OK, {"account_id": team})
             if len(parts) == 2 and parts[1] == "quotes" and method == "POST":
                 team = _account_ref(parts[0])
                 request = _json_object(body)
@@ -309,29 +309,9 @@ def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519Pu
     return load_public_key(evidence.settlement_pubkey)
 
 
-def register_team(
-    config: ProductConfig,
-    client: TopupClient,
-    ledger: ProductLedger,
-    team: str,
-    *,
-    suspended: bool = False,
-) -> str:
-    """Registers a workspace and records its persistent address after recomputing it.
-
-    The service creates the account with the address, as it does with a first quote.
-    """
+def register_team(ledger: ProductLedger, team: str, *, suspended: bool = False) -> None:
+    """Registers a workspace; the service creates its account with the first quote."""
     ledger.add_team(team, suspended=suspended)
-    address = client.create_deposit_address(team)
-    inputs = address.salt_inputs
-    salt = persistent_salt(inputs.product_slug, inputs.external_id, inputs.version)
-    expected = forwarder_address(config.factory, config.implementation, salt)
-    if inputs.product_slug != config.product_slug or inputs.external_id != team:
-        raise RuntimeError("address salt inputs name another account")
-    if not same_address(expected, address.address) or address.chain_id != config.chain_id:
-        raise RuntimeError("service returned an address the product cannot recompute")
-    ledger.record_address(address.address, team, version=inputs.version)
-    return address.address
 
 
 def create_quote(
@@ -350,7 +330,7 @@ def create_quote(
     quote = client.create_quote(
         team, amount_minor, chain_id=config.chain_id, asset=config.token_symbol.lower()
     )
-    ledger.record_address(quote.address, team, lock_ref=quote.id)
+    ledger.record_quote_address(quote.address, team, quote.id)
     return quote
 
 

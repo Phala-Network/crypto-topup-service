@@ -10,7 +10,6 @@ from .create_quote_request import CreateQuoteRequest
 from .create_refund_request import CreateRefundRequest
 from .daily_report_response import DailyReportResponse
 from .deposit import Deposit
-from .deposit_address_response import DepositAddressResponse
 from .deposit_event_response import DepositEventResponse
 from .deposit_list import DepositList
 from .deposit_response import DepositResponse
@@ -25,9 +24,6 @@ from .operator_identity import OperatorIdentity
 from .outbox_replay_response import OutboxReplayResponse
 from .pause_request import PauseRequest
 from .pause_response import PauseResponse
-from .pending_deposit_response import PendingDepositResponse
-from .pending_deposits_response import PendingDepositsResponse
-from .persistent_salt_inputs import PersistentSaltInputs
 from .product_response import ProductResponse
 from .quote import Quote
 from .quote_payment import QuotePayment
@@ -37,7 +33,6 @@ from .reconciliation_round_report import ReconciliationRoundReport
 from .record_refund_request import RecordRefundRequest
 from .refund import Refund
 from .register_product_request import RegisterProductRequest
-from .rotate_deposit_address_request import RotateDepositAddressRequest
 from .route_daily_report import RouteDailyReport
 from .route_daily_report_age_in_state_max_seconds import RouteDailyReportAgeInStateMaxSeconds
 from .route_daily_report_deposits_by_state import RouteDailyReportDepositsByState
@@ -57,7 +52,6 @@ __all__ = (
     "CreateRefundRequest",
     "DailyReportResponse",
     "Deposit",
-    "DepositAddressResponse",
     "DepositEventResponse",
     "DepositList",
     "DepositResponse",
@@ -72,9 +66,6 @@ __all__ = (
     "OutboxReplayResponse",
     "PauseRequest",
     "PauseResponse",
-    "PendingDepositResponse",
-    "PendingDepositsResponse",
-    "PersistentSaltInputs",
     "ProductResponse",
     "Quote",
     "QuotePayment",
@@ -84,7 +75,6 @@ __all__ = (
     "RecordRefundRequest",
     "Refund",
     "RegisterProductRequest",
-    "RotateDepositAddressRequest",
     "RouteDailyReport",
     "RouteDailyReportAgeInStateMaxSeconds",
     "RouteDailyReportDepositsByState",

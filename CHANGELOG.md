@@ -16,6 +16,10 @@ webhook receivers must ignore unknown fields.
   Quoting by token amount is removed. `GET /v1/config` lists the payable assets, limits, and
   quote terms; `POST …/accounts` and `GET …/accounts/{ext}/limits` are removed (the first quote or
   address creates the account).
+- **Breaking**: quotes are the only flow. `GET|POST …/accounts/{ext}/deposit-address`,
+  `…/deposit-address/rotate`, `GET …/accounts/{ext}/pending-deposits`, and the `addresses` pause
+  scope are removed. Persistent addresses issued before stay watched by the finalized scanner;
+  their payments are credited at spot, with `quote: null` on the deposit.
 - **Breaking**: deposits and refunds are top-level resources. `GET /v1/deposits` (a Stripe list
   object with `starting_after`/`ending_before`/`limit` and filters `account_id`, `quote`, `status`,
   `tx_hash`, `created[gte|lte]`) and `GET /v1/deposits/{id}` return `Deposit` objects (`dep_` ids,

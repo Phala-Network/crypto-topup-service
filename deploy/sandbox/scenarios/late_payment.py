@@ -10,7 +10,7 @@ from harness import Context, check
 
 
 def run(ctx: Context) -> None:
-    team, _ = ctx.team("late")
+    team = ctx.team("late")
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
     expired = ctx.event(
         "rate_lock.expired",

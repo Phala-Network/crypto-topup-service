@@ -6,7 +6,7 @@ lock credit to at least 90% of the route's `limits.max_open_minor` cap; the even
 
 **Impact:** a creation that would exceed the `account`, `product`, or `global` cap answers `409`;
 existing locks keep their terms until consumed, cancelled, or expired. `global` spans every
-quote-first route. Persistent-address deposits are unaffected.
+quote route.
 
 ## First steps
 

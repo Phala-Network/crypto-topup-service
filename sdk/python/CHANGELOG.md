@@ -16,6 +16,9 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 ### Removed
 
+- **Breaking**: `create_deposit_address`, `get_deposit_address`, `rotate_deposit_address`,
+  `list_pending_deposits`, and `topup_sdk.persistent_salt`, with their generated operations and
+  models: quotes are the only flow.
 - **Breaking**: `lookup_deposits` and `request_refund`; `list_deposits(external_id, state=…,
   created_from=…, created_to=…)` becomes `list_deposits(account_id=…, quote=…, status=…,
   tx_hash=…, created_gte=…, created_lte=…, expand=…)` over Stripe's cursors, and `get_deposit`

@@ -86,16 +86,10 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(quotes::get_config))
         .routes(routes!(quotes::create_quote))
         .routes(routes!(quotes::cancel_quote))
-        .routes(routes!(
-            handlers::get_deposit_address,
-            handlers::create_deposit_address
-        ))
-        .routes(routes!(handlers::rotate_deposit_address))
         .routes(routes!(deposits::list_deposits))
         .routes(routes!(deposits::get_deposit))
         .routes(routes!(deposits::create_refund))
         .routes(routes!(deposits::get_refund))
-        .routes(routes!(pending::list_pending_deposits))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_product,
