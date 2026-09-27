@@ -122,6 +122,6 @@ breaking change bumps the minor version. Each keeps a [Keep a Changelog 1.1.0](h
    ```
 
 3. [Release SDKs](.github/workflows/release-sdks.yml) checks that the tag names the version and
-   that the changelog has its dated section, runs the SDK's tests, publishes from the `release`
-   environment with trusted publishing (npm provenance, PyPI attestations), and creates the GitHub
+   that the changelog has its dated section, runs the SDK's tests, publishes from the `npm` or
+   `pypi` environment with trusted publishing (npm provenance, PyPI attestations), and creates the GitHub
    release with the changelog section as its notes (`sdk/changelog-section.sh`).

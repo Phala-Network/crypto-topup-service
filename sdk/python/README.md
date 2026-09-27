@@ -95,5 +95,5 @@ make sync    # install the locked environment
 make check   # ruff, mypy --strict, pytest, and the regeneration no-op check
 ```
 
-A tag `sdk-py-v<version>` matching `pyproject.toml` publishes to PyPI from the `release` workflow
-with trusted publishing.
+A tag `sdk-py-v<version>` matching `pyproject.toml` publishes to PyPI from the Release SDKs workflow
+(environment `pypi`) with trusted publishing.
