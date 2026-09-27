@@ -24,8 +24,9 @@ quote-first route. Persistent-address deposits are unaffected.
 
 - Legitimate demand: the cap already rejects over-cap quotes; tell the product and ask Finance
   and Risk whether to raise the caps.
-- One account concentrates exposure: ask the product to pause `quotes` for that account
-  (product-signed `POST /v1/products/{p}/accounts/{ext}/pause`), or pause the route.
+- One account concentrates exposure: pause `quotes` for that account
+  (`admin POST "/v1/admin/products/$PRODUCT/accounts/$ACCOUNT/pause" '{"scopes":["quotes"]}'`), or
+  pause the route.
 
 ## Fix
 

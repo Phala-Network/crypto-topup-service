@@ -42,6 +42,15 @@ const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
 const REFUND_DESTINATION: &str = "0x4444444444444444444444444444444444444444";
 const REFUND_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+/// A `POST /v1/refunds` body.
+fn refund_body(deposit: Uuid, destination: &str, amount: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "deposit": format!("dep_{}", deposit.simple()),
+        "destination_address": destination,
+        "amount_atomic": amount,
+    }))?)
+}
+
 const REPLACEMENT_TX: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 #[tokio::test]
@@ -63,21 +72,14 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         insert_transition(&database.app_pool, deposit).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let body = serde_json::to_vec(&json!({
-            "to_address": REFUND_DESTINATION,
-            "amount": "100"
-        }))?;
 
-        let cross_tenant_path = format!(
-            "/v1/products/{}/deposits/{other_deposit}/refund-requests",
-            product.slug
-        );
+        let cross_tenant_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &cross_tenant_path,
-                body.clone(),
+                cross_tenant_path,
+                refund_body(other_deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now,
@@ -91,16 +93,13 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             &["refunds".to_owned()],
         )
         .await?;
-        let request_path = format!(
-            "/v1/products/{}/deposits/{deposit}/refund-requests",
-            product.slug
-        );
+        let request_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body.clone(),
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 1,
@@ -124,8 +123,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body.clone(),
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 2,
@@ -144,8 +143,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body.clone(),
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 3,
@@ -161,8 +160,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body.clone(),
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 4,
@@ -170,16 +169,18 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let requested = response_json(response).await?;
-        let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
-        ensure!(requested["status"] == "requested");
+        let refund_id = topup::ids::parse(topup::ids::REFUND, requested["id"].as_str().context("refund id")?)
+            .context("re_ id")?;
+        ensure!(requested["status"] == "pending" && requested["object"] == "refund");
+        ensure!(requested["deposit"] == format!("dep_{}", deposit.simple()));
         ensure!(requested["amount_atomic"] == "100");
 
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body,
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 5,
@@ -196,17 +197,17 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                serde_json::to_vec(&json!({
-                    "to_address": "0x6666666666666666666666666666666666666666",
-                    "amount": "60"
-                }))?,
+                request_path,
+                refund_body(deposit, "0x6666666666666666666666666666666666666666", "60")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 6,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        let error = response_json(response).await?;
+        ensure!(error["error"]["code"] == "amount_too_large", "{error}");
+        ensure!(error["error"]["param"] == "amount_atomic", "{error}");
 
         let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
         seed::set_account_paused_scopes(
@@ -363,14 +364,11 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .bind(deposit)
             .fetch_one(&database.app_pool)
             .await?;
-        let lookup_path = format!(
-            "/v1/products/{}/deposits?tx_hash={tx_hash}",
-            product.slug
-        );
         let response = app
+            .clone()
             .oneshot(signed_request(
                 Method::GET,
-                &lookup_path,
+                &format!("/v1/deposits?tx_hash={tx_hash}"),
                 Vec::new(),
                 PRODUCT_KID,
                 &product_key,
@@ -379,9 +377,40 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let lookup = response_json(response).await?;
-        ensure!(lookup["deposits"][0]["id"] == deposit.to_string());
-        ensure!(lookup["deposits"][0]["external_id"] == "refund-account");
-        ensure!(lookup["deposits"][0]["timeline"][0]["to_state"] == "rejected");
+        ensure!(lookup["object"] == "list" && lookup["has_more"] == false);
+        let found = &lookup["data"][0];
+        ensure!(found["id"] == format!("dep_{}", deposit.simple()));
+        ensure!(found["account_id"] == "refund-account");
+        ensure!(found["amount_refunded_atomic"] == "100" && found["refunded"] == false);
+        let refund = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/v1/refunds/re_{}?expand[]=deposit", refund_id.simple()),
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 7,
+            ))
+            .await?;
+        ensure!(refund.status() == StatusCode::OK);
+        let refund = response_json(refund).await?;
+        ensure!(refund["status"] == "succeeded", "{refund}");
+        ensure!(refund["deposit"]["id"] == format!("dep_{}", deposit.simple()), "{refund}");
+        let response = app
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/v1/admin/deposits/dep_{}", deposit.simple()),
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 8,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let detail = response_json(response).await?;
+        ensure!(detail["external_id"] == "refund-account");
+        ensure!(detail["timeline"][0]["to_state"] == "rejected");
         Ok(())
     }
     .await;
@@ -414,21 +443,14 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
             seed_rejected_deposit(&database.app_pool, product.id, "sanctions-recheck", 100).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let body = serde_json::to_vec(&json!({
-            "to_address": REFUND_DESTINATION,
-            "amount": "100"
-        }))?;
 
-        let pending_path = format!(
-            "/v1/products/{}/deposits/{pending}/refund-requests",
-            product.slug
-        );
+        let pending_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &pending_path,
-                body.clone(),
+                pending_path,
+                refund_body(pending, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now,
@@ -436,16 +458,13 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
 
-        let request_path = format!(
-            "/v1/products/{}/deposits/{refundable}/refund-requests",
-            product.slug
-        );
+        let request_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                body,
+                request_path,
+                refund_body(refundable, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 1,
@@ -453,7 +472,11 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let requested = response_json(response).await?;
-        let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
+        let refund_id = topup::ids::parse(
+            topup::ids::REFUND,
+            requested["id"].as_str().context("refund id")?,
+        )
+        .context("re_ id")?;
 
         sqlx::query("UPDATE deposits SET state = 'confirmed', reason = NULL WHERE id = $1")
             .bind(refundable)
@@ -486,19 +509,13 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
         ensure!(approvals == 0);
 
         let app_for_credited = app.clone();
-        let sanctioned_path = format!(
-            "/v1/products/{}/deposits/{sanctioned}/refund-requests",
-            product.slug
-        );
+        let sanctioned_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &sanctioned_path,
-                serde_json::to_vec(&json!({
-                    "to_address": REFUND_DESTINATION,
-                    "amount": "100"
-                }))?,
+                sanctioned_path,
+                refund_body(sanctioned, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 3,
@@ -506,8 +523,11 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let requested = response_json(response).await?;
-        let sanctioned_refund =
-            Uuid::parse_str(requested["id"].as_str().context("sanctioned refund id")?)?;
+        let sanctioned_refund = topup::ids::parse(
+            topup::ids::REFUND,
+            requested["id"].as_str().context("refund id")?,
+        )
+        .context("re_ id")?;
         sqlx::query("UPDATE deposits SET reason = 'sanctioned' WHERE id = $1")
             .bind(sanctioned)
             .execute(&database.app_pool)
@@ -541,25 +561,19 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
             None,
         )
         .await?;
-        let credited_path = format!(
-            "/v1/products/{}/deposits/{credited}/refund-requests",
-            product.slug
-        );
+        let credited_path = "/v1/refunds";
         let response = app_for_credited
             .oneshot(signed_request(
                 Method::POST,
-                &credited_path,
-                serde_json::to_vec(&json!({
-                    "to_address": REFUND_DESTINATION,
-                    "amount": "100"
-                }))?,
+                credited_path,
+                refund_body(credited, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now + 5,
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["status"] == "requested");
+        ensure!(response_json(response).await?["status"] == "pending");
         Ok(())
     }
     .await;
@@ -592,19 +606,13 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
         .await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let request_path = format!(
-            "/v1/products/{}/deposits/{deposit}/refund-requests",
-            product.slug
-        );
+        let request_path = "/v1/refunds";
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                &request_path,
-                serde_json::to_vec(&json!({
-                    "to_address": REFUND_DESTINATION,
-                    "amount": "100"
-                }))?,
+                request_path,
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
                 PRODUCT_KID,
                 &product_key,
                 now,
@@ -612,7 +620,11 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let requested = response_json(response).await?;
-        let refund_id = Uuid::parse_str(requested["id"].as_str().context("refund id")?)?;
+        let refund_id = topup::ids::parse(
+            topup::ids::REFUND,
+            requested["id"].as_str().context("refund id")?,
+        )
+        .context("re_ id")?;
         let persisted_route: String = sqlx::query_scalar("SELECT route FROM refunds WHERE id = $1")
             .bind(refund_id)
             .fetch_one(&database.app_pool)
@@ -812,7 +824,61 @@ async fn corrected_hash_rejects_stale_observation_then_confirms_replacement() ->
 }
 
 #[tokio::test]
-async fn support_lookup_uses_tenant_scoped_keyset_pages() -> Result<()> {
+async fn refund_idempotency_keys_replay_and_refuse_other_parameters() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let product_key = SigningKey::from_bytes(&[71; 32]);
+        let admin_key = SigningKey::from_bytes(&[72; 32]);
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let deposit = seed_rejected_deposit(&database.app_pool, product.id, "keyed", 150).await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let request = |body: Vec<u8>, created: i64| {
+            support::signed_request_with_key(
+                Method::POST,
+                "/v1/refunds",
+                body,
+                PRODUCT_KID,
+                &product_key,
+                created,
+                "\"refund-1\"",
+            )
+        };
+        // Without an amount the whole unrefunded remainder is requested.
+        let body = serde_json::to_vec(&json!({
+            "deposit": format!("dep_{}", deposit.simple()),
+            "destination_address": REFUND_DESTINATION,
+        }))?;
+        let first = app.clone().oneshot(request(body.clone(), now)).await?;
+        ensure!(first.status() == StatusCode::OK);
+        let first = response_json(first).await?;
+        ensure!(first["amount_atomic"] == "150", "{first}");
+        let repeat = app.clone().oneshot(request(body, now + 1)).await?;
+        ensure!(response_json(repeat).await?["id"] == first["id"]);
+        let other = app
+            .clone()
+            .oneshot(request(
+                refund_body(deposit, "0x6666666666666666666666666666666666666666", "150")?,
+                now + 2,
+            ))
+            .await?;
+        ensure!(other.status() == StatusCode::CONFLICT);
+        ensure!(response_json(other).await?["error"]["type"] == "idempotency_error");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM refunds")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(count == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -820,53 +886,73 @@ async fn support_lookup_uses_tenant_scoped_keyset_pages() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[47; 32]);
         let admin_key = SigningKey::from_bytes(&[48; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let address = seed_same_address_deposits(&database.app_pool, product.id, 52).await?;
+        seed_same_address_deposits(&database.app_pool, product.id, 52).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let first_path = format!("/v1/products/{}/deposits?address={address}", product.slug);
-        let response = app
-            .clone()
-            .oneshot(signed_request(
+        let created = std::sync::atomic::AtomicI64::new(now);
+        let list = |query: String, kid: &'static str, key: &SigningKey| {
+            let app = app.clone();
+            let request = signed_request(
                 Method::GET,
-                &first_path,
+                &format!("/v1/deposits{query}"),
                 Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let first = response_json(response).await?;
-        ensure!(first["deposits"].as_array().context("first page")?.len() == 50);
-        let cursor = first["next_cursor"].as_str().context("next cursor")?;
-        let second_path = format!("{first_path}&cursor={cursor}");
-        let response = app
-            .oneshot(signed_request(
-                Method::GET,
-                &second_path,
-                Vec::new(),
-                PRODUCT_KID,
-                &product_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let second = response_json(response).await?;
-        ensure!(second["deposits"].as_array().context("second page")?.len() == 2);
-        ensure!(second["next_cursor"].is_null());
-        let first_ids = first["deposits"]
-            .as_array()
-            .context("first page")?
-            .iter()
-            .map(|deposit| deposit["id"].as_str().unwrap_or_default())
-            .collect::<std::collections::BTreeSet<_>>();
-        ensure!(
-            second["deposits"]
+                kid,
+                key,
+                created.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            );
+            async move {
+                let response = app.oneshot(request).await?;
+                let status = response.status();
+                anyhow::Ok((status, response_json(response).await?))
+            }
+        };
+        let ids = |page: &Value| -> Result<Vec<String>> {
+            page["data"]
                 .as_array()
-                .context("second page")?
+                .with_context(|| format!("no data in {page}"))?
                 .iter()
-                .all(|deposit| !first_ids.contains(deposit["id"].as_str().unwrap_or_default()))
-        );
+                .map(|deposit| deposit["id"].as_str().map(str::to_owned).context("id"))
+                .collect()
+        };
+
+        let (status, first) = list("?limit=50".to_owned(), PRODUCT_KID, &product_key).await?;
+        ensure!(status == StatusCode::OK, "{first}");
+        ensure!(first["object"] == "list" && first["url"] == "/v1/deposits");
+        ensure!(first["has_more"] == true);
+        let first_ids = ids(&first)?;
+        ensure!(first_ids.len() == 50);
+        let last = first_ids.last().context("last")?;
+        let (_, second) = list(
+            format!("?limit=50&starting_after={last}"),
+            PRODUCT_KID,
+            &product_key,
+        )
+        .await?;
+        let second_ids = ids(&second)?;
+        ensure!(second_ids.len() == 2 && second["has_more"] == false);
+        ensure!(second_ids.iter().all(|id| !first_ids.contains(id)));
+        // Paging back from the second page returns the end of the first, in the same order.
+        let (_, back) = list(
+            format!("?limit=3&ending_before={}", second_ids[0]),
+            PRODUCT_KID,
+            &product_key,
+        )
+        .await?;
+        ensure!(ids(&back)? == first_ids[47..]);
+        ensure!(back["has_more"] == true);
+        let (_, default) = list(String::new(), PRODUCT_KID, &product_key).await?;
+        ensure!(ids(&default)?.len() == 10);
+
+        for (query, param) in [
+            ("?limit=101", "limit"),
+            ("?status=paid", "status"),
+            ("?expand[]=quote", "expand"),
+            ("?color=red", "color"),
+        ] {
+            let (status, error) = list(query.to_owned(), PRODUCT_KID, &product_key).await?;
+            ensure!(status == StatusCode::BAD_REQUEST, "{query}");
+            ensure!(error["error"]["param"] == param, "{query}: {error}");
+        }
         Ok(())
     }
     .await;

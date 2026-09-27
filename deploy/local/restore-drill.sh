@@ -499,7 +499,7 @@ test "$(printf '%s\n' "$restore_report" | jq -er '.status')" = ok || {
     exit 1
 }
 test "$(topup_status POST /v1/admin/products)" = 503
-test "$(topup_status GET /v1/products/restore-drill/deposits?tx_hash=0x00)" = 401
+test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 401
 
 # restore-check logged in as the owner, and the application login works too: the restored roles
 # carry the source's derived passwords, which the replacement derived again.

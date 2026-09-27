@@ -1,10 +1,9 @@
 //! Quotes (`/v1/quotes`) and the product configuration (`/v1/config`).
 
 use axum::Json;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
-use serde::Deserialize;
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
 
@@ -14,9 +13,11 @@ use crate::locks::{self, RateLock, RateLockError, RateLockStatus};
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, idempotency_key};
+use super::extract::{ApiJson, expansions, idempotency_key, query_pairs};
 use super::handlers::{ensure_account, validate_external_id};
-use super::models::{ClientQuote, Config, ConfigAsset, CreateQuoteRequest, Quote, QuoteView};
+use super::models::{
+    ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
+};
 use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -163,19 +164,19 @@ pub(crate) async fn create_quote(
     respond_with_client_secret(&state, &product, lock).await
 }
 
-/// Query of `GET /v1/quotes/{id}`.
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-pub(crate) struct GetQuoteQuery {
-    /// The quote's `client_secret`, to read its public view without a signature. Send the request
-    /// without `Signature` headers; the response then allows any origin.
-    client_secret: Option<String>,
-}
-
 #[utoipa::path(
     get,
     path = "/v1/quotes/{id}",
-    params(("id" = String, Path, description = "Quote id, `qt_…`"), GetQuoteQuery),
+    params(
+        ("id" = String, Path, description = "Quote id, `qt_…`"),
+        ("expand[]" = Option<Vec<String>>, Query, description = "`deposit`; signed requests only"),
+        (
+            "client_secret" = Option<String>, Query,
+            description = "The quote's `client_secret`, to read its public view without a \
+                           signature. Send the request without `Signature` headers; the response \
+                           then allows any origin."
+        )
+    ),
     responses(
         (
             status = 200,
@@ -200,10 +201,15 @@ pub(crate) async fn get_quote(
     State(state): State<AppState>,
     product: Option<Extension<Product>>,
     Path(id): Path<String>,
-    Query(query): Query<GetQuoteQuery>,
+    RawQuery(query): RawQuery,
 ) -> Response {
+    let pairs = query_pairs(query.as_deref());
     let Some(Extension(product)) = product else {
-        let mut response = match client_quote(&state, &id, query.client_secret.as_deref()).await {
+        let client_secret = pairs
+            .iter()
+            .find(|(name, _)| name == "client_secret")
+            .map(|(_, value)| value.as_str());
+        let mut response = match client_quote(&state, &id, client_secret).await {
             Ok(quote) => Json(QuoteView::Client(quote)).into_response(),
             Err(error) => error.into_response(),
         };
@@ -214,12 +220,23 @@ pub(crate) async fn get_quote(
         return response;
     };
     let quote = async {
+        let expand = expansions(&pairs, &["deposit"])?;
         let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
         let lock = locks::get(&state.pool, product.id, quote)
             .await
             .map_err(map_error)?
             .ok_or_else(ApiError::not_found)?;
-        quote_object(&state, &product, lock).await
+        let consumed_by = lock.consumed_by;
+        let mut quote = quote_object(&state, &product, lock).await?;
+        if expand.contains(&"deposit")
+            && let Some(deposit) = consumed_by
+        {
+            let deposit = super::deposits::find_deposit(&state, product.id, deposit)
+                .await?
+                .ok_or_else(ApiError::internal)?;
+            quote.deposit = Some(ExpandableDeposit::Object(Box::new(deposit)));
+        }
+        Ok::<_, ApiError>(quote)
     };
     match quote.await {
         Ok(quote) => Json(QuoteView::Quote(quote)).into_response(),
@@ -365,7 +382,12 @@ fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
     )
 }
 
-async fn quote_object(state: &AppState, product: &Product, lock: RateLock) -> ApiResult<Quote> {
+/// The API representation of a quote.
+pub(super) async fn quote_object(
+    state: &AppState,
+    product: &Product,
+    lock: RateLock,
+) -> ApiResult<Quote> {
     // The quote's own route version may be retired; asset and tolerance come from the route's
     // current version, which keeps the chain and asset.
     let route = product_routes(state, product)
@@ -394,7 +416,7 @@ async fn quote_object(state: &AppState, product: &Product, lock: RateLock) -> Ap
         payment,
         deposit: lock
             .consumed_by
-            .map(|deposit| ids::format(ids::DEPOSIT, deposit)),
+            .map(|deposit| ExpandableDeposit::Id(ids::format(ids::DEPOSIT, deposit))),
         client_secret: None,
     })
 }
@@ -409,7 +431,7 @@ const fn status(status: RateLockStatus) -> &'static str {
 }
 
 /// An eight-decimal scaled price as an exact decimal string, such as `0.24875621`.
-fn decimal(scaled: u64) -> String {
+pub(super) fn decimal(scaled: u64) -> String {
     let digits = format!("{scaled:09}");
     let (integer, fraction) = digits.split_at(digits.len().saturating_sub(8));
     format!("{integer}.{fraction}")

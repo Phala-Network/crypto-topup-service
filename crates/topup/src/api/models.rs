@@ -38,35 +38,7 @@ pub struct RotateDepositAddressRequest {
     pub from_version: u64,
 }
 
-/// Deposit-list filters.
-#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct DepositListQuery {
-    /// Filter by state.
-    pub state: Option<String>,
-    /// Include deposits created at or after this time.
-    pub from: Option<DateTime<Utc>>,
-    /// Include deposits created before this time.
-    pub to: Option<DateTime<Utc>>,
-    /// Opaque cursor returned by the previous page.
-    pub cursor: Option<Uuid>,
-}
-
-/// Product-wide support lookup filters.
-#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct DepositLookupQuery {
-    /// Canonical transaction hash.
-    pub tx_hash: Option<String>,
-    /// Canonical receiving address.
-    pub address: Option<String>,
-    /// Product lock reference.
-    pub lock_ref: Option<String>,
-    /// Opaque `(created_at, id)` cursor returned by the previous support page.
-    pub cursor: Option<String>,
-}
-
-/// Product-visible deposit facts.
+/// A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DepositResponse {
     /// Deterministic deposit identifier.
@@ -161,24 +133,6 @@ pub struct DepositEventResponse {
     pub delivered_at: Option<DateTime<Utc>>,
 }
 
-/// A support lookup page with timelines.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct SupportDepositsResponse {
-    /// Matching deposits in descending creation order.
-    pub deposits: Vec<SupportDepositResponse>,
-    /// Cursor for the next page, or `null` when exhausted.
-    pub next_cursor: Option<String>,
-}
-
-/// A page of deposits.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct DepositsResponse {
-    /// Deposits in descending creation order.
-    pub deposits: Vec<DepositResponse>,
-    /// Cursor for the next page, or `null` when exhausted.
-    pub next_cursor: Option<Uuid>,
-}
-
 /// Pause or resume request.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct PauseRequest {
@@ -246,8 +200,8 @@ pub struct Quote {
     pub created: i64,
     /// The payment the checkout page should show, once one is seen on chain; display only.
     pub payment: Option<QuotePayment>,
-    /// `dep_` id of the deposit that completed the quote.
-    pub deposit: Option<String>,
+    /// The deposit that completed the quote: its `dep_` id, or the object with `expand[]=deposit`.
+    pub deposit: Option<ExpandableDeposit>,
     /// Lets the payer's browser read the quote's public view, `ClientQuote`, from
     /// `GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by
     /// `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
@@ -325,6 +279,127 @@ pub struct QuotePayment {
     pub matches_quote: bool,
     /// `dep_` id the deposit has, or will have once final.
     pub deposit: String,
+}
+
+/// A quote id, or the quote with `expand[]`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+#[schema(no_recursion)]
+pub enum ExpandableQuote {
+    /// `qt_` id.
+    Id(String),
+    /// The expanded quote.
+    Object(Box<Quote>),
+}
+
+/// A deposit id, or the deposit with `expand[]`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+#[schema(no_recursion)]
+pub enum ExpandableDeposit {
+    /// `dep_` id.
+    Id(String),
+    /// The expanded deposit.
+    Object(Box<Deposit>),
+}
+
+/// A final transfer to a quote's address: valued, screened, and credited, or rejected.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Deposit {
+    /// `dep_` and the hex of the deposit's deterministic UUID,
+    /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{log_index}")`.
+    pub id: String,
+    /// Always `deposit`.
+    pub object: String,
+    /// Your account identifier.
+    pub account_id: String,
+    /// The quote whose address received the transfer; `null` for a persistent address.
+    pub quote: Option<ExpandableQuote>,
+    /// `detected`, `confirmed`, `credited`, `swept`, or `rejected`. New values may be added.
+    pub status: String,
+    /// Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,
+    /// `out_of_range`, `sanctioned`, or `product_refused` (historical).
+    pub rejection_reason: Option<String>,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code; `null` for a token without a route.
+    pub asset: Option<String>,
+    /// Token contract address.
+    pub asset_contract: String,
+    /// Token amount in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// Credit in the currency's minor unit (cents), once valued.
+    pub amount: Option<u64>,
+    /// `usd`.
+    pub currency: String,
+    /// USD per token, a decimal string with 8 places, once valued.
+    pub exchange_rate: Option<String>,
+    /// `quote` (the quoted price) or `spot`, once valued.
+    pub price_source: Option<String>,
+    /// Valuation time, Unix seconds.
+    pub valued_at: Option<i64>,
+    /// Receiving forwarder address.
+    pub address: String,
+    /// Sender of the transfer.
+    pub from_address: String,
+    /// Transaction hash.
+    pub tx_hash: String,
+    /// Log index of the transfer.
+    pub log_index: u64,
+    /// Finalized block number.
+    pub block_number: u64,
+    /// Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.
+    pub amount_refunded_atomic: String,
+    /// Whether the deposit is fully refunded.
+    pub refunded: bool,
+    /// Detection time, Unix seconds.
+    pub created: i64,
+}
+
+/// A page of a list, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/deposits`.
+    pub url: String,
+    /// Whether more deposits follow in the direction of this page.
+    pub has_more: bool,
+    /// The deposits.
+    pub data: Vec<Deposit>,
+}
+
+/// `POST /v1/refunds` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRefundRequest {
+    /// `dep_` id of the deposit to refund.
+    pub deposit: String,
+    /// Address the customer controls; never default it to the sender, which may be an exchange.
+    pub destination_address: String,
+    /// Amount in base units, as a decimal string; the unrefunded remainder when absent.
+    pub amount_atomic: Option<String>,
+}
+
+/// A refund of (part of) a deposit to the customer, executed by finance from the treasury.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Refund {
+    /// `re_` id.
+    pub id: String,
+    /// Always `refund`.
+    pub object: String,
+    /// The refunded deposit: its `dep_` id, or the object with `expand[]=deposit`.
+    pub deposit: ExpandableDeposit,
+    /// Token amount in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// Destination address.
+    pub destination_address: String,
+    /// `pending` (requested, approved, or sent) or `succeeded` (the transfer is final).
+    pub status: String,
+    /// Refund transaction hash, once sent.
+    pub tx_hash: Option<String>,
+    /// Request time, Unix seconds.
+    pub created: i64,
 }
 
 /// What a product's UI reads instead of hardcoding: assets, limits, and quote terms.
@@ -411,35 +486,11 @@ pub struct PendingDepositsResponse {
     pub pending_deposits: Vec<PendingDepositResponse>,
 }
 
-/// Refund request body owned by C12.
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct RefundRequest {
-    /// Customer-controlled destination address.
-    pub to_address: String,
-    /// Atomic refund amount.
-    pub amount: String,
-}
-
 /// Administrative refund record body owned by C12.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct RecordRefundRequest {
     /// Treasury transaction hash to verify at finalized.
     pub tx_hash: String,
-}
-
-/// Customer refund request accepted for finance review.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct RefundResponse {
-    /// Refund request identifier.
-    pub id: Uuid,
-    /// Related deposit identifier.
-    pub deposit_id: Uuid,
-    /// Atomic token amount.
-    pub amount_atomic: String,
-    /// Customer-controlled destination address.
-    pub to_address: String,
-    /// Stable workflow status.
-    pub status: String,
 }
 
 /// Administrative product registration body. The product's key id is not part of it: the

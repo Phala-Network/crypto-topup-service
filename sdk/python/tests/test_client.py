@@ -173,37 +173,89 @@ def test_product_key_ids_end_in_v1() -> None:
 
 def _deposit(index: int) -> dict[str, object]:
     return {
-        "id": str(uuid.UUID(int=index)),
+        "id": f"dep_{index:032x}",
+        "object": "deposit",
+        "account_id": "ws 1",
+        "quote": QUOTE_ID,
+        "status": "credited",
+        "rejection_reason": None,
         "chain_id": 11155111,
+        "asset": "pha",
+        "asset_contract": "0x" + "22" * 20,
+        "amount_atomic": "1",
+        "amount": 1,
+        "currency": "usd",
+        "exchange_rate": "1.00000000",
+        "price_source": "quote",
+        "valued_at": NOW,
+        "address": "0x" + "11" * 20,
+        "from_address": "0x" + "33" * 20,
         "tx_hash": "0x" + "ab" * 32,
         "log_index": index,
         "block_number": 1,
-        "block_time": "2026-09-22T00:00:00Z",
-        "address": "0x" + "11" * 20,
-        "asset_contract": "0x" + "22" * 20,
-        "from_address": "0x" + "33" * 20,
-        "amount_atomic": "1",
-        "state": "credited",
-        "created_at": "2026-09-22T00:00:00Z",
-        "updated_at": "2026-09-22T00:00:00Z",
+        "amount_refunded_atomic": "0",
+        "refunded": False,
+        "created": NOW,
     }
 
 
-def test_list_deposits_follows_cursors() -> None:
-    cursor = str(uuid.UUID(int=99))
-
+def test_list_deposits_follows_stripe_cursors() -> None:
     def respond(request: httpx.Request, count: int) -> httpx.Response:
+        params = request.url.params
+        assert request.url.raw_path.startswith(b"/v1/deposits")
+        assert params["account_id"] == "ws 1"
+        assert params["status"] == "credited"
         if count == 1:
-            assert "cursor" not in request.url.params
-            return httpx.Response(200, json={"deposits": [_deposit(1)], "next_cursor": cursor})
-        assert request.url.params["cursor"] == cursor
-        assert request.url.params["state"] == "credited"
-        return httpx.Response(200, json={"deposits": [_deposit(2)], "next_cursor": None})
+            assert "starting_after" not in params
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "url": "/v1/deposits",
+                    "has_more": True,
+                    "data": [_deposit(1)],
+                },
+            )
+        assert params["starting_after"] == f"dep_{1:032x}"
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "url": "/v1/deposits",
+                "has_more": False,
+                "data": [_deposit(2)],
+            },
+        )
 
     service = FakeService(respond)
     with _client(service) as client:
-        deposits = list(client.list_deposits("ws 1", state="credited"))
+        deposits = list(client.list_deposits(account_id="ws 1", status="credited"))
     assert [deposit.log_index for deposit in deposits] == [1, 2]
+    assert deposits[0].quote == QUOTE_ID
+
+
+def test_refunds_send_an_idempotency_key_and_default_to_the_remainder() -> None:
+    refund = {
+        "id": "re_" + "0e" * 16,
+        "object": "refund",
+        "deposit": f"dep_{1:032x}",
+        "amount_atomic": "1",
+        "destination_address": "0x" + "44" * 20,
+        "status": "pending",
+        "tx_hash": None,
+        "created": NOW,
+    }
+    service = FakeService(lambda request, _: httpx.Response(200, json=refund))
+    with _client(service) as client:
+        created = client.create_refund(f"dep_{1:032x}", "0x" + "44" * 20)
+    assert created.status == "pending"
+    request = service.requests[0]
+    assert request.url.raw_path == b"/v1/refunds"
+    assert json.loads(request.content) == {
+        "deposit": f"dep_{1:032x}",
+        "destination_address": "0x" + "44" * 20,
+    }
+    assert request.headers["idempotency-key"].startswith('"')
 
 
 def test_list_pending_deposits_returns_provisional_transfers() -> None:

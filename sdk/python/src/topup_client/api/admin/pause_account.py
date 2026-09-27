@@ -15,8 +15,8 @@ from typing import cast
 
 
 def _get_kwargs(
-    p: str,
-    ext: str,
+    slug: str,
+    account_id: str,
     *,
     body: PauseRequest,
 ) -> dict[str, Any]:
@@ -24,9 +24,9 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/products/{p}/accounts/{ext}/resume".format(
-            p=quote(str(p), safe=""),
-            ext=quote(str(ext), safe=""),
+        "url": "/v1/admin/products/{slug}/accounts/{account_id}/pause".format(
+            slug=quote(str(slug), safe=""),
+            account_id=quote(str(account_id), safe=""),
         ),
     }
 
@@ -51,6 +51,11 @@ def _parse_response(
 
         return response_400
 
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
+
+        return response_404
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -69,16 +74,17 @@ def _build_response(
 
 
 def sync_detailed(
-    p: str,
-    ext: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
-    """
+    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+
     Args:
-        p (str):
-        ext (str):
+        slug (str):
+        account_id (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -90,8 +96,8 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
+        slug=slug,
+        account_id=account_id,
         body=body,
     )
 
@@ -103,16 +109,17 @@ def sync_detailed(
 
 
 def sync(
-    p: str,
-    ext: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
-    """
+    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+
     Args:
-        p (str):
-        ext (str):
+        slug (str):
+        account_id (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -124,24 +131,25 @@ def sync(
     """
 
     return sync_detailed(
-        p=p,
-        ext=ext,
+        slug=slug,
+        account_id=account_id,
         client=client,
         body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    p: str,
-    ext: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
-    """
+    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+
     Args:
-        p (str):
-        ext (str):
+        slug (str):
+        account_id (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -153,8 +161,8 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
+        slug=slug,
+        account_id=account_id,
         body=body,
     )
 
@@ -164,16 +172,17 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    p: str,
-    ext: str,
+    slug: str,
+    account_id: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
-    """
+    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+
     Args:
-        p (str):
-        ext (str):
+        slug (str):
+        account_id (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -186,8 +195,8 @@ async def asyncio(
 
     return (
         await asyncio_detailed(
-            p=p,
-            ext=ext,
+            slug=slug,
+            account_id=account_id,
             client=client,
             body=body,
         )

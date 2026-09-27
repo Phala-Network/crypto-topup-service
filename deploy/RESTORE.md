@@ -203,9 +203,9 @@ live_isolated() {
      --no-public-logs --no-public-sysinfo --wait
    ```
 
-   Once `/healthz` is `ok` again, product-signed support lookups against `$RESTORE_URL` (for
-   example `TopupClient(RESTORE_URL, slug, signer).lookup_deposits(tx_hash=...)`) must return
-   known deposits in their recorded state.
+   Once `/healthz` is `ok` again, product-signed deposit reads against `$RESTORE_URL` (for
+   example `TopupClient(RESTORE_URL, signer).list_deposits(tx_hash=...)`) must return known
+   deposits in their recorded state.
 
 ### Resume
 

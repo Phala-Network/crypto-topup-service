@@ -4,10 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use alloy_primitives::{Address as EvmAddress, B256, U256};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
@@ -22,11 +19,10 @@ use crate::db::{Account, Address, AddressKind, Product};
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
-    AdminRefundResponse, DailyReportResponse, DepositEventResponse, DepositListQuery,
-    DepositLookupQuery, DepositResponse, DepositTransitionResponse, DepositsResponse,
-    NudgeResponse, OutboxReplayResponse, ReconciliationBlockLiftResponse,
-    ReconciliationBlockReport, RefundResponse, RouteDailyReport, SupportDepositResponse,
-    SupportDepositsResponse,
+    AdminRefundResponse, DailyReportResponse, DepositEventResponse, DepositResponse,
+    DepositTransitionResponse, NudgeResponse, OutboxReplayResponse,
+    ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
+    SupportDepositResponse,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -316,120 +312,32 @@ pub async fn rotate_persistent_address(
     Ok(address)
 }
 
-/// Lists a tenant account's deposits using a stable UUID cursor.
-pub async fn list_account_deposits(
-    pool: &PgPool,
-    product_id: Uuid,
-    account_id: Uuid,
-    filters: &DepositListQuery,
-) -> Result<DepositsResponse, ApiError> {
-    let mut query = deposit_query();
-    query
-        .push(" WHERE account.product_id = ")
-        .push_bind(product_id);
-    query
-        .push(" AND deposit.account_id = ")
-        .push_bind(account_id);
-    if let Some(state) = &filters.state {
-        query.push(" AND deposit.state = ").push_bind(state.clone());
-    }
-    if let Some(from) = filters.from {
-        query.push(" AND deposit.created_at >= ").push_bind(from);
-    }
-    if let Some(to) = filters.to {
-        query.push(" AND deposit.created_at < ").push_bind(to);
-    }
-    if let Some(cursor) = filters.cursor {
-        query.push(
-            " AND (deposit.created_at, deposit.id) < (SELECT created_at, id FROM deposits WHERE id = ",
-        );
-        query.push_bind(cursor);
-        query
-            .push(" AND account_id = ")
-            .push_bind(account_id)
-            .push(")");
-    }
-    fetch_page(pool, query).await
+/// A refund request: the deposit, destination, and amount (the unrefunded remainder when absent).
+pub struct NewRefund<'a> {
+    /// Authenticated product.
+    pub product_id: Uuid,
+    /// Deposit to refund.
+    pub deposit_id: Uuid,
+    /// Fallback route of an unrouted deposit.
+    pub route: &'a RouteFile,
+    /// Customer-controlled destination.
+    pub destination: EvmAddress,
+    /// Requested amount; `None` refunds the remainder.
+    pub amount: Option<AtomicAmount>,
+    /// `Idempotency-Key` of the request.
+    pub idempotency_key: Option<&'a str>,
+    /// Audit actor.
+    pub actor: &'a str,
 }
 
-/// Fetches one deposit only when its account belongs to the requested product.
-pub async fn get_product_deposit(
-    pool: &PgPool,
-    product_id: Uuid,
-    deposit_id: Uuid,
-) -> Result<Option<DepositResponse>, ApiError> {
-    let mut query = deposit_query();
-    query
-        .push(" WHERE account.product_id = ")
-        .push_bind(product_id);
-    query.push(" AND deposit.id = ").push_bind(deposit_id);
-    let row = query
-        .build_query_as::<DepositViewRow>()
-        .fetch_optional(pool)
-        .await?;
-    row.map(TryInto::try_into).transpose()
-}
-
-/// Looks up product deposits by exactly one support key.
-pub async fn lookup_product_deposits(
-    pool: &PgPool,
-    product_id: Uuid,
-    filters: &DepositLookupQuery,
-) -> Result<SupportDepositsResponse, ApiError> {
-    let mut query = deposit_query();
-    query
-        .push(" WHERE account.product_id = ")
-        .push_bind(product_id);
-    match (&filters.tx_hash, &filters.address, &filters.lock_ref) {
-        (Some(tx_hash), None, None) => {
-            let value = B256::from_str(tx_hash).map_err(|_| {
-                ApiError::bad_request("tx_hash must be a 32-byte hexadecimal value")
-            })?;
-            query
-                .push(" AND deposit.tx_hash = ")
-                .push_bind(format!("{value:#x}"));
-        }
-        (None, Some(address), None) => {
-            let value = EvmAddress::from_str(address).map_err(|_| {
-                ApiError::bad_request("address must be a 20-byte hexadecimal value")
-            })?;
-            query
-                .push(" AND address.address = ")
-                .push_bind(format!("{value:#x}"));
-        }
-        (None, None, Some(lock_ref)) if !lock_ref.is_empty() => {
-            query
-                .push(" AND address.lock_ref = ")
-                .push_bind(lock_ref.clone());
-        }
-        _ => {
-            return Err(ApiError::bad_request(
-                "exactly one of tx_hash, address, or lock_ref is required",
-            ));
-        }
+/// Creates a refund request after every policy check and returns its id; a repeated
+/// `Idempotency-Key` returns the refund created with it.
+pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uuid, ApiError> {
+    if let Some(key) = refund.idempotency_key
+        && let Some(existing) = refund_by_key(pool, refund.product_id, key).await?
+    {
+        return existing.replay(refund);
     }
-    if let Some(cursor) = filters.cursor.as_deref() {
-        let cursor = decode_support_cursor(cursor)?;
-        query
-            .push(" AND (deposit.created_at, deposit.id) < (")
-            .push_bind(cursor.created_at)
-            .push(", ")
-            .push_bind(cursor.id)
-            .push(")");
-    }
-    fetch_support_page(pool, query).await
-}
-
-/// Creates or returns an idempotent refund request after all policy checks.
-pub async fn request_refund(
-    pool: &PgPool,
-    product_id: Uuid,
-    deposit_id: Uuid,
-    route: &RouteFile,
-    to_address: EvmAddress,
-    amount: AtomicAmount,
-    actor: &str,
-) -> Result<RefundResponse, ApiError> {
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
         r#"
@@ -446,12 +354,12 @@ pub async fn request_refund(
         FOR UPDATE OF deposit, account
         "#,
     )
-    .bind(deposit_id)
-    .bind(product_id)
-    .bind(&route.route)
+    .bind(refund.deposit_id)
+    .bind(refund.product_id)
+    .bind(&refund.route.route)
     .fetch_optional(&mut *transaction)
     .await?
-    .ok_or_else(ApiError::not_found)?;
+    .ok_or_else(|| ApiError::not_found().with_param("deposit"))?;
 
     let account_scopes: Vec<String> = row.try_get("account_scopes")?;
     let product_scopes: Vec<String> = row.try_get("product_scopes")?;
@@ -464,74 +372,156 @@ pub async fn request_refund(
     }
 
     let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
-    refund_eligibility(refund_deposit_from_row(&row, route)?)
-        .map_err(|_| ApiError::conflict("deposit is not eligible for a refund"))?;
+    refund_eligibility(refund_deposit_from_row(&row, refund.route)?)
+        .map_err(|_| ApiError::deposit_not_refundable())?;
     let effective_route: String = row.try_get("effective_route")?;
 
-    let to_address = format!("{to_address:#x}");
-    let amount_atomic = amount.value().to_string();
-    if let Some(existing) = sqlx::query_as::<_, RefundResponseRow>(
-        r#"
-        SELECT id, deposit_id, amount_atomic::text AS amount_atomic, to_address, status
-        FROM refunds
-        WHERE deposit_id = $1 AND to_address = $2 AND amount_atomic = $3::text::numeric
-        "#,
-    )
-    .bind(deposit_id)
-    .bind(&to_address)
-    .bind(&amount_atomic)
-    .fetch_optional(&mut *transaction)
-    .await?
+    let to_address = format!("{:#x}", refund.destination);
+    if refund.idempotency_key.is_none()
+        && let Some(amount) = refund.amount
+        && let Some(existing) = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM refunds
+            WHERE deposit_id = $1 AND to_address = $2 AND amount_atomic = $3::text::numeric
+            "#,
+        )
+        .bind(refund.deposit_id)
+        .bind(&to_address)
+        .bind(amount.value().to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
     {
         transaction.commit().await?;
-        return Ok(existing.into());
+        return Ok(existing);
     }
 
     let prior_total = sqlx::query_scalar::<_, String>(
         "SELECT COALESCE(sum(amount_atomic), 0)::text FROM refunds WHERE deposit_id = $1",
     )
-    .bind(deposit_id)
+    .bind(refund.deposit_id)
     .fetch_one(&mut *transaction)
     .await?;
     let prior_total = parse_atomic(prior_total)?;
     let remaining = deposit_amount
         .checked_sub(prior_total)
         .ok_or_else(ApiError::internal)?;
-    if amount.value().is_zero() {
-        return Err(ApiError::bad_request("amount must be greater than zero"));
+    let amount = refund.amount.map_or(remaining, AtomicAmount::value);
+    if amount.is_zero() {
+        return Err(ApiError::amount_too_small(
+            "amount_atomic",
+            "nothing is left to refund",
+        ));
     }
-    if amount.value() > remaining {
-        return Err(ApiError::conflict(
-            "refund amount exceeds the deposit amount remaining",
+    if amount > remaining {
+        return Err(ApiError::amount_too_large(
+            "amount_atomic",
+            format!("at most {remaining} base units are left to refund"),
         ));
     }
 
     let refund_id = Uuid::new_v4();
-    let refund = sqlx::query_as::<_, RefundResponseRow>(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO refunds
-            (id, deposit_id, amount_atomic, to_address, route, status, requested_by)
-        VALUES ($1, $2, $3::text::numeric, $4, $5, 'requested', $6)
-        RETURNING id, deposit_id, amount_atomic::text AS amount_atomic, to_address, status
+            (id, deposit_id, amount_atomic, to_address, route, status, requested_by, product_id,
+             idempotency_key)
+        VALUES ($1, $2, $3::text::numeric, $4, $5, 'requested', $6, $7, $8)
         "#,
     )
     .bind(refund_id)
-    .bind(deposit_id)
-    .bind(amount_atomic)
+    .bind(refund.deposit_id)
+    .bind(amount.to_string())
     .bind(to_address)
     .bind(effective_route)
-    .bind(actor)
-    .fetch_one(&mut *transaction)
-    .await?;
+    .bind(refund.actor)
+    .bind(refund.product_id)
+    .bind(refund.idempotency_key)
+    .execute(&mut *transaction)
+    .await;
+    match inserted {
+        Ok(_) => {}
+        // A concurrent request with the same key committed first: answer as its repeat.
+        Err(sqlx::Error::Database(error))
+            if error.constraint() == Some("refunds_product_idempotency_key_unique") =>
+        {
+            drop(transaction);
+            let key = refund.idempotency_key.ok_or_else(ApiError::internal)?;
+            return refund_by_key(pool, refund.product_id, key)
+                .await?
+                .ok_or_else(ApiError::internal)?
+                .replay(refund);
+        }
+        Err(error) => return Err(error.into()),
+    }
     insert_audit_tx(
         &mut transaction,
-        actor,
+        refund.actor,
         "refund_requested",
         &format!("refund:{refund_id}"),
     )
     .await?;
     transaction.commit().await?;
-    Ok(refund.into())
+    Ok(refund_id)
+}
+
+/// The parameters a refund was created with, to answer a repeated `Idempotency-Key`.
+struct StoredRefund {
+    id: Uuid,
+    deposit_id: Uuid,
+    to_address: String,
+    amount: U256,
+}
+
+impl StoredRefund {
+    fn replay(self, request: &NewRefund<'_>) -> Result<Uuid, ApiError> {
+        let same = self.deposit_id == request.deposit_id
+            && self.to_address == format!("{:#x}", request.destination)
+            && request
+                .amount
+                .is_none_or(|amount| amount.value() == self.amount);
+        if same {
+            Ok(self.id)
+        } else {
+            Err(ApiError::idempotency_key_reused())
+        }
+    }
+}
+
+async fn refund_by_key(
+    pool: &PgPool,
+    product_id: Uuid,
+    key: &str,
+) -> Result<Option<StoredRefund>, ApiError> {
+    let row = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
+        r#"
+        SELECT id, deposit_id, to_address, amount_atomic::text
+        FROM refunds
+        WHERE product_id = $1 AND idempotency_key = $2
+        "#,
+    )
+    .bind(product_id)
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(id, deposit_id, to_address, amount)| {
+        Ok(StoredRefund {
+            id,
+            deposit_id,
+            to_address,
+            amount: parse_atomic(amount)?,
+        })
+    })
+    .transpose()
+}
+
+/// One deposit with its transitions and webhook events, for the operator.
+pub async fn admin_deposit(
+    pool: &PgPool,
+    deposit_id: Uuid,
+) -> Result<Option<SupportDepositResponse>, ApiError> {
+    let mut query = deposit_query();
+    query.push(" WHERE deposit.id = ").push_bind(deposit_id);
+    Ok(fetch_support_page(pool, query).await?.into_iter().next())
 }
 
 /// Approves a requested refund idempotently and appends an audit row.
@@ -1064,27 +1054,6 @@ impl TryFrom<ReconciliationBlockRow> for ReconciliationBlockReport {
 }
 
 #[derive(FromRow)]
-struct RefundResponseRow {
-    id: Uuid,
-    deposit_id: Uuid,
-    amount_atomic: String,
-    to_address: String,
-    status: String,
-}
-
-impl From<RefundResponseRow> for RefundResponse {
-    fn from(row: RefundResponseRow) -> Self {
-        Self {
-            id: row.id,
-            deposit_id: row.deposit_id,
-            amount_atomic: row.amount_atomic,
-            to_address: row.to_address,
-            status: row.status,
-        }
-    }
-}
-
-#[derive(FromRow)]
 struct RefundAdminRow {
     id: Uuid,
     route: String,
@@ -1102,12 +1071,6 @@ impl From<RefundAdminRow> for AdminRefundResponse {
             confirmation_evidence: row.confirmation_evidence,
         }
     }
-}
-
-#[derive(Deserialize, Serialize)]
-struct SupportCursor {
-    created_at: DateTime<Utc>,
-    id: Uuid,
 }
 
 impl TryFrom<DepositViewRow> for DepositResponse {
@@ -1162,43 +1125,17 @@ fn deposit_query() -> QueryBuilder<Postgres> {
     )
 }
 
-async fn fetch_page(
-    pool: &PgPool,
-    mut query: QueryBuilder<Postgres>,
-) -> Result<DepositsResponse, ApiError> {
-    query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 51");
-    let rows = query
-        .build_query_as::<DepositViewRow>()
-        .fetch_all(pool)
-        .await?;
-    let has_more = rows.len() > 50;
-    let deposits: Vec<DepositResponse> = rows
-        .into_iter()
-        .take(50)
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<_>, _>>()?;
-    let next_cursor = has_more
-        .then(|| deposits.last().map(|deposit| deposit.id))
-        .flatten();
-    Ok(DepositsResponse {
-        deposits,
-        next_cursor,
-    })
-}
-
 async fn fetch_support_page(
     pool: &PgPool,
     mut query: QueryBuilder<Postgres>,
-) -> Result<SupportDepositsResponse, ApiError> {
-    query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 51");
+) -> Result<Vec<SupportDepositResponse>, ApiError> {
+    query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 50");
     let rows = query
         .build_query_as::<DepositViewRow>()
         .fetch_all(pool)
         .await?;
-    let has_more = rows.len() > 50;
     let deposits = rows
         .into_iter()
-        .take(50)
         .map(TryInto::try_into)
         .collect::<Result<Vec<DepositResponse>, ApiError>>()?;
     let ids = deposits
@@ -1242,22 +1179,14 @@ async fn fetch_support_page(
             .or_default()
             .push(event.into());
     }
-    let next_cursor = has_more
-        .then(|| deposits.last().map(encode_support_cursor))
-        .flatten()
-        .transpose()?;
-    let deposits = deposits
+    Ok(deposits
         .into_iter()
         .map(|deposit| SupportDepositResponse {
             timeline: by_deposit.remove(&deposit.id).unwrap_or_default(),
             events: events_by_deposit.remove(&deposit.id).unwrap_or_default(),
             deposit,
         })
-        .collect();
-    Ok(SupportDepositsResponse {
-        deposits,
-        next_cursor,
-    })
+        .collect())
 }
 
 /// Computes the daily finance report entirely from persisted integer values.
@@ -1628,22 +1557,6 @@ async fn refund_approval_paused(
     Ok([account_scopes, product_scopes, route_scopes]
         .iter()
         .any(|scopes| scopes.iter().any(|scope| scope == "refunds")))
-}
-
-fn encode_support_cursor(deposit: &DepositResponse) -> Result<String, ApiError> {
-    let cursor = SupportCursor {
-        created_at: deposit.created_at,
-        id: deposit.id,
-    };
-    let encoded = serde_json::to_vec(&cursor).map_err(|_| ApiError::internal())?;
-    Ok(URL_SAFE_NO_PAD.encode(encoded))
-}
-
-fn decode_support_cursor(cursor: &str) -> Result<SupportCursor, ApiError> {
-    let decoded = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| ApiError::bad_request("cursor is invalid"))?;
-    serde_json::from_slice(&decoded).map_err(|_| ApiError::bad_request("cursor is invalid"))
 }
 
 async fn lock_account(

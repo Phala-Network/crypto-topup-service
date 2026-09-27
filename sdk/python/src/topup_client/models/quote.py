@@ -12,6 +12,7 @@ from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
+    from ..models.deposit import Deposit
     from ..models.quote_payment import QuotePayment
 
 
@@ -45,7 +46,7 @@ class Quote:
             `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
             returns a new secret and the earlier one stops working. Give it only to the paying
             customer's page, and do not log it.
-        deposit (None | str | Unset): `dep_` id of the deposit that completed the quote.
+        deposit (Deposit | None | str | Unset):
         payment (None | QuotePayment | Unset):
     """
 
@@ -64,11 +65,12 @@ class Quote:
     payment_uri: str
     status: str
     client_secret: None | str | Unset = UNSET
-    deposit: None | str | Unset = UNSET
+    deposit: Deposit | None | str | Unset = UNSET
     payment: None | QuotePayment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.deposit import Deposit  # noqa: PLC0415
         from ..models.quote_payment import QuotePayment  # noqa: PLC0415
 
         account_id = self.account_id
@@ -105,9 +107,11 @@ class Quote:
         else:
             client_secret = self.client_secret
 
-        deposit: None | str | Unset
+        deposit: dict[str, Any] | None | str | Unset
         if isinstance(self.deposit, Unset):
             deposit = UNSET
+        elif isinstance(self.deposit, Deposit):
+            deposit = self.deposit.to_dict()
         else:
             deposit = self.deposit
 
@@ -150,6 +154,7 @@ class Quote:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.deposit import Deposit  # noqa: PLC0415
         from ..models.quote_payment import QuotePayment  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -190,12 +195,20 @@ class Quote:
 
         client_secret = _parse_client_secret(d.pop("client_secret", UNSET))
 
-        def _parse_deposit(data: object) -> None | str | Unset:
+        def _parse_deposit(data: object) -> Deposit | None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(None | str | Unset, data)
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_expandable_deposit_type_1 = Deposit.from_dict(data)
+
+                return componentsschemas_expandable_deposit_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(Deposit | None | str | Unset, data)
 
         deposit = _parse_deposit(d.pop("deposit", UNSET))
 

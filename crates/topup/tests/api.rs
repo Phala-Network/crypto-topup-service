@@ -292,7 +292,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let path = "/v1/config".to_owned();
         let now = Utc::now().timestamp();
@@ -338,11 +338,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
 
         // A signature for one path must not authorize a request to another route.
         let mut tampered = request("tampered-path", TEST_ORIGIN)?;
-        *tampered.uri_mut() = format!(
-            "/v1/products/{}/accounts/tampered-path/deposits",
-            product.slug
-        )
-        .parse()?;
+        *tampered.uri_mut() = "/v1/deposits".parse()?;
         let response = app.clone().oneshot(tampered).await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
         Ok(())
@@ -454,18 +450,24 @@ async fn account_address_rotation_tenant_and_pause_routes() -> Result<()> {
         ensure!(address_counts.try_get::<i64, _>("retired")? == 1);
 
         let other_deposit = seed_other_tenant_deposit(&database.app_pool, other.id).await?;
-        let cross_tenant_path = format!("/v1/products/{}/deposits/{other_deposit}", product.slug);
+        let cross_tenant_path = format!("/v1/deposits/dep_{}", other_deposit.simple());
         let response = app
             .clone()
             .oneshot(signed_request(Method::GET, &cross_tenant_path, Vec::new(), PRODUCT_KID, &product_key, now))
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
 
-        let pause_path = format!("/v1/products/{}/accounts/account-001/pause", product.slug);
+        // Pausing an account is an operator action.
+        let pause_path = format!("/v1/admin/products/{}/accounts/account-001/pause", product.slug);
         let pause_body = serde_json::to_vec(&json!({"scopes": ["addresses", "settlement"]}))?;
         let response = app
             .clone()
-            .oneshot(signed_request(Method::POST, &pause_path, pause_body, PRODUCT_KID, &product_key, now))
+            .oneshot(signed_request(Method::POST, &pause_path, pause_body.clone(), PRODUCT_KID, &product_key, now))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(signed_request(Method::POST, &pause_path, pause_body, ADMIN_KID, &admin_key, now))
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let paused = response_json(response).await?;
@@ -1268,7 +1270,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
 }
 
 /// `POST /v1/admin/outbox/{event_id}/replay` requeues an existing event without touching its
-/// payload; the product finds the event id in its signed support lookup.
+/// payload; the operator finds the event id in the admin deposit view.
 #[tokio::test]
 async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -1298,15 +1300,15 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
             .clone()
             .oneshot(signed_request(
                 Method::GET,
-                "/v1/products/phala-cloud/deposits?tx_hash=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &format!("/v1/admin/deposits/dep_{}", deposit.simple()),
                 Vec::new(),
-                PRODUCT_KID,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        let events = response_json(response).await?["deposits"][0]["events"].clone();
+        let events = response_json(response).await?["events"].clone();
         ensure!(events.as_array().map(Vec::len) == Some(1));
         ensure!(events[0]["id"] == event_id.to_string());
         ensure!(events[0]["event_type"] == "deposit.credited");
@@ -1533,16 +1535,21 @@ impl Attestor for DevHttpAttestor {
 }
 
 fn assert_query_parameters(document: &Value) -> Result<()> {
-    let cases = [
-        (
-            "/v1/products/{p}/accounts/{ext}/deposits",
-            &["state", "from", "to", "cursor"][..],
-        ),
-        (
-            "/v1/products/{p}/deposits",
-            &["tx_hash", "address", "lock_ref", "cursor"][..],
-        ),
-    ];
+    let cases = [(
+        "/v1/deposits",
+        &[
+            "account_id",
+            "quote",
+            "status",
+            "tx_hash",
+            "created[gte]",
+            "created[lte]",
+            "limit",
+            "starting_after",
+            "ending_before",
+            "expand[]",
+        ][..],
+    )];
     for (path, expected_names) in cases {
         let parameters = document["paths"][path]["get"]["parameters"]
             .as_array()

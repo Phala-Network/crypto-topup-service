@@ -8,51 +8,57 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.deposits_response import DepositsResponse
+from ...models.deposit_list import DepositList
 from ...models.error_response import ErrorResponse
 from ...types import UNSET, Unset
 from typing import cast
-from uuid import UUID
-import datetime
 
 
 def _get_kwargs(
-    p: str,
-    ext: str,
     *,
-    state: str | Unset = UNSET,
-    from_: datetime.datetime | Unset = UNSET,
-    to: datetime.datetime | Unset = UNSET,
-    cursor: UUID | Unset = UNSET,
+    account_id: str | Unset = UNSET,
+    quote: str | Unset = UNSET,
+    status: str | Unset = UNSET,
+    tx_hash: str | Unset = UNSET,
+    createdgte: int | Unset = UNSET,
+    createdlte: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+    expand: list[str] | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
 
-    params["state"] = state
+    params["account_id"] = account_id
 
-    json_from_: str | Unset = UNSET
-    if not isinstance(from_, Unset):
-        json_from_ = from_.isoformat()
-    params["from"] = json_from_
+    params["quote"] = quote
 
-    json_to: str | Unset = UNSET
-    if not isinstance(to, Unset):
-        json_to = to.isoformat()
-    params["to"] = json_to
+    params["status"] = status
 
-    json_cursor: str | Unset = UNSET
-    if not isinstance(cursor, Unset):
-        json_cursor = str(cursor)
-    params["cursor"] = json_cursor
+    params["tx_hash"] = tx_hash
+
+    params["created[gte]"] = createdgte
+
+    params["created[lte]"] = createdlte
+
+    params["limit"] = limit
+
+    params["starting_after"] = starting_after
+
+    params["ending_before"] = ending_before
+
+    json_expand: list[str] | Unset = UNSET
+    if not isinstance(expand, Unset):
+        json_expand = expand
+
+    params["expand[]"] = json_expand
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/v1/products/{p}/accounts/{ext}/deposits".format(
-            p=quote(str(p), safe=""),
-            ext=quote(str(ext), safe=""),
-        ),
+        "url": "/v1/deposits",
         "params": params,
     }
 
@@ -61,9 +67,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> DepositsResponse | ErrorResponse | None:
+) -> DepositList | ErrorResponse | None:
     if response.status_code == 200:
-        response_200 = DepositsResponse.from_dict(response.json())
+        response_200 = DepositList.from_dict(response.json())
 
         return response_200
 
@@ -72,10 +78,10 @@ def _parse_response(
 
         return response_400
 
-    if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
 
-        return response_404
+        return response_401
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -85,7 +91,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[DepositsResponse | ErrorResponse]:
+) -> Response[DepositList | ErrorResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -95,39 +101,52 @@ def _build_response(
 
 
 def sync_detailed(
-    p: str,
-    ext: str,
     *,
     client: AuthenticatedClient,
-    state: str | Unset = UNSET,
-    from_: datetime.datetime | Unset = UNSET,
-    to: datetime.datetime | Unset = UNSET,
-    cursor: UUID | Unset = UNSET,
-) -> Response[DepositsResponse | ErrorResponse]:
-    """
+    account_id: str | Unset = UNSET,
+    quote: str | Unset = UNSET,
+    status: str | Unset = UNSET,
+    tx_hash: str | Unset = UNSET,
+    createdgte: int | Unset = UNSET,
+    createdlte: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+    expand: list[str] | Unset = UNSET,
+) -> Response[DepositList | ErrorResponse]:
+    """The product's deposits, newest first, with Stripe's cursor pagination.
+
     Args:
-        p (str):
-        ext (str):
-        state (str | Unset):
-        from_ (datetime.datetime | Unset):
-        to (datetime.datetime | Unset):
-        cursor (UUID | Unset):
+        account_id (str | Unset):
+        quote (str | Unset):
+        status (str | Unset):
+        tx_hash (str | Unset):
+        createdgte (int | Unset):
+        createdlte (int | Unset):
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
+        expand (list[str] | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[DepositsResponse | ErrorResponse]
+        Response[DepositList | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
-        state=state,
-        from_=from_,
-        to=to,
-        cursor=cursor,
+        account_id=account_id,
+        quote=quote,
+        status=status,
+        tx_hash=tx_hash,
+        createdgte=createdgte,
+        createdlte=createdlte,
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
+        expand=expand,
     )
 
     response = client.get_httpx_client().request(
@@ -138,77 +157,103 @@ def sync_detailed(
 
 
 def sync(
-    p: str,
-    ext: str,
     *,
     client: AuthenticatedClient,
-    state: str | Unset = UNSET,
-    from_: datetime.datetime | Unset = UNSET,
-    to: datetime.datetime | Unset = UNSET,
-    cursor: UUID | Unset = UNSET,
-) -> DepositsResponse | ErrorResponse | None:
-    """
+    account_id: str | Unset = UNSET,
+    quote: str | Unset = UNSET,
+    status: str | Unset = UNSET,
+    tx_hash: str | Unset = UNSET,
+    createdgte: int | Unset = UNSET,
+    createdlte: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+    expand: list[str] | Unset = UNSET,
+) -> DepositList | ErrorResponse | None:
+    """The product's deposits, newest first, with Stripe's cursor pagination.
+
     Args:
-        p (str):
-        ext (str):
-        state (str | Unset):
-        from_ (datetime.datetime | Unset):
-        to (datetime.datetime | Unset):
-        cursor (UUID | Unset):
+        account_id (str | Unset):
+        quote (str | Unset):
+        status (str | Unset):
+        tx_hash (str | Unset):
+        createdgte (int | Unset):
+        createdlte (int | Unset):
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
+        expand (list[str] | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        DepositsResponse | ErrorResponse
+        DepositList | ErrorResponse
     """
 
     return sync_detailed(
-        p=p,
-        ext=ext,
         client=client,
-        state=state,
-        from_=from_,
-        to=to,
-        cursor=cursor,
+        account_id=account_id,
+        quote=quote,
+        status=status,
+        tx_hash=tx_hash,
+        createdgte=createdgte,
+        createdlte=createdlte,
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
+        expand=expand,
     ).parsed
 
 
 async def asyncio_detailed(
-    p: str,
-    ext: str,
     *,
     client: AuthenticatedClient,
-    state: str | Unset = UNSET,
-    from_: datetime.datetime | Unset = UNSET,
-    to: datetime.datetime | Unset = UNSET,
-    cursor: UUID | Unset = UNSET,
-) -> Response[DepositsResponse | ErrorResponse]:
-    """
+    account_id: str | Unset = UNSET,
+    quote: str | Unset = UNSET,
+    status: str | Unset = UNSET,
+    tx_hash: str | Unset = UNSET,
+    createdgte: int | Unset = UNSET,
+    createdlte: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+    expand: list[str] | Unset = UNSET,
+) -> Response[DepositList | ErrorResponse]:
+    """The product's deposits, newest first, with Stripe's cursor pagination.
+
     Args:
-        p (str):
-        ext (str):
-        state (str | Unset):
-        from_ (datetime.datetime | Unset):
-        to (datetime.datetime | Unset):
-        cursor (UUID | Unset):
+        account_id (str | Unset):
+        quote (str | Unset):
+        status (str | Unset):
+        tx_hash (str | Unset):
+        createdgte (int | Unset):
+        createdlte (int | Unset):
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
+        expand (list[str] | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[DepositsResponse | ErrorResponse]
+        Response[DepositList | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        p=p,
-        ext=ext,
-        state=state,
-        from_=from_,
-        to=to,
-        cursor=cursor,
+        account_id=account_id,
+        quote=quote,
+        status=status,
+        tx_hash=tx_hash,
+        createdgte=createdgte,
+        createdlte=createdlte,
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
+        expand=expand,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -217,40 +262,53 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    p: str,
-    ext: str,
     *,
     client: AuthenticatedClient,
-    state: str | Unset = UNSET,
-    from_: datetime.datetime | Unset = UNSET,
-    to: datetime.datetime | Unset = UNSET,
-    cursor: UUID | Unset = UNSET,
-) -> DepositsResponse | ErrorResponse | None:
-    """
+    account_id: str | Unset = UNSET,
+    quote: str | Unset = UNSET,
+    status: str | Unset = UNSET,
+    tx_hash: str | Unset = UNSET,
+    createdgte: int | Unset = UNSET,
+    createdlte: int | Unset = UNSET,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+    expand: list[str] | Unset = UNSET,
+) -> DepositList | ErrorResponse | None:
+    """The product's deposits, newest first, with Stripe's cursor pagination.
+
     Args:
-        p (str):
-        ext (str):
-        state (str | Unset):
-        from_ (datetime.datetime | Unset):
-        to (datetime.datetime | Unset):
-        cursor (UUID | Unset):
+        account_id (str | Unset):
+        quote (str | Unset):
+        status (str | Unset):
+        tx_hash (str | Unset):
+        createdgte (int | Unset):
+        createdlte (int | Unset):
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
+        expand (list[str] | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        DepositsResponse | ErrorResponse
+        DepositList | ErrorResponse
     """
 
     return (
         await asyncio_detailed(
-            p=p,
-            ext=ext,
             client=client,
-            state=state,
-            from_=from_,
-            to=to,
-            cursor=cursor,
+            account_id=account_id,
+            quote=quote,
+            status=status,
+            tx_hash=tx_hash,
+            createdgte=createdgte,
+            createdlte=createdlte,
+            limit=limit,
+            starting_after=starting_after,
+            ending_before=ending_before,
+            expand=expand,
         )
     ).parsed

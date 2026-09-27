@@ -403,18 +403,19 @@ GET    /v1/quotes/{id}                                            resume a check
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
 POST   /v1/products/{p}/accounts/{ext}/deposit-address           persistent, creates the account; GET same
 POST   /v1/products/{p}/accounts/{ext}/deposit-address/rotate    version + 1; old stays valid
-GET    /v1/products/{p}/accounts/{ext}/deposits?state&from&to&cursor
+GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
+GET    /v1/deposits/{id}                                          expand[]=quote
+POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or credited on the product's request; finance approves (§15)
+GET    /v1/refunds/{id}
 GET    /v1/products/{p}/accounts/{ext}/pending-deposits           seen above finalized; not deposits
-GET    /v1/products/{p}/deposits/{id}
-GET    /v1/products/{p}/deposits?tx_hash= | address= | lock_ref=  support lookup
-POST   /v1/products/{p}/accounts/{ext}/pause | resume {scopes}
-POST   /v1/products/{p}/deposits/{id}/refund-requests {to_address, amount}   rejected, or credited on the product's request; finance approves (§15)
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
 GA:    GET  …/deposits.csv        POST …/webhooks/replay {event_ids | since}     GET …/webhooks/deliveries
 
 POST   /v1/admin/products {slug, public_key, webhook_url}   key id: route (§14); same values → same product, different → 409
 PUT    /v1/admin/products/{slug} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
+GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
+POST   /v1/admin/products/{slug}/accounts/{account_id}/pause | resume {scopes}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}

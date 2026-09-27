@@ -87,7 +87,7 @@ chain is not added to any route.
    address the user controls and confirms in writing (never the sender, which may be an exchange
    hot wallet), or agrees another settlement with the product. The service holds no deposit row for
    this payment, so the return is recorded in the support case and the finance ledger, not through
-   `refund-requests`.
+   `POST /v1/refunds`.
 
 ## Done when
 

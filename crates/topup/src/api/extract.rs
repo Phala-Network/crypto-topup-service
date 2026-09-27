@@ -44,6 +44,36 @@ fn json_error(rejection: &JsonRejection) -> ApiError {
     }
 }
 
+/// The decoded `name=value` pairs of a query string, in order.
+pub(crate) fn query_pairs(raw: Option<&str>) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes())
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect()
+}
+
+/// The `expand[]` values of a query, each of which must be one of `allowed`.
+pub(crate) fn expansions(
+    pairs: &[(String, String)],
+    allowed: &[&'static str],
+) -> Result<Vec<&'static str>, ApiError> {
+    pairs
+        .iter()
+        .filter(|(name, _)| name == "expand[]" || name == "expand")
+        .map(|(_, value)| {
+            allowed
+                .iter()
+                .copied()
+                .find(|field| field == value)
+                .ok_or_else(|| {
+                    ApiError::invalid_param(
+                        "expand",
+                        format!("expand accepts {}", allowed.join(", ")),
+                    )
+                })
+        })
+        .collect()
+}
+
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 
 /// The `Idempotency-Key` header, 1 to 255 visible ASCII characters: either the RFC 8941 string
