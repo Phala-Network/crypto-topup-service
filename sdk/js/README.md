@@ -1,0 +1,137 @@
+# @phala/crypto-topup
+
+Browser checkout for the crypto top-up service: a framework-agnostic client for a quote's public
+view, and a React component that lets the payer pay from a browser wallet, by QR code, or manually,
+with live status. It is the browser half of the flow; your backend creates the quote with the
+Python SDK (`phala-crypto-topup`) and fulfils from the signed `deposit.credited` webhook.
+
+## Install
+
+```sh
+npm install @phala/crypto-topup viem
+```
+
+Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/crypto-topup/react`. Nothing else:
+wallets are found with EIP-6963 (with a `window.ethereum` fallback), not wagmi or WalletConnect.
+
+Until the first npm release, install from the repository with pnpm (read access to the repository
+is required). The package builds itself on install, which pnpm allows only for listed git
+dependencies:
+
+```sh
+pnpm add "github:Phala-Network/crypto-topup-service#main&path:/sdk/js"
+```
+
+```yaml
+# pnpm-workspace.yaml
+allowBuilds:
+  "@phala/crypto-topup": true
+```
+
+## Quickstart
+
+1. Your backend creates a quote (`POST /v1/quotes`, signed with the product key) and returns only its
+   `client_secret` to the signed-in user's browser.
+2. Render the checkout with it:
+
+```tsx
+"use client";
+import { CryptoTopupCheckout } from "@phala/crypto-topup/react";
+
+export function TopUp(props: { clientSecret: string; onPaid: () => void; onRetry: () => void }) {
+  return (
+    <CryptoTopupCheckout
+      clientSecret={props.clientSecret}
+      apiBase="https://topup.example.com"
+      onSuccess={props.onPaid}
+      onExpire={props.onRetry}
+    />
+  );
+}
+```
+
+3. Credit the account when your webhook endpoint receives `deposit.credited`. `onSuccess` is for the
+   UI only: the browser is not a trusted source of payment.
+
+The component reads `GET /v1/quotes/{id}?client_secret=…` every three seconds. That endpoint is
+public (`Access-Control-Allow-Origin: *`) and shows only what the payer needs: the amount, the
+token, the chain, the deposit address, the EIP-681 payment request, the expiry, and the payment
+status. Keep the client secret out of logs and URLs you share; anyone holding it can see that view.
+
+### Statuses
+
+| `status` | Shown |
+|---|---|
+| `loading` | Loading payment details |
+| `waiting` | Payment options, the exact amount, and the time left |
+| `seen` | Payment in a block, with its confirmations (a reorg can still remove it) |
+| `confirming` | Payment final, being valued and screened |
+| `credited` | Credited; `onSuccess` is called once |
+| `rejected` | Final but will not be credited; the payer contacts support |
+| `expired`, `canceled` | The address is hidden; `onExpire` is called once |
+| `error` | The client secret is not valid |
+
+The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
+amount, or after expiry, is still credited, at the market price instead of the quote's.
+
+## Appearance
+
+```tsx
+<CryptoTopupCheckout
+  clientSecret={clientSecret}
+  apiBase={apiBase}
+  appearance={{
+    theme: "dark",
+    variables: { colorPrimary: "#cdfa50", borderRadius: "12px", fontFamily: "Inter, sans-serif" },
+  }}
+/>
+```
+
+Variables: `colorPrimary`, `colorBackground`, `colorText`, `colorTextSecondary`, `colorBorder`,
+`colorDanger`, `colorSuccess`, `fontFamily`, `borderRadius`. Each is also a CSS custom property on
+`.ctp-root` (`--ctp-color-primary`, …), so a stylesheet can set them too.
+
+## Without React
+
+```ts
+import { createCheckout, payWithWallet, watchWallets, type Wallet } from "@phala/crypto-topup";
+
+const checkout = createCheckout({ clientSecret, apiBase: "https://topup.example.com" });
+const unsubscribe = checkout.subscribe(({ status, quote, error }) => render(status, quote, error));
+
+const stop = watchWallets((wallets) => showWalletButtons(wallets));
+
+async function onWalletClick(wallet: Wallet) {
+  const { quote } = checkout.getState();
+  if (quote !== null) {
+    // Resolves with the transaction hash once the wallet broadcast the transfer.
+    showTransaction(await payWithWallet(wallet.provider, quote));
+    await checkout.refresh();
+  }
+}
+
+// When leaving the page:
+stop();
+unsubscribe();
+checkout.destroy();
+```
+
+`payWithWallet` connects, switches the wallet to the quote's chain (adding Ethereum, Sepolia,
+Base, or Base Sepolia when the wallet lacks it), and sends the ERC-20 `transfer` stated by the
+quote's `payment_uri`, after checking that it pays exactly `amount_atomic` to `address`.
+
+## Development
+
+```sh
+pnpm install
+pnpm run check   # typecheck, lint, unit tests, build
+pnpm run e2e     # Playwright against Anvil; needs Foundry (anvil, forge) on PATH
+```
+
+The end-to-end tests start Anvil as Sepolia, deploy a test token, and pay a quote from a mocked
+EIP-6963 wallet backed by the node, then decode the QR code and exercise the manual details.
+
+## Releases
+
+A tag `sdk-js-v<version>` matching `package.json` publishes to npm from the `release` workflow
+with trusted publishing and provenance. See [CHANGELOG.md](CHANGELOG.md).

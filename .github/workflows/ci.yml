@@ -98,6 +98,28 @@ jobs:
       - name: Lint, type-check, test, and check that client regeneration is a no-op
         run: make -C sdk/python check
 
+  sdk-js:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    defaults:
+      run:
+        working-directory: sdk/js
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/sdk-js
+      - name: Typecheck, lint, unit tests, and build
+        run: pnpm run check
+      - name: End-to-end tests on Anvil
+        run: pnpm run e2e
+      - name: Keep the Playwright report of a failed run
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-js-playwright-report
+          path: |
+            sdk/js/playwright-report
+            sdk/js/test-results
+          retention-days: 7
+
   image:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
