@@ -55,6 +55,8 @@ class ProductConfig:
     per_period_cap_minor: int = 500_000
     period_seconds: int = 24 * 60 * 60
     restart_command: list[str] = field(default_factory=list)
+    # The built demo checkout page (reference_product.demo); unset, no page is served.
+    demo_dir: str | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> ProductConfig:

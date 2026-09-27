@@ -45,6 +45,7 @@ from .config import (
     MissingProductKeyError,
     ProductConfig,
 )
+from .demo import DemoConsole, Response
 from .fulfillment import Answer, Fulfillment, TransientError, parse_decimal
 from .ledger import ProductLedger
 
@@ -56,11 +57,18 @@ ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 class ProductServer:
-    """Serves `POST /webhooks`, `GET /healthz`, and, given an `AccountApi`, `/accounts`."""
+    """Serves `POST /webhooks`, `GET /healthz`, and, given an `AccountApi`, `/accounts`, and,
+    given a `DemoConsole`, `/demo/`."""
 
-    def __init__(self, fulfillment: Fulfillment, accounts: AccountApi | None = None) -> None:
+    def __init__(
+        self,
+        fulfillment: Fulfillment,
+        accounts: AccountApi | None = None,
+        demo: DemoConsole | None = None,
+    ) -> None:
         self.fulfillment = fulfillment
         self.accounts = accounts
+        self.demo = demo
         config = fulfillment.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
         server = self
@@ -75,6 +83,8 @@ class ProductServer:
                     self._send(server.fulfillment.handle(headers, body))
                 elif server.accounts is not None and server.accounts.handles(self.path):
                     self._send(server.accounts.handle("POST", self.path, headers, body))
+                elif server.demo is not None and server.demo.handles(self.path):
+                    self._send_raw(server.demo.handle("POST", self.path, headers, body))
                 else:
                     self._send(Answer(HTTPStatus.NOT_FOUND))
 
@@ -84,6 +94,8 @@ class ProductServer:
                     self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
                 elif server.accounts is not None and server.accounts.handles(self.path):
                     self._send(server.accounts.handle("GET", self.path, headers, b""))
+                elif server.demo is not None and server.demo.handles(self.path):
+                    self._send_raw(server.demo.handle("GET", self.path, headers, b""))
                 else:
                     self._send(Answer(HTTPStatus.NOT_FOUND))
 
@@ -102,6 +114,14 @@ class ProductServer:
                 self.send_header("content-length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
+
+            def _send_raw(self, response: Response) -> None:
+                self.send_response(response.status)
+                for name, value in response.headers.items():
+                    self.send_header(name, value)
+                self.send_header("content-length", str(len(response.body)))
+                self.end_headers()
+                self.wfile.write(response.body)
 
             def log_message(self, format: str, *args: Any) -> None:
                 LOG.debug("%s %s", self.address_string(), format % args)
@@ -341,19 +361,22 @@ def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
 
 @contextmanager
 def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
-    """Runs the product: webhook receiver with fulfillment, and account API."""
+    """Runs the product: webhook receiver with fulfillment, account API, and demo checkout."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
     settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
     ledger = ProductLedger(config.ledger_path)
     fulfillment = Fulfillment(config, ledger, settlement_key)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
+    demo = None if config.demo_dir is None else DemoConsole(config, ledger, config.demo_dir)
     try:
-        with ProductServer(fulfillment, accounts) as server:
+        with ProductServer(fulfillment, accounts, demo) as server:
             LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
             yield server
     finally:
         accounts.close()
+        if demo is not None:
+            demo.close()
 
 
 def serve(config: ProductConfig) -> None:

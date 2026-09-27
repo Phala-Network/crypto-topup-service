@@ -1,5 +1,6 @@
 # Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
-# receiver with fulfillment and the account API of deploy/product/reference_product for the
+# receiver with fulfillment, the account API, and the public Phala Pay demo page at
+# PRODUCT_PUBLIC_URL/demo/ of deploy/product/reference_product for the
 # phala-cloud product on the Sepolia staging route. Deploy (target `product`) renders this file with
 # deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
 # (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they
@@ -58,5 +59,6 @@ configs:
         "driver_public_key": "${PRODUCT_DRIVER_PUBLIC_KEY:-}",
         "ledger_path": "/data/ledger.sqlite3",
         "per_deposit_cap_minor": 500000,
-        "per_period_cap_minor": 1000000
+        "per_period_cap_minor": 1000000,
+        "demo_dir": "/opt/product/demo"
       }

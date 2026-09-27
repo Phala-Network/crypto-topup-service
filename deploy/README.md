@@ -408,6 +408,19 @@ RPC (it is published and the product seals no RPC key); the deposit driver pays 
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`
 with only `PRODUCT_SEED`, then Deploy `upgrade`, once.
 
+The product also serves the public **Phala Pay demo** at `PRODUCT_PUBLIC_URL/demo/`
+([product/web](product/web), built into the image; served by
+[reference_product/demo.py](product/reference_product/demo.py)): a cloud console's billing page
+paid with `@phala/pay`'s `<Checkout>`, with a live timeline of the payment built only from real
+data (the service's quote and deposit read with the product key, this product's verified webhook
+events and ledger rows, and the sweep transfer on chain), the product's signed API requests with
+signatures shortened, and the service's attestation. Each browser gets a random demo account in an
+`HttpOnly` cookie; quote creation is rate-limited per account (3 a minute, 20 a day) and overall
+(30 a minute), and the page carries a strict CSP. It holds no faucet key: test PHA is minted by the
+visitor's own wallet (`mint` is public on the staging token), with Sepolia ETH from a public faucet
+for gas. `cd product/web && pnpm run build && pnpm run e2e` runs the whole flow on Anvil against a
+stand-in service ([product/web/e2e/fake_service.py](product/web/e2e/fake_service.py)).
+
 Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
 
 1. On the owner's machine (mode-0600 files, never committed), create the keys and set the
