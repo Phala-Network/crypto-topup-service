@@ -14,18 +14,19 @@ npm install @phala/pay viem
 Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Nothing else:
 wallets are found with EIP-6963 (with a `window.ethereum` fallback), not wagmi or WalletConnect.
 
-Until the first npm release, install from the repository with pnpm (read access to the repository
-is required). The package builds itself on install, which pnpm allows only for listed git
-dependencies:
+Until the first npm release, install from the repository with pnpm. The package builds itself
+on install, which pnpm allows only for listed git dependencies: the first `pnpm add` stops and
+prints an `allowBuilds` entry naming the exact commit; add it to `pnpm-workspace.yaml` and run the
+same command again.
 
 ```sh
 pnpm add "github:Phala-Network/phala-pay#main&path:/sdk/js"
 ```
 
 ```yaml
-# pnpm-workspace.yaml
+# pnpm-workspace.yaml: the entry pnpm printed
 allowBuilds:
-  "@phala/pay": true
+  "@phala/pay@https://codeload.github.com/Phala-Network/phala-pay/tar.gz/<commit>#path:/sdk/js": true
 ```
 
 ## Quickstart
