@@ -37,7 +37,10 @@ const STEP_COPY: Record<StepKey, { title: string; current: string; failed?: stri
   },
   finalized: {
     title: "Final on both RPC providers",
-    current: "Waiting for finality: both providers must report the same block and log.",
+    current:
+      "Waiting for Ethereum finality, usually 13–16 minutes after the transfer (64–96 blocks). " +
+      "Credits count only final blocks, so a reorg can never undo one; both providers must then " +
+      "report the same block and log.",
   },
   credited: {
     title: "Credited by the service",
