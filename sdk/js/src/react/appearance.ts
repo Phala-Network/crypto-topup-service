@@ -114,6 +114,6 @@ export const STYLES = `
 .pp-copy { flex: none; appearance: none; border: 1px solid var(--pp-color-border); border-radius: 6px;
   background: none; color: var(--pp-color-text); font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer; }
 .pp-tx { margin: 0 0 12px; font-size: 13px; }
-.pp-tx a { color: var(--pp-color-primary); }
+.pp-tx a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .pp-tx .pp-value { overflow-wrap: anywhere; }
 `;
