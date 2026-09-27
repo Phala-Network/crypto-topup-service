@@ -938,6 +938,7 @@ fn confirmation_route() -> RouteFile {
             .expect("route fixture");
     route.asset.contract = evm_address(200);
     route.asset.decimals = 0;
+    route.rate_lock.amount_decimals = 0;
     route.destination.unit_decimals = 0;
     route.screening.min_credit_minor = 1;
     route

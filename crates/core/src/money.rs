@@ -344,6 +344,35 @@ pub fn tokens_for_credit(
     Ok(amount)
 }
 
+/// Rounds `amount` up to a multiple of `10^(asset_decimals − shown_decimals)`, so the token amount
+/// has at most `shown_decimals` digits after the point and is never less than `amount`.
+///
+/// `shown_decimals ≥ asset_decimals` returns `amount` unchanged.
+pub fn round_up_to_decimals(
+    amount: AtomicAmount,
+    asset_decimals: u8,
+    shown_decimals: u8,
+) -> Result<AtomicAmount, CreditError> {
+    let Some(dropped) = asset_decimals.checked_sub(shown_decimals) else {
+        return Ok(amount);
+    };
+    let step = power_of_ten(u16::from(dropped))?;
+    let value = U512::from(amount.0);
+    let remainder = value.checked_rem(step).ok_or(CreditError::DivisionByZero)?;
+    if remainder.is_zero() {
+        return Ok(amount);
+    }
+    let rounded = value
+        .checked_sub(remainder)
+        .and_then(|floor| floor.checked_add(step))
+        .ok_or(CreditError::OutOfRange)?;
+    let (value, overflow) = U256::overflowing_from_limbs_slice(rounded.as_limbs());
+    if overflow {
+        return Err(CreditError::OutOfRange);
+    }
+    Ok(AtomicAmount(value))
+}
+
 fn decimal_exponent(asset_decimals: u8, price_scale: u8, unit_decimals: u8) -> i16 {
     i16::from(asset_decimals)
         .checked_add(i16::from(price_scale))
@@ -422,6 +451,17 @@ mod tests {
                 .expect("previous credit remains representable");
             prop_assert!(actual >= target);
             prop_assert!(previous_credit < target);
+        }
+
+        #[test]
+        fn rounding_up_keeps_the_shown_decimals_and_never_lowers(amount in any::<u128>(), asset_decimals in 0_u8..=36, shown_decimals in 0_u8..=36) {
+            let amount = AtomicAmount::new(U256::from(amount));
+            let rounded = round_up_to_decimals(amount, asset_decimals, shown_decimals)
+                .expect("a u128 amount rounds within U256");
+            let step = U256::from(10_u8).pow(U256::from(asset_decimals.saturating_sub(shown_decimals)));
+            prop_assert!(rounded >= amount);
+            prop_assert!(rounded.value() % step == U256::ZERO);
+            prop_assert!(rounded.value() - amount.value() < step);
         }
 
         #[test]
@@ -508,6 +548,21 @@ mod tests {
         assert_eq!(
             tokens_for_credit(MinorAmount::new(1), price(1), u8::MAX, 0),
             Err(CreditError::ScaleOutOfRange)
+        );
+    }
+
+    #[test]
+    fn rounding_up_shortens_an_eighteen_decimal_amount() {
+        let amount = AtomicAmount::new(U256::from(273_918_494_456_300_549_947_u128));
+        assert_eq!(
+            round_up_to_decimals(amount, 18, 4),
+            Ok(AtomicAmount::new(U256::from(
+                273_918_500_000_000_000_000_u128
+            )))
+        );
+        assert_eq!(
+            round_up_to_decimals(AtomicAmount::new(U256::MAX), 18, 4),
+            Err(CreditError::OutOfRange)
         );
     }
 

@@ -575,6 +575,7 @@ async fn run_confirm_scenario(
 
     let mut route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(&fixture.path)?)?;
     route.asset.decimals = 0;
+    route.rate_lock.amount_decimals = 0;
     route.destination.unit_decimals = 0;
     route.screening.min_credit_minor = 1;
     let now = u64::try_from(chrono::Utc::now().timestamp())?;

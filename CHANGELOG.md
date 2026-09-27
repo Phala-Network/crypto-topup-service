@@ -62,6 +62,10 @@ webhook receivers must ignore unknown fields.
   chain's configured RPC providers and succeeds when any accepts it, so one rate-limited provider
   no longer blocks sweeps. When every provider refuses, the daily report's `flush_planning.error`
   reads `every provider failed to broadcast the transaction: …` with each provider's refusal.
+- A new quote's `amount_atomic` (and its `payment_uri`) is rounded up to the route's
+  `quote.amount_decimals` token decimals, default 4, so the payer is asked for `273.9185` PHA
+  rather than 18 decimals. The rounding overpays by less than one unit of the last decimal; the
+  quote's `amount` credit is unchanged. Quotes created before keep their amount.
 
 ### Added
 

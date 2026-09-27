@@ -497,6 +497,7 @@ mod tests {
                     window_s: 60,
                     spread_bps: bps(100),
                     lock_tolerance_bps: bps(tolerance_bps),
+                    amount_decimals: 4,
                     max_creations_per_minute: 10,
                     max_open_minor: ExposureCaps {
                         account: u64::MAX,

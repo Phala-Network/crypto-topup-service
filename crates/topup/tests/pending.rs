@@ -627,6 +627,7 @@ fn test_route(token: Address) -> RouteFile {
         );
     let mut route: RouteFile = serde_saphyr::from_str(&yaml).expect("route fixture");
     route.asset.decimals = 0;
+    route.rate_lock.amount_decimals = 0;
     route.destination.unit_decimals = 0;
     route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
     route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));

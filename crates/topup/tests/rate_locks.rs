@@ -520,6 +520,7 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
         let account = seed_account(&database.app_pool, product.id, "round-up").await?;
         let mut route = test_route();
         route.asset.decimals = 2;
+        route.rate_lock.amount_decimals = 2;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(ThreeDollarQuote);
         let lock = locks::create(
             &database.app_pool,
@@ -533,6 +534,86 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
         .await?;
         ensure!(lock.amount_atomic.value() == U256::from(34_u64));
         ensure!(lock.credit_minor.value() == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        struct CentsPriceQuote;
+
+        #[async_trait]
+        impl QuoteProvider for CentsPriceQuote {
+            async fn quote(&self, _route: &RouteFile) -> Result<ValidatedQuote, Value> {
+                Ok(ValidatedQuote {
+                    // $0.0365 per token.
+                    price: ScaledPrice::new(3_650_000, PRICE_SCALE).expect("fixed quote"),
+                    evidence: json!({"mode": "test"}),
+                })
+            }
+        }
+
+        let product_key = SigningKey::from_bytes(&[44; 32]);
+        let admin_key = SigningKey::from_bytes(&[45; 32]);
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        seed_account(&database.app_pool, product.id, "short-amount").await?;
+        let mut route = test_route();
+        route.asset.decimals = 18;
+        route.destination.unit_decimals = 2;
+        route.rate_lock.amount_decimals = 4;
+        route.screening.max_deposit_atomic = AtomicAmount::new(U256::MAX);
+        let app = topup::api::router(AppState {
+            pool: database.app_pool.clone(),
+            routes: Arc::new(
+                topup::routes::RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?,
+            ),
+            admin_key: VerificationKey::from_base64(
+                ADMIN_KID.to_owned(),
+                &public_key_base64(&admin_key),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: Arc::new(CentsPriceQuote),
+            client_reads: Arc::default(),
+        })
+        .0;
+        let body = serde_json::to_vec(&json!({
+            "account_id": "short-amount", "amount": 1_000, "currency": "usd",
+            "chain_id": 1, "asset": "pha"
+        }))?;
+        let response = app
+            .oneshot(signed_request_with_key(
+                Method::POST,
+                "/v1/quotes",
+                body,
+                PRODUCT_KID,
+                &product_key,
+                Utc::now().timestamp(),
+                "short-amount-1",
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let created = response_json(response).await?;
+        // $10.00 at $0.0365 is 273.972602739726027398 PHA at the minimal amount; the quote asks
+        // for 273.9727, and the credit stays exactly $10.00.
+        ensure!(created["amount"] == 1_000);
+        ensure!(created["amount_atomic"] == "273972700000000000000");
+        ensure!(
+            created["payment_uri"]
+                == format!(
+                    "ethereum:{:#x}@1/transfer?address={}&uint256=273972700000000000000",
+                    route.asset.contract,
+                    created["address"].as_str().context("address")?
+                )
+        );
         Ok(())
     }
     .await;
@@ -1489,6 +1570,7 @@ fn test_route() -> RouteFile {
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
             .expect("route fixture");
     route.asset.decimals = 0;
+    route.rate_lock.amount_decimals = 0;
     route.destination.unit_decimals = 0;
     route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
     route.rate_lock.max_creations_per_minute = 100;
