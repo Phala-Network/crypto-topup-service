@@ -1,4 +1,4 @@
-import { decodeFunctionData, erc20Abi } from "viem";
+import { createWalletClient, custom, decodeFunctionData, erc20Abi } from "viem";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   INJECTED_WALLET_UUID,
@@ -18,8 +18,14 @@ interface Call {
   params?: unknown;
 }
 
-/** A wallet on `chainId` that knows `known` chains and fails requests listed in `failures`. */
-function mockProvider(chainId: number, known: number[], failures: Record<string, number> = {}) {
+/** A wallet on `chainId` that knows `known` chains and fails requests listed in `failures`; it
+ * refuses to switch to an unknown chain with `unknownChain`. */
+function mockProvider(
+  chainId: number,
+  known: number[],
+  failures: Record<string, number> = {},
+  unknownChain: object = { code: 4902 },
+) {
   const calls: Call[] = [];
   let current = chainId;
   const provider: EthereumProvider = {
@@ -37,7 +43,7 @@ function mockProvider(chainId: number, known: number[], failures: Record<string,
         case "wallet_switchEthereumChain": {
           const target = Number((params as [{ chainId: string }])[0].chainId);
           if (!known.includes(target)) {
-            return Promise.reject(Object.assign(new Error("unknown chain"), { code: 4902 }));
+            return Promise.reject(Object.assign(new Error("unknown chain"), unknownChain));
           }
           current = target;
           return Promise.resolve(null);
@@ -106,6 +112,35 @@ describe("payWithWallet", () => {
     expect(error).toMatchObject({ code: "rejected" });
   });
 
+  it("adds the chain when MetaMask Mobile nests 4902 in data.originalError", async () => {
+    const nested = { code: -32603, data: { originalError: { code: 4902 } } };
+    const { provider, calls } = mockProvider(1, [1], {}, nested);
+    await expect(payWithWallet(provider, quote())).resolves.toBe(HASH);
+    expect(calls.map((c) => c.method)).toContain("wallet_addEthereumChain");
+  });
+
+  it("reports a rejected chain switch", async () => {
+    const { provider } = mockProvider(1, [1, 11155111], { wallet_switchEthereumChain: 4001 });
+    await expect(payWithWallet(provider, quote())).rejects.toMatchObject({ code: "rejected" });
+  });
+
+  it("pays with a viem WalletClient's account, switching its chain, without asking to connect", async () => {
+    const { provider, calls } = mockProvider(1, [1, 11155111]);
+    const client = createWalletClient({ account: ACCOUNT, transport: custom(provider) });
+    await expect(payWithWallet(client, quote())).resolves.toBe(HASH);
+    const methods = calls.map((c) => c.method);
+    expect(methods).not.toContain("eth_requestAccounts");
+    expect(methods).toContain("wallet_switchEthereumChain");
+    expect(sentTransfer(calls).tx.from).toBe(ACCOUNT);
+  });
+
+  it("connects a viem WalletClient that has no account", async () => {
+    const { provider, calls } = mockProvider(11155111, [11155111]);
+    const client = createWalletClient({ transport: custom(provider) });
+    await expect(payWithWallet(client, quote())).resolves.toBe(HASH);
+    expect(calls.map((c) => c.method)).toContain("eth_requestAccounts");
+  });
+
   it("never sends when the payment URI disagrees with the quote", async () => {
     const { provider, calls } = mockProvider(11155111, [11155111]);
     const tampered = quote({ payment_uri: quote({ address: TOKEN }).payment_uri });
@@ -119,27 +154,41 @@ describe("watchWallets", () => {
     delete (window as { ethereum?: unknown }).ethereum;
   });
 
-  it("lists wallets that announce themselves with EIP-6963", () => {
+  const announce = (detail: unknown) =>
+    window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail }));
+
+  it("lists wallets that announce themselves with EIP-6963, before and after it starts", () => {
     const { provider } = mockProvider(1, [1]);
     const seen: Wallet[][] = [];
-    const onRequest = () => {
-      window.dispatchEvent(
-        Object.assign(new Event("eip6963:announceProvider"), {
-          detail: {
-            info: { uuid: "u-1", name: "Test Wallet", icon: "javascript:alert(1)", rdns: "t.w" },
-            provider,
-          },
-        }),
-      );
-    };
+    const onRequest = () =>
+      announce({
+        info: { uuid: "u-1", name: "Test Wallet", icon: "javascript:alert(1)", rdns: "t.w" },
+        provider,
+      });
     window.addEventListener("eip6963:requestProvider", onRequest);
     const stop = watchWallets((wallets) => seen.push(wallets));
     window.removeEventListener("eip6963:requestProvider", onRequest);
-    stop();
-
     expect(seen.at(-1)?.map((w) => w.info)).toEqual([
       { uuid: "u-1", name: "Test Wallet", icon: "", rdns: "t.w" },
     ]);
+
+    const icon = "data:image/svg+xml,%3Csvg/%3E";
+    announce({ info: { uuid: "u-2", name: "Late Wallet", icon, rdns: "l.w" }, provider });
+    expect(seen.at(-1)?.map((w) => w.info.icon)).toEqual(["", icon]);
+
+    stop();
+    const count = seen.length;
+    announce({ info: { uuid: "u-3", name: "After", icon, rdns: "a.w" }, provider });
+    expect(seen).toHaveLength(count);
+  });
+
+  it("ignores malformed announcements", () => {
+    const seen: Wallet[][] = [];
+    const stop = watchWallets((wallets) => seen.push(wallets));
+    announce({ info: { uuid: "u-4", name: "No provider" }, provider: {} });
+    announce({ info: { name: "No uuid" }, provider: mockProvider(1, [1]).provider });
+    stop();
+    expect(seen.at(-1)).toEqual([]);
   });
 
   it("falls back to window.ethereum", () => {

@@ -23,6 +23,7 @@ declare global {
       params: unknown,
     ): Promise<{ result: unknown } | { error: { code: number; message: string } }>;
     walletCalls: string[];
+    testWallet: unknown;
   }
 }
 
@@ -152,6 +153,7 @@ async function installWallet(page: Page) {
         on: () => undefined,
         removeListener: () => undefined,
       };
+      window.testWallet = provider;
       const info = {
         uuid: "7f2b7a2c-2f5a-4d7e-9a0e-5b5c1a7d3e10",
         name: "Test Wallet",
@@ -203,6 +205,26 @@ test("pays a quote from a browser wallet, end to end on Anvil", async ({ page })
   // Only simple GETs: no custom header that would need a CORS preflight.
   const safelisted = /^(accept|accept-language|referer|user-agent|origin|sec-.*)$/;
   expect(requests.every((r) => r.method === "GET" && r.headers.every((h) => safelisted.test(h)))).toBe(true);
+});
+
+test("pays with the page's own viem wallet client instead of discovered wallets", async ({ page }) => {
+  const { quote, secret } = newQuote();
+  await serveQuote(page, quote, secret);
+  await installWallet(page);
+
+  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}&wallet_client=${env("PAYER_ADDRESS")}`);
+  const panel = page.getByRole("tabpanel");
+  await expect(panel.getByRole("button")).toHaveCount(1);
+  await panel.getByRole("button", { name: "Pay with crypto" }).click();
+  await expect(page.getByRole("status")).toHaveText("Payment credited: $25.00");
+
+  const token = { address: getAddress(env("TOKEN_ADDRESS")), abi: erc20Abi, functionName: "balanceOf" } as const;
+  expect(await chain().readContract({ ...token, args: [quote.address as Address] })).toBe(
+    BigInt(quote.amount_atomic),
+  );
+  const calls = await page.evaluate(() => window.walletCalls);
+  expect(calls).not.toContain("eth_requestAccounts");
+  expect(calls).toContain("wallet_switchEthereumChain");
 });
 
 test("shows the payment request as a scannable EIP-681 QR code", async ({ page }) => {
