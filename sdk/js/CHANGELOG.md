@@ -6,6 +6,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `<Checkout onChange>`: called once per status change with `{ status, quote, error }`, like
+  Stripe Elements' `onChange`, so the page can react to `seen` or `confirming` without its own
+  polling.
+
 ### Fixed
 
 - The transaction link in `<Checkout>` uses the text color with an underline instead of

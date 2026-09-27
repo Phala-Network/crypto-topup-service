@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Checkout } from "../src/react/index.js";
-import type { ClientQuote, EthereumProvider } from "../src/index.js";
+import type { CheckoutState, ClientQuote, EthereumProvider } from "../src/index.js";
 import { ADDRESS, API_BASE, CLIENT_SECRET, TOKEN, quote } from "./fixtures.js";
 
 const NOW = (quote().expires_at - 14 * 60 - 32) * 1000;
@@ -89,6 +89,22 @@ describe("Checkout", () => {
     expect(screen.getByRole("status").textContent).toBe("Payment credited: $25.00");
     expect(onSuccess).toHaveBeenCalledTimes(1);
     expect(onSuccess).toHaveBeenCalledWith(served);
+  });
+
+  it("calls onChange once per status change, not on every poll", async () => {
+    const onChange = vi.fn<(state: CheckoutState) => void>();
+    await renderCheckout({ onChange });
+
+    served = quote({ payment_status: "seen", confirmations: 2 });
+    await poll();
+    served = quote({ payment_status: "seen", confirmations: 3 });
+    await poll();
+    served = quote({ payment_status: "confirming" });
+    await poll();
+
+    const statuses = onChange.mock.calls.map(([state]) => state.status);
+    expect(statuses.filter((status) => status !== "loading")).toEqual(["waiting", "seen", "confirming"]);
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ quote: served, error: null }));
   });
 
   it("tells the payer not to pay after expiry, and calls onExpire", async () => {
