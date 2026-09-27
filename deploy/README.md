@@ -457,7 +457,7 @@ workspace, and checks the deposit state, the verified webhooks, and the product 
 | Path | Options | Expected |
 |---|---|---|
 | underpayment | `--pay-bps 9700` | `credited` at spot for what arrived, then `swept`; the lock later expires |
-| after the quote window | `--pay-after-expiry` | `rate_lock.expired`, then `credited` at spot and `swept` |
+| after the quote window | `--pay-after-expiry` | `quote.expired`, then `credited` at spot and `swept` |
 | unsupported token | `--token T --until rejected` | after finality `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
 | refund | `--pay-bps N --until refunded --refund-to A` | a payment of N/10000 of the quote above `max_deposit_atomic` (200000 test PHA): `rejected(out_of_bounds)`, swept; the driver requests a refund and waits while it is executed as in [refund execution](runbooks/refund-execution.md), until `confirmed` and one `deposit.refunded` |
 

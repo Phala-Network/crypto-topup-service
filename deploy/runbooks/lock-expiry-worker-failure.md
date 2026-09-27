@@ -6,7 +6,7 @@ in only after a successful scan).
 
 **Impact:** every five seconds the worker expires, in batches of 100, open locks whose chain's
 finalized scan has passed `expires_at` and that no in-window payment still awaits; that releases
-their exposure and queues `rate_lock.expired`. While it fails, overdue locks keep holding exposure
+their exposure and queues `quote.expired`. While it fails, overdue locks keep holding exposure
 (new quotes hit `409 exposure_cap_exceeded` early) and products are not told checkouts expired. A
 failing batch rolls back and the same oldest locks are picked again, so nothing progresses until
 the cause is fixed. Payments are unaffected: the confirm step judges them by `expires_at`.
@@ -34,7 +34,7 @@ scanner holds locks open by design and pages as `topup-scanner-<chain_id>`, not 
 ## Fix
 
 Never close or re-open locks by hand: the caps are enforced against open reserved locks, and a
-lock closed outside the worker never emits `rate_lock.expired`. Pausing `quotes` does not stop
+lock closed outside the worker never emits `quote.expired`. Pausing `quotes` does not stop
 consumption, cancellation, or expiry.
 
 ## Done when

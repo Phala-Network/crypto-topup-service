@@ -9,7 +9,6 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 from typing import cast
-from uuid import UUID
 import datetime
 
 
@@ -21,18 +20,19 @@ class OutboxReplayResponse:
     """A webhook event queued for delivery again.
 
     Attributes:
-        event_id (UUID): Stable event identifier, sent as the `webhook-id` header.
+        event_id (str): Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
+            older event.
         event_type (str): Event type, such as `deposit.credited`.
         next_attempt_at (datetime.datetime): When the delivery worker next attempts the event.
     """
 
-    event_id: UUID
+    event_id: str
     event_type: str
     next_attempt_at: datetime.datetime
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        event_id = str(self.event_id)
+        event_id = self.event_id
 
         event_type = self.event_type
 
@@ -53,7 +53,7 @@ class OutboxReplayResponse:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        event_id = UUID(d.pop("event_id"))
+        event_id = d.pop("event_id")
 
         event_type = d.pop("event_type")
 

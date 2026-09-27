@@ -1,6 +1,6 @@
 //! Anvil and PostgreSQL coverage for the display-only pending view (architecture §8, §12): the
-//! head scan, reorg removal, the finalized hand-off, the quote `payment` object, and the
-//! `deposit.pending` event.
+//! head scan, reorg removal, the finalized hand-off, and the quote `payment` object. The head scan
+//! writes no events.
 
 mod support;
 
@@ -122,7 +122,10 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         .context("chain is not frozen")?;
     // Only non-zero transfers of the routed token are requested and stored.
     ensure!(scan.commit.seen == 2, "unexpected head scan {scan:?}");
-    ensure!(scan.commit.announced == 2, "unexpected head scan {scan:?}");
+    ensure!(
+        outbox_rows(pool).await? == 0,
+        "the head scan wrote an event"
+    );
     ensure!(
         Ledger::read(pool).await? == before,
         "a pending transfer changed deposits, locks, exposure, or transitions"
@@ -168,18 +171,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let again = head_scan_once(pool, &reader, &chain_routes)
         .await?
         .context("chain is not frozen")?;
-    ensure!(again.commit.seen == 2 && again.commit.announced == 0);
-    ensure!(pending_events(pool).await? == 2);
-    let unannounced: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM outbox WHERE event_type = 'deposit.pending' \
-         AND (payload->>'provisional')::boolean IS NOT TRUE",
-    )
-    .fetch_one(pool)
-    .await?;
-    ensure!(
-        unannounced == 0,
-        "deposit.pending is not marked provisional"
-    );
+    ensure!(again.commit.seen == 2);
 
     // A reorg that drops the transfers removes them from the pending view.
     revert(anvil, &snapshot)?;
@@ -196,14 +188,16 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         api.payment("checkout-1").await?.is_null(),
         "reorged payment still shown"
     );
-    ensure!(pending_events(pool).await? == 2);
 
     // Once final, the finalized scanner records the deposit and clears its pending row in the same
     // transaction, and the lock shows the finalized payment.
     transfer(&anvil.rpc_url, token, lock_address, 100)?;
     head_scan_once(pool, &reader, &chain_routes).await?;
     ensure!(pending_rows(pool).await? == 1);
-    ensure!(pending_events(pool).await? == 3);
+    ensure!(
+        outbox_rows(pool).await? == 0,
+        "the head scan wrote an event"
+    );
     anvil.mine(FINALITY_LAG)?;
     let finalized = scan_once(pool, &reader, &chain_routes).await?;
     ensure!(
@@ -308,10 +302,6 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     ensure!(
         lock["payment"]["amount_atomic"] == "100" && lock["payment"]["matches_quote"] == false,
         "canceled quote shows its payment as applying: {lock}"
-    );
-    ensure!(
-        pending_events(pool).await? == 6,
-        "unsupported or zero transfers were announced"
     );
     Ok(())
 }
@@ -588,12 +578,10 @@ async fn pending_rows(pool: &sqlx::PgPool) -> Result<i64> {
         .await?)
 }
 
-async fn pending_events(pool: &sqlx::PgPool) -> Result<i64> {
-    Ok(
-        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE event_type = 'deposit.pending'")
-            .fetch_one(pool)
-            .await?,
-    )
+async fn outbox_rows(pool: &sqlx::PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT count(*) FROM outbox")
+        .fetch_one(pool)
+        .await?)
 }
 
 async fn pending_block_time(pool: &sqlx::PgPool, tx_hash: &str) -> Result<DateTime<Utc>> {

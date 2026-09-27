@@ -110,10 +110,10 @@ def receive_webhook(
 ) -> WebhookEvent:
     """Verifies a delivery and fulfills it when it is `deposit.credited`.
 
-    `SignatureError` means answer `400`. `fulfill` must credit `credit.amount_minor` to
-    `credit.external_id` at most once per `credit.fulfillment_key`, committing before this
-    returns, and treat a repeat as done; answer `2xx` only after it returns. Every other event
-    type is informational: notify the user and refresh history.
+    `SignatureError` means answer `400`. `fulfill` must credit `credit.amount` cents to
+    `credit.account_id` at most once per `credit.fulfillment_key` (the `dep_` id), committing
+    before this returns, and treat a repeat as done; answer `2xx` only after it returns. Every
+    other event type is informational: notify the user and refresh history.
     """
     event = verify_webhook(headers, body, settlement_key)
     if event.type == "deposit.credited":

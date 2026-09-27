@@ -30,7 +30,7 @@ pub use flushes::{
     next_planned_flush, rebind_planned_flushes, store_flush_replacement_cas, update_sent_evidence,
     upsert_flush_exclusion, void_paused_plan,
 };
-pub use outbox::{NewOutboxEvent, enqueue};
+pub use outbox::{EventObject, NewOutboxEvent, enqueue_in};
 pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,
     list_watched_addresses,

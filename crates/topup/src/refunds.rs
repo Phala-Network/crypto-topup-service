@@ -526,24 +526,18 @@ async fn confirm_refund(
         transaction.rollback().await?;
         return Ok(false);
     }
-    sqlx::query(
-        r#"
-        INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-        VALUES ($1, 'deposit.refunded', $2, now())
-        "#,
+    // The event's object is the deposit, with its refunded amount (as Stripe's `charge.refunded`
+    // is the charge); its id is derived from the refund, one event per refund.
+    crate::db::enqueue_in(
+        &mut *transaction,
+        &crate::db::NewOutboxEvent {
+            id: topup_core::identity::event_id("deposit.refunded", check.refund_id),
+            event_type: "deposit.refunded".to_owned(),
+            product_id: check.product_id,
+            object: crate::db::EventObject::Deposit(check.deposit_id),
+            next_attempt_at: chrono::Utc::now(),
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(json!({
-        "product_id": check.product_id,
-        "deposit_id": check.deposit_id,
-        "refund_id": check.refund_id,
-        "chain_id": check.chain_id,
-        "asset_contract": format!("{:#x}", check.asset_contract),
-        "amount_atomic": check.amount_atomic.to_string(),
-        "to_address": format!("{:#x}", check.to_address),
-        "tx_hash": tx_hash,
-    }))
-    .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
     Ok(true)

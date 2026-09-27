@@ -6,7 +6,7 @@
 
 **Impact:** a chain is scanned only while it has a loaded route, and a rate lock expires only once
 its chain's scanner passes `expires_at` (architecture §9). A lock left open on a chain without a
-scanner never expires: its exposure stays reserved and the product never gets `rate_lock.expired`.
+scanner never expires: its exposure stays reserved and the product never gets `quote.expired`.
 In-flight deposits on the chain stop too, and deposits of a removed version lose their version.
 
 ## First steps

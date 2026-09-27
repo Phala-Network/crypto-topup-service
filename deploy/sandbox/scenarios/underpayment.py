@@ -34,7 +34,7 @@ def run(ctx: Context) -> None:
     else:
         check(False, "a paid lock was cancelled")
 
-    deposit, confirmed = ctx.credited(team, lock.address, lock)
-    check(confirmed["price_source"] == "spot", "underpayment was valued at the lock price")
+    deposit, credited = ctx.credited(team, lock.address, lock)
+    check(credited["price_source"] == "spot", "underpayment was valued at the lock price")
     check(credit(deposit) < lock.amount, "underpayment was credited in full")
     check(ctx.client.get_quote(lock_ref).status != "complete", "lock was completed")

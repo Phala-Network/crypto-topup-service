@@ -10,7 +10,6 @@ from ..types import UNSET, Unset
 
 from ..types import UNSET, Unset
 from typing import cast
-from uuid import UUID
 import datetime
 
 
@@ -24,14 +23,15 @@ class DepositEventResponse:
     Attributes:
         created_at (datetime.datetime): Event creation time.
         event_type (str): Event type, such as `deposit.credited`.
-        id (UUID): Stable event identifier, sent as the `webhook-id` header.
+        id (str): Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
+            older event.
         delivered_at (datetime.datetime | None | Unset): When the receiver accepted the event, or `null` while it is
             undelivered.
     """
 
     created_at: datetime.datetime
     event_type: str
-    id: UUID
+    id: str
     delivered_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -40,7 +40,7 @@ class DepositEventResponse:
 
         event_type = self.event_type
 
-        id = str(self.id)
+        id = self.id
 
         delivered_at: None | str | Unset
         if isinstance(self.delivered_at, Unset):
@@ -71,7 +71,7 @@ class DepositEventResponse:
 
         event_type = d.pop("event_type")
 
-        id = UUID(d.pop("id"))
+        id = d.pop("id")
 
         def _parse_delivered_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:

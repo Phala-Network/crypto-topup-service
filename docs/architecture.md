@@ -282,7 +282,7 @@ Invoice model, enabled from the pilot, with this service's exception profile:
 - Any other deposit to a lock address (late, wrong amount, second payment) is valued at spot
   and still credited; the product shows this rule before payment.
 - Expiry uses chain time, like eligibility. A lock expires unconsumed, releasing its exposure
-  and emitting `rate_lock.expired`, only once the chain's scanner has committed through a
+  and emitting `quote.expired`, only once the chain's scanner has committed through a
   finalized block whose time is past `expires_at` (the finalized head's time, read with the
   head, is stored with the cursor) and no deposit mined inside the window still awaits its
   confirm step. A payment mined inside the window is therefore consumed at the lock price and
@@ -332,34 +332,36 @@ on the product's answer; delivery is tracked on the outbox row.
 
 ```http
 POST {webhook_url}
-webhook-id: <uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit_id)>
+webhook-id: evt_<hex of uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)>
 webhook-timestamp: <Unix seconds of this attempt>
 webhook-signature: v1a,<base64 ed25519 by settlement/v1 over "{id}.{timestamp}.{raw body}">
 
-{ "event_id": "<webhook-id>", "type": "deposit.credited", "created_at": "…",
-  "data": { "product_id": "…", "external_id": "<account>", "deposit_id": "…", "state": "credited",
-            "unit": "USD", "amount_minor": "1234", "price_source": "lock", "price_scaled": "…",
-            "price_scale": 8, "valuation_at": "…", "product_lock_ref": "…", "address": "0x…",
-            "route": "…", "route_version": 1, "chain_id": 1, "asset_contract": "0x…",
-            "tx_hash": "0x…", "log_index": 12, "amount_atomic": "…" } }
+{ "id": "<webhook-id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
+  "data": { "object": { "id": "dep_…", "object": "deposit", "account_id": "<account>",
+                        "quote": "qt_…", "status": "credited", "amount": 1234,
+                        "currency": "usd", "price_source": "quote", … } } }
 ```
 
 - The screen step writes the event in the transaction that moves the deposit `confirmed →
-  credited` (§7). `amount_minor` is the quoted `credit_minor` when `price_source` is `lock`,
-  otherwise the spot credit at finality (§9). `product_lock_ref` is the receiving address's
-  lock, also when a late or wrong-amount payment was valued at spot.
+  credited` (§7). The outbox row names the product and the deposit; `data.object`, the deposit
+  as `GET /v1/deposits/{id}` returns it, is rendered on the first delivery attempt and stored,
+  so retries and replays send the same body. `amount` is the quoted credit when `price_source`
+  is `quote`, otherwise the spot credit at finality (§9). `quote` is the receiving address's
+  quote, also when a late or wrong-amount payment was valued at spot.
 - Delivery is the outbox (§12): at least once, in no order, `2xx` acknowledges, anything else or
   no answer within 20 s is retried with full-jitter backoff (ceiling 30 s doubling to 1 h),
   forever; an undelivered event raises the outbox age warning after 24 hours and the operator
   can replay it. The daily report counts undelivered `deposit.credited` per route.
 - The event id is derived from the deposit id, so every retry, replay, and re-emission after a
-  restore carries the same `webhook-id`, and the outbox stores one row per deposit.
+  restore carries the same `webhook-id`, and the outbox stores one row per deposit. Rows written
+  before prefixed ids (outbox `format` 1) keep their flat payload and old envelope
+  (`event_id`, `created_at`, `data`) and bare-UUID `webhook-id`, so their replay is byte-identical.
 
 Product obligations:
 
 1. Verify the Standard Webhooks `v1a` signature over the raw body against the pinned
    `(keyid, public key)`, with a timestamp tolerance of 300 seconds.
-2. Credit `amount_minor` to `external_id` at most once per `deposit:<deposit_id>`: the credit
+2. Credit `amount` to `account_id` at most once per deposit id (`dep_…`): the credit
    and its record in one transaction under a unique index, committed before answering `2xx`.
    A repeat is acknowledged without a second credit. A repeat with a different amount can
    only follow a service restore that re-priced a spot deposit (§14); keep the first credit and
@@ -368,14 +370,14 @@ Product obligations:
    workspace, a suspended account, or above the product's own caps is recorded as held, answered
    `2xx`, and returned through a refund request (§15).
 
-Optional hardening, each the product's choice: fetch `GET /deposits/{id}` and require
-`credited` or `swept` with the same amount; recompute `deposit_id = uuid_v5(NS,
+Optional hardening, each the product's choice: fetch `GET /v1/deposits/{id}` and require
+`credited` or `swept` with the same amount; recompute the deposit UUID `uuid_v5(NS,
 "{chain_id}:{tx_hash}:{log_index}")` and verify the cited log on its own node at finality;
 per-deposit and per-period caps as review holds. None is needed for correctness: the credit is
 authorized by the service's signature alone.
 
 Phala Cloud: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code =
-'crypto-top-up'`, `provider_order_id = "deposit:<deposit_id>"`, partial unique index on
+'crypto-top-up'`, `provider_order_id` = the deposit id `dep_…`, partial unique index on
 `(team_id, provider_order_id)` for that flow), the credit transaction tagged `funding_source =
 crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction. Non-card top-ups skip
 the welcome promotion by existing rule.
@@ -436,20 +438,16 @@ transfer can disappear in a reorg; only `deposits` and `deposit.credited` reflec
 pending view ignores pause scopes: it is informational, and a pause still stops whatever it
 stops for the deposit once final. While a chain is frozen (§13) its pending view stops updating.
 
-Events (Standard Webhooks, signed with the settlement key): `deposit.pending`,
-`deposit.confirmed`, `deposit.credited`, `deposit.rejected`, `deposit.refunded`,
-`rate_lock.expired`. `deposit.credited` is the fulfillment event (§11); the others are
-informational and never change balances. `deposit.pending` is sent at most once per chain
-event when the head scan first sees a transfer to a watched address; its payload (`product_id`,
-`external_id`, `deposit_id`, `chain_id`, `tx_hash`, `log_index`, `block_number`, `address`,
-`product_lock_ref`, `asset_contract`, `from_address`, `amount_atomic`) is marked
-`provisional: true`: the transfer may still be reorged away, and no deposit exists yet. Only
-non-zero transfers of routed tokens produce it. The outbox does not order events, so
-`deposit.pending` can arrive after `deposit.confirmed` or `deposit.credited` for the same
-deposit; receivers must act on state (the deposit or lock they fetch), never on event order.
-`deposit.rejected` carries `product_id`, `deposit_id`, `chain_id`, `state`, `route` (null when
-no route was selected), and `reason`; rows rejected by the retired settlement protocol also
-carried `product_reason`. Payload changes
+Events (Standard Webhooks, signed with the settlement key) are Stripe's Event object,
+`{id: "evt_…", object: "event", type, created, data: {object}}`: `deposit.credited`,
+`deposit.rejected`, and `deposit.refunded` (one per final refund) carry the deposit, and
+`quote.expired` the quote. Every event id is `uuid_v5(NS, "{type}:{object UUID}")`, the object
+being the refund for `deposit.refunded`, so a re-emission after a restore deduplicates for every
+type. `deposit.credited` is the fulfillment event (§11); the others are informational and never
+change balances. Nothing is sent before finality: the checkout page reads the quote's display-only
+`payment`. The outbox does not order events, so `quote.expired` can arrive after the
+`deposit.credited` of a late payment; receivers must act on state (the deposit or quote they
+fetch), never on event order. Object changes
 are additive; receivers must ignore unknown fields. OpenAPI from `utoipa`; SDKs generated from
 it, shipped with a runnable
 Python integration example, a signing helper, and a versioning and deprecation policy. A
@@ -471,7 +469,7 @@ checklist:
 | Underpayment | Shows the amount received, the shortfall, and a "top up the difference" re-quote; multiple payments are not accumulated against one lock. |
 | Exceptions | Wrong asset or below minimum: "contact support"; the funds are held (§15) and finance may return them per the refund policy. Overpayment beyond tolerance is not an exception: it is credited at spot for the full amount (§9). Sanctions: "under compliance review, contact support"; the reason code stays server-side. A credit the product held (closed or suspended workspace, the product's caps): "under review, contact support", then a refund to an address the user supplies (§15). Paused: "deposits temporarily unavailable", address hidden. |
 | After credit | Shows the new available balance, debt settled, and whether service resumed. |
-| Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `rate_lock.expired`; optionally "payment received, waiting for finality" on `deposit.pending`. |
+| Notifications | Email or in-app notice on `deposit.credited`, `deposit.rejected`, `deposit.refunded`, and `quote.expired`; the waiting screen's "payment received, waiting for finality" comes from the quote's `payment`. |
 | Support | Support staff can look up by transaction hash, address, lock reference, workspace, or order and see the full timeline; every case has an owner and a response target. |
 
 ### Deposit status for exchange users (product UI)
@@ -741,7 +739,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Underpayment shortfall and top-up re-quote; overpayment beyond tolerance credited at spot | S+P | ✓ | | |
 | Wallet and exchange payment guidance, mobile deep link, copy fallback | P | ✓ | | |
 | Waiting screen with distinct stages, last update, when to ask for help | P | ✓ | | |
-| Pre-finality "seen" payment view and `deposit.pending` notification | S | ✓ | | |
+| Pre-finality "seen" payment view (the quote's `payment`; the payer's `payment_status`) | S | ✓ | | |
 | Deposit history with filters and pagination; receipt per deposit | S+P | ✓ | | |
 | CSV export; accounting and cost-basis export; valuation evidence bundle | S+F | | ✓ | |
 | Notifications on credited, rejected, refunded, lock expired; preferences and history | P | ✓ (basic) | ✓ | |

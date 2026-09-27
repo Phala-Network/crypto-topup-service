@@ -19,7 +19,7 @@ with TopupClient("https://topup.example", signer, forwarder=forwarder) as client
 
 Create a product key with `uv run topup-sdk keygen --keyid acme/v1 --seed-out product.seed` and
 send only the printed public key to the operator.
-`uv run topup-sdk send-test-event --url … --seed-file test.seed --external-id …` delivers a
+`uv run topup-sdk send-test-event --url … --seed-file test.seed --account-id …` delivers a
 signed test `deposit.credited` to a webhook receiver whose test instance pins that seed's public
 key, then a duplicate and a forged copy, and reports whether the answers were `2xx`, `2xx`, and
 `4xx`. See `docs/integration.md` for the integration guide, the signing profile, and the versioning and deprecation policy,

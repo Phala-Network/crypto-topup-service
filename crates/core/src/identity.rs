@@ -19,14 +19,22 @@ pub fn deposit_id(chain_id: u64, tx_hash: B256, log_index: u64) -> Uuid {
     Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
 }
 
-/// Returns the event id of a deposit's `deposit.credited` webhook.
+/// Returns the id of event `event_type` about the object with UUID `object_id`: UUIDv5 in the
+/// deposit namespace over `{event_type}:{object_id}`, so every retry, replay, and re-emission
+/// after a restore carries the same `webhook-id`.
 ///
-/// UUIDv5 in the deposit namespace over `deposit.credited:{deposit_id}`, so every retry, replay,
-/// and re-emission after a restore carries the same `webhook-id`.
+/// The object is the deposit for `deposit.credited` and `deposit.rejected`, the refund for
+/// `deposit.refunded`, and the quote for `quote.expired`.
+#[must_use]
+pub fn event_id(event_type: &str, object_id: Uuid) -> Uuid {
+    let name = format!("{event_type}:{object_id}");
+    Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
+}
+
+/// Returns the event id of a deposit's `deposit.credited` webhook.
 #[must_use]
 pub fn credited_event_id(deposit_id: Uuid) -> Uuid {
-    let name = format!("deposit.credited:{deposit_id}");
-    Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
+    event_id("deposit.credited", deposit_id)
 }
 
 #[cfg(test)]

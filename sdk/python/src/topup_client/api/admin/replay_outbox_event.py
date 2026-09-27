@@ -12,11 +12,10 @@ from ...models.admin_reason_request import AdminReasonRequest
 from ...models.error_response import ErrorResponse
 from ...models.outbox_replay_response import OutboxReplayResponse
 from typing import cast
-from uuid import UUID
 
 
 def _get_kwargs(
-    event_id: UUID,
+    event_id: str,
     *,
     body: AdminReasonRequest,
 ) -> dict[str, Any]:
@@ -73,14 +72,14 @@ def _build_response(
 
 
 def sync_detailed(
-    event_id: UUID,
+    event_id: str,
     *,
     client: AuthenticatedClient,
     body: AdminReasonRequest,
 ) -> Response[ErrorResponse | OutboxReplayResponse]:
     """
     Args:
-        event_id (UUID):
+        event_id (str):
         body (AdminReasonRequest): Administrative action body; `reason` is recorded in the
             action's audit row.
 
@@ -105,14 +104,14 @@ def sync_detailed(
 
 
 def sync(
-    event_id: UUID,
+    event_id: str,
     *,
     client: AuthenticatedClient,
     body: AdminReasonRequest,
 ) -> ErrorResponse | OutboxReplayResponse | None:
     """
     Args:
-        event_id (UUID):
+        event_id (str):
         body (AdminReasonRequest): Administrative action body; `reason` is recorded in the
             action's audit row.
 
@@ -132,14 +131,14 @@ def sync(
 
 
 async def asyncio_detailed(
-    event_id: UUID,
+    event_id: str,
     *,
     client: AuthenticatedClient,
     body: AdminReasonRequest,
 ) -> Response[ErrorResponse | OutboxReplayResponse]:
     """
     Args:
-        event_id (UUID):
+        event_id (str):
         body (AdminReasonRequest): Administrative action body; `reason` is recorded in the
             action's audit row.
 
@@ -162,14 +161,14 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    event_id: UUID,
+    event_id: str,
     *,
     client: AuthenticatedClient,
     body: AdminReasonRequest,
 ) -> ErrorResponse | OutboxReplayResponse | None:
     """
     Args:
-        event_id (UUID):
+        event_id (str):
         body (AdminReasonRequest): Administrative action body; `reason` is recorded in the
             action's audit row.
 

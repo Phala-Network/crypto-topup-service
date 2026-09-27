@@ -1022,7 +1022,8 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
 }
 
 /// `POST /v1/admin/outbox/{event_id}/replay` requeues an existing event without touching its
-/// payload; the operator finds the event id in the admin deposit view.
+/// payload; the operator finds the event id, `evt_…` or an older event's UUID, in the admin
+/// deposit view.
 #[tokio::test]
 async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -1033,18 +1034,36 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
         let admin_key = SigningKey::from_bytes(&[36; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
         let deposit = seed_other_tenant_deposit(&database.app_pool, product.id).await?;
-        let event_id = Uuid::new_v4();
-        let payload = json!({"product_id": product.id, "deposit_id": deposit, "state": "credited"});
+        let legacy_event = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at)
-            VALUES ($1, 'deposit.credited', $2, now() - interval '1 hour', now())
+            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at, format,
+                                created_at)
+            VALUES ($1, 'deposit.pending', $2, now() - interval '2 hours', now(), 1,
+                    now() - interval '2 hours')
+            "#,
+        )
+        .bind(legacy_event)
+        .bind(json!({"product_id": product.id, "deposit_id": deposit}))
+        .execute(&database.app_pool)
+        .await?;
+        let event_id = Uuid::new_v4();
+        let payload = json!({"object": {"id": format!("dep_{}", deposit.simple())}});
+        sqlx::query(
+            r#"
+            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at,
+                                product_id, object_type, object_id)
+            VALUES ($1, 'deposit.credited', $2, now() - interval '1 hour', now(), $3, 'deposit',
+                    $4)
             "#,
         )
         .bind(event_id)
         .bind(&payload)
+        .bind(product.id)
+        .bind(deposit)
         .execute(&database.app_pool)
         .await?;
+        let webhook_id = format!("evt_{}", event_id.simple());
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
@@ -1061,12 +1080,13 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let events = response_json(response).await?["events"].clone();
-        ensure!(events.as_array().map(Vec::len) == Some(1));
-        ensure!(events[0]["id"] == event_id.to_string());
-        ensure!(events[0]["event_type"] == "deposit.credited");
-        ensure!(!events[0]["delivered_at"].is_null());
+        ensure!(events.as_array().map(Vec::len) == Some(2), "{events}");
+        ensure!(events[0]["id"] == legacy_event.to_string());
+        ensure!(events[1]["id"] == webhook_id);
+        ensure!(events[1]["event_type"] == "deposit.credited");
+        ensure!(!events[1]["delivered_at"].is_null());
 
-        let replay = format!("/v1/admin/outbox/{event_id}/replay");
+        let replay = format!("/v1/admin/outbox/{webhook_id}/replay");
         let reason = serde_json::to_vec(&json!({"reason": "product lost the event"}))?;
         let response = app
             .clone()
@@ -1119,7 +1139,7 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
                 .await?;
             ensure!(response.status() == StatusCode::OK);
             let replayed = response_json(response).await?;
-            ensure!(replayed["event_id"] == event_id.to_string());
+            ensure!(replayed["event_id"] == webhook_id);
             ensure!(replayed["event_type"] == "deposit.credited");
         }
         let row = sqlx::query(

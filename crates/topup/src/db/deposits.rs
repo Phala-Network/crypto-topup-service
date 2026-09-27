@@ -128,17 +128,7 @@ pub struct TransitionUpdate {
 }
 
 /// An outbox event committed with a state transition.
-#[derive(Clone, Debug, PartialEq)]
-pub struct OutboxEvent {
-    /// Event identifier.
-    pub id: Uuid,
-    /// Stable event type.
-    pub event_type: String,
-    /// Event payload.
-    pub payload: Value,
-    /// Earliest delivery attempt.
-    pub next_attempt_at: DateTime<Utc>,
-}
+pub type OutboxEvent = super::outbox::NewOutboxEvent;
 
 /// Canonical chain evidence corrected while a deposit remains detected.
 #[derive(Clone, Debug, PartialEq)]
@@ -618,19 +608,7 @@ pub async fn apply_transition(
     .await?;
 
     for event in writes.outbox_events {
-        sqlx::query!(
-            r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO NOTHING
-            "#,
-            event.id,
-            event.event_type,
-            event.payload,
-            event.next_attempt_at
-        )
-        .execute(&mut **transaction)
-        .await?;
+        super::outbox::enqueue_in(&mut **transaction, event).await?;
     }
 
     Ok(ApplyTransitionResult::Applied)

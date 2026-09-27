@@ -4,12 +4,15 @@ use axum::Json;
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
+use sqlx::PgPool;
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
+use uuid::Uuid;
 
 use crate::db::{Account, Product};
 use crate::ids;
 use crate::locks::{self, RateLock, RateLockError, RateLockStatus};
+use crate::routes::RouteSet;
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
@@ -141,7 +144,7 @@ pub(crate) async fn create_quote(
             .map_err(map_error)?
     {
         let lock = locks::replay(existing, &account, route, credit).map_err(map_error)?;
-        return respond_with_client_secret(&state, &product, lock).await;
+        return respond_with_client_secret(&state, lock).await;
     }
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
@@ -161,7 +164,7 @@ pub(crate) async fn create_quote(
     )
     .await
     .map_err(map_error)?;
-    respond_with_client_secret(&state, &product, lock).await
+    respond_with_client_secret(&state, lock).await
 }
 
 #[utoipa::path(
@@ -227,13 +230,18 @@ pub(crate) async fn get_quote(
             .map_err(map_error)?
             .ok_or_else(ApiError::not_found)?;
         let consumed_by = lock.consumed_by;
-        let mut quote = quote_object(&state, &product, lock).await?;
+        let mut quote = quote_object(&state.pool, &state.routes, lock).await?;
         if expand.contains(&"deposit")
             && let Some(deposit) = consumed_by
         {
-            let deposit = super::deposits::find_deposit(&state, product.id, deposit)
-                .await?
-                .ok_or_else(ApiError::internal)?;
+            let deposit = super::deposits::find_deposit(
+                &state.pool,
+                &state.routes,
+                Some(product.id),
+                deposit,
+            )
+            .await?
+            .ok_or_else(ApiError::internal)?;
             quote.deposit = Some(ExpandableDeposit::Object(Box::new(deposit)));
         }
         Ok::<_, ApiError>(quote)
@@ -273,7 +281,7 @@ async fn client_quote(
             tracing::error!(route = %lock.route, "quote route is not loaded");
             ApiError::internal()
         })?;
-    let payment = super::pending::quote_payment(state, route, &lock).await?;
+    let payment = super::pending::quote_payment(&state.pool, route, &lock).await?;
     let (payment_status, confirmations) = match payment {
         None => ("none", None),
         Some(payment) if payment.status == "seen" => ("seen", payment.confirmations),
@@ -341,7 +349,7 @@ pub(crate) async fn cancel_quote(
     let lock = locks::cancel(&state.pool, &product, quote)
         .await
         .map_err(map_error)?;
-    respond(&state, &product, lock).await
+    respond(&state, lock).await
 }
 
 fn product_routes<'a>(
@@ -354,20 +362,18 @@ fn product_routes<'a>(
         .filter(move |route| route.destination.product == product.slug)
 }
 
-async fn respond(state: &AppState, product: &Product, lock: RateLock) -> ApiResult<Json<Quote>> {
-    quote_object(state, product, lock).await.map(Json)
+async fn respond(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
+    quote_object(&state.pool, &state.routes, lock)
+        .await
+        .map(Json)
 }
 
 /// Responds to `POST /v1/quotes` with a newly issued client secret.
-async fn respond_with_client_secret(
-    state: &AppState,
-    product: &Product,
-    lock: RateLock,
-) -> ApiResult<Json<Quote>> {
+async fn respond_with_client_secret(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
     let client_secret = locks::issue_client_secret(&state.pool, lock.address_id)
         .await
         .map_err(map_error)?;
-    let mut quote = quote_object(state, product, lock).await?;
+    let mut quote = quote_object(&state.pool, &state.routes, lock).await?;
     quote.client_secret = Some(client_secret);
     Ok(Json(quote))
 }
@@ -382,21 +388,35 @@ fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
     )
 }
 
+/// Returns one of `product_id`'s quotes by its address row id.
+pub(crate) async fn find_quote(
+    pool: &PgPool,
+    routes: &RouteSet,
+    product_id: Uuid,
+    id: Uuid,
+) -> ApiResult<Option<Quote>> {
+    match locks::get(pool, product_id, id).await.map_err(map_error)? {
+        Some(lock) => quote_object(pool, routes, lock).await.map(Some),
+        None => Ok(None),
+    }
+}
+
 /// The API representation of a quote.
-pub(super) async fn quote_object(
-    state: &AppState,
-    product: &Product,
+pub(crate) async fn quote_object(
+    pool: &PgPool,
+    routes: &RouteSet,
     lock: RateLock,
 ) -> ApiResult<Quote> {
     // The quote's own route version may be retired; asset and tolerance come from the route's
     // current version, which keeps the chain and asset.
-    let route = product_routes(state, product)
+    let route = routes
+        .current()
         .find(|route| route.route == lock.route)
         .ok_or_else(|| {
             tracing::error!(route = %lock.route, "quote route is not loaded");
             ApiError::internal()
         })?;
-    let payment = super::pending::quote_payment(state, route, &lock).await?;
+    let payment = super::pending::quote_payment(pool, route, &lock).await?;
     let payment_uri = payment_uri(route, &lock);
     Ok(Quote {
         id: locks::quote_id(lock.address_id),

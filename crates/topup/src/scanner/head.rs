@@ -120,7 +120,6 @@ pub(super) async fn run_head_loop(
                     latest = scan.latest,
                     seen = scan.commit.seen,
                     removed = scan.commit.removed,
-                    announced = scan.commit.announced,
                     "head scan committed"
                 );
             }

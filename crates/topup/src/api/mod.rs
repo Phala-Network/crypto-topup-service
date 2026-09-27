@@ -80,6 +80,39 @@ impl AppState {
     }
 }
 
+/// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
+/// about, as returned by `GET /v1/deposits/{id}` or `GET /v1/quotes/{id}`. `Ok(None)` means the
+/// object does not exist for `product_id`; `Err(())` means rendering failed and was logged.
+pub(crate) async fn event_data(
+    pool: &PgPool,
+    routes: &RouteSet,
+    product_id: uuid::Uuid,
+    object: crate::db::EventObject,
+) -> Result<Option<serde_json::Value>, ()> {
+    let rendered = match object {
+        crate::db::EventObject::Deposit(id) => {
+            deposits::find_deposit(pool, routes, Some(product_id), id)
+                .await
+                .map(|deposit| deposit.map(serde_json::to_value))
+        }
+        crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, product_id, id)
+            .await
+            .map(|quote| quote.map(serde_json::to_value)),
+    };
+    match rendered {
+        Ok(Some(Ok(value))) => Ok(Some(serde_json::json!({ "object": value }))),
+        Ok(None) => Ok(None),
+        Ok(Some(Err(error))) => {
+            tracing::error!(%error, "event object serialization failed");
+            Err(())
+        }
+        Err(_) => {
+            tracing::error!(object = ?object, "event object rendering failed");
+            Err(())
+        }
+    }
+}
+
 /// Builds the authenticated Axum router and its OpenAPI document.
 pub fn router(state: AppState) -> (Router, OpenApi) {
     let product = OpenApiRouter::new()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any
 
 import httpx
@@ -22,76 +21,92 @@ from topup_sdk.__main__ import send_test_event
 
 from .test_webhooks import RUST_BODY, RUST_ID, RUST_KEY, RUST_SIGNATURE, RUST_TIMESTAMP
 
-DEPOSIT = uuid.UUID("3f1c2b9e-6a8d-5c47-9e21-0b7d4f6a8c13")
+DEPOSIT = "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13"
 
 
-def _data(**overrides: Any) -> dict[str, Any]:
-    data: dict[str, Any] = {
-        "product_id": "8b0f7b4e-0000-4000-8000-000000000001",
-        "external_id": "team-42",
-        "deposit_id": str(DEPOSIT),
-        "state": "credited",
-        "unit": "USD",
-        "amount_minor": "1234",
-        "price_source": "lock",
-        "price_scaled": "12345678",
-        "price_scale": 8,
-        "valuation_at": "2026-09-26T12:00:00Z",
-        "product_lock_ref": "q-981",
-        "address": "0x" + "11" * 20,
-        "route": "ethereum-pha",
-        "route_version": 1,
+def _deposit(**overrides: Any) -> dict[str, Any]:
+    deposit: dict[str, Any] = {
+        "id": DEPOSIT,
+        "object": "deposit",
+        "account_id": "team-42",
+        "quote": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+        "status": "credited",
+        "rejection_reason": None,
         "chain_id": 1,
+        "asset": "pha",
         "asset_contract": "0x" + "22" * 20,
+        "amount_atomic": "1000000000000000000",
+        "amount": 1234,
+        "currency": "usd",
+        "exchange_rate": "0.12345678",
+        "price_source": "quote",
+        "valued_at": 1_790_410_321,
+        "address": "0x" + "11" * 20,
+        "from_address": "0x" + "44" * 20,
         "tx_hash": "0x" + "33" * 32,
         "log_index": 12,
-        "amount_atomic": "1000000000000000000",
+        "block_number": 100,
+        "amount_refunded_atomic": "0",
+        "refunded": False,
+        "created": 1_790_410_300,
     }
-    data.update(overrides)
-    return data
+    deposit.update(overrides)
+    return deposit
 
 
-def _event(data: dict[str, Any], event_type: str = CREDITED_EVENT) -> WebhookEvent:
+def _event(deposit: dict[str, Any], event_type: str = CREDITED_EVENT) -> WebhookEvent:
     return WebhookEvent(
-        id=str(credited_event_id(DEPOSIT)), type=event_type, created_at="…", data=data
+        id=credited_event_id(DEPOSIT),
+        type=event_type,
+        created=1_790_410_321,
+        data={"object": deposit},
     )
 
 
 def test_credited_event_id_is_derived_from_the_deposit_id() -> None:
-    # The service derives the same value (crates/topup, deposit.credited event id vector).
-    assert credited_event_id(DEPOSIT) == uuid.UUID("26a20351-ab10-595a-852f-9c1aa0372d73")
+    # The service derives the same value (crates/core, credited_event_id vector).
+    assert credited_event_id(DEPOSIT) == "evt_26a20351ab10595a852f9c1aa0372d73"
 
 
 def test_credited_event_parses_into_a_typed_credit() -> None:
-    credit = CreditedDeposit.from_event(_event(_data()))
+    credit = CreditedDeposit.from_event(_event(_deposit()))
     assert credit.deposit_id == DEPOSIT
-    assert credit.external_id == "team-42"
-    assert credit.amount_minor == 1234
-    assert credit.price_source == "lock"
-    assert credit.product_lock_ref == "q-981"
-    assert credit.fulfillment_key == f"deposit:{DEPOSIT}"
+    assert credit.account_id == "team-42"
+    assert credit.amount == 1234
+    assert credit.price_source == "quote"
+    assert credit.quote == "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10"
+    assert credit.fulfillment_key == DEPOSIT
 
 
-def test_spot_credit_may_carry_no_lock_ref() -> None:
-    credit = CreditedDeposit.from_event(_event(_data(price_source="spot", product_lock_ref=None)))
+def test_spot_and_swept_credits_parse() -> None:
+    credit = CreditedDeposit.from_event(
+        _event(_deposit(price_source="spot", quote=None, status="swept"))
+    )
     assert credit.price_source == "spot"
-    assert credit.product_lock_ref is None
+    assert credit.quote is None
 
 
 @pytest.mark.parametrize(
     "event",
     [
-        _event(_data(), event_type="deposit.confirmed"),
-        # A pre-fulfillment deposit.credited carried destination_tx_id and no account.
-        _event({key: value for key, value in _data().items() if key != "external_id"}),
-        _event(_data(state="swept")),
-        _event(_data(price_source="quote")),
-        _event(_data(amount_minor="12.34")),
-        _event(_data(amount_minor=1234)),
-        _event(_data(deposit_id="not-a-uuid")),
-        _event(_data(log_index=-1)),
-        _event(_data(route_version=True)),
-        _event(_data(product_lock_ref=7)),
+        _event(_deposit(), event_type="deposit.rejected"),
+        _event({key: value for key, value in _deposit().items() if key != "account_id"}),
+        _event(_deposit(status="rejected")),
+        _event(_deposit(object="quote")),
+        _event(_deposit(price_source="lock")),
+        _event(_deposit(amount="1234")),
+        _event(_deposit(amount=None)),
+        _event(_deposit(id="3f1c2b9e-6a8d-5c47-9e21-0b7d4f6a8c13")),
+        _event(_deposit(quote="q-981")),
+        _event(_deposit(log_index=-1)),
+        _event(_deposit(chain_id=True)),
+        # An operator replay of a credit delivered in the old envelope.
+        WebhookEvent(
+            id="26a20351-ab10-595a-852f-9c1aa0372d73",
+            type=CREDITED_EVENT,
+            created=0,
+            data={"deposit_id": "3f1c2b9e-6a8d-5c47-9e21-0b7d4f6a8c13", "state": "credited"},
+        ),
     ],
 )
 def test_other_shapes_are_refused(event: WebhookEvent) -> None:
@@ -111,7 +126,7 @@ def _receiver(key: Ed25519PrivateKey, credits: dict[str, int]) -> httpx.MockTran
         except SignatureError:
             return httpx.Response(400)
         credit = CreditedDeposit.from_event(event)
-        credits.setdefault(credit.fulfillment_key, credit.amount_minor)
+        credits.setdefault(credit.fulfillment_key, credit.amount)
         return httpx.Response(204)
 
     return httpx.MockTransport(handle)
@@ -123,24 +138,22 @@ def test_send_test_event_passes_a_verifying_deduplicating_receiver() -> None:
     report = send_test_event(
         "https://product.example/webhooks",
         key,
-        external_id="team-42",
-        amount_minor=250,
-        product_id=uuid.UUID(int=0),
+        account_id="team-42",
+        amount=250,
         transport=_receiver(key, credits),
     )
     assert report["passed"], json.dumps(report)
     assert [result["status"] for result in report["results"]] == [204, 204, 400]
-    assert credits == {f"deposit:{report['deposit_id']}": 250}
-    assert report["event_id"] == str(credited_event_id(uuid.UUID(report["deposit_id"])))
+    assert credits == {report["deposit_id"]: 250}
+    assert report["event_id"] == credited_event_id(report["deposit_id"])
 
 
 def test_send_test_event_fails_a_receiver_that_skips_verification() -> None:
     report = send_test_event(
         "https://product.example/webhooks",
         Ed25519PrivateKey.generate(),
-        external_id="team-42",
-        amount_minor=250,
-        product_id=uuid.UUID(int=0),
+        account_id="team-42",
+        amount=250,
         transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
     )
     assert not report["passed"]

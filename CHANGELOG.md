@@ -7,6 +7,15 @@ webhook receivers must ignore unknown fields.
 
 ### Changed
 
+- **Breaking**: webhooks are Stripe's Event object, `{"id": "evt_…", "object": "event", "type",
+  "created", "data": {"object": …}}`, where `data.object` is the deposit (`deposit.credited`,
+  `deposit.rejected`, `deposit.refunded`) or the quote (`quote.expired`, which replaces
+  `rate_lock.expired`) as the API returns it, rendered at the first delivery attempt. The
+  `webhook-id` is the `evt_` id, derived for every type from the event type and its object, so
+  every re-emission deduplicates. `deposit.pending` and `deposit.confirmed` are no longer sent:
+  the quote's `payment` shows a transfer before finality. Events delivered before this change
+  keep their old envelope when replayed. The admin outbox replay and deposit view take and show
+  `evt_` ids.
 - **Breaking**: quotes replace rate locks (docs/design/stripe-style-api.md §2). `POST /v1/quotes
   {account_id, amount, currency, chain_id, asset}`, `GET /v1/quotes/{id}`, and
   `POST /v1/quotes/{id}/cancel` replace `…/accounts/{ext}/rate-locks[/{ref}]`; the quote id

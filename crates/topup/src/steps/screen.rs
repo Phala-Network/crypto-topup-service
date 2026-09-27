@@ -12,13 +12,12 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
-use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
-use topup_core::identity::credited_event_id;
-use topup_core::money::PRICE_SCALE;
+use topup_core::deposit::{DepositState, RetryError, StepOutcome};
+use topup_core::identity::{credited_event_id, event_id};
 use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
 use uuid::Uuid;
 
-use crate::db::{Deposit, OutboxEvent};
+use crate::db::{Deposit, EventObject, OutboxEvent};
 use crate::pause::{self, PauseScopeSources};
 use crate::pump::{Step, StepResult};
 use crate::routes::{ProviderError, RouteSet};
@@ -81,10 +80,8 @@ impl ScreenRoute {
         );
         let evidence = screening_evidence(self.oracle, sanctions, self.bounds, &pause_scopes);
         let mut result = StepResult::new(outcome, evidence);
-        if let StepOutcome::Reject(reason) = outcome {
-            result
-                .events
-                .push(rejected_event(deposit, product_id, reason));
+        if let StepOutcome::Reject(_) = outcome {
+            result.events.push(rejected_event(deposit, product_id));
         }
         result
     }
@@ -218,16 +215,7 @@ impl Step for ScreenStep {
             .evaluate(deposit, product_id, pause_scopes)
             .await;
         if result.outcome == StepOutcome::Advance {
-            let credit = match credit_context(&self.pool, deposit.id).await {
-                Ok(Some(credit)) => credit,
-                Ok(None) => {
-                    return invariant_result("credit_context_missing", deposit.block_number);
-                }
-                Err(_) => {
-                    return transient_result("credit_context_load_failed", deposit.block_number);
-                }
-            };
-            match credited_event(deposit, product_id, &credit) {
+            match credited_event(deposit, product_id) {
                 Ok(event) => result.events.push(event),
                 Err(error) => return invariant_result(error, deposit.block_number),
             }
@@ -236,70 +224,17 @@ impl Step for ScreenStep {
     }
 }
 
-/// The account and receiving address a credit is owed for.
-#[derive(sqlx::FromRow)]
-struct CreditContext {
-    external_id: String,
-    address: String,
-    lock_ref: Option<String>,
-}
-
-async fn credit_context(
-    pool: &PgPool,
-    deposit_id: Uuid,
-) -> Result<Option<CreditContext>, sqlx::Error> {
-    sqlx::query_as::<_, CreditContext>(
-        r#"
-        SELECT account.external_id, address.address, address.lock_ref
-        FROM deposits AS deposit
-        JOIN accounts AS account ON account.id = deposit.account_id
-        JOIN addresses AS address ON address.id = deposit.address_id
-        WHERE deposit.id = $1
-        "#,
-    )
-    .bind(deposit_id)
-    .fetch_optional(pool)
-    .await
-}
-
-/// The fulfillment event: everything the product needs to credit the deposit once, keyed by a
-/// `webhook-id` derived from the deposit id.
-fn credited_event(
-    deposit: &Deposit,
-    product_id: Uuid,
-    credit: &CreditContext,
-) -> Result<OutboxEvent, &'static str> {
-    let credit_minor = deposit.credit_minor.ok_or("credit_minor_missing")?;
-    let price_scaled = deposit.price_scaled.ok_or("price_scaled_missing")?;
-    let price_source = deposit
-        .price_source
-        .as_deref()
-        .ok_or("price_source_missing")?;
-    let valuation_at = deposit.valuation_at.ok_or("valuation_at_missing")?;
+/// The fulfillment event: `deposit.credited`, whose object is the credited deposit, keyed by an
+/// id derived from the deposit id.
+fn credited_event(deposit: &Deposit, product_id: Uuid) -> Result<OutboxEvent, &'static str> {
+    // A credit always has its valuation; the event's deposit object carries it.
+    deposit.credit_minor.ok_or("credit_minor_missing")?;
+    deposit.valuation_at.ok_or("valuation_at_missing")?;
     Ok(OutboxEvent {
         id: credited_event_id(deposit.id),
         event_type: "deposit.credited".to_owned(),
-        payload: json!({
-            "product_id": product_id,
-            "external_id": credit.external_id,
-            "deposit_id": deposit.id,
-            "state": "credited",
-            "unit": "USD",
-            "amount_minor": credit_minor.value().to_string(),
-            "price_source": price_source,
-            "price_scaled": price_scaled.to_string(),
-            "price_scale": PRICE_SCALE,
-            "valuation_at": valuation_at,
-            "product_lock_ref": credit.lock_ref,
-            "address": credit.address,
-            "route": deposit.route.as_deref(),
-            "route_version": deposit.route_version,
-            "chain_id": deposit.chain_id,
-            "asset_contract": format!("{:#x}", deposit.asset_contract),
-            "tx_hash": format!("{:#x}", deposit.tx_hash),
-            "log_index": deposit.log_index,
-            "amount_atomic": deposit.amount_atomic.value().to_string(),
-        }),
+        product_id,
+        object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     })
 }
@@ -327,18 +262,12 @@ fn screening_evidence(
     })
 }
 
-fn rejected_event(deposit: &Deposit, product_id: Uuid, reason: RejectReason) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit, product_id: Uuid) -> OutboxEvent {
     OutboxEvent {
-        id: Uuid::new_v4(),
+        id: event_id("deposit.rejected", deposit.id),
         event_type: "deposit.rejected".to_owned(),
-        payload: json!({
-            "product_id": product_id,
-            "deposit_id": deposit.id,
-            "chain_id": deposit.chain_id,
-            "state": "rejected",
-            "route": deposit.route.as_deref(),
-            "reason": reason.code(),
-        }),
+        product_id,
+        object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     }
 }
@@ -371,7 +300,7 @@ fn transient_result(error: &'static str, block_number: u64) -> StepResult {
 mod tests {
     use alloy_primitives::{B256, U256};
     use chrono::Utc;
-    use topup_core::deposit::{StepOutcome, WaitReason};
+    use topup_core::deposit::{RejectReason, StepOutcome, WaitReason};
     use topup_core::money::AtomicAmount;
     use topup_core::screening::SanctionsAnswer;
 
@@ -514,12 +443,11 @@ mod tests {
                 assert_eq!(result.events.len(), 1);
                 assert_eq!(result.events[0].event_type, "deposit.rejected");
                 assert_eq!(
-                    result.events[0].payload["product_id"],
-                    product_id.to_string()
+                    result.events[0].id,
+                    event_id("deposit.rejected", deposit.id)
                 );
-                assert_eq!(result.events[0].payload["reason"], "sanctioned");
-                assert_eq!(result.events[0].payload["state"], "rejected");
-                assert_eq!(result.events[0].payload["route"], "route");
+                assert_eq!(result.events[0].product_id, product_id);
+                assert_eq!(result.events[0].object, EventObject::Deposit(deposit.id));
             } else {
                 assert!(result.events.is_empty());
             }
@@ -536,7 +464,7 @@ mod tests {
             out_of_bounds.outcome,
             StepOutcome::Reject(RejectReason::OutOfBounds)
         );
-        assert_eq!(out_of_bounds.events[0].payload["reason"], "out_of_bounds");
+        assert_eq!(out_of_bounds.events[0].event_type, "deposit.rejected");
         assert_eq!(out_of_bounds.evidence["bounds"]["min_atomic"], "10");
         assert_eq!(out_of_bounds.evidence["bounds"]["max_atomic"], "20");
 

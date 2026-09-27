@@ -1,6 +1,6 @@
 """The exact locked amount arrives after the lock expired.
 
-Expect: `rate_lock.expired` is delivered first; the late deposit is still credited, valued at
+Expect: `quote.expired` is delivered first; the late deposit is still credited, valued at
 spot rather than the lock price, and the lock stays `expired`.
 """
 
@@ -12,13 +12,14 @@ from harness import Context, check
 def run(ctx: Context) -> None:
     team = ctx.team("late")
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
-    expired = ctx.event(
-        "rate_lock.expired",
-        lambda data: data.get("external_id") == team and data.get("product_lock_ref") == lock_ref,
+    expired = ctx.event("quote.expired", lambda quote: quote["id"] == lock_ref)
+    check(
+        expired["account_id"] == team and expired["amount"] == lock.amount,
+        "expiry event names another quote",
     )
-    check(expired["credit_minor"] == str(lock.amount), "expiry event names another quote")
+    check(expired["status"] == "expired", f"expired quote is {expired['status']}")
     ctx.pay(lock.address, int(lock.amount_atomic))
-    deposit, confirmed = ctx.credited(team, lock.address, lock)
-    check(confirmed["price_source"] == "spot", "late payment was valued at the lock price")
+    deposit, credited = ctx.credited(team, lock.address, lock)
+    check(credited["price_source"] == "spot", "late payment was valued at the lock price")
     check(ctx.client.get_quote(lock_ref).status == "expired", "lock is not expired")
     check(deposit.quote == lock_ref, "deposit does not reference its quote")

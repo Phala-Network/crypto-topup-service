@@ -109,11 +109,10 @@
           {
             "name": "event_id",
             "in": "path",
-            "description": "Event identifier, the `webhook-id` header",
+            "description": "The `webhook-id` header: `evt_…`, or the UUID of an older event",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -2057,8 +2056,7 @@
           },
           "id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Stable event identifier, sent as the `webhook-id` header."
+            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an\nolder event."
           }
         }
       },
@@ -2457,8 +2455,7 @@
         "properties": {
           "event_id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Stable event identifier, sent as the `webhook-id` header."
+            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an\nolder event."
           },
           "event_type": {
             "type": "string",

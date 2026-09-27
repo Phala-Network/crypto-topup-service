@@ -20,20 +20,24 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use topup::db::{self, NewOutboxEvent};
+use topup::db::{self, AddressKind, EventObject, NewDeposit, NewOutboxEvent};
 use topup::outbox::{DeliveryConfig, DeliveryWorker, SignedWebhook};
+use topup::routes::RouteSet;
+use topup_core::deposit::DepositState;
+use topup_core::identity::deposit_id;
+use topup_core::money::AtomicAmount;
 use topup_core::{
     Ed25519PublicKey, Ed25519Signature, SignedTx, Signer as CoreSigner, SignerError, TxRequest,
 };
 use uuid::Uuid;
 
 use support::TestDatabase;
-use support::seed::{self, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewProduct};
 
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
@@ -340,6 +344,7 @@ fn worker_with_timeout(
 ) -> Result<DeliveryWorker<TestSigner>> {
     DeliveryWorker::new(
         pool.clone(),
+        Arc::new(RouteSet::new(Vec::new()).map_err(anyhow::Error::msg)?),
         signer,
         DeliveryConfig {
             batch_size: 1,
@@ -369,21 +374,71 @@ async fn seed_product(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
     Ok(product_id)
 }
 
-async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> Result<()> {
-    db::enqueue(
+/// Enqueues `deposit.credited` about a new deposit of `product_id`, due now; returns the deposit id.
+async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> Result<Uuid> {
+    let unique = alloy_primitives::keccak256(event_id.as_bytes());
+    let account = seed::create_account(
+        pool,
+        &NewAccount {
+            id: Uuid::new_v4(),
+            product_id,
+            external_id: format!("account-{event_id}"),
+            paused_scopes: Vec::new(),
+        },
+    )
+    .await?;
+    let address = seed::insert_address(
+        pool,
+        &NewAddress {
+            id: Uuid::new_v4(),
+            account_id: account.id,
+            chain_id: 1,
+            kind: AddressKind::Lock,
+            version: 1,
+            lock_ref: Some(format!("lock-{event_id}")),
+            salt: unique,
+            address: alloy_primitives::Address::from_word(unique),
+            retired_at: None,
+        },
+    )
+    .await?;
+    let deposit = NewDeposit {
+        chain_id: 1,
+        tx_hash: alloy_primitives::keccak256(unique),
+        log_index: 0,
+        block_number: 100,
+        block_hash: unique,
+        block_time: Utc::now(),
+        address_id: address.id,
+        account_id: account.id,
+        route: None,
+        route_version: None,
+        asset_contract: alloy_primitives::Address::repeat_byte(0x42),
+        from_address: alloy_primitives::Address::repeat_byte(0x43),
+        amount_atomic: AtomicAmount::new(alloy_primitives::U256::from(1_000_u64)),
+        state: DepositState::Detected,
+        reason: None,
+        next_attempt_at: Utc::now() + Duration::hours(1),
+    };
+    let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    ensure!(db::insert_deposit(pool, &deposit).await?);
+    db::enqueue_in(
         pool,
         &NewOutboxEvent {
             id: event_id,
-            event_type: "deposit.confirmed".to_owned(),
-            payload: json!({
-                "product_id": product_id,
-                "deposit_id": Uuid::new_v4(),
-            }),
+            event_type: "deposit.credited".to_owned(),
+            product_id,
+            object: EventObject::Deposit(deposit_id),
             next_attempt_at: Utc::now() - Duration::seconds(1),
         },
     )
     .await?;
-    Ok(())
+    Ok(deposit_id)
+}
+
+/// The `webhook-id` of a Stripe-style event.
+fn evt(event_id: Uuid) -> String {
+    topup::ids::format(topup::ids::EVENT, event_id)
 }
 
 async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<Uuid> {
@@ -401,7 +456,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
     let event_id = Uuid::new_v4();
     let body = br#"{"type":"deposit.confirmed","data":{}}"#;
 
-    let signed = SignedWebhook::new(&signer, event_id, Utc::now().timestamp(), body).await?;
+    let signed = SignedWebhook::new(&signer, &evt(event_id), Utc::now().timestamp(), body).await?;
     let tampered = client
         .post(&receiver.url)
         .header("webhook-id", &signed.id)
@@ -413,7 +468,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
     ensure!(tampered.status() == StatusCode::BAD_REQUEST);
 
     let stale_timestamp = Utc::now().timestamp() - TIMESTAMP_TOLERANCE_SECONDS - 1;
-    let stale = SignedWebhook::new(&signer, event_id, stale_timestamp, body).await?;
+    let stale = SignedWebhook::new(&signer, &evt(event_id), stale_timestamp, body).await?;
     let stale_response = client
         .post(&receiver.url)
         .header("webhook-id", &stale.id)
@@ -457,8 +512,65 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
         .first_body()
         .await
         .context("missing webhook body")?;
-    ensure!(envelope["event_id"] == event_id.to_string());
-    ensure!(envelope["type"] == "deposit.confirmed");
+    ensure!(envelope["id"] == evt(event_id) && envelope["object"] == "event");
+    ensure!(envelope["type"] == "deposit.credited");
+    ensure!(envelope["created"].is_i64());
+    let deposit = &envelope["data"]["object"];
+    ensure!(
+        deposit["object"] == "deposit" && deposit["status"] == "detected",
+        "{envelope}"
+    );
+    ensure!(
+        deposit["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("dep_"))
+    );
+    // The rendered data is stored, so every retry and replay sends it unchanged.
+    let stored: Value = sqlx::query_scalar("SELECT payload FROM outbox WHERE id = $1")
+        .bind(event_id)
+        .fetch_one(&context.app_pool)
+        .await?;
+    ensure!(stored == envelope["data"]);
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+/// An event written before Stripe-style events is delivered, and replayed, byte for byte in the
+/// old envelope under its bare UUID.
+#[tokio::test]
+async fn format_one_events_keep_the_old_envelope() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let receiver =
+        ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO).await?;
+    let product_id = seed_product(&context.app_pool, &receiver.url).await?;
+    let event_id = Uuid::new_v4();
+    let payload = serde_json::json!({"product_id": product_id, "deposit_id": Uuid::new_v4()});
+    let created_at: chrono::DateTime<Utc> = sqlx::query_scalar(
+        r#"
+        INSERT INTO outbox (id, event_type, payload, next_attempt_at, format, product_id)
+        VALUES ($1, 'deposit.credited', $2, now() - interval '1 second', 1, $3)
+        RETURNING created_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(&payload)
+    .bind(product_id)
+    .fetch_one(&context.app_pool)
+    .await?;
+
+    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
+    ensure!(receiver.ids().await == vec![event_id.to_string()]);
+    let expected = serde_json::to_vec(&topup::outbox::EventEnvelope {
+        event_id,
+        event_type: "deposit.credited".to_owned(),
+        created_at,
+        data: payload,
+    })?;
+    ensure!(receiver.bodies().await == vec![expected]);
 
     receiver.stop().await;
     context.cleanup().await
@@ -692,7 +804,7 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
         .execute(&context.app_pool)
         .await?;
     ensure!(delivery.run_once().await? == 1);
-    ensure!(receiver.ids().await == vec![event_id.to_string(), event_id.to_string()]);
+    ensure!(receiver.ids().await == vec![evt(event_id), evt(event_id)]);
     let mut bodies = receiver.bodies().await.into_iter();
     let first_body = bodies.next().context("missing failed delivery body")?;
     let second_body = bodies.next().context("missing successful retry body")?;
@@ -726,7 +838,7 @@ async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
     ensure!(delivery.run_once().await? == 1);
 
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["outbox", "replay", "--id", &event_id.to_string(), "--force"])
+        .args(["outbox", "replay", "--id", &evt(event_id), "--force"])
         .env("DATABASE_URL", &context.app_url)
         .output()
         .context("run topup outbox replay")?;
@@ -737,7 +849,7 @@ async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(delivery.run_once().await? == 1);
-    ensure!(receiver.ids().await == vec![event_id.to_string(), event_id.to_string()]);
+    ensure!(receiver.ids().await == vec![evt(event_id), evt(event_id)]);
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit WHERE action = 'outbox.replay' AND subject = $1",
     )

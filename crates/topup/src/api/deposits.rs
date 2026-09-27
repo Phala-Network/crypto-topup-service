@@ -7,12 +7,13 @@ use axum::Json;
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
 use crate::db::Product;
 use crate::ids;
+use crate::routes::RouteSet;
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
@@ -143,7 +144,7 @@ pub(crate) async fn list_deposits(
     }
     let mut data = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut deposit = deposit_object(&state, row)?;
+        let mut deposit = deposit_object(&state.routes, row)?;
         if expand.contains(&"data.quote") {
             deposit.quote = expanded_quote(&state, &product, deposit.quote).await?;
         }
@@ -181,7 +182,7 @@ pub(crate) async fn get_deposit(
 ) -> ApiResult<Json<Deposit>> {
     let expand = expansions(&query_pairs(query.as_deref()), &["quote"])?;
     let id = ids::parse(ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
-    let mut deposit = find_deposit(&state, product.id, id)
+    let mut deposit = find_deposit(&state.pool, &state.routes, Some(product.id), id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     if expand.contains(&"quote") {
@@ -298,7 +299,7 @@ pub(crate) async fn get_refund(
         && let ExpandableDeposit::Id(deposit) = &refund.deposit
     {
         let deposit_id = ids::parse(ids::DEPOSIT, deposit).ok_or_else(ApiError::internal)?;
-        let deposit = find_deposit(&state, product.id, deposit_id)
+        let deposit = find_deposit(&state.pool, &state.routes, Some(product.id), deposit_id)
             .await?
             .ok_or_else(ApiError::internal)?;
         refund.deposit = ExpandableDeposit::Object(Box::new(deposit));
@@ -306,23 +307,25 @@ pub(crate) async fn get_refund(
     Ok(Json(refund))
 }
 
-/// The product's deposit `id`, if it exists.
-pub(super) async fn find_deposit(
-    state: &AppState,
-    product_id: Uuid,
+/// Deposit `id`, of `product_id` when given, if it exists.
+pub(crate) async fn find_deposit(
+    pool: &PgPool,
+    routes: &RouteSet,
+    product_id: Option<Uuid>,
     id: Uuid,
 ) -> ApiResult<Option<Deposit>> {
     let mut builder = deposit_query();
-    builder
-        .push(" WHERE account.product_id = ")
-        .push_bind(product_id)
-        .push(" AND deposit.id = ")
-        .push_bind(id);
+    builder.push(" WHERE deposit.id = ").push_bind(id);
+    if let Some(product_id) = product_id {
+        builder
+            .push(" AND account.product_id = ")
+            .push_bind(product_id);
+    }
     builder
         .build_query_as::<DepositRow>()
-        .fetch_optional(&state.pool)
+        .fetch_optional(pool)
         .await?
-        .map(|row| deposit_object(state, row))
+        .map(|row| deposit_object(routes, row))
         .transpose()
 }
 
@@ -339,7 +342,7 @@ async fn expanded_quote(
         .await
         .map_err(|_| ApiError::internal())?
         .ok_or_else(ApiError::internal)?;
-    let quote = super::quotes::quote_object(state, product, lock).await?;
+    let quote = super::quotes::quote_object(&state.pool, &state.routes, lock).await?;
     Ok(Some(ExpandableQuote::Object(Box::new(quote))))
 }
 
@@ -434,10 +437,9 @@ fn deposit_query() -> QueryBuilder<Postgres> {
     )
 }
 
-fn deposit_object(state: &AppState, row: DepositRow) -> ApiResult<Deposit> {
+fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
     let asset = row.route.as_deref().and_then(|name| {
-        state
-            .routes
+        routes
             .routes()
             .iter()
             .find(|route| route.route == name)

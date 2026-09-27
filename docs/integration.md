@@ -41,11 +41,11 @@ sequenceDiagram
     S-->>PC: id, address, amount_atomic, amount, expires_at, payment_uri
     PC-->>User: QR, exact amount, countdown
     User->>ETH: transfer amount_atomic to the address
-    S-->>PC: webhook deposit.pending (provisional, display only)
+    PC->>S: GET /v1/quotes/{id} (the page polls: payment seen, display only)
     Note over S,ETH: block finalized (about 15 min)
     S->>S: detected → confirmed (2 RPC providers, price) → credited (screening)
     S->>PC: webhook deposit.credited (webhook-id derived from the deposit id)
-    PC->>PC: verify the signature, credit once by deposit:<id>, in one transaction
+    PC->>PC: verify the signature, credit once per dep_ id, in one transaction
     PC-->>S: 2xx (anything else is retried until 2xx)
     S->>ETH: factory.flush(salts, token) → treasury (swept)
     opt Phala Cloud refuses (closed or suspended workspace, its own caps)
@@ -239,8 +239,8 @@ and `price_scaled` has scale 8.
 `keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`; with the pinned forwarder
 `TopupClient` recomputes it and raises `AddressMismatchError`, so a user never pays an address you
 did not derive. You need no address records of your own to credit:
-`deposit.credited` names the workspace (`external_id`) and the quote id (`product_lock_ref`), also
-for a late or wrong-amount payment.
+`deposit.credited` carries the deposit, which names the workspace (`account_id`) and the quote
+(`quote`), also for a late or wrong-amount payment.
 
 ### 4.4 Errors
 
@@ -276,27 +276,28 @@ and owed to you, whatever you answer.
 ```http
 POST {webhook_url}
 content-type: application/json
-webhook-id: 26a20351-ab10-595a-852f-9c1aa0372d73
+webhook-id: evt_26a20351ab10595a852f9c1aa0372d73
 webhook-timestamp: 1790409600
 webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
 
-{"event_id": "26a20351-…", "type": "deposit.credited", "created_at": "…",
- "data": {"product_id": "…", "external_id": "team-42", "deposit_id": "3f1c2b9e-…",
-          "state": "credited", "unit": "USD", "amount_minor": "1234",
-          "price_source": "lock", "price_scaled": "…", "price_scale": 8, "valuation_at": "…",
-          "product_lock_ref": "checkout-981", "address": "0x…", "route": "…", "route_version": 1,
-          "chain_id": 1, "asset_contract": "0x…", "tx_hash": "0x…", "log_index": 12,
-          "amount_atomic": "…"}}
+{"id": "evt_26a20351ab10595a852f9c1aa0372d73", "object": "event", "type": "deposit.credited",
+ "created": 1790409590,
+ "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit",
+                     "account_id": "team-42", "quote": "qt_…", "status": "credited",
+                     "amount": 1234, "currency": "usd", "price_source": "quote", …}}}
 ```
 
-- `amount_minor` is the credit: exactly the quote's `credit_minor` when `price_source` is `lock`,
+- `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
+  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a flush
+  covered it before that first delivery.
+- `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
   otherwise spot at finality (§7).
-- `product_lock_ref` is the lock of the receiving address, also when a late or wrong-amount
-  payment was valued at spot; it is `null` only for a legacy persistent address.
-- `webhook-id` is `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit_id)`
-  (`topup_sdk.credited_event_id`): every retry, operator replay, and re-emission after a service
-  restore carries the same id.
-- Addresses and hashes are lowercase hex; amounts are decimal strings.
+- `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
+  valued at spot; it is `null` only for a legacy persistent address.
+- `webhook-id` is the event's `id`: `evt_` and the hex of
+  `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
+  (`topup_sdk.credited_event_id`), so every retry, operator replay, and re-emission after a
+  service restore carries the same id.
 
 ### 5.2 The fulfillment function
 
@@ -315,13 +316,13 @@ def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
 
 def fulfill(credit: CreditedDeposit) -> None:
     with db.transaction():
-        if orders.exists(provider_order_id=credit.fulfillment_key):  # "deposit:<id>", unique
+        if orders.exists(provider_order_id=credit.fulfillment_key):  # "dep_…", unique
             return  # already done; a differing amount only follows a service restore: report it
         if refuses(credit):  # closed or suspended workspace, your own caps
             orders.insert(credit.fulfillment_key, status="held")
             return  # support later requests a refund (§5.4)
         orders.insert(credit.fulfillment_key, status="paid")
-        ledger.credit(credit.external_id, credit.amount_minor)
+        ledger.credit(credit.account_id, credit.amount)
 ```
 
 [deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
@@ -332,14 +333,14 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 | # | Obligation | Why |
 |---|---|---|
 | 1 | Verify the `v1a` signature over the raw body against the pinned `(settlement/v1, public key)`; answer `400` otherwise. | Only the attested service may credit. |
-| 2 | Credit at most once per `deposit:<deposit_id>`: the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
+| 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§5.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
-| 5 | On a repeat with a different `amount_minor`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
+| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
 
-Optional hardening, your choice: fetch `GET /deposits/{id}` in `fulfill` and require `credited`
-or `swept` with the same amount; recompute `deposit_id = uuid_v5(NS,
-"{chain_id}:{tx_hash}:{log_index}")` (`topup_sdk.deposit_id`) and verify the cited log on your
+Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
+`credited` or `swept` with the same amount; recompute the deposit id, `dep_` and the hex of
+`uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` (`topup_sdk.deposit_id`), and verify the cited log on your
 own node at finality; per-deposit and per-period caps as review holds. None is needed for
 correctness: as with a card processor, the credit is authorized by the service's signature.
 Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
@@ -358,7 +359,7 @@ then wait in `confirmed` until you resume.
 ### 5.5 Phala Cloud ledger mapping
 
 Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto-top-up'`,
-`provider_order_id = "deposit:<deposit_id>"`, unique per flow), the credit transaction with
+`provider_order_id` = the deposit id `dep_…`, unique per flow), the credit transaction with
 `funding_source = crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction
 ([architecture §11](architecture.md#11-fulfillment-webhook)).
 
@@ -368,12 +369,17 @@ Every event, `deposit.credited` included, is Standard Webhooks with the asymmetr
 signed with the `settlement/v1` key and `POST`ed to the registered webhook URL:
 
 ```text
-webhook-id: <event UUID>
+webhook-id: evt_…
 webhook-timestamp: <Unix seconds of this attempt>
 webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
 
-{"event_id": "<same UUID>", "type": "deposit.credited", "created_at": "…", "data": {…}}
+{"id": "<same evt_ id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
+ "data": {"object": {…}}}
 ```
+
+The body is Stripe's [Event object](https://docs.stripe.com/api/events/object) without its
+account fields; the signature is Standard Webhooks, not `Stripe-Signature`, because you hold only
+the service's public key.
 
 ```python
 from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
@@ -396,26 +402,27 @@ def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
   30 s and doubles to 1 h; there is no final attempt. The operator is warned about events
   undelivered for 24 hours.
 - Deduplicate by `webhook-id`; delivery is at least once.
-- There is no ordering: `deposit.pending` can arrive after `deposit.credited`. Act on fetched
-  state (the deposit or lock), never on event order.
+- There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
+  payment. Act on fetched state (the deposit or quote), never on event order.
 - Only `deposit.credited` moves a balance (§5); every other event is for notifications, history,
   and UI refresh.
 - Ignore unknown event types and unknown fields.
 - A lost event can be replayed by the operator with the admin-signed
-  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same payload. The operator's
+  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same body. An event delivered
+  before prefixed ids keeps its old envelope on replay (`event_id`, `created_at`, flat `data`);
+  the SDK parses it, and `CreditedDeposit.from_event` refuses it because it was fulfilled when
+  first delivered. The operator's
   deposit view (`GET /v1/admin/deposits/{id}`) lists each deposit's `events` with `delivered_at`.
 
-| Type | When | `data` |
+| Type | When | `data.object` |
 |---|---|---|
-| `deposit.pending` | Head scan first sees a routed-token transfer to a watched address, above `finalized`; at most once per chain event. | `provisional: true`, `product_id`, `external_id`, `deposit_id`, `chain_id`, `tx_hash`, `log_index`, `block_number`, `address`, `product_lock_ref`, `asset_contract`, `from_address`, `amount_atomic` |
-| `deposit.confirmed` | Final, priced. | `product_id`, `deposit_id`, `chain_id`, `route`, `route_version`, `tx_hash`, `log_index`, `amount_atomic`, `price_scaled`, `price_scale`, `price_source` (`spot` or `lock`), `credit_minor`, `valuation_at` |
-| `deposit.credited` | Final, priced, and screened: fulfill it (§5). | `product_id`, `external_id`, `deposit_id`, `state`, `unit`, `amount_minor`, `price_source`, `price_scaled`, `price_scale`, `valuation_at`, `product_lock_ref`, `address`, `route`, `route_version`, `chain_id`, `asset_contract`, `tx_hash`, `log_index`, `amount_atomic` |
-| `deposit.rejected` | Rejected (§7). | `product_id`, `deposit_id`, `chain_id`, `state`, `route` (null without a route), `reason` |
-| `deposit.refunded` | A refund transaction is final. | `product_id`, `deposit_id`, `refund_id`, `chain_id`, `asset_contract`, `amount_atomic`, `to_address`, `tx_hash` |
-| `rate_lock.expired` | The finalized chain passed `expires_at` with the lock unconsumed. | `product_id`, `external_id`, `product_lock_ref`, `route`, `chain_id`, `address`, `amount_atomic`, `credit_minor`, `expires_at` |
+| `deposit.credited` | Final, priced, and screened: fulfill it (§5). | The deposit |
+| `deposit.rejected` | Rejected (§7); `rejection_reason` says why. | The deposit |
+| `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
+| `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
 
-`deposit.pending`, `deposit.credited`, and `rate_lock.expired` name the workspace; map the others
-through their `deposit_id` (`GET /deposits/{id}` carries `external_id`).
+Every object names its `account_id`. Before finality nothing is sent: a checkout page shows the
+payment from the quote's `payment` (or the payer's `payment_status` read by `client_secret`).
 
 ## 7. Deposit outcomes
 
@@ -427,10 +434,10 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
 | Payment | Outcome visible to Phala Cloud |
 |---|---|
-| Exact lock amount, in time (within `lock_tolerance_bps`) | Lock `consumed`; `deposit.credited` with `price_source: "lock"` and exactly the quoted `credit_minor`. |
-| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `rate_lock.expired`; cancel refused with `409 quote_payment_received`. Payments are not accumulated against one lock: offer a re-quote for the shortfall. |
+| Exact lock amount, in time (within `lock_tolerance_bps`) | Quote `complete`; `deposit.credited` with `price_source: "quote"` and exactly the quoted `amount`. |
+| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `409 quote_payment_received`. Payments are not accumulated against one lock: offer a re-quote for the shortfall. |
 | Overpayment beyond tolerance | Credited at spot for the full amount; lock not consumed. |
-| After the window (mined after `expires_at`) | `rate_lock.expired`, then credited at spot (`product_lock_ref` still names the quote). A payment mined inside the window stays at the lock price even if final later; the quote stays `open` past `expires_at` until then. |
+| After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the lock price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a lock address, or to a cancelled lock | Credited at spot. |
 | Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot at finality. |
 | Token without a route | After finality `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
@@ -463,12 +470,12 @@ cd sdk/python
 uv run --locked topup-sdk keygen --keyid settlement/v1 --seed-out /tmp/test-service.seed
 # Configure your test instance to pin the printed public key in place of the service key, then:
 uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
-  --seed-file /tmp/test-service.seed --external-id test-workspace --amount-minor 250
+  --seed-file /tmp/test-service.seed --account-id test-workspace --amount 250
 ```
 
 It sends a signed `deposit.credited`, the same event again, and a copy signed by another key, and
 passes when your answers are `2xx`, `2xx`, and `4xx`. Then check your ledger: exactly one credit
-of `--amount-minor` for `--external-id`. The reference product's tests
+of `--amount` cents for `--account-id`. The reference product's tests
 ([deploy/product/tests](../deploy/product/tests)) are a worked example of the §5 obligations.
 
 ### 8.2 Staging
@@ -483,7 +490,7 @@ finality takes about 15 minutes per deposit.
 
 - [ ] `topup-sdk send-test-event` passes against your production code path, and the ledger holds
       one credit.
-- [ ] Fulfillment keyed by `deposit:<deposit_id>` under a unique index, committed before `2xx`;
+- [ ] Fulfillment keyed by the deposit id (`dep_…`) under a unique index, committed before `2xx`;
       refusals recorded as holds, never answered `5xx`.
 - [ ] Production product key generated for production only; seed in the secret store; public key
       and key id sent to the operator; webhook URL agreed.

@@ -174,8 +174,8 @@ struct HealthcheckArgs {
 #[derive(Subcommand)]
 enum OutboxCommand {
     Replay {
-        /// Replay one event by its stable webhook identifier.
-        #[arg(long, conflicts_with = "since", required_unless_present = "since")]
+        /// Replay one event by its `webhook-id`: `evt_…`, or the UUID of an older event.
+        #[arg(long, conflicts_with = "since", required_unless_present = "since", value_parser = parse_event_id)]
         id: Option<Uuid>,
         /// Replay events created at or after this RFC 3339 timestamp.
         #[arg(long, conflicts_with = "id", required_unless_present = "id")]
@@ -624,7 +624,8 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .zip(u32::try_from(scanner_count).ok())
         .zip(u32::try_from(route_count).ok())
         .and_then(|((pumps, scanners), routes)| pumps.checked_add(scanners)?.checked_add(routes))
-        .and_then(|count| count.checked_add(3))
+        // The outbox renders an event's object on a second connection while it holds the claim.
+        .and_then(|count| count.checked_add(4))
         .context("route count is too large")?;
     let pool = connect("DATABASE_URL", "run", connection_count)
         .await
@@ -635,6 +636,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let signer = spawn_signer(None).context("failed to start signer actor")?;
     let delivery_worker = topup::outbox::DeliveryWorker::new(
         pool.clone(),
+        Arc::clone(&routes),
         Arc::new(signer.clone()),
         topup::outbox::DeliveryConfig::default(),
     )
@@ -1075,6 +1077,10 @@ fn spawn_signer(operator_key_version: Option<NonZeroU32>) -> std::io::Result<Sig
         None => DstackSigner::new(),
     };
     SignerHandle::spawn(signer, SIGNER_QUEUE, SIGNER_TIMEOUT)
+}
+
+fn parse_event_id(value: &str) -> Result<Uuid, String> {
+    topup::ids::parse_event(value).ok_or_else(|| "expected an evt_ id or a UUID".to_owned())
 }
 
 async fn replay_outbox(

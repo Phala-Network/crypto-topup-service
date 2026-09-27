@@ -676,7 +676,7 @@ pub async fn replay_outbox_event(
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
         r#"
-        SELECT event_type, next_attempt_at,
+        SELECT event_type, format, next_attempt_at,
                delivered_at IS NULL AND next_attempt_at <= now() AS due
         FROM outbox
         WHERE id = $1
@@ -710,7 +710,7 @@ pub async fn replay_outbox_event(
     }
     transaction.commit().await?;
     Ok(OutboxReplayResponse {
-        event_id,
+        event_id: crate::outbox::webhook_id(row.try_get("format")?, event_id),
         event_type: row.try_get("event_type")?,
         next_attempt_at,
     })
@@ -929,6 +929,7 @@ impl From<DepositTransitionRow> for DepositTransitionResponse {
 #[derive(FromRow)]
 struct DepositEventRow {
     id: Uuid,
+    format: i16,
     deposit_id: Uuid,
     event_type: String,
     created_at: DateTime<Utc>,
@@ -938,7 +939,7 @@ struct DepositEventRow {
 impl From<DepositEventRow> for DepositEventResponse {
     fn from(row: DepositEventRow) -> Self {
         Self {
-            id: row.id,
+            id: crate::outbox::webhook_id(row.format, row.id),
             event_type: row.event_type,
             created_at: row.created_at,
             delivered_at: row.delivered_at,
@@ -1082,13 +1083,17 @@ async fn fetch_support_page(
     }
     let events = sqlx::query_as::<_, DepositEventRow>(
         r#"
-        SELECT id, (payload ->> 'deposit_id')::uuid AS deposit_id, event_type, created_at,
-               delivered_at
+        SELECT id, format,
+               CASE WHEN format = 1 THEN (payload ->> 'deposit_id')::uuid ELSE object_id END
+                   AS deposit_id,
+               event_type, created_at, delivered_at
         FROM outbox
-        WHERE payload ->> 'deposit_id' = ANY($1)
+        WHERE (object_type = 'deposit' AND object_id = ANY($1))
+           OR (format = 1 AND payload ->> 'deposit_id' = ANY($2))
         ORDER BY created_at, id
         "#,
     )
+    .bind(&ids)
     .bind(ids.iter().map(Uuid::to_string).collect::<Vec<_>>())
     .fetch_all(pool)
     .await?;
@@ -1228,7 +1233,7 @@ pub async fn daily_report(
                    max(extract(epoch FROM ($1 - outbox.created_at)))::bigint, 0
                ) AS max_age_seconds
         FROM outbox
-        JOIN deposits AS deposit ON deposit.id::text = outbox.payload ->> 'deposit_id'
+        JOIN deposits AS deposit ON deposit.id = outbox.object_id
         WHERE outbox.event_type = 'deposit.credited' AND outbox.delivered_at IS NULL
         GROUP BY report_key
         "#,

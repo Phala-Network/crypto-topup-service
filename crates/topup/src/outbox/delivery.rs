@@ -12,8 +12,10 @@ use topup_core::{Signer, retry::backoff};
 use tracing::Instrument as _;
 use uuid::Uuid;
 
-use super::{EventEnvelope, SignedWebhook};
+use super::{Event, EventEnvelope, LEGACY_FORMAT, SignedWebhook, webhook_id};
+use crate::db::EventObject;
 use crate::jitter::{JitterSource, OsJitter};
+use crate::routes::RouteSet;
 
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
 
@@ -66,6 +68,8 @@ struct ClaimedEvent {
     id: Uuid,
     event_type: String,
     payload: Value,
+    format: i16,
+    object: Option<EventObject>,
     attempts: i32,
     created_at: DateTime<Utc>,
     claim_until: DateTime<Utc>,
@@ -86,6 +90,7 @@ enum ClaimResult {
 /// PostgreSQL-backed Standard Webhooks sender.
 pub struct DeliveryWorker<S> {
     pool: PgPool,
+    routes: Arc<RouteSet>,
     client: Client,
     signer: Arc<S>,
     config: DeliveryConfig,
@@ -99,6 +104,7 @@ where
     /// Builds a worker with redirects disabled and a bounded request timeout.
     pub fn new(
         pool: PgPool,
+        routes: Arc<RouteSet>,
         signer: Arc<S>,
         config: DeliveryConfig,
     ) -> Result<Self, DeliveryError> {
@@ -110,6 +116,7 @@ where
             .map_err(DeliveryError::Client)?;
         Ok(Self {
             pool,
+            routes,
             client,
             signer,
             config,
@@ -162,7 +169,8 @@ where
                     self.warn_if_old(&delivery.event);
                     let span = crate::observability::outbox_delivery_span(
                         delivery.event.id,
-                        &delivery.event.payload,
+                        &delivery.event.event_type,
+                        delivery.event.object.map(EventObject::id),
                         delivery.event.attempts,
                     );
                     self.deliver_claimed(delivery).instrument(span).await?;
@@ -227,23 +235,17 @@ where
             return Ok(());
         };
 
-        let envelope = EventEnvelope {
-            event_id: event.id,
-            event_type: event.event_type.clone(),
-            created_at: event.created_at,
-            data: event.payload.clone(),
-        };
-        let body = match serde_json::to_vec(&envelope) {
-            Ok(body) => body,
-            Err(_) => {
-                self.record_failure(connection, event, None, None, "envelope_serialization")
+        let (webhook_id, body) = match self.event_body(connection, event, product_id).await? {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                self.record_failure(connection, event, None, None, error)
                     .await?;
                 return Ok(());
             }
         };
         let signed = match SignedWebhook::new(
             self.signer.as_ref(),
-            event.id,
+            &webhook_id,
             Utc::now().timestamp(),
             &body,
         )
@@ -295,6 +297,57 @@ where
             .await?;
         }
         Ok(())
+    }
+
+    /// Returns the `webhook-id` and body. A format-2 event's `data` is rendered on its first
+    /// attempt and stored with the attempt's outcome, so every retry and replay sends it unchanged.
+    async fn event_body(
+        &self,
+        connection: &mut PgConnection,
+        event: &ClaimedEvent,
+        product_id: Uuid,
+    ) -> Result<Result<(String, Vec<u8>), &'static str>, DeliveryError> {
+        if event.format == LEGACY_FORMAT {
+            let envelope = EventEnvelope {
+                event_id: event.id,
+                event_type: event.event_type.clone(),
+                created_at: event.created_at,
+                data: event.payload.clone(),
+            };
+            return Ok(serde_json::to_vec(&envelope)
+                .map(|body| (webhook_id(event.format, event.id), body))
+                .map_err(|_| "envelope_serialization"));
+        }
+        let Some(object) = event.object else {
+            return Ok(Err("missing_object"));
+        };
+        let data = if event.payload.get("object").is_some() {
+            event.payload.clone()
+        } else {
+            match crate::api::event_data(&self.pool, &self.routes, product_id, object).await {
+                Ok(Some(data)) => {
+                    sqlx::query("UPDATE outbox SET payload = $2 WHERE id = $1")
+                        .bind(event.id)
+                        .bind(&data)
+                        .execute(&mut *connection)
+                        .await?;
+                    data
+                }
+                Ok(None) => return Ok(Err("object_not_found")),
+                Err(()) => return Ok(Err("render_failed")),
+            }
+        };
+        let id = webhook_id(event.format, event.id);
+        let envelope = Event {
+            id: id.clone(),
+            object: "event",
+            event_type: event.event_type.clone(),
+            created: event.created_at.timestamp(),
+            data,
+        };
+        Ok(serde_json::to_vec(&envelope)
+            .map(|body| (id, body))
+            .map_err(|_| "envelope_serialization"))
     }
 
     async fn record_failure(
@@ -358,8 +411,9 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
         SET next_attempt_at = now() + make_interval(secs => $1)
         FROM candidates
         WHERE event.id = candidates.id
-        RETURNING event.id, event.event_type, event.payload, event.attempts,
-                  event.created_at, event.next_attempt_at
+        RETURNING event.id, event.event_type, event.payload, event.format, event.product_id,
+                  event.object_type, event.object_id, event.attempts, event.created_at,
+                  event.next_attempt_at
         "#,
     )
     .bind(lease_seconds)
@@ -369,15 +423,24 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
         transaction.commit().await?;
         return Ok(ClaimResult::Empty);
     };
+    let object_type: Option<String> = row.try_get("object_type")?;
+    let object_id: Option<Uuid> = row.try_get("object_id")?;
     let event = ClaimedEvent {
         id: row.try_get("id")?,
         event_type: row.try_get("event_type")?,
         payload: row.try_get("payload")?,
+        format: row.try_get("format")?,
+        object: object_type
+            .zip(object_id)
+            .and_then(|(object_type, id)| EventObject::from_parts(&object_type, id)),
         attempts: row.try_get("attempts")?,
         created_at: row.try_get("created_at")?,
         claim_until: row.try_get("next_attempt_at")?,
     };
-    let product_id = product_id(&event.payload);
+    let product_id = match row.try_get::<Option<Uuid>, _>("product_id")? {
+        Some(product_id) => Ok(product_id),
+        None => legacy_product_id(&event.payload),
+    };
     if let Ok(product_id) = product_id {
         let locked = sqlx::query_scalar::<_, bool>(
             "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
@@ -399,7 +462,7 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
     }))
 }
 
-fn product_id(payload: &Value) -> Result<Uuid, &'static str> {
+fn legacy_product_id(payload: &Value) -> Result<Uuid, &'static str> {
     let Some(raw) = payload.get("product_id").and_then(Value::as_str) else {
         return Err("missing_product_id");
     };

@@ -5,8 +5,8 @@ signed `deposit.credited` webhook. `Fulfillment` does what Phala Cloud's backend
 
 1. verify the Standard Webhooks `v1a` signature against the settlement key pinned from
    attestation, over the raw body;
-2. credit once per deposit: the order row keyed by `provider_order_id = "deposit:<id>"` is
-   found-or-created under a unique index, and the credit transaction and
+2. credit once per deposit: the order row keyed by `provider_order_id`, the deposit's `dep_` id,
+   is found-or-created under a unique index, and the credit transaction and
    `complete_order_payment` commit in the same transaction;
 3. hold instead of crediting when the product refuses (unknown or suspended workspace, its own
    per-deposit or per-period cap); support later collects a refund address and requests a refund;
@@ -77,12 +77,12 @@ class Fulfillment:
             try:
                 credit = CreditedDeposit.from_event(event)
             except FulfillmentError as error:
-                # A deposit.credited from before fulfillment was settled by the old protocol.
+                # A replay of a credit delivered in the old envelope was fulfilled back then.
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
             else:
                 self.fulfill(credit)
         if self.ledger.record_event(event.id, event.type, event.data):
-            LOG.info("webhook %s %s", event.type, event.data.get("deposit_id", ""))
+            LOG.info("webhook %s %s", event.type, (event.object or {}).get("id", ""))
         return Answer(HTTPStatus.NO_CONTENT)
 
     def fulfill(self, credit: CreditedDeposit) -> str:
@@ -96,19 +96,19 @@ class Fulfillment:
             existing = ProductLedger._find_order(db, key)
             if existing is not None:
                 stored = parse_decimal(existing.payload.get("amount_minor"))
-                if stored is not None and stored != credit.amount_minor:
+                if stored is not None and stored != credit.amount:
                     # Only a service restored from backup re-prices a spot deposit: keep the first
                     # credit and raise it with the operator.
                     LOG.error(
                         "deposit.credited %s repeats with %s minor, first credited %s",
                         key,
-                        credit.amount_minor,
+                        credit.amount,
                         stored,
                     )
                 return existing.status
             hold = self._hold_reason(db, credit, now)
             order_id = str(uuid.uuid4())
-            team_id = None if hold == "unknown_account" else credit.external_id
+            team_id = None if hold == "unknown_account" else credit.account_id
             db.execute(
                 "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
                 "payload, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -132,9 +132,9 @@ class Fulfillment:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         credit_id,
-                        credit.external_id,
+                        credit.account_id,
                         order_id,
-                        credit.amount_minor,
+                        credit.amount,
                         f"crypto:{self.config.token_symbol}:{credit.chain_id}",
                         now,
                     ),
@@ -150,28 +150,28 @@ class Fulfillment:
 
     def _hold_reason(self, db: Any, credit: CreditedDeposit, now: float) -> str | None:
         row = db.execute(
-            "SELECT suspended FROM teams WHERE id = ?", (credit.external_id,)
+            "SELECT suspended FROM teams WHERE id = ?", (credit.account_id,)
         ).fetchone()
         if row is None:
             return "unknown_account"
         if row[0]:
             return "account_suspended"
-        if credit.amount_minor > self.config.per_deposit_cap_minor:
+        if credit.amount > self.config.per_deposit_cap_minor:
             return "per_deposit_cap"
         since = now - self.config.period_seconds
-        already = self.ledger.credited_since(db, credit.external_id, since)
-        if already + credit.amount_minor > self.config.per_period_cap_minor:
+        already = self.ledger.credited_since(db, credit.account_id, since)
+        if already + credit.amount > self.config.per_period_cap_minor:
             return "per_period_cap"
         return None
 
 
 def _payload(credit: CreditedDeposit) -> dict[str, Any]:
     return {
-        "deposit_id": str(credit.deposit_id),
-        "external_id": credit.external_id,
-        "amount_minor": str(credit.amount_minor),
+        "deposit_id": credit.deposit_id,
+        "account_id": credit.account_id,
+        "amount_minor": str(credit.amount),
         "price_source": credit.price_source,
-        "product_lock_ref": credit.product_lock_ref,
+        "quote": credit.quote,
         "tx_hash": credit.tx_hash,
         "log_index": credit.log_index,
     }

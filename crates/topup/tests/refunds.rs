@@ -353,12 +353,17 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 .await?;
         ensure!(confirmed.try_get::<String, _>("status")? == "confirmed");
         ensure!(confirmed.try_get::<Value, _>("confirmation_evidence")?["result"] == "matched");
-        let event: Value =
-            sqlx::query_scalar("SELECT payload FROM outbox WHERE event_type = 'deposit.refunded'")
-                .fetch_one(&database.app_pool)
-                .await?;
-        ensure!(event["refund_id"] == refund_id.to_string());
-        ensure!(event["product_id"] == product.id.to_string());
+        let event = sqlx::query(
+            "SELECT id, product_id, object_id FROM outbox WHERE event_type = 'deposit.refunded'",
+        )
+        .fetch_one(&database.app_pool)
+        .await?;
+        ensure!(
+            event.try_get::<Uuid, _>("id")?
+                == topup_core::identity::event_id("deposit.refunded", refund_id)
+        );
+        ensure!(event.try_get::<Option<Uuid>, _>("product_id")? == Some(product.id));
+        ensure!(event.try_get::<Option<Uuid>, _>("object_id")? == Some(deposit));
 
         let tx_hash: String = sqlx::query_scalar("SELECT tx_hash FROM deposits WHERE id = $1")
             .bind(deposit)
@@ -1112,13 +1117,15 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         // The credited deposit's fulfillment event is still waiting for the product.
         sqlx::query(
             r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at, created_at)
-            VALUES ($1, 'deposit.credited', jsonb_build_object('deposit_id', $2::text), now(),
-                    now() - interval '1 hour')
+            INSERT INTO outbox (id, event_type, payload, next_attempt_at, created_at, product_id,
+                                object_type, object_id)
+            VALUES ($1, 'deposit.credited', '{}', now(), now() - interval '1 hour', $2,
+                    'deposit', $3)
             "#,
         )
         .bind(Uuid::new_v4())
-        .bind(credited.to_string())
+        .bind(product.id)
+        .bind(credited)
         .execute(&database.app_pool)
         .await?;
         seed_open_lock(&database.app_pool, product.id).await?;

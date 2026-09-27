@@ -578,10 +578,7 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query_as::<_, ExpiringRow>(
         r#"
-        SELECT rate_lock.address_id, rate_lock.credit_minor::text AS credit_minor,
-               rate_lock.amount_atomic::text AS amount_atomic,
-               account.product_id, account.external_id, address.chain_id, address.address,
-               address.lock_ref, rate_lock.route, rate_lock.expires_at
+        SELECT rate_lock.address_id, account.product_id
         FROM rate_locks AS rate_lock
         JOIN addresses AS address ON address.id = rate_lock.address_id
         JOIN accounts AS account ON account.id = address.account_id
@@ -625,26 +622,16 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     }
 
     for row in &rows {
-        let credit_minor = parse_minor(&row.credit_minor)?;
-        sqlx::query(
-            r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-            VALUES ($1, 'rate_lock.expired', $2, now())
-            "#,
+        crate::db::enqueue_in(
+            &mut *transaction,
+            &crate::db::NewOutboxEvent {
+                id: topup_core::identity::event_id("quote.expired", row.address_id),
+                event_type: "quote.expired".to_owned(),
+                product_id: row.product_id,
+                object: crate::db::EventObject::Quote(row.address_id),
+                next_attempt_at: Utc::now(),
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(json!({
-            "product_id": row.product_id,
-            "external_id": row.external_id,
-            "product_lock_ref": row.lock_ref,
-            "route": row.route,
-            "chain_id": row.chain_id,
-            "address": row.address,
-            "amount_atomic": row.amount_atomic,
-            "credit_minor": credit_minor.value().to_string(),
-            "expires_at": row.expires_at,
-        }))
-        .execute(&mut *transaction)
         .await?;
     }
     transaction.commit().await?;
@@ -925,15 +912,7 @@ async fn get_in(
 #[derive(FromRow)]
 struct ExpiringRow {
     address_id: Uuid,
-    credit_minor: String,
-    amount_atomic: String,
     product_id: Uuid,
-    external_id: String,
-    chain_id: i64,
-    address: String,
-    lock_ref: String,
-    route: String,
-    expires_at: DateTime<Utc>,
 }
 
 fn parse_minor(value: &str) -> Result<MinorAmount, RateLockError> {

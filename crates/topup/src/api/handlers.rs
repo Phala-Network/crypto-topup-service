@@ -316,7 +316,11 @@ pub(crate) async fn lift_reconciliation_block(
 #[utoipa::path(
     post,
     path = "/v1/admin/outbox/{event_id}/replay",
-    params(("event_id" = Uuid, Path, description = "Event identifier, the `webhook-id` header")),
+    params((
+        "event_id" = String,
+        Path,
+        description = "The `webhook-id` header: `evt_…`, or the UUID of an older event"
+    )),
     request_body = AdminReasonRequest,
     responses(
         (status = 200, description = "OK: queued for delivery", body = OutboxReplayResponse),
@@ -328,9 +332,10 @@ pub(crate) async fn lift_reconciliation_block(
 )]
 pub(crate) async fn replay_outbox_event(
     State(state): State<AppState>,
-    Path(event_id): Path<Uuid>,
+    Path(event_id): Path<String>,
     Json(request): Json<AdminReasonRequest>,
 ) -> ApiResult<Json<OutboxReplayResponse>> {
+    let event_id = crate::ids::parse_event(&event_id).ok_or_else(ApiError::not_found)?;
     validate_reason(&request.reason)?;
     Ok(Json(
         repository::replay_outbox_event(

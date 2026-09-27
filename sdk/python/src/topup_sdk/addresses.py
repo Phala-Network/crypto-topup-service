@@ -10,6 +10,8 @@ import uuid
 
 from Crypto.Hash import keccak
 
+from .ids import DEPOSIT, object_id
+
 DEPOSIT_NAMESPACE = uuid.UUID("d55bab89-f656-5796-a6a2-bddfa1dd9631")
 
 _CLONE_CREATION_PREFIX = bytes.fromhex("3d602d80600a3d3981f3")
@@ -22,12 +24,13 @@ def keccak256(data: bytes) -> bytes:
     return bytes(keccak.new(digest_bits=256, data=data).digest())
 
 
-def deposit_id(chain_id: int, tx_hash: str, log_index: int) -> uuid.UUID:
-    """Returns UUIDv5(NS, `{chain_id}:{lowercase tx_hash}:{log_index}`)."""
+def deposit_id(chain_id: int, tx_hash: str, log_index: int) -> str:
+    """Returns a transfer's deposit id, `dep_` and the hex of
+    UUIDv5(NS, `{chain_id}:{lowercase tx_hash}:{log_index}`)."""
     tx_hash = tx_hash.lower()
     if len(_hex_bytes(tx_hash)) != 32:
         raise ValueError("tx_hash must be 32 bytes")
-    return uuid.uuid5(DEPOSIT_NAMESPACE, f"{chain_id}:{tx_hash}:{log_index}")
+    return object_id(DEPOSIT, uuid.uuid5(DEPOSIT_NAMESPACE, f"{chain_id}:{tx_hash}:{log_index}"))
 
 
 def lock_salt(product_slug: str, external_id: str, lock_ref: str) -> bytes:

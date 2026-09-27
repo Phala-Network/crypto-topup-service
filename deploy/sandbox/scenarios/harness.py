@@ -32,7 +32,6 @@ from reference_product.server import create_quote, register_team  # noqa: E402
 from topup_client.models import Deposit, Quote  # noqa: E402
 from topup_sdk import TopupClient  # noqa: E402
 from topup_sdk.addresses import same_address  # noqa: E402
-from topup_sdk.ids import DEPOSIT, parse_id  # noqa: E402
 
 LOG = logging.getLogger("sandbox")
 TOKEN_UNIT = 10**18
@@ -60,11 +59,6 @@ def credit(deposit: Deposit) -> int:
     return int(str(deposit.amount))
 
 
-def deposit_uuid(deposit: Deposit) -> str:
-    """The deposit's UUID, as webhook events and the ledger's order keys name it."""
-    return str(parse_id(DEPOSIT, deposit.id))
-
-
 class ScenarioFulfillment(Fulfillment):
     """Reference webhook receiver with per-team delivery counters and one injectable fault."""
 
@@ -80,7 +74,7 @@ class ScenarioFulfillment(Fulfillment):
         answer = super().handle(headers, body)
         try:
             envelope = json.loads(body)
-            team = str(envelope["data"]["external_id"])
+            team = str(envelope["data"]["object"]["account_id"])
             credited = envelope["type"] == "deposit.credited"
         except (ValueError, KeyError, TypeError):
             return answer
@@ -145,32 +139,32 @@ class Context:
         )
 
     def event(self, event_type: str, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
-        return self.ledger.wait_for_event(event_type, matches, EVENT_TIMEOUT_S)
+        """Waits for an `event_type` webhook whose `data.object` `matches`; returns that object."""
+        data = self.ledger.wait_for_event(
+            event_type, lambda data: matches(data.get("object") or {}), EVENT_TIMEOUT_S
+        )
+        return dict(data["object"])
 
     def deposit_event(self, event_type: str, deposit: Deposit) -> dict[str, Any]:
-        return self.event(event_type, lambda data: data.get("deposit_id") == deposit_uuid(deposit))
+        return self.event(event_type, lambda deposit_object: deposit_object["id"] == deposit.id)
 
     def credited(
         self, team: str, address: str, lock: Quote | None = None, tx_hash: str | None = None
     ) -> tuple[Deposit, dict[str, Any]]:
-        """Waits for credit and checks the webhook and product ledger agree with the service."""
+        """Waits for credit and checks the webhook and product ledger agree with the service;
+        returns the deposit and the `deposit.credited` event's deposit object."""
         deposit = self.deposit(team, address, tx_hash=tx_hash)
         check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
-        confirmed = self.deposit_event("deposit.confirmed", deposit)
         credited = self.deposit_event("deposit.credited", deposit)
         check(
-            credited["amount_minor"] == str(deposit.amount),
+            credited["amount"] == deposit.amount,
             "deposit.credited amount differs from the deposit's credit",
         )
-        credits = [
-            amount
-            for key, amount in self.ledger.credits_for(team)
-            if key == f"deposit:{deposit_uuid(deposit)}"
-        ]
+        credits = [amount for key, amount in self.ledger.credits_for(team) if key == deposit.id]
         check(credits == [credit(deposit)], f"product ledger holds {credits}")
         if lock is not None:
             check(same_address(deposit.address, lock.address), "deposit is not at the lock")
-        return deposit, confirmed
+        return deposit, credited
 
     def restart_service(self) -> None:
         if not self.config.restart_command:

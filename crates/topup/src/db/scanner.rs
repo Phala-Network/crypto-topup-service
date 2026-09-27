@@ -2,7 +2,7 @@ use alloy_primitives::Address as EvmAddress;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use topup_core::deposit::{DepositState, RejectReason};
-use topup_core::identity::deposit_id;
+use topup_core::identity::{deposit_id, event_id};
 use uuid::Uuid;
 
 use super::deposits::{NewDeposit, insert_deposit_in};
@@ -59,42 +59,25 @@ async fn insert_rejected_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deposit: &NewDeposit,
 ) -> Result<(), sqlx::Error> {
-    let reason = deposit.reason.ok_or_else(|| {
-        sqlx::Error::Protocol("rejected deposit is missing its reason".to_owned())
-    })?;
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO outbox (id, event_type, payload, next_attempt_at)
-        SELECT $1, 'deposit.rejected',
-               jsonb_build_object(
-                   'product_id', account.product_id,
-                   'deposit_id', $2::uuid,
-                   'chain_id', $5::bigint,
-                   'state', 'rejected',
-                   'route', $6::text,
-                   'reason', $3::text
-               ),
-               now()
-        FROM accounts AS account
-        WHERE account.id = $4
-        "#,
+    let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
+        .bind(deposit.account_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or_else(|| {
+            sqlx::Error::Protocol("rejected deposit account does not exist".to_owned())
+        })?;
+    super::outbox::enqueue_in(
+        &mut **transaction,
+        &super::outbox::NewOutboxEvent {
+            id: event_id("deposit.rejected", id),
+            event_type: "deposit.rejected".to_owned(),
+            product_id,
+            object: super::outbox::EventObject::Deposit(id),
+            next_attempt_at: Utc::now(),
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(id)
-    .bind(reason.code())
-    .bind(deposit.account_id)
-    .bind(to_i64(deposit.chain_id, "deposits.chain_id")?)
-    .bind(deposit.route.as_deref())
-    .execute(&mut **transaction)
-    .await?;
-    if inserted.rows_affected() == 1 {
-        Ok(())
-    } else {
-        Err(sqlx::Error::Protocol(
-            "rejected deposit account does not exist".to_owned(),
-        ))
-    }
+    .await
 }
 
 /// Returns the last completely committed block for a chain.
