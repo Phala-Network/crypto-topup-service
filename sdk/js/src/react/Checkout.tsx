@@ -167,17 +167,14 @@ function statusMessage(status: CheckoutStatus, quote: ClientQuote | null): strin
 
 function Transaction({ hash, chainId }: { hash: Hash; chainId: number }) {
   const url = transactionUrl(chainId, hash);
-  const short = `${hash.slice(0, 10)}…${hash.slice(-8)}`;
   return (
     <p className="pp-tx">
       Transaction sent:{" "}
       {url === undefined ? (
-        <span className="pp-value" title={hash}>
-          {short}
-        </span>
+        <span className="pp-value">{hash}</span>
       ) : (
-        <a href={url} target="_blank" rel="noreferrer" title={hash}>
-          {short}
+        <a className="pp-value" href={url} target="_blank" rel="noreferrer">
+          {hash}
         </a>
       )}
     </p>

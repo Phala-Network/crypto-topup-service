@@ -5,6 +5,8 @@ export interface Appearance {
   theme?: "light" | "dark";
   variables?: {
     colorPrimary?: string;
+    /** The color of text appearing on top of any `colorPrimary` background, such as the pay button. */
+    accessibleColorOnColorPrimary?: string;
     colorBackground?: string;
     colorText?: string;
     colorTextSecondary?: string;
@@ -18,6 +20,7 @@ export interface Appearance {
 
 const VARIABLES: Record<keyof NonNullable<Appearance["variables"]>, string> = {
   colorPrimary: "--pp-color-primary",
+  accessibleColorOnColorPrimary: "--pp-accessible-color-on-color-primary",
   colorBackground: "--pp-color-background",
   colorText: "--pp-color-text",
   colorTextSecondary: "--pp-color-text-secondary",
@@ -48,6 +51,7 @@ export function appearanceStyle(appearance: Appearance | undefined): CSSProperti
 export const STYLES = `
 .pp-root {
   --pp-color-primary: #0f62fe;
+  --pp-accessible-color-on-color-primary: #ffffff;
   --pp-color-background: #ffffff;
   --pp-color-text: #1a1a1a;
   --pp-color-text-secondary: #5c5f66;
@@ -77,7 +81,7 @@ export const STYLES = `
   --pp-color-success: #42be65;
 }
 .pp-root *, .pp-root *::before, .pp-root *::after { box-sizing: inherit; }
-.pp-amount { margin: 0; font-size: 22px; font-weight: 600; }
+.pp-amount { margin: 0; overflow-wrap: anywhere; font-size: 22px; font-weight: 600; }
 .pp-subtitle { margin: 2px 0 16px; color: var(--pp-color-text-secondary); }
 .pp-status { display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
   margin-bottom: 12px; padding: 10px 12px; border-radius: var(--pp-border-radius);
@@ -95,7 +99,7 @@ export const STYLES = `
 .pp-wallets { display: grid; gap: 8px; }
 .pp-button { display: flex; gap: 10px; align-items: center; justify-content: center; width: 100%;
   appearance: none; border: 1px solid var(--pp-color-primary); border-radius: var(--pp-border-radius);
-  background: var(--pp-color-primary); color: #fff; font: inherit; font-weight: 600; padding: 10px 14px; cursor: pointer; }
+  background: var(--pp-color-primary); color: var(--pp-accessible-color-on-color-primary); font: inherit; font-weight: 600; padding: 10px 14px; cursor: pointer; }
 .pp-button:disabled { opacity: 0.6; cursor: progress; }
 .pp-button img { width: 20px; height: 20px; }
 .pp-wallet-name { font-weight: 400; opacity: 0.85; }
@@ -111,4 +115,5 @@ export const STYLES = `
   background: none; color: var(--pp-color-text); font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer; }
 .pp-tx { margin: 0 0 12px; font-size: 13px; }
 .pp-tx a { color: var(--pp-color-primary); }
+.pp-tx .pp-value { overflow-wrap: anywhere; }
 `;

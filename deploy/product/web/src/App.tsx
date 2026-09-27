@@ -97,6 +97,7 @@ export function App() {
     theme,
     variables: {
       colorPrimary: "var(--accent)",
+      accessibleColorOnColorPrimary: "var(--accent-contrast)",
       colorBackground: "var(--surface)",
       colorText: "var(--text)",
       colorTextSecondary: "var(--text-muted)",
