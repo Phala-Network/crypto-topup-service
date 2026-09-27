@@ -86,7 +86,7 @@ amount, or after expiry, is still credited, at the market price instead of the q
     theme: "dark",
     variables: {
       colorPrimary: "#cdfa50",
-      colorPrimaryText: "#161616",
+      accessibleColorOnColorPrimary: "#161616",
       borderRadius: "12px",
       fontFamily: "Inter, sans-serif",
     },
@@ -94,21 +94,22 @@ amount, or after expiry, is still credited, at the market price instead of the q
 />
 ```
 
-| Variable             | CSS custom property         | Light default | Dark default | Use                                           |
-| -------------------- | --------------------------- | ------------- | ------------ | --------------------------------------------- |
-| `colorPrimary`       | `--pp-color-primary`        | `#0f62fe`     | `#78a9ff`    | Pay button, selected tab, links, focus ring   |
-| `colorPrimaryText`   | `--pp-color-primary-text`   | `#ffffff`     | `#ffffff`    | Text on a `colorPrimary` background (button)  |
-| `colorBackground`    | `--pp-color-background`     | `#ffffff`     | `#161616`    | Background                                    |
-| `colorText`          | `--pp-color-text`           | `#1a1a1a`     | `#f4f4f4`    | Text                                          |
-| `colorTextSecondary` | `--pp-color-text-secondary` | `#5c5f66`     | `#a8a8a8`    | Labels and hints                              |
-| `colorBorder`        | `--pp-color-border`         | `#d9dce1`     | `#393939`    | Borders                                       |
-| `colorDanger`        | `--pp-color-danger`         | `#c62828`     | `#ff8389`    | Errors, expired and rejected states           |
-| `colorSuccess`       | `--pp-color-success`        | `#1b7f3b`     | `#42be65`    | Credited state                                |
-| `fontFamily`         | `--pp-font-family`          | system UI     | system UI    | Font                                          |
-| `borderRadius`       | `--pp-border-radius`        | `8px`         | `8px`        | Corner radius                                 |
+| Variable                        | CSS custom property                      | Light default | Dark default | Use                                          |
+| ------------------------------- | ---------------------------------------- | ------------- | ------------ | -------------------------------------------- |
+| `colorPrimary`                  | `--pp-color-primary`                     | `#0f62fe`     | `#78a9ff`    | Pay button, selected tab, links, focus ring  |
+| `accessibleColorOnColorPrimary` | `--pp-accessible-color-on-color-primary` | `#ffffff`     | `#ffffff`    | Text on a `colorPrimary` background (button) |
+| `colorBackground`               | `--pp-color-background`                  | `#ffffff`     | `#161616`    | Background                                   |
+| `colorText`                     | `--pp-color-text`                        | `#1a1a1a`     | `#f4f4f4`    | Text                                         |
+| `colorTextSecondary`            | `--pp-color-text-secondary`              | `#5c5f66`     | `#a8a8a8`    | Labels and hints                             |
+| `colorBorder`                   | `--pp-color-border`                      | `#d9dce1`     | `#393939`    | Borders                                      |
+| `colorDanger`                   | `--pp-color-danger`                      | `#c62828`     | `#ff8389`    | Errors, expired and rejected states          |
+| `colorSuccess`                  | `--pp-color-success`                     | `#1b7f3b`     | `#42be65`    | Credited state                               |
+| `fontFamily`                    | `--pp-font-family`                       | system UI     | system UI    | Font                                         |
+| `borderRadius`                  | `--pp-border-radius`                     | `8px`         | `8px`        | Corner radius                                |
 
 Each variable is also a CSS custom property on `.pp-root`, so a stylesheet can set it too. With a
-light `colorPrimary`, set a dark `colorPrimaryText` so the button label stays readable.
+light `colorPrimary`, set a dark `accessibleColorOnColorPrimary` so the button label stays
+readable.
 
 ## Without React
 

@@ -6,7 +6,7 @@ export interface Appearance {
   variables?: {
     colorPrimary?: string;
     /** The color of text appearing on top of any `colorPrimary` background, such as the pay button. */
-    colorPrimaryText?: string;
+    accessibleColorOnColorPrimary?: string;
     colorBackground?: string;
     colorText?: string;
     colorTextSecondary?: string;
@@ -20,7 +20,7 @@ export interface Appearance {
 
 const VARIABLES: Record<keyof NonNullable<Appearance["variables"]>, string> = {
   colorPrimary: "--pp-color-primary",
-  colorPrimaryText: "--pp-color-primary-text",
+  accessibleColorOnColorPrimary: "--pp-accessible-color-on-color-primary",
   colorBackground: "--pp-color-background",
   colorText: "--pp-color-text",
   colorTextSecondary: "--pp-color-text-secondary",
@@ -51,7 +51,7 @@ export function appearanceStyle(appearance: Appearance | undefined): CSSProperti
 export const STYLES = `
 .pp-root {
   --pp-color-primary: #0f62fe;
-  --pp-color-primary-text: #ffffff;
+  --pp-accessible-color-on-color-primary: #ffffff;
   --pp-color-background: #ffffff;
   --pp-color-text: #1a1a1a;
   --pp-color-text-secondary: #5c5f66;
@@ -99,7 +99,7 @@ export const STYLES = `
 .pp-wallets { display: grid; gap: 8px; }
 .pp-button { display: flex; gap: 10px; align-items: center; justify-content: center; width: 100%;
   appearance: none; border: 1px solid var(--pp-color-primary); border-radius: var(--pp-border-radius);
-  background: var(--pp-color-primary); color: var(--pp-color-primary-text); font: inherit; font-weight: 600; padding: 10px 14px; cursor: pointer; }
+  background: var(--pp-color-primary); color: var(--pp-accessible-color-on-color-primary); font: inherit; font-weight: 600; padding: 10px 14px; cursor: pointer; }
 .pp-button:disabled { opacity: 0.6; cursor: progress; }
 .pp-button img { width: 20px; height: 20px; }
 .pp-wallet-name { font-weight: 400; opacity: 0.85; }

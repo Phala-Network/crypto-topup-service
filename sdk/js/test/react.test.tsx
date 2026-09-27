@@ -105,13 +105,17 @@ describe("Checkout", () => {
     const { container } = await renderCheckout({
       appearance: {
         theme: "dark",
-        variables: { colorPrimary: "#cdfa50", colorPrimaryText: "#161616", borderRadius: "2px" },
+        variables: {
+          colorPrimary: "#cdfa50",
+          accessibleColorOnColorPrimary: "#161616",
+          borderRadius: "2px",
+        },
       },
     });
     const root = container.querySelector<HTMLElement>(".pp-root");
     expect(root?.dataset["theme"]).toBe("dark");
     expect(root?.style.getPropertyValue("--pp-color-primary")).toBe("#cdfa50");
-    expect(root?.style.getPropertyValue("--pp-color-primary-text")).toBe("#161616");
+    expect(root?.style.getPropertyValue("--pp-accessible-color-on-color-primary")).toBe("#161616");
     expect(root?.style.getPropertyValue("--pp-border-radius")).toBe("2px");
   });
 

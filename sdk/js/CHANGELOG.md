@@ -8,9 +8,10 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Added
 
-- `appearance.variables.colorPrimaryText` (`--pp-color-primary-text`, default `#ffffff`): the color
-  of text on a `colorPrimary` background, such as the pay button's label, so a light brand primary
-  stays readable. Same name and meaning as Stripe's Appearance API variable.
+- `appearance.variables.accessibleColorOnColorPrimary` (`--pp-accessible-color-on-color-primary`,
+  default `#ffffff`): the color of text on a `colorPrimary` background, such as the pay button's
+  label, so a light brand primary stays readable. Same name and meaning as Stripe's current
+  Appearance API variable.
 
 ### Fixed
 
