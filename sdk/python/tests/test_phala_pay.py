@@ -246,7 +246,16 @@ def test_construct_event_rejects_forgeries(case: str, match: str) -> None:
 
 
 def test_construct_event_rejects_a_verified_body_that_is_not_an_event() -> None:
-    body = b'{"event_id": "x"}'
-    headers = sign_webhook(SERVICE_KEY, EVENT_ID, int(time.time()), body)
+    # The service's envelope before `evt_` ids, as an operator replay still sends it.
+    legacy_id = "0b6f1e1e-6f0c-4c43-9d7a-2f0d4b0f7a11"
+    body = json.dumps(
+        {
+            "event_id": legacy_id,
+            "type": "deposit.credited",
+            "created_at": "2026-09-26T00:00:00Z",
+            "data": {"deposit_id": legacy_id},
+        }
+    ).encode()
+    headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), body)
     with pytest.raises(ValueError, match="not an event"):
         Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)

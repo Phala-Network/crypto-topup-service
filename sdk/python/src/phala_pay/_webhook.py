@@ -68,7 +68,9 @@ class Webhook:
         service's settlement key (hex or base64), pinned from attestation. Raises
         `SignatureVerificationError` when the signature does not verify, the timestamp is more
         than `tolerance` seconds away, or the body's id differs from `webhook-id`, and
-        `ValueError` when a verified body is not an event.
+        `ValueError` when a verified body is not an event. That includes an operator replay of
+        an event written before `evt_` ids (a UUID `webhook-id` and a flat body): those predate
+        this SDK and were fulfilled when first delivered; `topup_sdk.verify_webhook` reads them.
         """
         body = payload.encode() if isinstance(payload, str) else payload
         key = load_public_key(public_key) if isinstance(public_key, str) else public_key
