@@ -24,6 +24,8 @@ All notable changes to `crypto-topup-sdk` are recorded here. The format follows
 
 - `TopupClient.get_config`, `create_quote` (sends an `Idempotency-Key`, generated unless given,
   and reuses it on retries), `get_quote`, and `cancel_quote`; `topup_sdk.signing.sf_string`.
+- `Quote.client_secret`, returned by `create_quote` only, and the generated `ClientQuote` model:
+  the public view the payer's browser reads from `GET /v1/quotes/{id}?client_secret=…`.
 
 - `topup_sdk.fulfillment`: `CreditedDeposit.from_event` parses a verified `deposit.credited`
   into a typed credit with its `fulfillment_key` (`deposit:<deposit_id>`), raising

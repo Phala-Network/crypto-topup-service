@@ -90,6 +90,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(FixedQuote),
+        client_reads: Arc::default(),
     })
     .0;
     let api = Api {
@@ -106,6 +107,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         api.payment("checkout-1").await?.is_null(),
         "unpaid quote has a payment"
     );
+    ensure!(api.client_progress("checkout-1").await? == ("none".to_owned(), None));
     let persistent = api
         .call(
             Method::POST,
@@ -157,6 +159,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
             .as_u64()
             .is_some_and(|value| value >= 1)
     );
+    let (progress, confirmations) = api.client_progress("checkout-1").await?;
+    ensure!(progress == "seen" && confirmations == payment["confirmations"].as_u64());
     let block_time = pending_block_time(pool, payment["tx_hash"].as_str().context("hash")?).await?;
     ensure!(
         payment["estimated_final_at"].as_i64()
@@ -229,6 +233,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let payment = api.payment("checkout-1").await?;
     ensure!(payment["status"] == "final", "unexpected {payment}");
     ensure!(payment["confirmations"].is_null());
+    // Final but not yet valued and screened.
+    ensure!(api.client_progress("checkout-1").await? == ("confirming".to_owned(), None));
 
     // Underpay, then pay in full: the finalized underpayment does not consume the lock, so the
     // later exact payment is the one shown while it is still pending.
@@ -465,8 +471,8 @@ struct Api {
     /// Distinct `created` per request: identical requests signed in the same second would carry
     /// the same single-use signature.
     created: std::sync::atomic::AtomicI64,
-    /// Quote ids by the test's name for them.
-    quotes: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// Quote ids and client secrets by the test's name for them.
+    quotes: std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>,
 }
 
 impl Api {
@@ -481,22 +487,53 @@ impl Api {
             )
             .await?;
         let id = quote["id"].as_str().context("quote id")?.to_owned();
+        let secret = quote["client_secret"]
+            .as_str()
+            .context("client secret")?
+            .to_owned();
         self.quotes
             .lock()
             .map_err(|_| anyhow::anyhow!("quote map poisoned"))?
-            .insert(name.to_owned(), id);
+            .insert(name.to_owned(), (id, secret));
         Ok(Address::from_str(
             quote["address"].as_str().context("quote address")?,
         )?)
     }
 
     fn id(&self, name: &str) -> Result<String> {
+        Ok(self.quote_entry(name)?.0)
+    }
+
+    fn quote_entry(&self, name: &str) -> Result<(String, String)> {
         self.quotes
             .lock()
             .map_err(|_| anyhow::anyhow!("quote map poisoned"))?
             .get(name)
             .cloned()
             .context("unknown quote")
+    }
+
+    /// The payment progress the payer's page reads with the client secret.
+    async fn client_progress(&self, name: &str) -> Result<(String, Option<u64>)> {
+        let (id, secret) = self.quote_entry(name)?;
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!("/v1/quotes/{id}?client_secret={secret}"))
+                    .body(axum::body::Body::empty())?,
+            )
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let quote: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_048_576).await?)?;
+        Ok((
+            quote["payment_status"]
+                .as_str()
+                .context("payment_status")?
+                .to_owned(),
+            quote["confirmations"].as_u64(),
+        ))
     }
 
     fn address_id(&self, name: &str) -> Result<Uuid> {

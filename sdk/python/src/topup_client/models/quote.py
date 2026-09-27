@@ -40,6 +40,11 @@ class Quote:
         status (str): `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
             `open` after `expires_at` until the finalized chain passes it, so a payment mined in time
             is never reported as expired; hide the address once `expires_at` has passed.
+        client_secret (None | str | Unset): Lets the payer's browser read the quote's public view, `ClientQuote`, from
+            `GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by
+            `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
+            returns a new secret and the earlier one stops working. Give it only to the paying
+            customer's page, and do not log it.
         deposit (None | str | Unset): `dep_` id of the deposit that completed the quote.
         payment (None | QuotePayment | Unset):
     """
@@ -58,6 +63,7 @@ class Quote:
     object_: str
     payment_uri: str
     status: str
+    client_secret: None | str | Unset = UNSET
     deposit: None | str | Unset = UNSET
     payment: None | QuotePayment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -93,6 +99,12 @@ class Quote:
 
         status = self.status
 
+        client_secret: None | str | Unset
+        if isinstance(self.client_secret, Unset):
+            client_secret = UNSET
+        else:
+            client_secret = self.client_secret
+
         deposit: None | str | Unset
         if isinstance(self.deposit, Unset):
             deposit = UNSET
@@ -127,6 +139,8 @@ class Quote:
                 "status": status,
             }
         )
+        if client_secret is not UNSET:
+            field_dict["client_secret"] = client_secret
         if deposit is not UNSET:
             field_dict["deposit"] = deposit
         if payment is not UNSET:
@@ -166,6 +180,15 @@ class Quote:
         payment_uri = d.pop("payment_uri")
 
         status = d.pop("status")
+
+        def _parse_client_secret(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        client_secret = _parse_client_secret(d.pop("client_secret", UNSET))
 
         def _parse_deposit(data: object) -> None | str | Unset:
             if data is None:
@@ -208,6 +231,7 @@ class Quote:
             object_=object_,
             payment_uri=payment_uri,
             status=status,
+            client_secret=client_secret,
             deposit=deposit,
             payment=payment,
         )

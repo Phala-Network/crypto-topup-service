@@ -10,7 +10,10 @@ use std::time::Duration;
 use alloy_primitives::{Address as EvmAddress, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rand::TryRng as _;
+use rand::rngs::SysRng;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
@@ -211,6 +214,9 @@ pub enum RateLockError {
     /// Money arithmetic could not be represented.
     #[error("rate-lock arithmetic is out of range")]
     Arithmetic,
+    /// The operating system's random number generator failed.
+    #[error("operating system entropy is unavailable")]
+    EntropyUnavailable,
     /// Persisted data violated an internal invariant.
     #[error("rate-lock database invariant failed")]
     DatabaseInvariant,
@@ -390,6 +396,54 @@ pub fn replay(
     } else {
         Err(RateLockError::IdempotencyMismatch)
     }
+}
+
+/// Random bytes after `_secret_` in a client secret.
+const CLIENT_SECRET_BYTES: usize = 24;
+
+/// Issues the quote's `client_secret`, `qt_…_secret_` followed by 48 random hex digits, and stores
+/// only its SHA-256, replacing any earlier secret so that one stops working.
+pub async fn issue_client_secret(pool: &PgPool, address_id: Uuid) -> Result<String, RateLockError> {
+    let mut random = [0_u8; CLIENT_SECRET_BYTES];
+    SysRng.try_fill_bytes(&mut random).map_err(|error| {
+        tracing::error!(%error, "OS RNG failed; no client secret issued");
+        RateLockError::EntropyUnavailable
+    })?;
+    let secret = format!("{}_secret_{}", quote_id(address_id), hex::encode(random));
+    let updated =
+        sqlx::query("UPDATE rate_locks SET client_secret_hash = $2 WHERE address_id = $1")
+            .bind(address_id)
+            .bind(Sha256::digest(secret.as_bytes()).as_slice())
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if updated != 1 {
+        return Err(RateLockError::NotFound);
+    }
+    Ok(secret)
+}
+
+/// Loads the quote a client secret belongs to; any secret that does not match a stored one, in
+/// form or value, is `None`.
+pub async fn get_by_client_secret(
+    pool: &PgPool,
+    client_secret: &str,
+) -> Result<Option<RateLock>, RateLockError> {
+    let Some(address_id) = client_secret
+        .split_once("_secret_")
+        .and_then(|(quote, _)| crate::ids::parse(crate::ids::QUOTE, quote))
+    else {
+        return Ok(None);
+    };
+    let row = sqlx::query_as::<_, RateLockRow>(concat!(
+        select_lock!(),
+        " WHERE rate_lock.address_id = $1 AND rate_lock.client_secret_hash = $2"
+    ))
+    .bind(address_id)
+    .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
+    .fetch_optional(pool)
+    .await?;
+    row.map(TryInto::try_into).transpose()
 }
 
 /// Loads one lock when it belongs to the authenticated product.

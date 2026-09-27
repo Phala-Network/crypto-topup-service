@@ -248,6 +248,61 @@ pub struct Quote {
     pub payment: Option<QuotePayment>,
     /// `dep_` id of the deposit that completed the quote.
     pub deposit: Option<String>,
+    /// Lets the payer's browser read the quote's public view, `ClientQuote`, from
+    /// `GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by
+    /// `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
+    /// returns a new secret and the earlier one stops working. Give it only to the paying
+    /// customer's page, and do not log it.
+    pub client_secret: Option<String>,
+}
+
+/// The public view of a quote, read with its `client_secret` and without a signature, for the
+/// payer's checkout page. It has no account or internal fields.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ClientQuote {
+    /// `qt_` id.
+    pub id: String,
+    /// Always `quote`.
+    pub object: String,
+    /// `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
+    /// `expires_at` has passed.
+    pub status: String,
+    /// Credit in the currency's minor unit.
+    pub amount: u64,
+    /// `usd`.
+    pub currency: String,
+    /// Asset code.
+    pub asset: String,
+    /// The token's decimals, to display `amount_atomic`.
+    pub decimals: u8,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The exact token amount to pay, in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// Single-use forwarder address to pay.
+    pub address: String,
+    /// EIP-681 URI carrying the token, chain, address, and amount.
+    pub payment_uri: String,
+    /// End of the payment window, Unix seconds.
+    pub expires_at: i64,
+    /// Progress of the payment shown on the page; display only, never a reason to deliver
+    /// anything: `none`; `seen` (in a block that is not final yet and may still disappear);
+    /// `confirming` (final, being valued and screened); `credited`; or `rejected` (final and not
+    /// credited; the payer should contact the product's support).
+    pub payment_status: String,
+    /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
+    pub confirmations: Option<u64>,
+}
+
+/// `GET /v1/quotes/{id}` returns a `Quote` to a signed request and a `ClientQuote` to a request by
+/// `client_secret`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum QuoteView {
+    /// The product's view.
+    Quote(Quote),
+    /// The payer's view.
+    Client(ClientQuote),
 }
 
 /// A payment observed at a quote's address. Display only: while `status` is `seen` it is not

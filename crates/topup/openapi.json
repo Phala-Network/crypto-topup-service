@@ -1541,7 +1541,7 @@
         "tags": [
           "quotes"
         ],
-        "summary": "One quote, for example to resume a checkout page.",
+        "summary": "One quote, for example to resume a checkout page. The payer's browser can read the quote's\npublic view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.",
         "operationId": "get_quote",
         "parameters": [
           {
@@ -1552,15 +1552,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "client_secret",
+            "in": "query",
+            "description": "The quote's `client_secret`, to read its public view without a signature. Send the request\nwithout `Signature` headers; the response then allows any origin.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "OK: a `Quote` to a signed request, a `ClientQuote` to a request by `client_secret`",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Quote"
+                  "$ref": "#/components/schemas/QuoteView"
                 }
               }
             }
@@ -1576,7 +1585,17 @@
             }
           },
           "404": {
-            "description": "Not Found",
+            "description": "Not Found, also for a `client_secret` that is not this quote's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests: reads by `client_secret`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1589,7 +1608,8 @@
         "security": [
           {
             "http_message_signature": []
-          }
+          },
+          {}
         ]
       }
     },
@@ -1737,6 +1757,95 @@
           "settlement_pubkey": {
             "type": "string",
             "description": "Raw ed25519 settlement public key as lowercase hexadecimal."
+          }
+        }
+      },
+      "ClientQuote": {
+        "type": "object",
+        "description": "The public view of a quote, read with its `client_secret` and without a signature, for the\npayer's checkout page. It has no account or internal fields.",
+        "required": [
+          "id",
+          "object",
+          "status",
+          "amount",
+          "currency",
+          "asset",
+          "decimals",
+          "chain_id",
+          "amount_atomic",
+          "address",
+          "payment_uri",
+          "expires_at",
+          "payment_status"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Single-use forwarder address to pay."
+          },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credit in the currency's minor unit.",
+            "minimum": 0
+          },
+          "amount_atomic": {
+            "type": "string",
+            "description": "The exact token amount to pay, in base units, as a decimal string."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset code."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "While `seen`: blocks on top of and including the payment's block; otherwise `null`.",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "description": "`usd`."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The token's decimals, to display `amount_atomic`.",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End of the payment window, Unix seconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "`qt_` id."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `quote`."
+          },
+          "payment_status": {
+            "type": "string",
+            "description": "Progress of the payment shown on the page; display only, never a reason to deliver\nanything: `none`; `seen` (in a block that is not final yet and may still disappear);\n`confirming` (final, being valued and screened); `credited`; or `rejected` (final and not\ncredited; the payer should contact the product's support)."
+          },
+          "payment_uri": {
+            "type": "string",
+            "description": "EIP-681 URI carrying the token, chain, address, and amount."
+          },
+          "status": {
+            "type": "string",
+            "description": "`open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once\n`expires_at` has passed."
           }
         }
       },
@@ -2632,6 +2741,13 @@
             "description": "EVM chain identifier.",
             "minimum": 0
           },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lets the payer's browser read the quote's public view, `ClientQuote`, from\n`GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by\n`POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`\nreturns a new secret and the earlier one stops working. Give it only to the paying\ncustomer's page, and do not log it."
+          },
           "created": {
             "type": "integer",
             "format": "int64",
@@ -2735,6 +2851,19 @@
             "description": "Canonical transaction hash."
           }
         }
+      },
+      "QuoteView": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Quote",
+            "description": "The product's view."
+          },
+          {
+            "$ref": "#/components/schemas/ClientQuote",
+            "description": "The payer's view."
+          }
+        ],
+        "description": "`GET /v1/quotes/{id}` returns a `Quote` to a signed request and a `ClientQuote` to a request by\n`client_secret`."
       },
       "ReconciliationBlockLiftResponse": {
         "type": "object",

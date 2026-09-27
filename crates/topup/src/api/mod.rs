@@ -2,6 +2,7 @@
 
 mod attestation;
 mod auth;
+mod client_limit;
 mod error;
 mod extract;
 mod handlers;
@@ -30,6 +31,7 @@ use utoipa_axum::routes;
 
 pub use attestation::{AttestationError, AttestationFuture, Attestor};
 pub use auth::VerificationKey;
+pub use client_limit::ClientReadLimiter;
 pub use topup_adapters::http_signature::PublicOrigin;
 
 /// Shared state for all API handlers.
@@ -47,6 +49,8 @@ pub struct AppState {
     pub attestor: Arc<dyn Attestor>,
     /// Validated current-price provider for rate-lock creation.
     pub rate_lock_quotes: Arc<dyn QuoteProvider>,
+    /// Rate limit of unsigned quote reads by `client_secret`.
+    pub client_reads: Arc<ClientReadLimiter>,
 }
 
 impl AppState {
@@ -80,7 +84,6 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let product = OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
         .routes(routes!(quotes::create_quote))
-        .routes(routes!(quotes::get_quote))
         .routes(routes!(quotes::cancel_quote))
         .routes(routes!(
             handlers::get_deposit_address,
@@ -115,8 +118,17 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             auth::authenticate_admin,
         ));
 
+    // A quote is also readable without a signature by its `client_secret`.
+    let quote = OpenApiRouter::new()
+        .routes(routes!(quotes::get_quote))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::authenticate_product_or_client_secret,
+        ));
+
     let mut documented = OpenApiRouter::new()
         .merge(product)
+        .merge(quote)
         .merge(admin)
         .routes(routes!(handlers::get_attestation));
     let mut info = Info::new("Crypto Top-up Service API", env!("CARGO_PKG_VERSION"));
@@ -270,6 +282,7 @@ mod tests {
                 .expect("test origin is valid"),
             attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
+            client_reads: Arc::default(),
         };
         let product = Product {
             id: Uuid::nil(),
@@ -306,6 +319,7 @@ mod tests {
                 .expect("test origin is valid"),
             attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
+            client_reads: Arc::default(),
         };
         let response = super::router(state)
             .0

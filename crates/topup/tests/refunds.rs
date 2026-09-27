@@ -1335,6 +1335,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
+        client_reads: Arc::default(),
     };
     topup::api::router(state).0
 }

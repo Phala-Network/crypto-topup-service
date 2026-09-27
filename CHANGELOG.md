@@ -16,6 +16,10 @@ webhook receivers must ignore unknown fields.
   Quoting by token amount is removed. `GET /v1/config` lists the payable assets, limits, and
   quote terms; `POST …/accounts` and `GET …/accounts/{ext}/limits` are removed (the first quote or
   address creates the account).
+- `POST /v1/quotes` returns a `client_secret`, like Stripe's PaymentIntent. The payer's browser
+  reads the quote's public view, `ClientQuote`, from `GET /v1/quotes/{id}?client_secret=…` without
+  a signature (any origin; rate-limited). Only the secret's hash is stored: `GET` returns `null`,
+  and a repeat with the same `Idempotency-Key` returns a new secret.
 - **Breaking**: the product is identified by the request signature's key id, `{product}/v1`,
   not by the path.
 - **Breaking**: errors are Stripe's error object, `{"error": {"type", "code", "message",

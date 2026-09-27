@@ -92,6 +92,26 @@ pub async fn authenticate_product(
     next.run(request).await
 }
 
+/// Passes an unsigned request that carries a `client_secret` query parameter to the handler without
+/// a product, which then serves the quote's public view; any other request must be a signed
+/// product request.
+pub async fn authenticate_product_or_client_secret(
+    state: State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let unsigned = !request.headers().contains_key("signature-input")
+        && !request.headers().contains_key("signature");
+    let has_client_secret = request.uri().query().is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == "client_secret")
+    });
+    if unsigned && has_client_secret {
+        next.run(request).await
+    } else {
+        authenticate_product(state, request, next).await
+    }
+}
+
 /// The product slug of a product key id, `{slug}/v1`.
 fn product_slug_of(keyid: &str) -> Option<String> {
     let slug = keyid.strip_suffix("/v1")?;

@@ -1489,6 +1489,7 @@ fn app_state_with_attestor(
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor,
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
+        client_reads: Arc::default(),
     }
 }
 

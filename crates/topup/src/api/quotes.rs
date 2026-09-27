@@ -1,8 +1,10 @@
 //! Quotes (`/v1/quotes`) and the product configuration (`/v1/config`).
 
 use axum::Json;
-use axum::extract::{Extension, Path, State};
-use axum::http::HeaderMap;
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue, header};
+use axum::response::{IntoResponse as _, Response};
+use serde::Deserialize;
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
 
@@ -14,7 +16,7 @@ use super::AppState;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, idempotency_key};
 use super::handlers::{ensure_account, validate_external_id};
-use super::models::{Config, ConfigAsset, CreateQuoteRequest, Quote};
+use super::models::{ClientQuote, Config, ConfigAsset, CreateQuoteRequest, Quote, QuoteView};
 use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -138,7 +140,7 @@ pub(crate) async fn create_quote(
             .map_err(map_error)?
     {
         let lock = locks::replay(existing, &account, route, credit).map_err(map_error)?;
-        return respond(&state, &product, lock).await;
+        return respond_with_client_secret(&state, &product, lock).await;
     }
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
@@ -158,33 +160,138 @@ pub(crate) async fn create_quote(
     )
     .await
     .map_err(map_error)?;
-    respond(&state, &product, lock).await
+    respond_with_client_secret(&state, &product, lock).await
+}
+
+/// Query of `GET /v1/quotes/{id}`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct GetQuoteQuery {
+    /// The quote's `client_secret`, to read its public view without a signature. Send the request
+    /// without `Signature` headers; the response then allows any origin.
+    client_secret: Option<String>,
 }
 
 #[utoipa::path(
     get,
     path = "/v1/quotes/{id}",
-    params(("id" = String, Path, description = "Quote id, `qt_…`")),
+    params(("id" = String, Path, description = "Quote id, `qt_…`"), GetQuoteQuery),
     responses(
-        (status = 200, description = "OK", body = Quote),
+        (
+            status = 200,
+            description = "OK: a `Quote` to a signed request, a `ClientQuote` to a request by \
+                           `client_secret`",
+            body = QuoteView
+        ),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
+        (
+            status = 404,
+            description = "Not Found, also for a `client_secret` that is not this quote's",
+            body = ErrorResponse
+        ),
+        (status = 429, description = "Too Many Requests: reads by `client_secret`", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("http_message_signature" = []), ()),
     tag = "quotes"
 )]
-/// One quote, for example to resume a checkout page.
+/// One quote, for example to resume a checkout page. The payer's browser can read the quote's
+/// public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
 pub(crate) async fn get_quote(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    product: Option<Extension<Product>>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Quote>> {
-    let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
-    let lock = locks::get(&state.pool, product.id, quote)
+    Query(query): Query<GetQuoteQuery>,
+) -> Response {
+    let Some(Extension(product)) = product else {
+        let mut response = match client_quote(&state, &id, query.client_secret.as_deref()).await {
+            Ok(quote) => Json(QuoteView::Client(quote)).into_response(),
+            Err(error) => error.into_response(),
+        };
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        return response;
+    };
+    let quote = async {
+        let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
+        let lock = locks::get(&state.pool, product.id, quote)
+            .await
+            .map_err(map_error)?
+            .ok_or_else(ApiError::not_found)?;
+        quote_object(&state, &product, lock).await
+    };
+    match quote.await {
+        Ok(quote) => Json(QuoteView::Quote(quote)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// The public view of the quote `id` whose client secret is `client_secret`.
+async fn client_quote(
+    state: &AppState,
+    id: &str,
+    client_secret: Option<&str>,
+) -> ApiResult<ClientQuote> {
+    let quote = ids::parse(ids::QUOTE, id).ok_or_else(ApiError::not_found)?;
+    let client_secret = client_secret
+        .filter(|secret| {
+            secret
+                .strip_prefix(id)
+                .is_some_and(|rest| rest.starts_with("_secret_"))
+        })
+        .ok_or_else(ApiError::not_found)?;
+    if !state.client_reads.allow(quote) {
+        return Err(ApiError::rate_limited());
+    }
+    let lock = locks::get_by_client_secret(&state.pool, client_secret)
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    respond(&state, &product, lock).await
+    let route = state
+        .routes
+        .current()
+        .find(|route| route.route == lock.route)
+        .ok_or_else(|| {
+            tracing::error!(route = %lock.route, "quote route is not loaded");
+            ApiError::internal()
+        })?;
+    let payment = super::pending::quote_payment(state, route, &lock).await?;
+    let (payment_status, confirmations) = match payment {
+        None => ("none", None),
+        Some(payment) if payment.status == "seen" => ("seen", payment.confirmations),
+        Some(payment) => {
+            let deposit =
+                ids::parse(ids::DEPOSIT, &payment.deposit).ok_or_else(ApiError::internal)?;
+            let deposit_state =
+                sqlx::query_scalar::<_, String>("SELECT state FROM deposits WHERE id = $1")
+                    .bind(deposit)
+                    .fetch_one(&state.pool)
+                    .await?;
+            let status = match deposit_state.as_str() {
+                "credited" | "swept" => "credited",
+                "rejected" => "rejected",
+                _ => "confirming",
+            };
+            (status, None)
+        }
+    };
+    Ok(ClientQuote {
+        id: locks::quote_id(lock.address_id),
+        object: "quote".to_owned(),
+        status: status(lock.status).to_owned(),
+        amount: lock.credit_minor.value(),
+        currency: "usd".to_owned(),
+        asset: route.asset.symbol.clone(),
+        decimals: route.asset.decimals,
+        chain_id: lock.chain_id,
+        amount_atomic: lock.amount_atomic.value().to_string(),
+        address: format!("{:#x}", lock.address),
+        payment_uri: payment_uri(route, &lock),
+        expires_at: lock.expires_at.timestamp(),
+        payment_status: payment_status.to_owned(),
+        confirmations,
+    })
 }
 
 #[utoipa::path(
@@ -231,6 +338,34 @@ fn product_routes<'a>(
 }
 
 async fn respond(state: &AppState, product: &Product, lock: RateLock) -> ApiResult<Json<Quote>> {
+    quote_object(state, product, lock).await.map(Json)
+}
+
+/// Responds to `POST /v1/quotes` with a newly issued client secret.
+async fn respond_with_client_secret(
+    state: &AppState,
+    product: &Product,
+    lock: RateLock,
+) -> ApiResult<Json<Quote>> {
+    let client_secret = locks::issue_client_secret(&state.pool, lock.address_id)
+        .await
+        .map_err(map_error)?;
+    let mut quote = quote_object(state, product, lock).await?;
+    quote.client_secret = Some(client_secret);
+    Ok(Json(quote))
+}
+
+fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
+    format!(
+        "ethereum:{:#x}@{}/transfer?address={:#x}&uint256={}",
+        route.asset.contract,
+        lock.chain_id,
+        lock.address,
+        lock.amount_atomic.value()
+    )
+}
+
+async fn quote_object(state: &AppState, product: &Product, lock: RateLock) -> ApiResult<Quote> {
     // The quote's own route version may be retired; asset and tolerance come from the route's
     // current version, which keeps the chain and asset.
     let route = product_routes(state, product)
@@ -240,7 +375,8 @@ async fn respond(state: &AppState, product: &Product, lock: RateLock) -> ApiResu
             ApiError::internal()
         })?;
     let payment = super::pending::quote_payment(state, route, &lock).await?;
-    Ok(Json(Quote {
+    let payment_uri = payment_uri(route, &lock);
+    Ok(Quote {
         id: locks::quote_id(lock.address_id),
         object: "quote".to_owned(),
         account_id: lock.account_external_id,
@@ -251,13 +387,7 @@ async fn respond(state: &AppState, product: &Product, lock: RateLock) -> ApiResu
         amount_atomic: lock.amount_atomic.value().to_string(),
         exchange_rate: decimal(lock.price.value()),
         address: format!("{:#x}", lock.address),
-        payment_uri: format!(
-            "ethereum:{:#x}@{}/transfer?address={:#x}&uint256={}",
-            route.asset.contract,
-            lock.chain_id,
-            lock.address,
-            lock.amount_atomic.value()
-        ),
+        payment_uri,
         status: status(lock.status).to_owned(),
         expires_at: lock.expires_at.timestamp(),
         created: lock.created_at.timestamp(),
@@ -265,7 +395,8 @@ async fn respond(state: &AppState, product: &Product, lock: RateLock) -> ApiResu
         deposit: lock
             .consumed_by
             .map(|deposit| ids::format(ids::DEPOSIT, deposit)),
-    }))
+        client_secret: None,
+    })
 }
 
 const fn status(status: RateLockStatus) -> &'static str {
@@ -305,7 +436,9 @@ fn map_error(error: RateLockError) -> ApiError {
         RateLockError::WindowClosed => ApiError::quote_window_closed(),
         RateLockError::PendingPayment => ApiError::quote_payment_received(),
         RateLockError::IdempotencyMismatch => ApiError::idempotency_key_reused(),
-        RateLockError::Arithmetic | RateLockError::DatabaseInvariant => ApiError::internal(),
+        RateLockError::Arithmetic
+        | RateLockError::EntropyUnavailable
+        | RateLockError::DatabaseInvariant => ApiError::internal(),
         RateLockError::Database(error) => ApiError::from(error),
     }
 }

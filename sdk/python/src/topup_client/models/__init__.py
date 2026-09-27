@@ -3,6 +3,7 @@
 from .admin_reason_request import AdminReasonRequest
 from .admin_refund_response import AdminRefundResponse
 from .attestation_response import AttestationResponse
+from .client_quote import ClientQuote
 from .config import Config
 from .config_asset import ConfigAsset
 from .create_quote_request import CreateQuoteRequest
@@ -49,6 +50,7 @@ __all__ = (
     "AdminReasonRequest",
     "AdminRefundResponse",
     "AttestationResponse",
+    "ClientQuote",
     "Config",
     "ConfigAsset",
     "CreateQuoteRequest",

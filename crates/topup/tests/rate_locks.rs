@@ -89,6 +89,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(FixedQuote),
+            client_reads: Arc::default(),
         })
         .0;
         let now = Utc::now().timestamp();
@@ -141,12 +142,85 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         );
         ensure!(created["address"] == format!("{expected:#x}"));
 
+        let first_secret = created["client_secret"]
+            .as_str()
+            .context("client_secret")?
+            .to_owned();
+        let random = first_secret
+            .strip_prefix(&format!("{quote_id}_secret_"))
+            .context("client_secret names its quote")?;
+        ensure!(random.len() == 48 && random.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
         let retried = app
             .clone()
             .oneshot(create("key-1", quote_body("account-rl", 100)?, now + 1))
             .await?;
         ensure!(retried.status() == StatusCode::OK);
-        ensure!(response_json(retried).await?["id"] == quote_id);
+        let retried = response_json(retried).await?;
+        ensure!(retried["id"] == quote_id);
+        // Only the secret's hash is stored, so a repeat issues a new one and the first stops working.
+        let client_secret = retried["client_secret"].as_str().context("client_secret")?;
+        ensure!(client_secret != first_secret);
+        let stale = app
+            .clone()
+            .oneshot(client_read(&quote_id, &first_secret)?)
+            .await?;
+        ensure!(stale.status() == StatusCode::NOT_FOUND);
+
+        // The payer's browser reads the public view with the secret alone, from any origin.
+        let public = app
+            .clone()
+            .oneshot(client_read(&quote_id, client_secret)?)
+            .await?;
+        ensure!(public.status() == StatusCode::OK);
+        ensure!(public.headers()["access-control-allow-origin"] == "*");
+        let public = response_json(public).await?;
+        ensure!(
+            public
+                == json!({
+                    "id": quote_id, "object": "quote", "status": "open", "amount": 100,
+                    "currency": "usd", "asset": "pha", "decimals": route.asset.decimals,
+                    "chain_id": 1, "amount_atomic": "100", "address": created["address"],
+                    "payment_uri": created["payment_uri"], "expires_at": created["expires_at"],
+                    "payment_status": "none", "confirmations": null,
+                }),
+            "{public}"
+        );
+        // Signed reads never return the secret; unsigned reads need the quote's own secret.
+        let signed = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/v1/quotes/{quote_id}"),
+                Vec::new(),
+                PRODUCT_KID,
+                &product_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(signed.status() == StatusCode::OK);
+        let signed = response_json(signed).await?;
+        ensure!(signed["account_id"] == "account-rl" && signed["client_secret"].is_null());
+        let other_quote = format!("qt_{}", Uuid::new_v4().simple());
+        for (path, secret) in [
+            (other_quote.as_str(), client_secret),
+            (
+                quote_id.as_str(),
+                &format!("{quote_id}_secret_{}", "0".repeat(48)),
+            ),
+        ] {
+            let refused = app.clone().oneshot(client_read(path, secret)?).await?;
+            ensure!(refused.status() == StatusCode::NOT_FOUND);
+            ensure!(refused.headers()["access-control-allow-origin"] == "*");
+            ensure!(response_json(refused).await?["error"]["code"] == "resource_missing");
+        }
+        let unsigned = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!("/v1/quotes/{quote_id}")).body(Body::empty())?,
+            )
+            .await?;
+        ensure!(unsigned.status() == StatusCode::UNAUTHORIZED);
         let lock_count: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_locks")
             .fetch_one(&database.app_pool)
             .await?;
@@ -1457,6 +1531,14 @@ async fn seed_account(
         },
     )
     .await?)
+}
+
+/// An unsigned `GET /v1/quotes/{id}?client_secret=…`, as a browser sends it.
+fn client_read(quote_id: &str, client_secret: &str) -> Result<axum::http::Request<Body>> {
+    Ok(axum::http::Request::get(format!(
+        "/v1/quotes/{quote_id}?client_secret={client_secret}"
+    ))
+    .body(Body::empty())?)
 }
 
 async fn response_json(response: axum::response::Response) -> Result<Value> {
