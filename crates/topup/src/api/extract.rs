@@ -1,9 +1,11 @@
 //! Request extractors that answer rejections with the API error object.
 
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::path::ErrorKind;
+use axum::extract::rejection::PathRejection;
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use axum::http::HeaderMap;
+use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
 use sfv::{BareItem, Item, Parser};
 
@@ -23,13 +25,66 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(request, state).await {
             Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_error(&rejection)),
+            Err(rejection) => Err(deserialize_error(&rejection.body_text())),
         }
     }
 }
 
-fn json_error(rejection: &JsonRejection) -> ApiError {
-    let text = rejection.body_text();
+/// A query string whose rejection is the `400` error object [`ApiJson`] returns.
+pub(crate) struct ApiQuery<T>(pub(crate) T);
+
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(Self(value)),
+            Err(rejection) => Err(deserialize_error(&rejection.body_text())),
+        }
+    }
+}
+
+/// Path parameters whose rejection is a `400` `parameter_invalid` error object naming the
+/// parameter, without the parser's message.
+pub(crate) struct ApiPath<T>(pub(crate) T);
+
+impl<S, T> FromRequestParts<S> for ApiPath<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Path::<T>::from_request_parts(parts, state).await {
+            Ok(Path(value)) => Ok(Self(value)),
+            Err(rejection) => Err(path_error(&rejection)),
+        }
+    }
+}
+
+fn path_error(rejection: &PathRejection) -> ApiError {
+    let PathRejection::FailedToDeserializePathParams(error) = rejection else {
+        tracing::error!(%rejection, "route has no path parameters to extract");
+        return ApiError::internal();
+    };
+    match error.kind() {
+        ErrorKind::ParseErrorAtKey { key, .. }
+        | ErrorKind::InvalidUtf8InPathParam { key }
+        | ErrorKind::DeserializeError { key, .. } => {
+            ApiError::invalid_param(key.clone(), format!("{key} is not a valid value"))
+        }
+        _ => ApiError::bad_request("a path parameter is not a valid value"),
+    }
+}
+
+/// Maps a serde rejection of a body or query string: `parameter_missing` or `parameter_unknown`
+/// naming the field, otherwise `parameter_invalid`.
+fn deserialize_error(text: &str) -> ApiError {
     let field = text.split('`').nth(1).map(str::to_owned);
     let error = if text.contains("missing field") {
         ApiError::missing_param(text)

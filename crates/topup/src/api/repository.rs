@@ -593,7 +593,7 @@ pub async fn nudge_deposit(
     .await?;
     transaction.commit().await?;
     Ok(NudgeResponse {
-        deposit_id,
+        deposit_id: crate::ids::format(crate::ids::DEPOSIT, deposit_id),
         next_attempt_at,
     })
 }
@@ -986,7 +986,7 @@ struct RefundAdminRow {
 impl From<RefundAdminRow> for AdminRefundResponse {
     fn from(row: RefundAdminRow) -> Self {
         Self {
-            id: row.id,
+            id: crate::ids::format(crate::ids::REFUND, row.id),
             status: row.status,
             tx_hash: row.tx_hash,
             confirmation_evidence: row.confirmation_evidence,
@@ -999,7 +999,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
 
     fn try_from(row: DepositViewRow) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: row.id,
+            id: crate::ids::format(crate::ids::DEPOSIT, row.id),
             external_id: row.external_id,
             chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
             tx_hash: row.tx_hash,
@@ -1057,12 +1057,9 @@ async fn fetch_support_page(
         .await?;
     let deposits = rows
         .into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<DepositResponse>, ApiError>>()?;
-    let ids = deposits
-        .iter()
-        .map(|deposit| deposit.id)
-        .collect::<Vec<_>>();
+        .map(|row| Ok((row.id, DepositResponse::try_from(row)?)))
+        .collect::<Result<Vec<(Uuid, DepositResponse)>, ApiError>>()?;
+    let ids = deposits.iter().map(|(id, _)| *id).collect::<Vec<_>>();
     let transitions = sqlx::query_as::<_, DepositTransitionRow>(
         r#"
         SELECT id, deposit_id, from_state, to_state, attempt, evidence, created_at
@@ -1106,9 +1103,9 @@ async fn fetch_support_page(
     }
     Ok(deposits
         .into_iter()
-        .map(|deposit| SupportDepositResponse {
-            timeline: by_deposit.remove(&deposit.id).unwrap_or_default(),
-            events: events_by_deposit.remove(&deposit.id).unwrap_or_default(),
+        .map(|(id, deposit)| SupportDepositResponse {
+            timeline: by_deposit.remove(&id).unwrap_or_default(),
+            events: events_by_deposit.remove(&id).unwrap_or_default(),
             deposit,
         })
         .collect())

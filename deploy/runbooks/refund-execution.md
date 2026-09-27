@@ -25,8 +25,9 @@ sender, which may be an exchange hot wallet.
 
 ## Fix
 
-Approve (the service re-checks the deposit, route, product, and account; require `200` with
-`status` `approved`), then prepare the transfer:
+`REFUND_ID` is the refund's `re_…` id, as `POST /v1/refunds` returned it; the bare UUID from an
+older log also works. Approve (the service re-checks the deposit, route, product, and account;
+require `200` with `status` `approved`), then prepare the transfer:
 
 ```sh
 admin POST "/v1/admin/refunds/$REFUND_ID/approve"

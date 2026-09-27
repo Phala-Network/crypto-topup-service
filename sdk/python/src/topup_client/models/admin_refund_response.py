@@ -10,7 +10,6 @@ from ..types import UNSET, Unset
 
 from ..types import UNSET, Unset
 from typing import cast
-from uuid import UUID
 
 
 T = TypeVar("T", bound="AdminRefundResponse")
@@ -21,20 +20,20 @@ class AdminRefundResponse:
     """Administrative refund workflow result.
 
     Attributes:
-        id (UUID): Refund request identifier.
+        id (str): Refund id, `re_…`.
         status (str): Stable workflow status.
         confirmation_evidence (Any | Unset): Most recent confirmation evidence, when checked.
         tx_hash (None | str | Unset): Recorded treasury transaction hash, when present.
     """
 
-    id: UUID
+    id: str
     status: str
     confirmation_evidence: Any | Unset = UNSET
     tx_hash: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        id = str(self.id)
+        id = self.id
 
         status = self.status
 
@@ -64,7 +63,7 @@ class AdminRefundResponse:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        id = UUID(d.pop("id"))
+        id = d.pop("id")
 
         status = d.pop("status")
 

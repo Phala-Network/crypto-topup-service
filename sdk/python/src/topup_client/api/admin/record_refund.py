@@ -12,11 +12,10 @@ from ...models.admin_refund_response import AdminRefundResponse
 from ...models.error_response import ErrorResponse
 from ...models.record_refund_request import RecordRefundRequest
 from typing import cast
-from uuid import UUID
 
 
 def _get_kwargs(
-    id: UUID,
+    id: str,
     *,
     body: RecordRefundRequest,
 ) -> dict[str, Any]:
@@ -78,14 +77,14 @@ def _build_response(
 
 
 def sync_detailed(
-    id: UUID,
+    id: str,
     *,
     client: AuthenticatedClient,
     body: RecordRefundRequest,
 ) -> Response[AdminRefundResponse | ErrorResponse]:
     """
     Args:
-        id (UUID):
+        id (str):
         body (RecordRefundRequest): Administrative refund record body owned by C12.
 
     Raises:
@@ -109,14 +108,14 @@ def sync_detailed(
 
 
 def sync(
-    id: UUID,
+    id: str,
     *,
     client: AuthenticatedClient,
     body: RecordRefundRequest,
 ) -> AdminRefundResponse | ErrorResponse | None:
     """
     Args:
-        id (UUID):
+        id (str):
         body (RecordRefundRequest): Administrative refund record body owned by C12.
 
     Raises:
@@ -135,14 +134,14 @@ def sync(
 
 
 async def asyncio_detailed(
-    id: UUID,
+    id: str,
     *,
     client: AuthenticatedClient,
     body: RecordRefundRequest,
 ) -> Response[AdminRefundResponse | ErrorResponse]:
     """
     Args:
-        id (UUID):
+        id (str):
         body (RecordRefundRequest): Administrative refund record body owned by C12.
 
     Raises:
@@ -164,14 +163,14 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    id: UUID,
+    id: str,
     *,
     client: AuthenticatedClient,
     body: RecordRefundRequest,
 ) -> AdminRefundResponse | ErrorResponse | None:
     """
     Args:
-        id (UUID):
+        id (str):
         body (RecordRefundRequest): Administrative refund record body owned by C12.
 
     Raises:

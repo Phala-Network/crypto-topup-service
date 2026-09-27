@@ -35,6 +35,16 @@
               }
             }
           },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not Found",
             "content": {
@@ -63,10 +73,10 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Deposit id, `dep_…` or the UUID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -77,6 +87,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NudgeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -530,10 +550,10 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Refund id, `re_…` or the UUID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -544,6 +564,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AdminRefundResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -576,10 +606,10 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Refund id, `re_…` or the UUID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -1511,8 +1541,7 @@
           },
           "id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Refund request identifier."
+            "description": "Refund id, `re_…`."
           },
           "status": {
             "type": "string",
@@ -2161,8 +2190,7 @@
           },
           "id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Deterministic deposit identifier."
+            "description": "Deposit id, `dep_…`."
           },
           "lock_ref": {
             "type": [
@@ -2402,8 +2430,7 @@
         "properties": {
           "deposit_id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Nudged deposit identifier."
+            "description": "Nudged deposit id, `dep_…`."
           },
           "next_attempt_at": {
             "type": "string",

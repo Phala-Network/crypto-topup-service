@@ -66,6 +66,13 @@ webhook receivers must ignore unknown fields.
   `quote.amount_decimals` token decimals, default 4, so the payer is asked for `273.9185` PHA
   rather than 18 decimals. The rounding overpays by less than one unit of the last decimal; the
   quote's `amount` credit is unchanged. Quotes created before keep their amount.
+- The admin deposit `nudge` and refund `approve`/`record` paths take the `dep_` and `re_` ids the
+  product API returns, as the admin deposit view and outbox replay already did; the bare UUID
+  still works. Their responses (`AdminRefundResponse.id`, `NudgeResponse.deposit_id`, and the
+  deposit view's `id`) show the prefixed id instead of the UUID.
+- A malformed path parameter, query string, or JSON body on any route, product or admin, answers
+  the `400` error object (`parameter_invalid`, `parameter_missing`, or `parameter_unknown`, with
+  `param`) instead of plain text; the admin routes' JSON bodies were plain text before.
 
 ### Added
 

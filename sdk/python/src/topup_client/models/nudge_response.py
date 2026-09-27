@@ -9,7 +9,6 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 from typing import cast
-from uuid import UUID
 import datetime
 
 
@@ -21,16 +20,16 @@ class NudgeResponse:
     """Administrative deposit nudge result.
 
     Attributes:
-        deposit_id (UUID): Nudged deposit identifier.
+        deposit_id (str): Nudged deposit id, `dep_…`.
         next_attempt_at (datetime.datetime): Newly due processing time.
     """
 
-    deposit_id: UUID
+    deposit_id: str
     next_attempt_at: datetime.datetime
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        deposit_id = str(self.deposit_id)
+        deposit_id = self.deposit_id
 
         next_attempt_at = self.next_attempt_at.isoformat()
 
@@ -48,7 +47,7 @@ class NudgeResponse:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        deposit_id = UUID(d.pop("deposit_id"))
+        deposit_id = d.pop("deposit_id")
 
         next_attempt_at = datetime.datetime.fromisoformat(d.pop("next_attempt_at"))
 

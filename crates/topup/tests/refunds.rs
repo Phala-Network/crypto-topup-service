@@ -209,7 +209,46 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         ensure!(error["error"]["code"] == "amount_too_large", "{error}");
         ensure!(error["error"]["param"] == "amount_atomic", "{error}");
 
-        let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
+        // A malformed id is an unknown refund; a path that is not UTF-8 names the parameter.
+        for (path, status, code, created) in [
+            (
+                format!("/v1/admin/refunds/re_{refund_id}/approve"),
+                StatusCode::NOT_FOUND,
+                "resource_missing",
+                now + 20,
+            ),
+            (
+                "/v1/admin/refunds/re_%FF/approve".to_owned(),
+                StatusCode::BAD_REQUEST,
+                "parameter_invalid",
+                now + 21,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(signed_request(
+                    Method::POST,
+                    &path,
+                    Vec::new(),
+                    ADMIN_KID,
+                    &admin_key,
+                    created,
+                ))
+                .await?;
+            ensure!(response.status() == status, "{path}");
+            let error = response_json(response).await?;
+            ensure!(error["error"]["type"] == "invalid_request_error", "{error}");
+            ensure!(error["error"]["code"] == code, "{error}");
+            if status == StatusCode::BAD_REQUEST {
+                ensure!(error["error"]["param"] == "id", "{error}");
+            }
+        }
+
+        // Operators take the `re_` id from the product API; the bare UUID of older logs also works.
+        let approve_path = format!(
+            "/v1/admin/refunds/{}/approve",
+            requested["id"].as_str().context("refund id")?
+        );
         seed::set_account_paused_scopes(
             &database.app_pool,
             account_id(&database.app_pool, deposit).await?,
@@ -290,7 +329,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["status"] == "approved");
+        let approved = response_json(response).await?;
+        ensure!(approved["status"] == "approved" && approved["id"] == requested["id"], "{approved}");
 
         let record_path = format!("/v1/admin/refunds/{refund_id}/record");
         let response = app
@@ -305,7 +345,8 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["status"] == "sent");
+        let recorded = response_json(response).await?;
+        ensure!(recorded["status"] == "sent" && recorded["id"] == requested["id"], "{recorded}");
 
         let route = route_fixture();
         let reader = ScriptedReader::new(vec![
@@ -403,6 +444,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         ensure!(refund["status"] == "succeeded", "{refund}");
         ensure!(refund["deposit"]["id"] == format!("dep_{}", deposit.simple()), "{refund}");
         let response = app
+            .clone()
             .oneshot(signed_request(
                 Method::GET,
                 &format!("/v1/admin/deposits/dep_{}", deposit.simple()),
@@ -414,8 +456,21 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let detail = response_json(response).await?;
+        ensure!(detail["id"] == format!("dep_{}", deposit.simple()), "{detail}");
         ensure!(detail["external_id"] == "refund-account");
         ensure!(detail["timeline"][0]["to_state"] == "rejected");
+        let response = app
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/v1/admin/deposits/{deposit}"),
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 9,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response_json(response).await?["id"] == detail["id"]);
         Ok(())
     }
     .await;
@@ -1138,19 +1193,26 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
 
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let nudge_path = format!("/v1/admin/deposits/{rejected}/nudge");
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &nudge_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
+        // The `dep_` id and the bare UUID of older logs both name the deposit.
+        for (nudge_path, created) in [
+            (format!("/v1/admin/deposits/dep_{}/nudge", rejected.simple()), now - 1),
+            (format!("/v1/admin/deposits/{rejected}/nudge"), now),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(signed_request(
+                    Method::POST,
+                    &nudge_path,
+                    Vec::new(),
+                    ADMIN_KID,
+                    &admin_key,
+                    created,
+                ))
+                .await?;
+            ensure!(response.status() == StatusCode::OK);
+            let nudged = response_json(response).await?;
+            ensure!(nudged["deposit_id"] == format!("dep_{}", rejected.simple()), "{nudged}");
+        }
         let state: String = sqlx::query_scalar("SELECT state FROM deposits WHERE id = $1")
             .bind(rejected)
             .fetch_one(&database.app_pool)
@@ -1162,7 +1224,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         .bind(format!("deposit:{rejected}"))
         .fetch_one(&database.app_pool)
         .await?;
-        ensure!(audit_count == 1);
+        ensure!(audit_count == 2);
 
         // Production has no logs: the report says why the route's last planning run stopped.
         topup::observability::record_flush_planning(
