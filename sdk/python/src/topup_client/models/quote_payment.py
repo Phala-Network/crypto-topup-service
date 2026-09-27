@@ -22,11 +22,11 @@ class QuotePayment:
 
         Attributes:
             amount_atomic (str): Token amount in base units, as a decimal string.
-            deposit (str): `dep_` id the deposit has, or will have once final.
+            deposit (str): `dep_` id the deposit has, or will have once recorded.
             matches_quote (bool): Whether the payment is the quote's asset, in time, and within tolerance, so it will be
                 credited at the quoted price; otherwise it is credited at spot once final.
-            status (str): `seen` (above the finalized head) or `final` (recorded as a deposit). New values may be
-                added.
+            status (str): `seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the
+                route's confirmation; it is final once its block is). New values may be added.
             tx_hash (str): Canonical transaction hash.
             confirmations (int | None | Unset): Blocks on top of and including the transfer's block at the last head scan;
                 `seen` only.

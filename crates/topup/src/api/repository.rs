@@ -262,6 +262,7 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
+               deposit.final_at IS NOT NULL AS is_final,
                COALESCE(deposit.route, $3) AS effective_route,
                account.paused_scopes AS account_scopes,
                product.paused_scopes AS product_scopes,
@@ -294,6 +295,10 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
     refund_eligibility(refund_deposit_from_row(&row, refund.route)?)
         .map_err(|_| ApiError::deposit_not_refundable())?;
+    // Nothing is paid back for a deposit that could still be reversed.
+    if !row.try_get::<bool, _>("is_final")? {
+        return Err(ApiError::deposit_not_final());
+    }
     let effective_route: String = row.try_get("effective_route")?;
 
     let to_address = format!("{:#x}", refund.destination);
@@ -883,9 +888,11 @@ struct DepositViewRow {
     external_id: String,
     chain_id: i64,
     tx_hash: String,
+    receipt_log_index: i64,
     log_index: i64,
     block_number: i64,
     block_time: DateTime<Utc>,
+    final_at: Option<DateTime<Utc>>,
     address: String,
     lock_ref: Option<String>,
     route: Option<String>,
@@ -1003,9 +1010,12 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             external_id: row.external_id,
             chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
             tx_hash: row.tx_hash,
+            receipt_log_index: u64::try_from(row.receipt_log_index)
+                .map_err(|_| ApiError::internal())?,
             log_index: u64::try_from(row.log_index).map_err(|_| ApiError::internal())?,
             block_number: u64::try_from(row.block_number).map_err(|_| ApiError::internal())?,
             block_time: row.block_time,
+            final_at: row.final_at,
             address: row.address,
             lock_ref: row.lock_ref,
             route: row.route,
@@ -1032,8 +1042,9 @@ fn deposit_query() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         r#"
         SELECT deposit.id, account.external_id, deposit.chain_id, deposit.tx_hash,
-               deposit.log_index,
-               deposit.block_number, deposit.block_time, address.address, address.lock_ref,
+               deposit.receipt_log_index, deposit.log_index,
+               deposit.block_number, deposit.block_time, deposit.final_at, address.address,
+               address.lock_ref,
                deposit.route, deposit.route_version, deposit.asset_contract,
                deposit.from_address, deposit.amount_atomic::text AS amount_atomic,
                deposit.state, deposit.valuation_at, deposit.price_scaled::text AS price_scaled,
@@ -1160,7 +1171,7 @@ pub async fn daily_report(
         SELECT COALESCE(route, 'unrouted:' || chain_id::text || ':' || asset_contract) AS report_key,
                COALESCE(sum(amount_atomic), 0)::text AS amount
         FROM deposits
-        WHERE flush_id IS NULL
+        WHERE flush_id IS NULL AND state <> 'reversed'
         GROUP BY report_key
         "#,
     )
@@ -1347,7 +1358,14 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
-        deposits_by_state: zero_counts(&["detected", "confirmed", "credited", "swept", "rejected"]),
+        deposits_by_state: zero_counts(&[
+            "detected",
+            "confirmed",
+            "credited",
+            "swept",
+            "rejected",
+            "reversed",
+        ]),
         credited_undelivered: 0,
         credited_undelivered_max_age_seconds: 0,
         refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),
@@ -1372,7 +1390,14 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
         unflushed_balance_atomic: "0".to_owned(),
         open_rate_lock_exposure_atomic: "0".to_owned(),
         rejected_holds_atomic: "0".to_owned(),
-        deposits_by_state: zero_counts(&["detected", "confirmed", "credited", "swept", "rejected"]),
+        deposits_by_state: zero_counts(&[
+            "detected",
+            "confirmed",
+            "credited",
+            "swept",
+            "rejected",
+            "reversed",
+        ]),
         credited_undelivered: 0,
         credited_undelivered_max_age_seconds: 0,
         refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),

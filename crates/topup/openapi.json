@@ -1368,7 +1368,7 @@
         "tags": [
           "refunds"
         ],
-        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the product did not apply.",
+        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the product did not apply. The deposit\nmust be final.",
         "operationId": "create_refund",
         "parameters": [
           {
@@ -1426,7 +1426,7 @@
             }
           },
           "409": {
-            "description": "`deposit_not_refundable`, `paused`, `signature_replayed`, or `idempotency_error`",
+            "description": "`deposit_not_refundable`, `deposit_not_final`, `paused`, `signature_replayed`, or `idempotency_error`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1668,7 +1668,7 @@
           },
           "payment_status": {
             "type": "string",
-            "description": "Progress of the payment shown on the page; display only, never a reason to deliver\nanything: `none`; `seen` (in a block that is not final yet and may still disappear);\n`confirming` (final, being valued and screened); `credited`; or `rejected` (final and not\ncredited; the payer should contact the product's support)."
+            "description": "Progress of the payment shown on the page; display only, never a reason to deliver\nanything: `none`; `seen` (in a block, below the route's confirmation, and may still\ndisappear); `confirming` (at the route's confirmation, being valued and screened);\n`credited`; or `rejected` (not credited; the payer should contact the product's support)."
           },
           "payment_uri": {
             "type": "string",
@@ -1741,6 +1741,10 @@
             "description": "EVM chain identifier.",
             "minimum": 0
           },
+          "confirmations": {
+            "type": "string",
+            "description": "The confirmation a payment's block must reach before it is credited: a depth (`\"2\"`: the\nblock and one more), `\"safe\"`, or `\"finalized\"`. A credit before finality can still be\nreversed (`deposit.reversed`). Optional in the schema, like `typical_credit_seconds`, so\nclients also parse responses from servers that predate fast credit."
+          },
           "contract": {
             "type": "string",
             "description": "Token contract address."
@@ -1787,10 +1791,16 @@
             "description": "Payment window of a quote, in seconds.",
             "minimum": 0
           },
+          "typical_credit_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Typical time from payment to the `deposit.credited` event, in seconds.",
+            "minimum": 0
+          },
           "typical_finality_seconds": {
             "type": "integer",
             "format": "int64",
-            "description": "Typical time from payment to finality, in seconds.",
+            "description": "Typical time from payment to finality, in seconds; refunds wait for it.",
             "minimum": 0
           }
         }
@@ -1908,7 +1918,7 @@
       },
       "Deposit": {
         "type": "object",
-        "description": "A final transfer to a quote's address: valued, screened, and credited, or rejected.",
+        "description": "A transfer to a quote's address at the route's confirmation: valued, screened, and credited,\nor rejected; `reversed` if its transaction left the chain before finality.",
         "required": [
           "id",
           "object",
@@ -1967,7 +1977,7 @@
           "block_number": {
             "type": "integer",
             "format": "int64",
-            "description": "Finalized block number.",
+            "description": "Number of the block the transfer is in; it changes if the transaction is re-included.",
             "minimum": 0
           },
           "chain_id": {
@@ -1998,12 +2008,12 @@
           },
           "id": {
             "type": "string",
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{log_index}\")`."
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs."
           },
           "log_index": {
             "type": "integer",
             "format": "int64",
-            "description": "Log index of the transfer.",
+            "description": "Block-wide log index of the transfer; it changes if the transaction is re-included.",
             "minimum": 0
           },
           "object": {
@@ -2041,7 +2051,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`detected`, `confirmed`, `credited`, `swept`, or `rejected`. New values may be added."
+            "description": "`detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is\nnot in the final chain: claw back a credit as for `deposit.refunded`). New values may be\nadded."
           },
           "tx_hash": {
             "type": "string",
@@ -2154,13 +2164,13 @@
           "block_number": {
             "type": "integer",
             "format": "int64",
-            "description": "Finalized block number.",
+            "description": "Including block number.",
             "minimum": 0
           },
           "block_time": {
             "type": "string",
             "format": "date-time",
-            "description": "Finalized block time."
+            "description": "Including block time."
           },
           "chain_id": {
             "type": "integer",
@@ -2184,6 +2194,14 @@
             "type": "string",
             "description": "Product-owned identifier of the account the receiving address belongs to. This service\nalways sends it; it is optional in the schema so clients also parse responses from servers\nthat predate it."
           },
+          "final_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When both providers showed the transfer at or below `finalized`; `null` while the deposit\ncan still be reversed."
+          },
           "from_address": {
             "type": "string",
             "description": "Canonical transfer sender address."
@@ -2202,7 +2220,7 @@
           "log_index": {
             "type": "integer",
             "format": "int64",
-            "description": "Transfer log index.",
+            "description": "Block-wide transfer log index; it follows the transaction's re-inclusion.",
             "minimum": 0
           },
           "price_scaled": {
@@ -2218,6 +2236,12 @@
               "null"
             ],
             "description": "Which price valued the deposit: `lock` (the quoted price) or `spot`."
+          },
+          "receipt_log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Position of the transfer log in its transaction's receipt; with the chain and transaction,\nthe deposit's identity. Optional in the schema so clients also parse responses from\nservers that predate it.",
+            "minimum": 0
           },
           "route": {
             "type": [
@@ -2703,7 +2727,7 @@
           },
           "deposit": {
             "type": "string",
-            "description": "`dep_` id the deposit has, or will have once final."
+            "description": "`dep_` id the deposit has, or will have once recorded."
           },
           "estimated_final_at": {
             "type": [
@@ -2719,7 +2743,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`seen` (above the finalized head) or `final` (recorded as a deposit). New values may be\nadded."
+            "description": "`seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the\nroute's confirmation; it is final once its block is). New values may be added."
           },
           "tx_hash": {
             "type": "string",

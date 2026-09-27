@@ -59,7 +59,7 @@ async fn insert_rejected_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deposit: &NewDeposit,
 ) -> Result<(), sqlx::Error> {
-    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index);
     let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
         .bind(deposit.account_id)
         .fetch_optional(&mut **transaction)
@@ -93,6 +93,77 @@ pub async fn get_cursor(pool: &PgPool, chain_id: u64) -> Result<Option<u64>, sql
         .transpose()
 }
 
+/// Returns the last block the fast scanner committed at the route confirmation, if any.
+pub async fn get_confirmed_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+) -> Result<Option<u64>, sqlx::Error> {
+    let chain_id = to_i64(chain_id, "cursors.chain_id")?;
+    let confirmed_block = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT confirmed_block FROM cursors WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    confirmed_block
+        .map(|value| to_u64(value, "cursors.confirmed_block"))
+        .transpose()
+}
+
+/// Commits deposits the fast scanner found at the route confirmation and advances its cursor
+/// to `confirmed_block`, atomically. The cursor never moves backwards, and it needs a finalized
+/// cursor row: the fast scan starts above the finalized scanner's range.
+pub async fn commit_confirmed_scan(
+    pool: &PgPool,
+    chain_id: u64,
+    deposits: &[NewDeposit],
+    confirmed_block: u64,
+) -> Result<ScanCommit, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let commit = insert_deposits_in(&mut transaction, deposits).await?;
+    sqlx::query(
+        r#"
+        UPDATE cursors
+        SET confirmed_block = GREATEST(COALESCE(confirmed_block, 0), $2)
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(to_i64(chain_id, "cursors.chain_id")?)
+    .bind(to_i64(confirmed_block, "cursors.confirmed_block")?)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(commit)
+}
+
+async fn insert_deposits_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deposits: &[NewDeposit],
+) -> Result<ScanCommit, sqlx::Error> {
+    let mut inserted = 0_u64;
+    let mut unsupported_inserted = 0_u64;
+    for deposit in deposits {
+        if insert_deposit_in(transaction, deposit).await? {
+            inserted = inserted.checked_add(1).ok_or_else(|| {
+                sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
+            })?;
+            if deposit.reason == Some(RejectReason::UnsupportedAsset) {
+                unsupported_inserted = unsupported_inserted.checked_add(1).ok_or_else(|| {
+                    sqlx::Error::Protocol("unsupported deposit count overflowed u64".to_owned())
+                })?;
+            }
+            if deposit.state == DepositState::Rejected {
+                insert_rejected_event(transaction, deposit).await?;
+            }
+        }
+    }
+    Ok(ScanCommit {
+        inserted,
+        unsupported_inserted,
+    })
+}
+
 /// Loads every address for a chain, including retired persistent and lock addresses.
 pub async fn list_scan_addresses(
     pool: &PgPool,
@@ -123,6 +194,8 @@ pub async fn list_scan_addresses(
 ///
 /// A deposit born `rejected` (no route for its asset) never passes through a pump step, so its
 /// `deposit.rejected` event is written here, in the same transaction and only on first insert.
+/// Deposits already recorded by the fast scanner are left as they are: the insert is keyed by the
+/// receipt position, and the finality watch follows their evidence.
 pub async fn commit_scan(
     pool: &PgPool,
     chain_id: u64,
@@ -132,23 +205,7 @@ pub async fn commit_scan(
     scanned_block_time: Option<DateTime<Utc>>,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let mut inserted = 0_u64;
-    let mut unsupported_inserted = 0_u64;
-    for deposit in deposits {
-        if insert_deposit_in(&mut transaction, deposit).await? {
-            inserted = inserted.checked_add(1).ok_or_else(|| {
-                sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
-            })?;
-            if deposit.reason == Some(RejectReason::UnsupportedAsset) {
-                unsupported_inserted = unsupported_inserted.checked_add(1).ok_or_else(|| {
-                    sqlx::Error::Protocol("unsupported deposit count overflowed u64".to_owned())
-                })?;
-            }
-            if deposit.state == DepositState::Rejected {
-                insert_rejected_event(&mut transaction, deposit).await?;
-            }
-        }
-    }
+    let commit = insert_deposits_in(&mut transaction, deposits).await?;
 
     if !backfilled_address_ids.is_empty() {
         sqlx::query("UPDATE addresses SET backfilled = true WHERE id = ANY($1)")
@@ -181,8 +238,5 @@ pub async fn commit_scan(
     }
 
     transaction.commit().await?;
-    Ok(ScanCommit {
-        inserted,
-        unsupported_inserted,
-    })
+    Ok(commit)
 }

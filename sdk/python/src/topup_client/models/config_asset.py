@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
+
 
 T = TypeVar("T", bound="ConfigAsset")
 
@@ -29,7 +31,13 @@ class ConfigAsset:
             spread.
         quote_tolerance_bps (int): A payment within this many basis points of the quoted amount completes the quote.
         quote_ttl_seconds (int): Payment window of a quote, in seconds.
-        typical_finality_seconds (int): Typical time from payment to finality, in seconds.
+        typical_finality_seconds (int): Typical time from payment to finality, in seconds; refunds wait for it.
+        confirmations (str | Unset): The confirmation a payment's block must reach before it is credited: a depth
+            (`"2"`: the
+            block and one more), `"safe"`, or `"finalized"`. A credit before finality can still be
+            reversed (`deposit.reversed`). Optional in the schema, like `typical_credit_seconds`, so
+            clients also parse responses from servers that predate fast credit.
+        typical_credit_seconds (int | Unset): Typical time from payment to the `deposit.credited` event, in seconds.
     """
 
     asset: str
@@ -44,6 +52,8 @@ class ConfigAsset:
     quote_tolerance_bps: int
     quote_ttl_seconds: int
     typical_finality_seconds: int
+    confirmations: str | Unset = UNSET
+    typical_credit_seconds: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +81,10 @@ class ConfigAsset:
 
         typical_finality_seconds = self.typical_finality_seconds
 
+        confirmations = self.confirmations
+
+        typical_credit_seconds = self.typical_credit_seconds
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -89,6 +103,10 @@ class ConfigAsset:
                 "typical_finality_seconds": typical_finality_seconds,
             }
         )
+        if confirmations is not UNSET:
+            field_dict["confirmations"] = confirmations
+        if typical_credit_seconds is not UNSET:
+            field_dict["typical_credit_seconds"] = typical_credit_seconds
 
         return field_dict
 
@@ -119,6 +137,10 @@ class ConfigAsset:
 
         typical_finality_seconds = d.pop("typical_finality_seconds")
 
+        confirmations = d.pop("confirmations", UNSET)
+
+        typical_credit_seconds = d.pop("typical_credit_seconds", UNSET)
+
         config_asset = cls(
             asset=asset,
             chain_id=chain_id,
@@ -132,6 +154,8 @@ class ConfigAsset:
             quote_tolerance_bps=quote_tolerance_bps,
             quote_ttl_seconds=quote_ttl_seconds,
             typical_finality_seconds=typical_finality_seconds,
+            confirmations=confirmations,
+            typical_credit_seconds=typical_credit_seconds,
         )
 
         config_asset.additional_properties = d

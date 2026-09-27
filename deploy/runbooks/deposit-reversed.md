@@ -1,0 +1,68 @@
+# Deposit reversed or pending after a reorg
+
+**Trigger:** `TopupDepositReversed` (a deposit's transaction left the chain before finality and
+the deposit is now `reversed`), or `TopupDepositPendingAfterReorg` (a deposit's transaction has
+been in no block for an hour, with its sender's nonce still unused). Both carry `chain_id` and
+`state` tags and the `deposit_id` and `tx_hash` fields.
+
+**Impact:** the service credits at the route's confirmation (two blocks on Ethereum) and watches
+each deposit to finality ([architecture §7](../../docs/architecture.md#7-states-and-pump)). A
+reversal already sent `deposit.reversed` when the product had been told of the deposit
+(`credited` or `rejected`); the product claws the credit back as for `deposit.refunded`, and a quote
+the deposit completed opened again (or expired). Nothing needs undoing in the service. A reversal
+is a chain-health signal: depth-2 reorgs were not observed on post-Merge Ethereum, so more than a
+rare one means the chain, or a provider, is misbehaving.
+
+## First steps
+
+1. Read the deposit's timeline and events (the admin deposit view):
+
+   ```sh
+   admin GET "/v1/admin/deposits/$DEPOSIT_ID" | jq ".deposit, .timeline, .events"
+   ```
+
+   In the `timeline`, the transition to `reversed` has `evidence.result`
+   `dropped_nonce_consumed` (with `tx_from`, `tx_nonce`, and each provider's nonce at
+   `finalized`) or `transfer_absent_at_finality` (with the block both providers showed). The
+   watch's records (`evidence.stage` `finality`, `result` `followed`) show where the transaction
+   was followed; `deposit.final_at` stays `null` on a reversed deposit.
+2. Read the transaction on both providers:
+
+   ```sh
+   cast rpc --rpc-url "$RPC_PROVIDER_A_URL" eth_getTransactionReceipt "$TX_HASH" | jq .blockHash
+   cast rpc --rpc-url "$RPC_PROVIDER_B_URL" eth_getTransactionReceipt "$TX_HASH" | jq .blockHash
+   cast nonce --rpc-url "$RPC_PROVIDER_A_URL" --block finalized "$TX_FROM"
+   cast nonce --rpc-url "$RPC_PROVIDER_B_URL" --block finalized "$TX_FROM"
+   ```
+
+## Decide
+
+- `TopupDepositReversed`, one deposit, both providers agree the transaction is gone (or the
+  transfer is missing from its final receipt): a real reorg or a replaced transaction. Confirm the
+  product received `deposit.reversed` (the view's `events` shows `delivered_at`); if the payer
+  still wants to top up, they pay a new quote.
+- Several reversals on one chain in a short time: treat as a chain or provider incident. Pause
+  settlement on the chain's routes so no further credit is made before finality, and escalate:
+
+  ```sh
+  admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["settlement"]}'
+  ```
+
+- `TopupDepositPendingAfterReorg`: the transaction is out of every block and may still be mined
+  (for example stuck in a mempool at a low fee). Nothing to do while the nonce is unused; the
+  deposit is reversed automatically once another transaction consumes the nonce and that is
+  final. If the providers disagree about the receipt, follow
+  [Provider disagreement](provider-disagreement.md).
+
+## Fix
+
+A reversal needs no repair. If the evidence contradicts the chain (a receipt at or below
+`finalized` with the transfer, on both providers), escalate to Engineering with the timeline.
+Raising a route's confirmation (for example to `finalized`) is a route config change and Deploy
+`upgrade`.
+
+## Done when
+
+The product confirms the claw-back of every reversed credit, and no further reversals arrive (or
+settlement is resumed after the incident:
+`admin POST "/v1/admin/routes/$ROUTE/resume" '{"scopes":["settlement"]}'`).

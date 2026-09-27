@@ -27,7 +27,14 @@ type ApiResult<T> = Result<T, ApiError>;
 
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 100;
-const DEPOSIT_STATES: [&str; 5] = ["detected", "confirmed", "credited", "swept", "rejected"];
+const DEPOSIT_STATES: [&str; 6] = [
+    "detected",
+    "confirmed",
+    "credited",
+    "swept",
+    "rejected",
+    "reversed",
+];
 
 #[utoipa::path(
     get,
@@ -208,8 +215,8 @@ pub(crate) async fn get_deposit(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
             status = 409,
-            description = "`deposit_not_refundable`, `paused`, `signature_replayed`, or \
-                           `idempotency_error`",
+            description = "`deposit_not_refundable`, `deposit_not_final`, `paused`, \
+                           `signature_replayed`, or `idempotency_error`",
             body = ErrorResponse
         )
     ),
@@ -217,7 +224,8 @@ pub(crate) async fn get_deposit(
     tag = "refunds"
 )]
 /// Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-/// other than a sanctioned or dust one, or a credited one the product did not apply.
+/// other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+/// must be final.
 pub(crate) async fn create_refund(
     State(state): State<AppState>,
     Extension(product): Extension<Product>,

@@ -1,6 +1,7 @@
 # Fully valid schema fixture. Addresses are from the A1 deterministic test-vector deployment.
 # It overrides defaults the tests rely on: providers, the chain defaults (so tests may change the
-# chain id), and the deposit and flush floors.
+# chain id), crediting only at `finalized` (so the suite checks that `finalized` reproduces the
+# behaviour before fast credit), and the deposit and flush floors.
 route: phala-cloud-ethereum-pha-usd
 version: 1
 product: phala-cloud
@@ -9,6 +10,7 @@ chain:
   chain_id: 1
   forwarder_factory: "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d"
   treasury: "0x0000000000000000000000000000000000007EA5"
+  confirmations: finalized
   sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
   rpc_providers: [alchemy, quicknode]
   flush:

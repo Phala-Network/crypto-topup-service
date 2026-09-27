@@ -341,6 +341,89 @@ async fn fulfillment_migration_returns_cleared_deposits_to_confirmed_with_histor
 }
 
 #[tokio::test]
+async fn fast_credit_migration_keeps_recorded_deposits_final_under_their_ids() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            // Recreate the pre-migration schema with a deposit and a pending row recorded by it.
+            sqlx::raw_sql(include_str!(
+                "../migrations/20261003000000_fast_credit.down.sql"
+            ))
+            .execute(&context.owner_pool)
+            .await?;
+            let seed = seed_account(&context.app_pool, 6).await?;
+            let id = deposit_id(1, b256(6), 7);
+            sqlx::query(
+                r#"
+                INSERT INTO deposits (
+                    id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
+                    address_id, account_id, asset_contract, from_address, amount_atomic, state,
+                    next_attempt_at
+                )
+                VALUES ($1, 1, $2, 7, 10, $3, now(), $4, $5, $6, $6, 100, 'credited', now())
+                "#,
+            )
+            .bind(id)
+            .bind(format!("{:#x}", b256(6)))
+            .bind(format!("{:#x}", b256(7)))
+            .bind(seed.address_id)
+            .bind(seed.account_id)
+            .bind(format!("{:#x}", evm_address(6)))
+            .execute(&context.owner_pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO pending_transfers (
+                    chain_id, tx_hash, log_index, block_number, block_hash, block_time, head_block,
+                    address_id, asset_contract, from_address, amount_atomic
+                )
+                VALUES (1, $1, 0, 20, $1, now(), 20, $2, $3, $3, 5)
+                "#,
+            )
+            .bind(format!("{:#x}", b256(8)))
+            .bind(seed.address_id)
+            .bind(format!("{:#x}", evm_address(8)))
+            .execute(&context.owner_pool)
+            .await?;
+
+            sqlx::raw_sql(include_str!(
+                "../migrations/20261003000000_fast_credit.up.sql"
+            ))
+            .execute(&context.owner_pool)
+            .await?;
+
+            let deposit = db::get_deposit(&context.app_pool, id)
+                .await?
+                .context("migrated deposit")?;
+            ensure!(deposit.receipt_log_index == 7 && deposit.log_index == 7);
+            ensure!(
+                deposit.final_at.is_some(),
+                "a deposit born final stays final"
+            );
+            ensure!(deposit.tx_from.is_none() && deposit.tx_nonce.is_none());
+            let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_transfers")
+                .fetch_one(&context.app_pool)
+                .await?;
+            ensure!(pending == 0, "the head scan rebuilds the pending view");
+            // A swept deposit must be final; `reversed` is a state.
+            sqlx::query("UPDATE deposits SET state = 'swept' WHERE id = $1")
+                .bind(id)
+                .execute(&context.owner_pool)
+                .await?;
+            assert_sqlstate(
+                sqlx::query("UPDATE deposits SET final_at = NULL WHERE id = $1")
+                    .bind(id)
+                    .execute(&context.owner_pool)
+                    .await
+                    .err(),
+                "23514",
+            )?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
@@ -1114,6 +1197,10 @@ fn new_deposit(
         chain_id,
         tx_hash: b256(number),
         log_index,
+        receipt_log_index: log_index,
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
+        is_final: true,
         block_number: 100 + u64::from(number),
         block_hash: b256(number.wrapping_add(1)),
         block_time: Utc::now(),

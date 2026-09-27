@@ -14,6 +14,16 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Added
 
+- Fast credit: the regenerated client carries the config's `confirmations` and
+  `typical_credit_seconds`, and the admin deposit view's `receipt_log_index` and `final_at`.
+  `Event` documents `deposit.reversed`: claw its credit back as for `deposit.refunded`.
+
+### Changed
+
+- **Breaking**: `topup_sdk.deposit_id(chain_id, tx_hash, receipt_log_index)` hashes the
+  transfer's position in its transaction's receipt (0 for a plain token transfer), the service's
+  deposit identity since fast credit; the argument was the block-wide `log_index`.
+
 - `phala_pay`: the Stripe-style facade. `PhalaPay(api_base, key_id, key_file=… | seed=…,
   forwarder=…)` with `quotes.create/retrieve/cancel`, `deposits.list` (auto-paginating) and
   `retrieve`, `refunds.create/retrieve`, and `config.retrieve`; `webhooks.construct_event(payload,

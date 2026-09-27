@@ -22,8 +22,9 @@ export interface ClientQuote {
   /** Unix seconds; after this the address must no longer be shown. */
   expires_at: number;
   /**
-   * `seen` before finality (a reorg can remove it), `confirming` while a final payment is valued
-   * and screened, `credited` once it is credited, `rejected` when it is final but will not be.
+   * `seen` once in a block (a reorg can remove it), `confirming` while a payment at the route's
+   * confirmation is valued and screened, `credited` once it is credited (about 30 seconds after
+   * paying), `rejected` when it will not be.
    */
   payment_status: "none" | "seen" | "confirming" | "credited" | "rejected";
   /** Block confirmations while `payment_status` is `seen`, otherwise `null`. */

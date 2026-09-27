@@ -98,6 +98,8 @@ async def webhook(request: Request) -> Response:
         return Response(status_code=400)
     if event.type == "deposit.credited":
         credit_once(event.deposit.id, event.deposit.account_id, event.deposit.amount)
+    elif event.type in ("deposit.reversed", "deposit.refunded"):
+        claw_back_once(event.id, event.deposit.id)
     return Response(status_code=200)
 ```
 
@@ -111,9 +113,13 @@ cloud console's billing page, at `/demo/`.
 
 A quote is the only way to pay, as a PaymentIntent is in Stripe: the user states an amount in
 dollars and receives a locked price, an exact token amount, and a single-use address to pay
-within the window. The service watches Ethereum for transfers to its addresses, waits for
-finality, prices each deposit, and screens it. A deposit that passes is credited, and the service
-tells Phala Cloud with a signed `deposit.credited` webhook. Phala Cloud owns the balance: it
+within the window. The service watches Ethereum for transfers to its addresses, waits for the
+route's confirmation (two blocks on Ethereum), prices each deposit, and screens it. A deposit that
+passes is credited, typically **about 30 seconds after paying**, and the service tells Phala Cloud
+with a signed `deposit.credited` webhook. It keeps watching the deposit until it is final (about
+15 minutes on Ethereum); in the rare case that the payment's transaction is dropped from the
+chain before then, the deposit is reversed and a signed `deposit.reversed` tells you to claw the
+credit back, exactly as for a refund (§2.3). Phala Cloud owns the balance: it
 verifies the signature and credits the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
 addresses are CREATE2 forwarders that can only pay the treasury; the service sweeps them there in
@@ -134,12 +140,16 @@ sequenceDiagram
     BE-->>UI: client_secret
     UI->>PP: GET /v1/quotes/{id}?client_secret=… (polls)
     Payer->>ETH: transfer the exact amount (wallet, QR, or manual)
-    PP-->>UI: payment seen, then confirming
-    Note over PP,ETH: finality, about 15 minutes, two RPC providers agree
+    PP-->>UI: payment seen within seconds, then confirming
+    Note over PP,ETH: two blocks, both RPC providers agree (about 30 s after paying)
     PP->>BE: webhook deposit.credited (signed, retried until 2xx)
     BE->>BE: verify, credit once per dep_ id
     BE-->>PP: 2xx
     PP-->>UI: credited
+    Note over PP,ETH: watched until final, about 15 minutes
+    opt Transaction dropped before finality (rare)
+        PP->>BE: webhook deposit.reversed: claw back like a refund
+    end
     PP->>ETH: batched flush to the treasury Safe
     opt Refund (operator only, from your admin)
         BE->>PP: POST /v1/refunds {deposit, destination_address}
@@ -153,7 +163,9 @@ Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead 
 the payable assets (chain, asset code, contract, decimals), the minimum `amount` in cents
 (`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), the per-account cap on
 open quotes in cents (`max_open_amount_per_account`), the refund floor, the quote window, spread,
-and tolerance, and the typical finality time. Quotes are priced at
+and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more),
+the typical credit time (`typical_credit_seconds`, 30), and the typical finality time
+(`typical_finality_seconds`, 900). Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is the service's
 and never reduces a credit.
@@ -184,7 +196,8 @@ and never reduces a credit.
   time is never reported as expired: hide the address once `expires_at` has passed and offer a
   new quote.
 - `payment` is what the waiting screen shows once a transfer is seen on chain, display only:
-  `status` (`seen` before finality, `final` once it is a deposit), `tx_hash`, `amount_atomic`,
+  `status` (`seen` once in a block, `final` once it is a deposit at the route's confirmation;
+  the name predates fast credit), `tx_hash`, `amount_atomic`,
   `confirmations` and `estimated_final_at` while `seen`, `matches_quote` (credited at the quoted
   price when true), and the `dep_` id it has or will have. A seen payment can disappear in a
   reorg and is never a credit.
@@ -221,8 +234,8 @@ records of your own to credit: `deposit.credited` carries the deposit, which nam
 do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without a signature, from any
 origin, as Stripe.js reads a PaymentIntent: `{id, object, status, amount, currency, asset,
 decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
-confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (final, being valued and
-screened), `credited`, or `rejected` (contact support). It carries no account, price, deposit id,
+confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the route's
+confirmation, being valued and screened), `credited`, or `rejected` (contact support). It carries no account, price, deposit id,
 or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
 repeat with the same `Idempotency-Key` returns the same quote with a new secret, and the earlier
 one stops working. `@phala/pay`'s `<Checkout>` is this page.
@@ -235,9 +248,9 @@ and does not pay twice.
 
 **Drive the page from the checkout.** `<Checkout onChange>` is called once per status change with
 `{ status, quote, error }`, like Stripe Elements' `onChange`. Hide your own "new payment" or
-amount controls while the status is `seen` or `confirming`, so that a payer waiting for finality
-does not start a second payment. While waiting, tell the payer that finality takes about 15
-minutes (`typical_finality_seconds`), that they can close the page, and that the credit arrives
+amount controls while the status is `seen` or `confirming`, so that a waiting payer does not
+start a second payment. While waiting, tell the payer that the payment is credited in about 30
+seconds (`typical_credit_seconds`), that they can close the page, and that the credit arrives
 automatically.
 
 **Theme it.** `appearance` takes a `theme` (`light` or `dark`) and `variables` named as in Stripe's
@@ -260,9 +273,10 @@ dark one with a light brand color), `colorBackground`, `colorText`, `colorTextSe
 ### 1.3 Payment outcomes
 
 A deposit's `status` is `detected → confirmed → credited → swept`, or `rejected` with a
-`rejection_reason`
+`rejection_reason`, or `reversed`
 ([architecture §7](architecture.md#7-states-and-pump)). Nothing is reported as a deposit before
-finality. The staging deposit driver asserts these outcomes on Sepolia
+the route's confirmation (two blocks on Ethereum); a deposit is final about 15 minutes later.
+The staging deposit driver asserts these outcomes on Sepolia
 ([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
@@ -273,11 +287,12 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
-| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot at finality. |
-| Token without a route | After finality `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
+| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot when confirmed. |
+| Token without a route | Once confirmed, `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
+| Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): claw back the credit as for `deposit.refunded`. A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
 | You refuse the credit (for example a closed workspace) | Deposit `credited`; you hold it and request its refund (§2.4). Deposits refused under the retired settlement protocol show `rejected(product_refused)`. |
 
 User-facing copy per state and reason, including what never to show, is in
@@ -309,7 +324,7 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
   first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a flush
   covered it before that first delivery.
 - `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
-  otherwise spot at finality (§1.3).
+  otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
   valued at spot; it is `null` only for a legacy persistent address.
 - `webhook-id` is the event's `id`: `evt_` and the hex of
@@ -356,11 +371,13 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
 | 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
+| 6 | On `deposit.reversed`, claw back the credit applied for that deposit id, as for `deposit.refunded`, once per event id (a held credit was never applied). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. |
 
 Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
 `credited` or `swept` with the same amount; recompute the deposit id, `dep_` and the hex of
-`uuid_v5(NS, "{chain_id}:{tx_hash}:{log_index}")` (`topup_sdk.deposit_id`), and verify the cited log on your
-own node at finality; per-deposit and per-period caps as review holds. None is needed for
+`uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}")` (`topup_sdk.deposit_id`), where
+`receipt_log_index` is the transfer's position among its transaction's receipt logs (0 for a plain
+token transfer), and verify the cited log on your own node at finality; per-deposit and per-period caps as review holds. None is needed for
 correctness: as with a card processor, the credit is authorized by the service's signature.
 Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
 events, and the event follows the `credited` commit within a second.
@@ -409,8 +426,8 @@ the service's public key.
 - Deduplicate by `webhook-id`; delivery is at least once.
 - There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
   payment. Act on fetched state (the deposit or quote), never on event order.
-- Only `deposit.credited` moves a balance (§2); every other event is for notifications, history,
-  and UI refresh.
+- Only `deposit.credited` moves a balance up, and `deposit.reversed` and `deposit.refunded` move
+  it back (§2); every other event is for notifications, history, and UI refresh.
 - Ignore unknown event types and unknown fields.
 - A lost event can be replayed by the operator with the admin-signed
   `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same body. An event delivered
@@ -423,11 +440,13 @@ the service's public key.
 |---|---|---|
 | `deposit.credited` | Final, priced, and screened: fulfill it (§2). | The deposit |
 | `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
+| `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Claw back its credit as for `deposit.refunded` (§2.3). | The deposit, `status: "reversed"` |
 | `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
 
-Every object names its `account_id`. Before finality nothing is sent: a checkout page shows the
-payment from the quote's `payment` (or the payer's `payment_status` read by `client_secret`).
+Every object names its `account_id`. Before the route's confirmation nothing is sent: a checkout
+page shows the payment from the quote's `payment` (or the payer's `payment_status` read by
+`client_secret`).
 
 ### 2.7 Receipts
 
@@ -445,9 +464,9 @@ Stripe, so the customer gets the same invoice and receipt as for a card top-up.
   idempotency keys alone are not enough: Stripe
   [keeps them 24 hours](https://docs.stripe.com/api/idempotent_requests), and a retry can come
   later.
-- On `deposit.refunded`, issue a
+- On `deposit.refunded` and `deposit.reversed`, issue a
   [credit note](https://docs.stripe.com/api/credit_notes/create) on that invoice with
-  `out_of_band_amount` for the reversed credit, once per refund.
+  `out_of_band_amount` for the reversed credit, once per event.
 - Do this from a queue, not inside the webhook's `2xx` path: a Stripe outage must not hold a
   credit (§2.3, obligation 3).
 
@@ -483,7 +502,9 @@ Idempotency-Key: "…"
 - `status` is `pending` while finance approves and executes the transfer from the treasury Safe,
   and `succeeded` once the transfer is final, when `deposit.refunded` is sent and the deposit's
   `amount_refunded_atomic` (and `refunded`, once whole) shows it. `GET /v1/refunds/{id}` reads it.
-- An ineligible deposit is `409 deposit_not_refundable`; a paused `refunds` scope is
+- An ineligible deposit is `409 deposit_not_refundable`; a deposit that is not final yet (about
+  15 minutes after its block on Ethereum) is `409 deposit_not_final`, so nothing is paid back for
+  a payment that could still be reversed: retry after finality. A paused `refunds` scope is
   `409 paused`. The same `Idempotency-Key` with the same parameters returns the same refund.
 - When `deposit.refunded` arrives, reverse the credit you applied for that deposit (a held
   credit was never applied), once per event id.
@@ -528,8 +549,8 @@ of `--amount` cents for `--account-id`. The reference product's tests
 Staging runs on Sepolia with the test PHA token (§4.1). Until Phala Cloud's staging backend is
 registered there, the reference product receives staging's credits; it is the model for a
 complete product (fulfillment, holds, refund requests). Once your receiver is registered, pay test
-quotes with minted test PHA and Sepolia ETH for gas, and play the abnormal payments of §1.3. Sepolia
-finality takes about 15 minutes per deposit.
+quotes with minted test PHA and Sepolia ETH for gas, and play the abnormal payments of §1.3.
+Sepolia deposits are credited about 30 seconds after paying and final about 15 minutes later.
 
 ### 4.4 Go-live checklist
 
@@ -551,6 +572,8 @@ finality takes about 15 minutes per deposit.
       `confirming`.
 - [ ] Refund path in your internal admin, by deposit id with a user-supplied address, also for
       held credits and unknown accounts; `deposit.refunded` reverses the credit (§3).
+- [ ] `deposit.reversed` claws back the credit exactly as `deposit.refunded` does (§2.3,
+      obligation 6).
 - [ ] Alerts on your side: webhook signature failures (rate-limited, for example through error
       tracking rather than paging, since anyone can post to the URL), a repeated deposit id with a
       different amount, payments to unknown accounts, and held credits waiting for a refund.
@@ -707,11 +730,11 @@ product's resources is refused. `account_id` is your workspace id (1 to 255 byte
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
-| `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, and typical finality time: what your UI shows instead of hardcoding. | `get_config` |
+| `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
 | `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` returns a new one. | `create_quote` |
 | `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Unsigned with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
-| `GET /v1/deposits` | Final deposits, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
+| `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
@@ -736,6 +759,7 @@ parameter when there is one. Codes are stable; messages are not.
 | 409 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
 | 409 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
 | 409 | `deposit_not_refundable` | The deposit is not eligible for a refund (§3). |
+| 409 | `deposit_not_final` | The deposit could still be reversed; request the refund once it is final (§3). |
 | 409 | `conflict` | Other state conflicts. |
 | 429 | `rate_limit` | Quote creation limit per account, or unsigned reads of one quote by its `client_secret`. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |

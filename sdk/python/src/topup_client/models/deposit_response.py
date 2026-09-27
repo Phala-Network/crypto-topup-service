@@ -24,13 +24,13 @@ class DepositResponse:
         address (str): Receiving forwarder address.
         amount_atomic (str): Atomic token amount encoded as a decimal string.
         asset_contract (str): Canonical token contract address.
-        block_number (int): Finalized block number.
-        block_time (datetime.datetime): Finalized block time.
+        block_number (int): Including block number.
+        block_time (datetime.datetime): Including block time.
         chain_id (int): EVM chain identifier.
         created_at (datetime.datetime): Row creation time.
         from_address (str): Canonical transfer sender address.
         id (str): Deposit id, `dep_…`.
-        log_index (int): Transfer log index.
+        log_index (int): Block-wide transfer log index; it follows the transaction's re-inclusion.
         state (str): Current processing state.
         tx_hash (str): Canonical transaction hash.
         updated_at (datetime.datetime): Last processing update time.
@@ -39,9 +39,16 @@ class DepositResponse:
             service
             always sends it; it is optional in the schema so clients also parse responses from servers
             that predate it.
+        final_at (datetime.datetime | None | Unset): When both providers showed the transfer at or below `finalized`;
+            `null` while the deposit
+            can still be reversed.
         lock_ref (None | str | Unset): Rate-lock reference, when applicable.
         price_scaled (None | str | Unset): Eight-decimal scaled price encoded as a decimal string.
         price_source (None | str | Unset): Which price valued the deposit: `lock` (the quoted price) or `spot`.
+        receipt_log_index (int | Unset): Position of the transfer log in its transaction's receipt; with the chain and
+            transaction,
+            the deposit's identity. Optional in the schema so clients also parse responses from
+            servers that predate it.
         route (None | str | Unset): Selected route.
         route_version (int | None | Unset): Selected route version.
         valuation_at (datetime.datetime | None | Unset): Valuation observation time.
@@ -62,9 +69,11 @@ class DepositResponse:
     updated_at: datetime.datetime
     credit_minor: None | str | Unset = UNSET
     external_id: str | Unset = UNSET
+    final_at: datetime.datetime | None | Unset = UNSET
     lock_ref: None | str | Unset = UNSET
     price_scaled: None | str | Unset = UNSET
     price_source: None | str | Unset = UNSET
+    receipt_log_index: int | Unset = UNSET
     route: None | str | Unset = UNSET
     route_version: int | None | Unset = UNSET
     valuation_at: datetime.datetime | None | Unset = UNSET
@@ -105,6 +114,14 @@ class DepositResponse:
 
         external_id = self.external_id
 
+        final_at: None | str | Unset
+        if isinstance(self.final_at, Unset):
+            final_at = UNSET
+        elif isinstance(self.final_at, datetime.datetime):
+            final_at = self.final_at.isoformat()
+        else:
+            final_at = self.final_at
+
         lock_ref: None | str | Unset
         if isinstance(self.lock_ref, Unset):
             lock_ref = UNSET
@@ -122,6 +139,8 @@ class DepositResponse:
             price_source = UNSET
         else:
             price_source = self.price_source
+
+        receipt_log_index = self.receipt_log_index
 
         route: None | str | Unset
         if isinstance(self.route, Unset):
@@ -166,12 +185,16 @@ class DepositResponse:
             field_dict["credit_minor"] = credit_minor
         if external_id is not UNSET:
             field_dict["external_id"] = external_id
+        if final_at is not UNSET:
+            field_dict["final_at"] = final_at
         if lock_ref is not UNSET:
             field_dict["lock_ref"] = lock_ref
         if price_scaled is not UNSET:
             field_dict["price_scaled"] = price_scaled
         if price_source is not UNSET:
             field_dict["price_source"] = price_source
+        if receipt_log_index is not UNSET:
+            field_dict["receipt_log_index"] = receipt_log_index
         if route is not UNSET:
             field_dict["route"] = route
         if route_version is not UNSET:
@@ -221,6 +244,23 @@ class DepositResponse:
 
         external_id = d.pop("external_id", UNSET)
 
+        def _parse_final_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                final_at_type_0 = datetime.datetime.fromisoformat(data)
+
+                return final_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        final_at = _parse_final_at(d.pop("final_at", UNSET))
+
         def _parse_lock_ref(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -247,6 +287,8 @@ class DepositResponse:
             return cast(None | str | Unset, data)
 
         price_source = _parse_price_source(d.pop("price_source", UNSET))
+
+        receipt_log_index = d.pop("receipt_log_index", UNSET)
 
         def _parse_route(data: object) -> None | str | Unset:
             if data is None:
@@ -299,9 +341,11 @@ class DepositResponse:
             updated_at=updated_at,
             credit_minor=credit_minor,
             external_id=external_id,
+            final_at=final_at,
             lock_ref=lock_ref,
             price_scaled=price_scaled,
             price_source=price_source,
+            receipt_log_index=receipt_log_index,
             route=route,
             route_version=route_version,
             valuation_at=valuation_at,

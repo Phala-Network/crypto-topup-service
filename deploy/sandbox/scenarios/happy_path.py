@@ -1,8 +1,9 @@
 """Payment of a quote's exact amount, then a second payment to the same address.
 
-Expect: before finality, the quote shows the payment as `seen` and matching, and the payer's view
-by `client_secret` shows it too; nothing is credited yet. Then the deposit is credited at the
-quoted price with exactly the quoted credit and the quote becomes `complete`. The second payment,
+Expect: the quote shows the payment, `seen` in a block or already `final` (recorded at the route's
+confirmation, two blocks), and matching, and the payer's view by `client_secret` shows it too.
+Then the deposit is credited at the quoted price with exactly the quoted credit and the quote
+becomes `complete`. The second payment,
 to the completed quote's address, is credited at spot. Both produce a verified `deposit.credited`
 webhook and one product ledger credit each.
 """
@@ -42,14 +43,21 @@ def run(ctx: Context) -> None:
 
 
 def seen_lock_payment(ctx: Context, team: str, lock_ref: str) -> QuotePayment:
-    """Polls the lock until its payment is `seen`; failing if it is final or credited first."""
+    """Polls the lock until it shows its payment. At the default confirmation (two blocks) the
+    payment may already be recorded as a deposit, and the lock completed, when first read."""
     found: list[QuotePayment] = []
 
     def seen() -> bool:
         lock = ctx.client.get_quote(lock_ref)
-        check(lock.status == "open", f"lock is {lock.status} before its payment was shown as seen")
+        check(
+            lock.status in {"open", "complete"},
+            f"lock is {lock.status} before its payment was shown",
+        )
         if isinstance(lock.payment, QuotePayment):
-            check(lock.payment.status == "seen", f"payment is {lock.payment.status}, not seen")
+            check(
+                lock.payment.status in {"seen", "final"},
+                f"payment is {lock.payment.status}, not seen or final",
+            )
             found.append(lock.payment)
         return bool(found)
 

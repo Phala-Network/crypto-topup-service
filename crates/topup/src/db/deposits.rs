@@ -22,11 +22,13 @@ pub struct Deposit {
     pub chain_id: u64,
     /// Transfer transaction hash.
     pub tx_hash: B256,
-    /// Transfer log index.
+    /// Position of the transfer log in its transaction's receipt; part of the identity.
+    pub receipt_log_index: u64,
+    /// Block-wide transfer log index; evidence that follows re-inclusion.
     pub log_index: u64,
-    /// Finalized block number.
+    /// Including block number.
     pub block_number: u64,
-    /// Finalized block hash.
+    /// Including block hash.
     pub block_hash: B256,
     /// Chain block time.
     pub block_time: DateTime<Utc>,
@@ -44,6 +46,13 @@ pub struct Deposit {
     pub from_address: Address,
     /// Atomic token amount.
     pub amount_atomic: AtomicAmount,
+    /// Transaction sender; absent on deposits recorded before fast credit.
+    pub tx_from: Option<Address>,
+    /// Transaction nonce; absent on deposits recorded before fast credit.
+    pub tx_nonce: Option<u64>,
+    /// When both providers showed the transfer at or below `finalized`; `None` while it can still
+    /// be reversed.
+    pub final_at: Option<DateTime<Utc>>,
     /// Current domain state.
     pub state: DepositState,
     /// Terminal rejection reason.
@@ -74,18 +83,20 @@ pub struct Deposit {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Values used to insert a finalized transfer as a deposit.
+/// Values used to insert a transfer at the required confirmation as a deposit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewDeposit {
     /// EVM chain identifier.
     pub chain_id: u64,
     /// Transfer transaction hash.
     pub tx_hash: B256,
-    /// Transfer log index.
+    /// Position of the transfer log in its transaction's receipt.
+    pub receipt_log_index: u64,
+    /// Block-wide transfer log index.
     pub log_index: u64,
-    /// Finalized block number.
+    /// Including block number.
     pub block_number: u64,
-    /// Finalized block hash.
+    /// Including block hash.
     pub block_hash: B256,
     /// Chain block time.
     pub block_time: DateTime<Utc>,
@@ -109,6 +120,13 @@ pub struct NewDeposit {
     pub reason: Option<RejectReason>,
     /// Earliest processing time.
     pub next_attempt_at: DateTime<Utc>,
+    /// Transaction sender.
+    pub tx_from: Address,
+    /// Transaction nonce.
+    pub tx_nonce: u64,
+    /// Whether the deposit is known final when recorded. Scanners record `false`; the confirm step
+    /// and the finality watch mark a deposit final once both providers show it at `finalized`.
+    pub is_final: bool,
 }
 
 /// A deposit returned with a newly acquired five-minute processing lease.
@@ -133,7 +151,9 @@ pub type OutboxEvent = super::outbox::NewOutboxEvent;
 /// Canonical chain evidence corrected while a deposit remains detected.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalEvidence {
-    /// Canonical finalized block number.
+    /// Canonical block-wide log index.
+    pub log_index: u64,
+    /// Canonical block number.
     pub block_number: u64,
     /// Canonical finalized block hash.
     pub block_hash: B256,
@@ -184,6 +204,8 @@ pub struct TransitionEffects {
     pub valuation: Option<StoredValuation>,
     /// Optional conditional rate-lock consumption.
     pub lock_consumption: Option<LockConsumption>,
+    /// Marks the deposit final: both providers showed its transfer at or below `finalized`.
+    pub mark_final: bool,
 }
 
 /// Timeline and side effects written by one transition application.
@@ -224,6 +246,7 @@ struct DepositRecord {
     id: Uuid,
     chain_id: i64,
     tx_hash: String,
+    receipt_log_index: i64,
     log_index: i64,
     block_number: i64,
     block_hash: String,
@@ -235,6 +258,9 @@ struct DepositRecord {
     asset_contract: String,
     from_address: String,
     amount_atomic: String,
+    tx_from: Option<String>,
+    tx_nonce: Option<String>,
+    final_at: Option<DateTime<Utc>>,
     state: String,
     reason: Option<String>,
     attempt: i32,
@@ -259,6 +285,7 @@ impl TryFrom<DepositRecord> for Deposit {
             id: record.id,
             chain_id: to_u64(record.chain_id, "deposits.chain_id")?,
             tx_hash: parse_b256(&record.tx_hash)?,
+            receipt_log_index: to_u64(record.receipt_log_index, "deposits.receipt_log_index")?,
             log_index: to_u64(record.log_index, "deposits.log_index")?,
             block_number: to_u64(record.block_number, "deposits.block_number")?,
             block_hash: parse_b256(&record.block_hash)?,
@@ -273,6 +300,9 @@ impl TryFrom<DepositRecord> for Deposit {
             asset_contract: parse_address(&record.asset_contract)?,
             from_address: parse_address(&record.from_address)?,
             amount_atomic: parse_atomic_decimal(&record.amount_atomic)?,
+            tx_from: record.tx_from.as_deref().map(parse_address).transpose()?,
+            tx_nonce: parse_optional_u64_decimal(record.tx_nonce.as_deref())?,
+            final_at: record.final_at,
             state: parse_state(&record.state)?,
             reason: parse_reason(record.reason.as_deref())?,
             attempt: record.attempt,
@@ -303,9 +333,10 @@ pub(crate) async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
 ) -> Result<bool, sqlx::Error> {
-    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index);
     let chain_id = to_i64(deposit.chain_id, "deposits.chain_id")?;
     let tx_hash = b256_hex(deposit.tx_hash);
+    let receipt_log_index = to_i64(deposit.receipt_log_index, "deposits.receipt_log_index")?;
     let log_index = to_i64(deposit.log_index, "deposits.log_index")?;
     let block_number = to_i64(deposit.block_number, "deposits.block_number")?;
     let block_hash = b256_hex(deposit.block_hash);
@@ -318,18 +349,22 @@ pub(crate) async fn insert_deposit_in(
     let amount_atomic = atomic_decimal(deposit.amount_atomic);
     let state = state_code(deposit.state);
     let reason = deposit.reason.map(RejectReason::code);
+    let tx_from = address_hex(deposit.tx_from);
+    let tx_nonce = deposit.tx_nonce.to_string();
     let result = sqlx::query!(
         r#"
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, route, route_version, asset_contract, from_address,
-            amount_atomic, state, reason, next_attempt_at
+            amount_atomic, state, reason, next_attempt_at, receipt_log_index, tx_from, tx_nonce,
+            final_at
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14::text::numeric, $15, $16, $17
+            $14::text::numeric, $15, $16, $17, $18, $19, $20::text::numeric,
+            CASE WHEN $21 THEN now() END
         )
-        ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING
+        ON CONFLICT (chain_id, tx_hash, receipt_log_index) DO NOTHING
         "#,
         id,
         chain_id,
@@ -347,18 +382,27 @@ pub(crate) async fn insert_deposit_in(
         amount_atomic,
         state,
         reason,
-        deposit.next_attempt_at
+        deposit.next_attempt_at,
+        receipt_log_index,
+        tx_from,
+        tx_nonce,
+        deposit.is_final
     )
     .execute(&mut **transaction)
     .await?;
     let inserted = result.rows_affected() == 1;
     if inserted {
-        link_inserted_deposit(transaction, id).await?;
+        link_deposit_to_flush(transaction, id).await?;
     }
     Ok(inserted)
 }
 
-async fn link_inserted_deposit(
+/// Links a final deposit to the first confirmed flush after its log position, moving it from
+/// `credited` to `swept` (architecture §7). Flushes are confirmed only at `finalized`, and the
+/// deposit must be final and not reversed, so the swept accounting never depends on an
+/// unfinalized sweep or a moved transfer. Runs when a deposit is recorded and when it becomes
+/// final; a confirmed flush links the deposits before it itself.
+pub(crate) async fn link_deposit_to_flush(
     transaction: &mut Transaction<'_, Postgres>,
     deposit_id: Uuid,
 ) -> Result<(), sqlx::Error> {
@@ -372,6 +416,8 @@ async fn link_inserted_deposit(
             JOIN flushes x ON x.id = f.flush_id
             WHERE d.id = $1
               AND x.status = 'confirmed'
+              AND d.final_at IS NOT NULL
+              AND d.state <> 'reversed'
               AND d.asset_contract = x.token
               AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
             ORDER BY f.block_number, f.log_index, f.flush_id
@@ -409,9 +455,10 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
         DepositRecord,
         r#"
         SELECT
-            id, chain_id, tx_hash, log_index, block_number, block_hash, block_time, address_id,
-            account_id, route, route_version, asset_contract, from_address,
-            amount_atomic::text AS "amount_atomic!", state, reason, attempt, next_attempt_at,
+            id, chain_id, tx_hash, receipt_log_index, log_index, block_number, block_hash,
+            block_time, address_id, account_id, route, route_version, asset_contract,
+            from_address, amount_atomic::text AS "amount_atomic!", tx_from,
+            tx_nonce::text AS tx_nonce, final_at, state, reason, attempt, next_attempt_at,
             lease_token, lease_until, valuation_at, price_scaled::text AS price_scaled,
             price_source, credit_minor::text AS credit_minor, quote, flush_id, created_at, updated_at
         FROM deposits
@@ -435,7 +482,7 @@ pub async fn claim_deposit(
         WITH candidate AS (
             SELECT id
             FROM deposits
-            WHERE state NOT IN ('swept', 'rejected')
+            WHERE state NOT IN ('swept', 'rejected', 'reversed')
               AND next_attempt_at <= now()
               AND (lease_until IS NULL OR lease_until <= now())
             ORDER BY next_attempt_at, created_at, id
@@ -449,11 +496,12 @@ pub async fn claim_deposit(
         FROM candidate
         WHERE deposit.id = candidate.id
         RETURNING
-            deposit.id, deposit.chain_id, deposit.tx_hash, deposit.log_index,
-            deposit.block_number, deposit.block_hash, deposit.block_time, deposit.address_id,
-            deposit.account_id, deposit.route, deposit.route_version, deposit.asset_contract,
-            deposit.from_address, deposit.amount_atomic::text AS "amount_atomic!",
-            deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,
+            deposit.id, deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index,
+            deposit.log_index, deposit.block_number, deposit.block_hash, deposit.block_time,
+            deposit.address_id, deposit.account_id, deposit.route, deposit.route_version,
+            deposit.asset_contract, deposit.from_address,
+            deposit.amount_atomic::text AS "amount_atomic!", deposit.tx_from,
+            deposit.tx_nonce::text AS tx_nonce, deposit.final_at, deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,
             deposit.lease_token, deposit.lease_until, deposit.valuation_at,
             deposit.price_scaled::text AS price_scaled, deposit.price_source,
             deposit.credit_minor::text AS credit_minor, deposit.quote, deposit.flush_id,
@@ -547,6 +595,7 @@ pub async fn apply_transition(
                 amount_atomic = $7::text::numeric,
                 route = $8,
                 route_version = $9,
+                log_index = $10,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -565,6 +614,17 @@ pub async fn apply_transition(
                 .map(|version| to_i64(version, "deposits.route_version"))
                 .transpose()?,
         )
+        .bind(to_i64(canonical.log_index, "deposits.log_index")?)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    if writes.effects.mark_final {
+        sqlx::query(
+            "UPDATE deposits SET final_at = now(), updated_at = now() \
+             WHERE id = $1 AND final_at IS NULL",
+        )
+        .bind(deposit_id)
         .execute(&mut **transaction)
         .await?;
     }
@@ -609,6 +669,10 @@ pub async fn apply_transition(
 
     for event in writes.outbox_events {
         super::outbox::enqueue_in(&mut **transaction, event).await?;
+    }
+
+    if writes.effects.mark_final {
+        link_deposit_to_flush(transaction, deposit_id).await?;
     }
 
     Ok(ApplyTransitionResult::Applied)

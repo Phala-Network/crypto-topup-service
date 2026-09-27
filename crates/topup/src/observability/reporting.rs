@@ -169,6 +169,7 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
         "TopupLockExpiryFailing" => "lock-expiry-worker-failure.md",
         "TopupLockExposureNearCap" => "lock-exposure-near-cap.md",
         "TopupUnsupportedInflows" => "rejected-funds-at-treasury.md",
+        "TopupDepositReversed" | "TopupDepositPendingAfterReorg" => "deposit-reversed.md",
         "TopupOperatorGasReserveLow" => "gas-refill.md",
         "OperatorRoleMissing" | "MissingConsumedReceipt" => "operator-key-compromise.md",
         "Reverted" | "IsolatedAddress" | "PlanningExcluded" | "FeeCapReached" => {
@@ -227,6 +228,12 @@ impl CronMonitor {
     #[must_use]
     pub fn scanner(chain_id: u64) -> Self {
         Self::heartbeat(format!("topup-scanner-{chain_id}"), 5)
+    }
+
+    /// Polls of the finality watch.
+    #[must_use]
+    pub fn finality_watch() -> Self {
+        Self::heartbeat("topup-finality-watch".to_owned(), 5)
     }
 
     /// Iterations of one deposit pump; a step may run for four minutes.

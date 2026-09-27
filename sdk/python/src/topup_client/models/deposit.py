@@ -20,36 +20,40 @@ T = TypeVar("T", bound="Deposit")
 
 @_attrs_define
 class Deposit:
-    """A final transfer to a quote's address: valued, screened, and credited, or rejected.
+    """A transfer to a quote's address at the route's confirmation: valued, screened, and credited,
+    or rejected; `reversed` if its transaction left the chain before finality.
 
-    Attributes:
-        account_id (str): Your account identifier.
-        address (str): Receiving forwarder address.
-        amount_atomic (str): Token amount in base units, as a decimal string.
-        amount_refunded_atomic (str): Refunded token amount in base units, as a decimal string: the sum of succeeded
-            refunds.
-        asset_contract (str): Token contract address.
-        block_number (int): Finalized block number.
-        chain_id (int): EVM chain identifier.
-        created (int): Detection time, Unix seconds.
-        currency (str): `usd`.
-        from_address (str): Sender of the transfer.
-        id (str): `dep_` and the hex of the deposit's deterministic UUID,
-            `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{log_index}")`.
-        log_index (int): Log index of the transfer.
-        object_ (str): Always `deposit`.
-        refunded (bool): Whether the deposit is fully refunded.
-        status (str): `detected`, `confirmed`, `credited`, `swept`, or `rejected`. New values may be added.
-        tx_hash (str): Transaction hash.
-        amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
-        asset (None | str | Unset): Asset code; `null` for a token without a route.
-        exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
-        price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
-        quote (None | Quote | str | Unset):
-        rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
-            `out_of_bounds`,
-            `out_of_range`, `sanctioned`, or `product_refused` (historical).
-        valued_at (int | None | Unset): Valuation time, Unix seconds.
+        Attributes:
+            account_id (str): Your account identifier.
+            address (str): Receiving forwarder address.
+            amount_atomic (str): Token amount in base units, as a decimal string.
+            amount_refunded_atomic (str): Refunded token amount in base units, as a decimal string: the sum of succeeded
+                refunds.
+            asset_contract (str): Token contract address.
+            block_number (int): Number of the block the transfer is in; it changes if the transaction is re-included.
+            chain_id (int): EVM chain identifier.
+            created (int): Detection time, Unix seconds.
+            currency (str): `usd`.
+            from_address (str): Sender of the transfer.
+            id (str): `dep_` and the hex of the deposit's deterministic UUID,
+                `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
+                `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+            log_index (int): Block-wide log index of the transfer; it changes if the transaction is re-included.
+            object_ (str): Always `deposit`.
+            refunded (bool): Whether the deposit is fully refunded.
+            status (str): `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
+                not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
+                added.
+            tx_hash (str): Transaction hash.
+            amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
+            asset (None | str | Unset): Asset code; `null` for a token without a route.
+            exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
+            price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
+            quote (None | Quote | str | Unset):
+            rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
+                `out_of_bounds`,
+                `out_of_range`, `sanctioned`, or `product_refused` (historical).
+            valued_at (int | None | Unset): Valuation time, Unix seconds.
     """
 
     account_id: str

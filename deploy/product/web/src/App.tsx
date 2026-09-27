@@ -36,11 +36,12 @@ const STEP_COPY: Record<StepKey, { title: string; current: string; failed?: stri
     failed: "The quote expired without a payment.",
   },
   finalized: {
-    title: "Final on both RPC providers",
+    title: "Confirmed on both RPC providers",
     current:
-      "Waiting for Ethereum finality, usually 13–16 minutes after the transfer (64–96 blocks). " +
-      "Credits count only final blocks, so a reorg can never undo one; both providers must then " +
-      "report the same block and log.",
+      "Waiting for the transfer's block and one more, about 30 seconds after the transfer; " +
+      "both providers must report the same block and log. The deposit stays watched until " +
+      "Ethereum finality (about 15 minutes), and a reorg that drops it is reversed with " +
+      "deposit.reversed.",
   },
   credited: {
     title: "Credited by the service",

@@ -3,10 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 /// The durable processing state of a deposit.
+///
+/// Whether a deposit is final (its block at or below `finalized` on both providers) is a
+/// timestamp, not a state: any state before finality can still become [`Self::Reversed`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DepositState {
-    /// The finalized chain event has been detected but not yet valued.
+    /// The transfer reached the required confirmation and has not been valued yet.
     Detected,
     /// Finality and valuation have been confirmed.
     Confirmed,
@@ -17,13 +20,23 @@ pub enum DepositState {
     Swept,
     /// The deposit was deterministically denied credit.
     Rejected,
+    /// The transfer is not part of the final chain: its transaction was dropped and its nonce
+    /// consumed by another, or its receipt at finality lacks the transfer.
+    Reversed,
 }
 
 impl DepositState {
     /// Returns whether no further state transition is permitted.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Swept | Self::Rejected)
+        matches!(self, Self::Swept | Self::Rejected | Self::Reversed)
+    }
+
+    /// Returns whether a deposit in this state may still become [`Self::Reversed`]: every state
+    /// except `swept` (which requires a final deposit) and `reversed` itself.
+    #[must_use]
+    pub const fn is_reversible(self) -> bool {
+        !matches!(self, Self::Swept | Self::Reversed)
     }
 }
 
@@ -81,6 +94,8 @@ pub enum RetryError {
 pub enum WaitReason {
     /// At least one provider has not finalized the deposit block yet.
     Finality,
+    /// At least one provider has not reached the route's depth or `safe` confirmation yet.
+    Confirmations,
     /// Crediting is paused for the account, product, or route.
     Paused,
     /// No confirmed flush after the deposit has been observed yet.
@@ -145,6 +160,8 @@ pub enum TransitionKind {
     Retry,
     /// The deposit stayed in place while waiting; the pump leaves attempt unchanged.
     Wait,
+    /// The finality watch found the transfer gone from the final chain.
+    Reversed,
 }
 
 /// A validated deposit state transition.
@@ -221,6 +238,28 @@ pub fn next(state: DepositState, outcome: &StepOutcome) -> Result<Transition, In
     Ok(transition)
 }
 
+/// Returns the transition into [`DepositState::Reversed`], which only the finality watch applies,
+/// outside the pump's step outcomes.
+pub fn reverse(state: DepositState) -> Result<Transition, InvalidReversal> {
+    if state.is_reversible() {
+        Ok(Transition {
+            from: state,
+            to: DepositState::Reversed,
+            kind: TransitionKind::Reversed,
+        })
+    } else {
+        Err(InvalidReversal { state })
+    }
+}
+
+/// A reversal requested for a state that cannot be reversed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("deposit state {state:?} cannot be reversed")]
+pub struct InvalidReversal {
+    /// The state that cannot be reversed.
+    pub state: DepositState,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,7 +284,7 @@ mod tests {
 
     #[test]
     fn transition_table_covers_every_state_and_outcome_kind() {
-        use DepositState::{Confirmed, Credited, Detected, Rejected, Swept};
+        use DepositState::{Confirmed, Credited, Detected, Rejected, Reversed, Swept};
         use Expected::{Invalid, Valid};
         use StepOutcomeKind as Outcome;
         use TransitionKind as Kind;
@@ -272,6 +311,10 @@ mod tests {
             (Rejected, &REJECT, Invalid(Outcome::Reject)),
             (Rejected, &RETRY, Invalid(Outcome::Retry)),
             (Rejected, &WAIT, Invalid(Outcome::Wait)),
+            (Reversed, &ADVANCE, Invalid(Outcome::Advance)),
+            (Reversed, &REJECT, Invalid(Outcome::Reject)),
+            (Reversed, &RETRY, Invalid(Outcome::Retry)),
+            (Reversed, &WAIT, Invalid(Outcome::Wait)),
         ];
 
         for (state, outcome, expected) in cases {
@@ -326,6 +369,29 @@ mod tests {
         assert!(!DepositState::Credited.is_terminal());
         assert!(DepositState::Swept.is_terminal());
         assert!(DepositState::Rejected.is_terminal());
+        assert!(DepositState::Reversed.is_terminal());
+    }
+
+    #[test]
+    fn every_state_before_finality_can_be_reversed_exactly_once() {
+        for state in [
+            DepositState::Detected,
+            DepositState::Confirmed,
+            DepositState::Credited,
+            DepositState::Rejected,
+        ] {
+            assert_eq!(
+                reverse(state),
+                Ok(Transition {
+                    from: state,
+                    to: DepositState::Reversed,
+                    kind: TransitionKind::Reversed,
+                })
+            );
+        }
+        for state in [DepositState::Swept, DepositState::Reversed] {
+            assert_eq!(reverse(state), Err(InvalidReversal { state }));
+        }
     }
 
     #[test]
@@ -336,6 +402,7 @@ mod tests {
             (DepositState::Credited, "\"credited\""),
             (DepositState::Swept, "\"swept\""),
             (DepositState::Rejected, "\"rejected\""),
+            (DepositState::Reversed, "\"reversed\""),
         ];
         let reasons = [
             (RejectReason::UnsupportedAsset, "unsupported_asset"),

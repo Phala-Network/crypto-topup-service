@@ -685,6 +685,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         refund_config,
     )
     .context("failed to configure refund confirmation worker")?;
+    let finality_watch = topup::finality::FinalityWatch::from_routes(pool.clone(), &routes)
+        .map_err(anyhow::Error::msg)
+        .context("failed to configure the finality watch")?;
     let mut tasks = ServiceTasks::new();
     let state = topup::api::AppState {
         pool: pool.clone(),
@@ -714,6 +717,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             cancellation,
         )
         .await
+    });
+    tasks.spawn("finality watch", |cancellation| async move {
+        finality_watch.run(cancellation).await;
     });
     tasks.spawn("refund confirmation worker", |cancellation| async move {
         refund_worker.run(cancellation).await;

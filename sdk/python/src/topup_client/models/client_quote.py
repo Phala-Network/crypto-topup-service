@@ -32,9 +32,9 @@ class ClientQuote:
             id (str): `qt_` id.
             object_ (str): Always `quote`.
             payment_status (str): Progress of the payment shown on the page; display only, never a reason to deliver
-                anything: `none`; `seen` (in a block that is not final yet and may still disappear);
-                `confirming` (final, being valued and screened); `credited`; or `rejected` (final and not
-                credited; the payer should contact the product's support).
+                anything: `none`; `seen` (in a block, below the route's confirmation, and may still
+                disappear); `confirming` (at the route's confirmation, being valued and screened);
+                `credited`; or `rejected` (not credited; the payer should contact the product's support).
             payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
             status (str): `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
                 `expires_at` has passed.

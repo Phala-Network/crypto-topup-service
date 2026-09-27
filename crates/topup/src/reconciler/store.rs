@@ -169,6 +169,7 @@ pub(crate) async fn address_totals(
         SELECT a.id,
                COALESCE((SELECT SUM(d.amount_atomic) FROM deposits d
                          WHERE d.address_id = a.id AND d.asset_contract = $2
+                           AND d.state <> 'reversed'
                            AND d.block_number <= $3), 0)::text AS deposits,
                COALESCE((SELECT SUM(f.amount_atomic) FROM flushed f
                          JOIN flushes x ON x.id = f.flush_id
@@ -236,6 +237,8 @@ pub(crate) async fn linkable_flushes(pool: &PgPool) -> Result<Vec<Uuid>, Reconci
               SELECT 1 FROM deposits d
               WHERE d.address_id = f.address_id
                 AND d.asset_contract = x.token
+                AND d.final_at IS NOT NULL
+                AND d.state <> 'reversed'
                 AND d.flush_id IS NULL
                 AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
           )

@@ -1401,6 +1401,10 @@ async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, product_id: Uuid) -> Res
             chain_id: 1,
             tx_hash,
             log_index: 0,
+            receipt_log_index: 0,
+            tx_from: alloy_primitives::Address::ZERO,
+            tx_nonce: 0,
+            is_final: true,
             block_number: 1,
             block_hash: B256::from_str(
                 "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

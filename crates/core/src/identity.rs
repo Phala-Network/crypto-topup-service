@@ -12,10 +12,13 @@ pub const DEPOSIT_NAMESPACE: Uuid = Uuid::from_u128(0xd55bab89f6565796a6a2bddfa1
 
 /// Returns the UUIDv5 identity for an EVM transfer log.
 ///
-/// The name is `{chain_id}:{tx_hash lowercase 0x-prefixed}:{log_index decimal}`.
+/// The name is `{chain_id}:{tx_hash lowercase 0x-prefixed}:{receipt_log_index decimal}`, where
+/// `receipt_log_index` is the log's position among the logs of its transaction's receipt (0 for
+/// the first). Unlike the block-wide log index, the position survives the transaction's
+/// re-inclusion in another block, so a re-included transfer keeps its deposit id.
 #[must_use]
-pub fn deposit_id(chain_id: u64, tx_hash: B256, log_index: u64) -> Uuid {
-    let name = format!("{chain_id}:{tx_hash:#x}:{log_index}");
+pub fn deposit_id(chain_id: u64, tx_hash: B256, receipt_log_index: u64) -> Uuid {
+    let name = format!("{chain_id}:{tx_hash:#x}:{receipt_log_index}");
     Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
 }
 
@@ -23,7 +26,8 @@ pub fn deposit_id(chain_id: u64, tx_hash: B256, log_index: u64) -> Uuid {
 /// deposit namespace over `{event_type}:{object_id}`, so every retry, replay, and re-emission
 /// after a restore carries the same `webhook-id`.
 ///
-/// The object is the deposit for `deposit.credited` and `deposit.rejected`, the refund for
+/// The object is the deposit for `deposit.credited`, `deposit.rejected`, and `deposit.reversed`,
+/// the refund for
 /// `deposit.refunded`, and the quote for `quote.expired`.
 #[must_use]
 pub fn event_id(event_type: &str, object_id: Uuid) -> Uuid {
@@ -35,6 +39,12 @@ pub fn event_id(event_type: &str, object_id: Uuid) -> Uuid {
 #[must_use]
 pub fn credited_event_id(deposit_id: Uuid) -> Uuid {
     event_id("deposit.credited", deposit_id)
+}
+
+/// Returns the event id of a deposit's `deposit.reversed` webhook.
+#[must_use]
+pub fn reversed_event_id(deposit_id: Uuid) -> Uuid {
+    event_id("deposit.reversed", deposit_id)
 }
 
 #[cfg(test)]

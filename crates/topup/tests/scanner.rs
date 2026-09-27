@@ -19,12 +19,12 @@ use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup_adapters::chain::evm::{
-    ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, TransferLog,
+    ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, ReceiptLookup, TransferLog,
 };
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
-use topup_core::route::RouteFile;
+use topup_core::route::{ChainHeads, Confirmations, RouteFile};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
@@ -90,12 +90,28 @@ impl ChainReader for RecordingReader {
         Ok(Vec::new())
     }
 
-    async fn transfer_log_by_identity(
+    async fn confirmation_heads(
+        &self,
+        _confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        let finalized = self.finalized_head().await?.number;
+        Ok(ChainHeads {
+            latest: Some(finalized),
+            safe: Some(finalized),
+            finalized,
+        })
+    }
+
+    async fn receipt_transfer(
         &self,
         _tx_hash: B256,
-        _log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
-        Ok(None)
+        _receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        Ok(ReceiptLookup::Missing)
+    }
+
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+        Ok(0)
     }
 }
 
@@ -176,12 +192,28 @@ impl ChainReader for BackfillReader {
         Ok(logs)
     }
 
-    async fn transfer_log_by_identity(
+    async fn confirmation_heads(
+        &self,
+        _confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        let finalized = self.finalized_head().await?.number;
+        Ok(ChainHeads {
+            latest: Some(finalized),
+            safe: Some(finalized),
+            finalized,
+        })
+    }
+
+    async fn receipt_transfer(
         &self,
         _tx_hash: B256,
-        _log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
-        Ok(None)
+        _receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        Ok(ReceiptLookup::Missing)
+    }
+
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+        Ok(0)
     }
 }
 
@@ -844,6 +876,9 @@ fn mock_transfer_log(
     TransferLog {
         tx_hash: B256::from([marker; 32]),
         log_index: 0,
+        receipt_log_index: 0,
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
         block_number,
         block_hash: B256::from([marker.saturating_add(10); 32]),
         block_time: DateTime::from_timestamp(i64::from(marker), 0).expect("test timestamp"),

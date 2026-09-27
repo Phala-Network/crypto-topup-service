@@ -55,9 +55,9 @@ status. Keep the client secret out of logs and URLs you share; anyone holding it
 | `loading` | Loading payment details |
 | `waiting` | Payment options, the exact amount, and the time left |
 | `seen` | Payment in a block, with its confirmations (a reorg can still remove it) |
-| `confirming` | Payment final, being valued and screened |
-| `credited` | Credited; `onSuccess` is called once |
-| `rejected` | Final but will not be credited; the payer contacts support |
+| `confirming` | Payment at the route's confirmation (two blocks on Ethereum), being valued and screened |
+| `credited` | Credited, typically about 30 seconds after paying; `onSuccess` is called once |
+| `rejected` | Will not be credited; the payer contacts support |
 | `expired`, `canceled` | The address is hidden; `onExpire` is called once |
 | `error` | The client secret is not valid |
 
@@ -67,7 +67,12 @@ Elements' `onChange`, for example to hide your own "new payment" control while a
 
 To resume after a reload, keep the client secret in the browser (for example `localStorage`, per
 signed-in account) until the status is `credited`, `expired`, `canceled`, or `error`. Tell a
-payer who is waiting that finality takes about 15 minutes and the credit arrives on its own.
+payer who is waiting that the payment is credited in about 30 seconds and the credit arrives on
+its own.
+
+A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg drops
+the payment's transaction, your backend receives `deposit.reversed` and claws the credit back as
+for `deposit.refunded`; the checkout itself only reflects the quote.
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's.

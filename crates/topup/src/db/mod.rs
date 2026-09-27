@@ -16,6 +16,7 @@ use sqlx::migrate::Migrator;
 pub use accounts::{Account, get_account};
 pub(crate) use addresses::list_chain_addresses_with_pause_scopes;
 pub use addresses::{Address, AddressKind, get_address, list_chain_addresses};
+pub(crate) use deposits::link_deposit_to_flush;
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
@@ -36,7 +37,10 @@ pub use pending::{
     list_watched_addresses,
 };
 pub use products::{Product, get_product};
-pub use scanner::{ScanAddress, ScanCommit, commit_scan, get_cursor, list_scan_addresses};
+pub use scanner::{
+    ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,
+    list_scan_addresses,
+};
 
 /// Embedded SQL migrations for the service database.
 pub static MIGRATOR: Migrator = sqlx::migrate!();
@@ -55,6 +59,7 @@ pub(crate) fn state_code(state: topup_core::deposit::DepositState) -> &'static s
         DepositState::Credited => "credited",
         DepositState::Swept => "swept",
         DepositState::Rejected => "rejected",
+        DepositState::Reversed => "reversed",
     }
 }
 
@@ -67,6 +72,7 @@ pub(crate) fn parse_state(value: &str) -> Result<topup_core::deposit::DepositSta
         "credited" => Ok(DepositState::Credited),
         "swept" => Ok(DepositState::Swept),
         "rejected" => Ok(DepositState::Rejected),
+        "reversed" => Ok(DepositState::Reversed),
         other => Err(sqlx::Error::Decode(
             format!("unknown deposit state `{other}`").into(),
         )),

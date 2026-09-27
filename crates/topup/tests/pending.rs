@@ -412,6 +412,7 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
         chain_id: CHAIN_ID,
         tx_hash: B256::repeat_byte(0x51),
         log_index: 0,
+        receipt_log_index: 0,
         block_number: 50,
         block_hash: B256::repeat_byte(0x52),
         block_time: Utc::now(),

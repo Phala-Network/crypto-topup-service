@@ -269,6 +269,7 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
   | `topup-scanner-<chain_id>` | after each finalized scan, every minute | 5 min |
   | `topup-pump-<n>`, `topup-outbox-<n>` | each iteration or poll, every minute | 5 min |
   | `topup-lock-expiry` | after each successful expiry scan, every minute | 5 min |
+  | `topup-finality-watch` | each poll of the finality watch, every minute | 5 min |
   | `topup-reconciler` | `ok` after a complete round, `error` after failed checks, every 10 min | 10 min |
   | `topup-backup` | `ok` while the WAL-G success marker is at most 120 s old, else `error`; 3 errors open an issue | 2 min |
   | `topup-flush-<route>` | on the route's `flush.schedule` (UTC): `ok` after planning, `error` when planning failed | 15 min |
@@ -446,8 +447,8 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    ```
 
    The driver recomputes the lock address before paying and exits 0 once the product has
-   recorded exactly one credit and the verified `deposit.credited` webhook (Sepolia finality takes
-   about 15 minutes). The flusher sweeps only forwarders holding at least `min_flush_atomic`
+   recorded exactly one credit and the verified `deposit.credited` webhook (about 30 seconds after
+   paying, at the route's default confirmation of two blocks). The flusher sweeps only forwarders holding at least `min_flush_atomic`
    (20000 test PHA), so `--min-atomic` refuses a smaller quote and prints the `--amount-minor`
    needed; the quote must also fit the 500000-cent per-deposit and per-account caps (PHA below
    about $0.24). `--until swept --timeout 25200` also waits for the next sweep (schedule
@@ -465,7 +466,7 @@ workspace, and checks the deposit state, the verified webhooks, and the product 
 |---|---|---|
 | underpayment | `--pay-bps 9700` | `credited` at spot for what arrived, then `swept`; the lock later expires |
 | after the quote window | `--pay-after-expiry` | `quote.expired`, then `credited` at spot and `swept` |
-| unsupported token | `--token T --until rejected` | after finality `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
+| unsupported token | `--token T --until rejected` | once confirmed `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
 | refund | `--pay-bps N --until refunded --refund-to A` | a payment of N/10000 of the quote above `max_deposit_atomic` (200000 test PHA): `rejected(out_of_bounds)`, swept; the driver requests a refund and waits while it is executed as in [refund execution](runbooks/refund-execution.md), until `confirmed` and one `deposit.refunded` |
 
 Each row adds its options to the step-5 driver command: `T` is the Sepolia unsupported test token

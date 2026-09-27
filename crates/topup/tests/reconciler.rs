@@ -857,6 +857,61 @@ impl RpcNode {
                     &results
                 ))))
             }
+            "eth_getTransactionReceipt" => {
+                let hash: B256 = serde_json::from_value(params[0].clone())?;
+                let logs = self.logs.lock().unwrap();
+                let receipt_logs = logs
+                    .iter()
+                    .filter(|log| log.tx_hash == hash)
+                    .collect::<Vec<_>>();
+                let first = receipt_logs.first().context("unknown transaction")?;
+                Ok(json!({
+                    "transactionHash": hash,
+                    "transactionIndex": "0x0",
+                    "blockHash": first.block_hash,
+                    "blockNumber": format!("{:#x}", first.block_number),
+                    "from": first.tx_from,
+                    "to": first.token,
+                    "cumulativeGasUsed": "0x0",
+                    "gasUsed": "0x0",
+                    "effectiveGasPrice": "0x0",
+                    "contractAddress": null,
+                    "logs": receipt_logs.iter().map(|log| rpc_log(log)).collect::<Vec<_>>(),
+                    "logsBloom": Bloom::ZERO,
+                    "type": "0x2",
+                    "status": "0x1",
+                }))
+            }
+            "eth_getTransactionByHash" => {
+                let hash: B256 = serde_json::from_value(params[0].clone())?;
+                let logs = self.logs.lock().unwrap();
+                let log = logs
+                    .iter()
+                    .find(|log| log.tx_hash == hash)
+                    .context("unknown transaction")?;
+                Ok(json!({
+                    "hash": hash,
+                    "nonce": format!("{:#x}", log.tx_nonce),
+                    "blockHash": log.block_hash,
+                    "blockNumber": format!("{:#x}", log.block_number),
+                    "transactionIndex": "0x0",
+                    "from": log.tx_from,
+                    "to": log.token,
+                    "value": "0x0",
+                    "gas": "0x0",
+                    "maxFeePerGas": "0x0",
+                    "maxPriorityFeePerGas": "0x0",
+                    "gasPrice": "0x0",
+                    "input": "0x",
+                    "chainId": "0x1",
+                    "type": "0x2",
+                    "accessList": [],
+                    "v": "0x0",
+                    "yParity": "0x0",
+                    "r": "0x1",
+                    "s": "0x1",
+                }))
+            }
             method => anyhow::bail!("{method} is not served"),
         }
     }
@@ -1013,11 +1068,22 @@ impl ChainReader for UnreachableReader {
         Err(ChainError::ProviderUnhealthy)
     }
 
-    async fn transfer_log_by_identity(
+    async fn confirmation_heads(
+        &self,
+        _confirmations: topup_core::route::Confirmations,
+    ) -> Result<topup_core::route::ChainHeads, ChainError> {
+        Err(ChainError::ProviderUnhealthy)
+    }
+
+    async fn receipt_transfer(
         &self,
         _tx_hash: B256,
-        _log_index: u64,
-    ) -> Result<Option<TransferLog>, ChainError> {
+        _receipt_log_index: u64,
+    ) -> Result<topup_adapters::chain::evm::ReceiptLookup, ChainError> {
+        Err(ChainError::ProviderUnhealthy)
+    }
+
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
         Err(ChainError::ProviderUnhealthy)
     }
 }
@@ -1284,6 +1350,9 @@ fn transfer(
     TransferLog {
         tx_hash: B256::from([number; 32]),
         log_index,
+        receipt_log_index: log_index,
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
         block_number,
         block_hash: B256::from([number.wrapping_add(1); 32]),
         block_time: Utc::now(),
@@ -1409,6 +1478,10 @@ async fn seed_deposit(
         chain_id: route.chain.chain_id,
         tx_hash: B256::from([number; 32]),
         log_index: u64::from(number),
+        receipt_log_index: u64::from(number),
+        tx_from: alloy_primitives::Address::ZERO,
+        tx_nonce: 0,
+        is_final: true,
         block_number: fixture.block_number,
         block_hash: B256::from([number.wrapping_add(1); 32]),
         block_time: Utc::now(),

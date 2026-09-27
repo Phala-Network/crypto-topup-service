@@ -498,11 +498,12 @@ pub async fn cancel(
         .bind(row.address_id)
         .execute(&mut *transaction)
         .await?;
-    let paid: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1)")
-            .bind(row.address_id)
-            .fetch_one(&mut *transaction)
-            .await?;
+    let paid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1 AND state <> 'reversed')",
+    )
+    .bind(row.address_id)
+    .fetch_one(&mut *transaction)
+    .await?;
     if paid {
         return Err(RateLockError::PendingPayment);
     }

@@ -14,6 +14,9 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Changed
 
+- `<Checkout>` copy for fast credit: a seen payment reads "Payment received, N confirmations.
+  Crediting in about 30 seconds"; `confirming` and `credited` are documented for crediting at the
+  route's confirmation (two blocks on Ethereum) instead of finality.
 - `watchWallets` discovers EIP-6963 wallets through [mipd](https://github.com/wevm/mipd), wagmi's
   discovery store, now a dependency; the `window.ethereum` fallback stays. Wallet errors are
   classified with viem's `UserRejectedRequestError` and `SwitchChainError`.

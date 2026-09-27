@@ -706,6 +706,8 @@ async fn link_deposits_for_flush(
             JOIN flushes x ON x.id = f.flush_id
             WHERE f.flush_id = $1
               AND x.status = 'confirmed'
+              AND d.final_at IS NOT NULL
+              AND d.state <> 'reversed'
               AND d.asset_contract = x.token
               AND d.flush_id IS NULL
               AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
