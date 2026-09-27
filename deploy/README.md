@@ -52,21 +52,28 @@ passwords: that is a key migration, not an image bump.
    | Name | Value |
    |---|---|
    | `PHALA_WORKSPACE` | display name of the API key's workspace (preflight checks it) |
-   | `DSTACK_OS_IMAGE` | `dstack-0.5.9` |
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
    | `TOPUP_DOMAIN` | the [custom domain](#custom-domain): `crypto-topup-api-staging.phala.com` (`staging`), `crypto-topup-api.phala.com` (`production`) |
-   | `TOPUP_GATEWAY_DOMAIN` | the domain's CNAME target, a name under the dstack gateway domain of the CVM's node: `gateway.dstack-pha-prod5.phala.network`; Deploy refuses a CVM on another gateway |
-   | `SENTRY_ENVIRONMENT` | the Environment's name; Deploy refuses any other value |
    | `AWS_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
-   | `AWS_REGION` | `auto` for R2 |
-   | `AWS_S3_FORCE_PATH_STYLE` | `false` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
-   | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen`, a separate key per Environment; the seed stays with the admin |
+   | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
-   | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_RPC_URL`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
+   | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
 
-   All but the first three are [attested settings](#attested-settings). `TOPUP_PUBLIC_ORIGIN` is
-   not a variable: the compose sets it to `https://$TOPUP_DOMAIN`.
+   That is ten variables for `staging` and eight for `production`. All but the first two are
+   [attested settings](#attested-settings). Deploy derives the rest, and a variable of the same
+   name overrides a derived value where noted:
+
+   | Setting | Derived as |
+   |---|---|
+   | `SENTRY_ENVIRONMENT` | the Environment's name (no override) |
+   | `TOPUP_GATEWAY_DOMAIN` | `gateway.<base domain>` of the CVM's node, read from the existing CVM on `upgrade`; `provision` renders a provisional value and upgrades the new CVM once its node is known (no override) |
+   | OS image | `dstack-0.5.9`, fixed in `deploy.yml` (architecture §14; no override) |
+   | `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE` | `auto` and `true` for an R2 `AWS_ENDPOINT`; set both variables for any other endpoint |
+   | `TOPUP_ADMIN_KID` | `admin/<Environment>-v1`; set the variable only after an admin key rotation to a new key id |
+   | `PRODUCT_RPC_URL` | `TOPUP_RPC_PROVIDER_B_URL`, which must then be keyless (product preflight refuses a keyed URL) |
+
+   `TOPUP_PUBLIC_ORIGIN` is not a variable: the compose sets it to `https://$TOPUP_DOMAIN`.
 5. **Sentry** (project admin; the Crons monitors create themselves on their first check-in):
    - Settings > Security & Privacy: keep *Data Scrubber* and *Use Default Scrubbers* on; turn
      *Prevent Storing of IP Addresses* on.
@@ -74,7 +81,7 @@ passwords: that is a key migration, not an image bump.
      on-call owner when an issue is created or regresses, with no level filter (most alert lines are
      `warning` events). Confirm that the Crons and Uptime monitors are listed as connected.
    - One Uptime monitor per Environment (UI only): `GET https://<TOPUP_DOMAIN>/healthz`, interval
-     1 minute, timeout 10 seconds, environment = `SENTRY_ENVIRONMENT`.
+     1 minute, timeout 10 seconds, environment = the Environment's name.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
 6. **Packages.** After the first Release images run, make `crypto-topup`, `postgres-walg`, and
@@ -164,8 +171,9 @@ an RPC provider's API key is not one: its URL has `{key}` where the key goes, an
 
 | Setting | Source |
 |---|---|
-| `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY`, `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL`, `SENTRY_ENVIRONMENT` | the Environment variables of the same name |
-| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variables of the same name: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` |
+| `AWS_ENDPOINT`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the Environment variables of the same name |
+| `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT` | derived ([One-time setup](#one-time-setup-human-only-repository-owner), step 4) |
+| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variable, and the CVM node's gateway: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` |
 | `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE` | the release's digests; the image digest is also the Sentry release |
 | `TOPUP_RESTORE_FROM_BACKUP`, `TOPUP_SERVICE_ENABLED` | the variant: service `off`, `on`; `--restore-check`: `on`, `read-only` |
 | ingress | the variant: the service runs `dstack-ingress` on 443 and publishes no topup port; `--restore-check` runs no ingress and publishes topup on 8081 (blocks after `# only-in: VARIANT` in the compose) |
@@ -245,8 +253,8 @@ unchanged. Rotation is an `ALTER ROLE` to a `db/*/v2` value and a new compose.
 ## Sentry
 
 The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a malformed DSN stops
-`topup run`). The release is the `TOPUP_IMAGE` digest and the environment `SENTRY_ENVIRONMENT`,
-both attested.
+`topup run`). The release is the `TOPUP_IMAGE` digest and the environment `SENTRY_ENVIRONMENT`
+(the GitHub Environment's name), both attested.
 
 - **Events**: every `ERROR` line and panic, grouped by message, at most one event per issue every
   10 minutes. An event holds the log line's fields minus `account_id`; no request data, no RPC
@@ -370,7 +378,7 @@ admin seed to PEM once, then sign and send the exact body:
 ```sh
 (umask 077 && { printf '302e020100300506032b657004220420'; tr -d '\n' < admin.seed; } |
   xxd -r -p | openssl pkey -inform DER -out admin.pem)
-export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/v1   # the CVM's TOPUP_ADMIN_KID
+export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/staging-v1   # the CVM's TOPUP_ADMIN_KID
 jq -cjn --arg public_key '<base64 from the integrator>' \
   '{slug: "phala-cloud", public_key: $public_key,
     webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-product.json
@@ -403,8 +411,8 @@ with only `PRODUCT_SEED`, then Deploy `upgrade`, once.
 Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
 
 1. On the owner's machine (mode-0600 files, never committed), create the keys and set the
-   `staging` variables `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`) and
-   `PRODUCT_RPC_URL`:
+   `staging` variable `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`);
+   `PRODUCT_RPC_URL` is `TOPUP_RPC_PROVIDER_B_URL` unless the variable of that name is set:
 
    ```sh
    cd sdk/python

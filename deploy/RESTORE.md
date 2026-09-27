@@ -94,9 +94,11 @@ muting: the live instance keeps checking in.
 ### Render it and its env file
 
 Render from the commit of the live compose, with the live images and every
-[attested setting](README.md#attested-settings) exported, but a provisional `TOPUP_DOMAIN` (the
-instance's gateway host is known only after creation; the variant needs no
-`TOPUP_GATEWAY_DOMAIN`):
+[attested setting](README.md#attested-settings) exported (the derived ones too, with the values
+Deploy derived: `SENTRY_ENVIRONMENT` the Environment's name, `AWS_REGION=auto` and
+`AWS_S3_FORCE_PATH_STYLE=true` for R2, `TOPUP_ADMIN_KID=admin/<Environment>-v1`), but a
+provisional `TOPUP_DOMAIN` (the instance's gateway host is known only after creation; the variant
+needs no `TOPUP_GATEWAY_DOMAIN`):
 
 ```sh
 export TOPUP_IMAGE=<live crypto-topup digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>

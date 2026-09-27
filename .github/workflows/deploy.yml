@@ -85,25 +85,27 @@ jobs:
       TARGET: ${{ inputs.target }}
       MODE: ${{ inputs.mode }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
-      DSTACK_OS_IMAGE: ${{ vars.DSTACK_OS_IMAGE }}
+      # The owner-approved OS image (architecture §14); preflight refuses any other.
+      DSTACK_OS_IMAGE: dstack-0.5.9
       TOPUP_CVM_ID: ${{ vars.TOPUP_CVM_ID }}
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
-      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN and
-      # PRODUCT_PUBLIC_URL come from step "Resolve the public URLs". The RPC URLs are published
-      # with the compose: a keyed provider's URL has `{key}` in place of the key, which the owner
-      # seals as TOPUP_RPC_PROVIDER_<A|B>_KEY.
+      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN,
+      # PRODUCT_PUBLIC_URL, and TOPUP_GATEWAY_DOMAIN come from step "Resolve the public URLs". The
+      # RPC URLs are published with the compose: a keyed provider's URL has `{key}` in place of the
+      # key, which the owner seals as TOPUP_RPC_PROVIDER_<A|B>_KEY. SENTRY_ENVIRONMENT is the
+      # Environment's name; an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, TOPUP_ADMIN_KID, or
+      # PRODUCT_RPC_URL is derived in step "Check inputs and Environment settings".
       AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
       WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX }}
       TOPUP_DOMAIN: ${{ vars.TOPUP_DOMAIN }}
-      TOPUP_GATEWAY_DOMAIN: ${{ vars.TOPUP_GATEWAY_DOMAIN }}
       TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
       TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
       TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
       TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
-      SENTRY_ENVIRONMENT: ${{ vars.SENTRY_ENVIRONMENT }}
+      SENTRY_ENVIRONMENT: ${{ inputs.environment }}
       PRODUCT_RPC_URL: ${{ vars.PRODUCT_RPC_URL }}
       PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
     steps:
@@ -115,15 +117,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           status=0
+          # Derived settings (deploy/README.md, "Environment variables"); a set variable overrides.
+          if [[ "$AWS_ENDPOINT" =~ ^https://[0-9a-f]+\.r2\.cloudflarestorage\.com$ ]]; then
+            AWS_REGION=${AWS_REGION:-auto} AWS_S3_FORCE_PATH_STYLE=${AWS_S3_FORCE_PATH_STYLE:-true}
+          fi
+          TOPUP_ADMIN_KID=${TOPUP_ADMIN_KID:-admin/$DEPLOY_ENVIRONMENT-v1}
+          PRODUCT_RPC_URL=${PRODUCT_RPC_URL:-$TOPUP_RPC_PROVIDER_B_URL}
+          for name in AWS_REGION AWS_S3_FORCE_PATH_STYLE TOPUP_ADMIN_KID PRODUCT_RPC_URL; do
+            echo "$name=${!name}" >>"$GITHUB_ENV"
+          done
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
           case "$TARGET" in
             topup)
-              required="SENTRY_ENVIRONMENT AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
-                TOPUP_DOMAIN TOPUP_GATEWAY_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY
+              required="AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
+                TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY
                 TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL"
-              [[ "$SENTRY_ENVIRONMENT" == "$DEPLOY_ENVIRONMENT" ]] ||
-                { echo "::error::SENTRY_ENVIRONMENT must be $DEPLOY_ENVIRONMENT"; status=1; }
               # The public URL is the custom domain; there is no gateway port to resolve.
               dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=crypto-topup-$DEPLOY_ENVIRONMENT
               instance_type=tdx.medium port="" origin_variable=""
@@ -137,7 +146,7 @@ jobs:
               images=PRODUCT_IMAGE compose_name=docker-compose.product.yml ;;
             *) echo "::error::unknown target $TARGET"; exit 1 ;;
           esac
-          for name in PHALA_WORKSPACE DSTACK_OS_IMAGE $required; do
+          for name in PHALA_WORKSPACE $required; do
             [[ -n "${!name}" ]] ||
               { echo "::error::Environment variable $name is not set"; status=1; }
           done
@@ -224,10 +233,11 @@ jobs:
         with:
           version: v1.8.3
 
-      # topup's public URL is its custom domain, and the gateway it names must be the CVM's (checked
-      # again after provisioning). The product's own URL is its gateway URL: a new CVM is rendered
-      # with a provisional one until it is known (step "Set the public URL"); an upgrade renders the
-      # existing CVM's. The product also renders topup's origin, the same Environment's domain.
+      # topup's public URL is its custom domain, whose CNAME target is the gateway of the CVM's node.
+      # The product's own URL is its gateway URL. Both come from the existing CVM on an upgrade; a
+      # new CVM is rendered with a provisional value until its node is known (step "Set the values
+      # known only after provisioning"). The product also renders topup's origin, the same
+      # Environment's domain.
       - name: Resolve the public URLs
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -236,8 +246,12 @@ jobs:
             deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
           fi
           if [[ "$TARGET" == topup ]]; then
-            [[ "$MODE" == provision ]] ||
-              deploy/phala-cvm.sh gateway "$WORK/cvm-before.json" "$TOPUP_GATEWAY_DOMAIN"
+            if [[ "$MODE" == provision ]]; then
+              gateway=gateway.pending.invalid
+            else
+              gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm-before.json")
+            fi
+            echo "TOPUP_GATEWAY_DOMAIN=$gateway" | tee -a "$GITHUB_ENV"
             echo "PUBLIC_URL=https://$TOPUP_DOMAIN" | tee -a "$GITHUB_ENV"
           else
             if [[ "$MODE" == provision ]]; then
@@ -342,23 +356,25 @@ jobs:
             fi
           } >>"$GITHUB_STEP_SUMMARY"
           deploy/phala-cvm.sh wait "$cvm_id" >"$WORK/cvm.json"
-          if [[ "$TARGET" == topup ]]; then
-            # A new CVM lands on a node chosen by Phala Cloud; its attested gateway domain must be
-            # that node's gateway, or fix the variable and upgrade.
-            deploy/phala-cvm.sh gateway "$WORK/cvm.json" "$TOPUP_GATEWAY_DOMAIN"
-          else
+          if [[ "$TARGET" == product ]]; then
             echo "PUBLIC_URL=$(deploy/phala-cvm.sh url "$WORK/cvm.json" "$PORT")" | tee -a "$GITHUB_ENV"
           fi
 
-      # The product's gateway URL is known only after provisioning, and it is attested
-      # configuration: upgrade the new CVM to the compose rendered with it (no -e: the env stays).
-      - name: Set the public URL
-        if: inputs.mode == 'provision' && inputs.target == 'product'
+      # A new CVM lands on a node chosen by Phala Cloud. Its gateway (topup's CNAME target, which
+      # dstack-ingress names) and the product's gateway URL are known only now, and both are attested
+      # configuration: upgrade the new CVM to the compose rendered with them (no -e: the env stays).
+      - name: Set the values known only after provisioning
+        if: inputs.mode == 'provision'
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          env "$ORIGIN_VARIABLE=$PUBLIC_URL" "$DIR/render-compose.sh" >"$COMPOSE"
-          echo "$ORIGIN_VARIABLE=$PUBLIC_URL" >>"$GITHUB_ENV"
+          if [[ "$TARGET" == topup ]]; then
+            name=TOPUP_GATEWAY_DOMAIN value=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
+          else
+            name=$ORIGIN_VARIABLE value=$PUBLIC_URL
+          fi
+          env "$name=$value" "$DIR/render-compose.sh" >"$COMPOSE"
+          echo "$name=$value" | tee -a "$GITHUB_ENV"
           "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" --offline --unsealed
           previous=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
           deploy/phala-cvm.sh deploy "$WORK/deploy-public-url.json" \
