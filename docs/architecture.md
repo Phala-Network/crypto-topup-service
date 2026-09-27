@@ -140,6 +140,35 @@ Cloud node offers a 0.6 image, so it is out of scope until a key migration is sp
 `unwrap_used`. `cargo-deny`, committed lockfile, reproducible distroless image by digest.
 Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
+```mermaid
+flowchart TB
+    products["Products<br/>signed requests"]
+    admin["Operator<br/>admin key"]
+    subgraph cvm["dstack CVM on Phala Cloud (compose hash attested)"]
+        direction LR
+        ingress["dstack-ingress<br/>TLS terminated in the CVM"]
+        topup["topup run<br/>API, scanner, pump, flusher,<br/>outbox, reconciler"]
+        pg[("PostgreSQL")]
+        backup["backup (WAL-G)"]
+        ingress --> topup --> pg
+        backup --> pg
+    end
+    subgraph ext["External services"]
+        direction LR
+        kms["dstack KMS<br/>derived keys"]
+        rpc["RPC providers<br/>A and B"]
+        prices["Price sources"]
+        oracle["Sanctions oracle"]
+        sentry["Sentry"]
+        r2[("R2<br/>encrypted backups")]
+    end
+    products --> ingress
+    admin --> ingress
+    topup -.->|"webhooks"| products
+    topup --> kms & rpc & prices & oracle & sentry
+    backup --> r2
+```
+
 ```text
 crates/core       pure, no I/O: money, route schema, CREATE2 math, state machine, valuation, screening
 crates/adapters   chain::evm, signer::dstack, pricing::{coinmetrics,binance,kraken}, risk::oracle
@@ -203,9 +232,17 @@ monotone; splitting into `n` parts loses at most `n − 1` minor units.
 
 ## 7. States and pump
 
-```text
-detected → confirmed → credited → swept
-        ↘ rejected(reason)
+```mermaid
+stateDiagram-v2
+    [*] --> detected: finalized transfer of the route's token
+    [*] --> rejected: transfer of another token (unsupported)
+    detected --> confirmed: both providers agree, valued
+    detected --> rejected: below the minimum credit
+    confirmed --> credited: screened, deposit.credited written
+    confirmed --> rejected: sanctioned or out of bounds
+    credited --> swept: flush confirmed
+    rejected --> [*]: swept to the treasury, refundable
+    swept --> [*]
 ```
 
 `core::next(state, outcome)` is the only function that picks a target. A step that cannot
@@ -632,6 +669,15 @@ does not re-check first, and a finding that still reproduces blocks again on the
 lift writes `audit` with the reason and the removed block in the same transaction.
 
 ## 14. Configuration and deployment
+
+```mermaid
+flowchart LR
+    pr["Pull request<br/>CI: lint, test, sdk, image, ..."] --> main["main"]
+    main --> release["Release images<br/>two reproducible builds, push by digest"]
+    release --> deploy["Deploy (staging or production)<br/>render attested compose, preflight"]
+    deploy --> cvm["Phala Cloud CVM upgrade"]
+    cvm --> verify["Verify<br/>dstack verifier: quote, TCB, compose hash;<br/>ingress certificate evidence"]
+```
 
 One route file per chain and asset pair, with its chain settings inline, in the compose, hence
 attested. The file names only what differs per route or environment: route name and version,

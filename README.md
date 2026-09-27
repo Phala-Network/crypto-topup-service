@@ -12,6 +12,31 @@ are added through route configuration and adapters.
 
 ## Flow
 
+```mermaid
+flowchart LR
+    payer(["Payer"])
+    subgraph product["Product (e.g. Phala Cloud)"]
+        ui["Web app<br/>&lt;Checkout&gt; from @phala/pay"]
+        backend["Backend<br/>PhalaPay SDK"]
+    end
+    subgraph cvm["Phala Pay (dstack CVM, attested)"]
+        api["HTTP API<br/>/v1/quotes, deposits, refunds"]
+        worker["Scanner, pump, flusher,<br/>outbox, reconciler"]
+    end
+    subgraph chain["Ethereum"]
+        fwd["CREATE2 forwarders<br/>(one per quote)"]
+        safe[("Treasury Safe")]
+    end
+    payer -->|"wallet, QR, or manual transfer"| fwd
+    ui -->|"client_secret: status"| api
+    ui <--> backend
+    backend -->|"signed: create quote, refunds"| api
+    worker -->|"signed deposit.credited webhook"| backend
+    worker -->|"reads finalized logs (2 RPC providers)"| fwd
+    worker -->|"batched flush"| fwd
+    fwd -->|"can only pay"| safe
+```
+
 ```text
 product asks for a quote; the account is created with it
   → service locks the price and computes a CREATE2 forwarder address (no key, nothing deployed)

@@ -122,27 +122,28 @@ batches.
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User
-    participant PC as Phala Cloud backend
-    participant S as Top-up service
+    actor Payer
+    participant UI as Your web app (Checkout)
+    participant BE as Your backend
+    participant PP as Phala Pay
     participant ETH as Ethereum
-    User->>PC: top up $X
-    PC->>S: POST /v1/quotes {account_id, amount, currency, chain_id, asset}
-    Note over S: the workspace's account is created on first use
-    S-->>PC: id, address, amount_atomic, amount, expires_at, payment_uri
-    PC-->>User: QR, exact amount, countdown
-    User->>ETH: transfer amount_atomic to the address
-    PC->>S: GET /v1/quotes/{id} (the page polls: payment seen, display only)
-    Note over S,ETH: block finalized (about 15 min)
-    S->>S: detected → confirmed (2 RPC providers, price) → credited (screening)
-    S->>PC: webhook deposit.credited (webhook-id derived from the deposit id)
-    PC->>PC: verify the signature, credit once per dep_ id, in one transaction
-    PC-->>S: 2xx (anything else is retried until 2xx)
-    S->>ETH: factory.flush(salts, token) → treasury (swept)
-    opt Phala Cloud refuses (closed or suspended workspace, its own caps)
-        PC->>PC: record the credit as held, do not apply it
-        PC->>S: POST /v1/refunds {deposit, destination_address}
-        S-->>PC: webhook deposit.refunded, once finance's transfer is final
+    Payer->>UI: top up $25
+    UI->>BE: create top-up
+    BE->>PP: POST /v1/quotes (signed, Idempotency-Key)
+    PP-->>BE: quote with client_secret
+    BE-->>UI: client_secret
+    UI->>PP: GET /v1/quotes/{id}?client_secret=… (polls)
+    Payer->>ETH: transfer the exact amount (wallet, QR, or manual)
+    PP-->>UI: payment seen, then confirming
+    Note over PP,ETH: finality, about 15 minutes, two RPC providers agree
+    PP->>BE: webhook deposit.credited (signed, retried until 2xx)
+    BE->>BE: verify, credit once per dep_ id
+    BE-->>PP: 2xx
+    PP-->>UI: credited
+    PP->>ETH: batched flush to the treasury Safe
+    opt Refund (operator only, from your admin)
+        BE->>PP: POST /v1/refunds {deposit, destination_address}
+        PP->>BE: webhook deposit.refunded, after finance's transfer is final
     end
 ```
 
