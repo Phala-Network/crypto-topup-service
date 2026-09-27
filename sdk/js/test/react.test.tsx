@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Checkout } from "../src/react/index.js";
-import type { ClientQuote } from "../src/index.js";
+import type { ClientQuote, EthereumProvider } from "../src/index.js";
 import { ADDRESS, API_BASE, CLIENT_SECRET, TOKEN, quote } from "./fixtures.js";
 
 const NOW = (quote().expires_at - 14 * 60 - 32) * 1000;
@@ -103,11 +103,39 @@ describe("Checkout", () => {
 
   it("applies appearance variables", async () => {
     const { container } = await renderCheckout({
-      appearance: { theme: "dark", variables: { colorPrimary: "#ff0000", borderRadius: "2px" } },
+      appearance: {
+        theme: "dark",
+        variables: { colorPrimary: "#cdfa50", colorPrimaryText: "#161616", borderRadius: "2px" },
+      },
     });
     const root = container.querySelector<HTMLElement>(".pp-root");
     expect(root?.dataset["theme"]).toBe("dark");
-    expect(root?.style.getPropertyValue("--pp-color-primary")).toBe("#ff0000");
+    expect(root?.style.getPropertyValue("--pp-color-primary")).toBe("#cdfa50");
+    expect(root?.style.getPropertyValue("--pp-color-primary-text")).toBe("#161616");
     expect(root?.style.getPropertyValue("--pp-border-radius")).toBe("2px");
+  });
+
+  it("shows the full transaction hash after a wallet payment, linked to the explorer", async () => {
+    const hash = `0x${"ab".repeat(32)}`;
+    const provider: EthereumProvider = {
+      request: ({ method }) => {
+        switch (method) {
+          case "eth_requestAccounts":
+            return Promise.resolve([ADDRESS]);
+          case "eth_chainId":
+            return Promise.resolve(`0x${quote().chain_id.toString(16)}`);
+          case "eth_sendTransaction":
+            return Promise.resolve(hash);
+          default:
+            return Promise.reject(new Error(`unexpected ${method}`));
+        }
+      },
+    };
+    vi.stubGlobal("ethereum", provider);
+    const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
+    await renderCheckout();
+    await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
+    const link = await screen.findByRole("link", { name: hash });
+    expect(link.getAttribute("href")).toBe(`https://sepolia.etherscan.io/tx/${hash}`);
   });
 });

@@ -6,6 +6,18 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `appearance.variables.colorPrimaryText` (`--pp-color-primary-text`, default `#ffffff`): the color
+  of text on a `colorPrimary` background, such as the pay button's label, so a light brand primary
+  stays readable. Same name and meaning as Stripe's Appearance API variable.
+
+### Fixed
+
+- `<Checkout>` shows the full transaction hash after a wallet payment, wrapping in monospace,
+  instead of truncating it, so a payer can verify every character; a long token amount wraps
+  instead of overflowing.
+
 ## [0.1.0] - 2026-09-27
 
 ### Added
