@@ -92,8 +92,8 @@ the five-minute window.
 Send the operator the printed `keyid` and `public_key` and your webhook URL (public `https`). The
 operator then:
 
-1. sets `destination.product_kid` in the attested route file (its only source; a route change is
-   a new attested deployment);
+1. names your product in the attested route file (`product: phala-cloud`; your key id is
+   `phala-cloud/v1`; a route change is a new attested deployment);
 2. issues the product with the admin-signed `POST /v1/admin/products {slug, public_key,
    webhook_url}` ([deploy/README.md](../deploy/README.md#product-credentials)).
 
@@ -140,8 +140,8 @@ worthless without the verifier step: it proves only that the response is self-co
 
 ### 3.4 Rotate the product key
 
-The key id is attested in the route and stays the same; a rotation replaces only the public key
-the service stores for your slug:
+The key id, `phala-cloud/v1`, stays the same; a rotation replaces only the public key the service
+stores for your slug:
 
 1. Generate a new key under the same key id (§3.1) and send the operator its `public_key`.
 2. The operator stores it with the admin-signed `PUT /v1/admin/products/phala-cloud {public_key,

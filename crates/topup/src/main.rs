@@ -194,6 +194,13 @@ enum RouteCommand {
         template: bool,
         file: PathBuf,
     },
+    /// Print the resolved route as JSON (also a valid route file): every code default written out.
+    Show {
+        /// Permit zero factory and treasury placeholders in deployment templates.
+        #[arg(long)]
+        template: bool,
+        file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -227,6 +234,9 @@ async fn main() -> ExitCode {
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
+        TopupCommand::Route {
+            command: RouteCommand::Show { template, file },
+        } => return show_route(&file, template),
         TopupCommand::Outbox {
             command: OutboxCommand::Replay { id, since, force },
         } => replay_outbox(id, since.as_deref(), force).await,
@@ -1103,6 +1113,26 @@ async fn migrate() -> anyhow::Result<ExitCode> {
         .context("failed to apply database migrations")?;
     tracing::info!("database migrations applied");
     Ok(ExitCode::SUCCESS)
+}
+
+fn show_route(file: &Path, template: bool) -> ExitCode {
+    let resolved = std::fs::read_to_string(file)
+        .map_err(|error| format!("failed to read route file `{}`: {error}", file.display()))
+        .and_then(|yaml| {
+            route::parse_and_validate(&yaml, template)
+                .map_err(|error| format!("route file `{}` is invalid: {error}", file.display()))
+        })
+        .and_then(|route| route::resolved_json(&route));
+    match resolved {
+        Ok(json) => {
+            print!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn validate_route(file: &Path, template: bool) -> ExitCode {

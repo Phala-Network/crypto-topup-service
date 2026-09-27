@@ -6,7 +6,7 @@ use std::sync::Arc;
 use alloy_primitives::Address;
 use topup_adapters::attestation::OperatorKey;
 use topup_adapters::chain::evm::EvmClient;
-use topup_core::route::{ChainConfig, DestinationConfig, RouteFile, product_destination};
+use topup_core::route::{ChainConfig, DestinationConfig, RouteFile};
 
 use crate::rpc_provider::{UnresolvedProvider, configured_provider_url, provider_label};
 
@@ -82,18 +82,9 @@ impl RouteSet {
                 ));
             }
         }
-        // Product authentication reads the destination from the routes, so every route of one
-        // product must name the same product key id.
-        let products = routes
-            .iter()
-            .map(|route| route.destination.product.as_str())
-            .collect::<BTreeSet<_>>();
-        for product in products {
-            product_destination(&routes, product).map_err(|error| error.to_string())?;
-        }
-        // Rate-lock exposure caps sum credit across routes, so every quote-first route must
-        // count credit in the same destination minor unit.
-        let mut lock_routes = routes.iter().filter(|route| route.rate_lock.enabled);
+        // Rate-lock exposure caps sum credit across routes, so every route must count credit in
+        // the same destination minor unit.
+        let mut lock_routes = routes.iter();
         if let Some(first) = lock_routes.next()
             && let Some(other) = lock_routes
                 .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
@@ -113,12 +104,6 @@ impl RouteSet {
                     route.route, route.version
                 )
             })?;
-            if route.chain.finality != "finalized" {
-                return Err(format!(
-                    "route `{}` version {} uses unsupported finality rule `{}`",
-                    route.route, route.version, route.chain.finality
-                ));
-            }
             let chain_id = route.chain.chain_id;
             let chain = chains.entry(chain_id).or_insert_with(|| ChainEntry {
                 config: route.chain.clone(),
@@ -131,9 +116,7 @@ impl RouteSet {
                     .collect(),
             });
             let first = &chain.config;
-            if first.finality != route.chain.finality
-                || first.rpc_providers != route.chain.rpc_providers
-            {
+            if first.rpc_providers != route.chain.rpc_providers {
                 return Err(format!(
                     "route `{}` version {} disagrees with another chain {chain_id} scanner configuration",
                     route.route, route.version
@@ -282,25 +265,18 @@ mod tests {
     }
 
     #[test]
-    fn route_loading_requires_one_destination_per_product() {
+    fn products_are_found_by_slug() {
         let route = fixture();
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
-        newer.destination.product_kid = "phala-cloud/v2".to_owned();
-        assert!(
-            RouteSet::new(vec![route.clone(), newer.clone()])
-                .expect_err("one product must not have two key ids")
-                .contains("destination.product_kid")
-        );
-
-        newer.route = "builder-route".to_owned();
-        newer.asset.contract = Address::repeat_byte(0x42);
-        newer.destination.product = "builder".to_owned();
-        let set = RouteSet::new(vec![route.clone(), newer]).expect("two products load");
+        let mut other = route.clone();
+        other.route = "builder-route".to_owned();
+        other.asset.contract = Address::repeat_byte(0x42);
+        other.destination.product = "builder".to_owned();
+        let set = RouteSet::new(vec![route, other]).expect("two products load");
         assert_eq!(
             set.destination("builder")
-                .map(|destination| destination.product_kid.as_str()),
-            Some("phala-cloud/v2")
+                .map(DestinationConfig::product_kid)
+                .as_deref(),
+            Some("builder/v1")
         );
         assert_eq!(set.destination("unknown"), None);
     }
@@ -320,20 +296,13 @@ mod tests {
                 route.route
             ))
         );
-        other.rate_lock.enabled = false;
+        other.destination.unit_decimals = route.destination.unit_decimals;
         RouteSet::new(vec![route, other]).expect("one rate-lock unit loads");
     }
 
     #[test]
-    fn one_chain_has_one_finality_rule_provider_list_and_route_per_asset() {
+    fn one_chain_has_one_provider_list_and_route_per_asset() {
         let route = fixture();
-        let mut finality = route.clone();
-        finality.chain.finality = "latest".to_owned();
-        assert!(
-            RouteSet::new(vec![finality])
-                .expect_err("only finalized is reviewed")
-                .contains("unsupported finality rule")
-        );
 
         let mut providers = route.clone();
         providers.route = "other-route".to_owned();

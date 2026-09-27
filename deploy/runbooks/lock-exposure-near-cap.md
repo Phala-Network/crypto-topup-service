@@ -1,7 +1,7 @@
 # Lock exposure near cap
 
 **Trigger:** `TopupLockExposureNearCap` (a rate-lock creation took the open `product` or `global`
-lock credit to at least 90% of the route's `rate_lock.max_open_minor` cap; the event carries
+lock credit to at least 90% of the route's `limits.max_open_minor` cap; the event carries
 `scope`, `open_minor`, and `cap_minor`), or products reporting `409 exposure_cap_exceeded`.
 
 **Impact:** a creation that would exceed the `account`, `product`, or `global` cap answers `409`;

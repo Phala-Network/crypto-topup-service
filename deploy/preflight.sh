@@ -246,13 +246,17 @@ route_value() {
 }
 declare -A route=()
 if [[ -s "$tmp/route.yaml" ]]; then
-    for key in chain_id forwarder_factory implementation treasury contract sanctions_oracle \
-        decimals; do
+    # The file names only what differs per route; the implementation (the factory's first CREATE)
+    # and, on chains with a Chainalysis oracle, the sanctions oracle are code defaults that the
+    # online checks read from `topup route show`.
+    for key in chain_id forwarder_factory treasury contract sanctions_oracle decimals; do
         route[$key]=$(route_value "$key")
     done
-    for key in forwarder_factory implementation treasury contract sanctions_oracle; do
+    for key in forwarder_factory treasury contract sanctions_oracle; do
         address=${route[$key]}
-        if ! is_address "$address"; then
+        if [[ "$key" == sanctions_oracle && -z "$address" ]]; then
+            continue
+        elif ! is_address "$address"; then
             fail "route $key is not an address: '$address'"
         elif placeholder_address "$address"; then
             fail "route $key is the placeholder or zero address $address; deploy the contracts" \
@@ -274,12 +278,14 @@ fi
 
 check_anonymous_pulls "$tmp/images"
 topup_image=$(jq -r '.services.topup.image' "$tmp/compose.json")
-if docker run --rm -i --pull never "$topup_image" topup route validate /dev/stdin \
+if docker run --rm -i --pull never "$topup_image" topup route show /dev/stdin \
     <"$tmp/route.yaml" \
-    >"$tmp/validate.out" 2>&1; then
-    ok "topup route validate accepts the attested route"
+    >"$tmp/resolved.json" 2>"$tmp/validate.out"; then
+    ok "topup route show resolves the attested route"
+    route[implementation]=$(jq -r '.chain.implementation' "$tmp/resolved.json")
+    route[sanctions_oracle]=$(jq -r '.chain.sanctions_oracle' "$tmp/resolved.json")
 else
-    fail "topup route validate rejected the route: $(tail -n 3 "$tmp/validate.out")"
+    fail "topup route show rejected the route: $(tail -n 3 "$tmp/validate.out")"
 fi
 
 echo "== asset chain (RPC URLs are not printed)"

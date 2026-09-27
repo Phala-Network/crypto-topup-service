@@ -14,6 +14,14 @@ pub(crate) fn parse_and_validate(yaml: &str, template: bool) -> Result<RouteFile
     Ok(route)
 }
 
+/// The resolved route as JSON, which is also a YAML route file: every default written out,
+/// parsing back to the same route.
+pub(crate) fn resolved_json(route: &RouteFile) -> Result<String, String> {
+    serde_json::to_string_pretty(route)
+        .map(|json| json + "\n")
+        .map_err(|error| format!("failed to write the route: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,30 +47,105 @@ mod tests {
     }
 
     #[test]
-    fn attested_deployment_configs_match_the_schema() {
-        parse_and_validate(DEPLOY_ROUTE, true).expect("attested route template must parse");
+    fn staging_route_resolves_to_the_reviewed_values() {
+        let route = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
+        assert_eq!(route.destination.product_kid(), "phala-cloud/v1");
+        assert_eq!(
+            format!("{:#x}", route.chain.contracts.implementation),
+            "0x70b714508bfa441449dc09f790ca03baa5170360"
+        );
+        assert_eq!(route.chain.rpc_providers, ["provider-a", "provider-b"]);
+        assert_eq!(route.chain.operator_key_version, 1);
+        assert_eq!(route.chain.flush.native_price_asset, "eth");
+        assert_eq!(
+            route
+                .chain
+                .flush
+                .min_operator_balance_wei
+                .value()
+                .to_string(),
+            "10000000000000000"
+        );
+        let check = route
+            .pricing
+            .check
+            .as_ref()
+            .expect("spot route has a check");
+        assert_eq!(
+            (check.fx.source.as_str(), check.fx.pair.as_str()),
+            ("kraken", "USDT/USD")
+        );
+        assert!(route.asset.min_flush_atomic.value().is_zero());
+        assert!(route.screening.min_deposit_atomic.value().is_zero());
+        assert_eq!(route.rate_lock.window_s, 900);
+        assert_eq!(route.rate_lock.spread_bps.value(), 50);
+        assert_eq!(route.alerts.stuck_after_s.credited, 172_800);
+    }
+
+    #[test]
+    fn resolved_json_parses_back_to_the_same_route() {
+        for yaml in [VALID, DEPLOY_ROUTE] {
+            let route = parse_and_validate(yaml, false).expect("route must pass");
+            let resolved = resolved_json(&route).expect("route serializes");
+            assert!(resolved.contains("\"implementation\"") && resolved.contains("\"window_s\""));
+            assert_eq!(parse_and_validate(&resolved, false), Ok(route));
+        }
+    }
+
+    #[test]
+    fn chain_defaults_are_required_where_the_chain_has_none() {
+        let without_chain_overrides = VALID
+            .replace(
+                "  sanctions_oracle: \"0x40C57923924B5c5c5455c48D93317139ADDaC8fb\"\n",
+                "",
+            )
+            .replace("    native_price_asset: eth\n", "");
+        let mainnet =
+            parse_and_validate(&without_chain_overrides, false).expect("chain 1 defaults");
+        assert_eq!(
+            mainnet.screening.sanctions_oracle,
+            topup_core::route::default_sanctions_oracle(1).expect("mainnet oracle")
+        );
+        let polygon = without_chain_overrides.replace("  chain_id: 1\n", "  chain_id: 137\n");
+        assert!(
+            parse_and_validate(&polygon, false)
+                .expect_err("no native gas asset default on 137")
+                .contains("chain.flush.native_price_asset")
+        );
+        let sepolia = without_chain_overrides.replace("  chain_id: 1\n", "  chain_id: 11155111\n");
+        assert!(
+            parse_and_validate(&sepolia, false)
+                .expect_err("no Chainalysis oracle on Sepolia")
+                .contains("chain.sanctions_oracle")
+        );
+        let not_usdt = VALID.replace("symbol: PHAUSDT", "symbol: PHABTC");
+        assert!(
+            parse_and_validate(&not_usdt, false)
+                .expect_err("a non-USDT market needs its FX leg")
+                .contains("pricing.check.fx")
+        );
     }
 
     #[test]
     fn route_files_with_removed_keys_fail_with_the_key_name() {
         for (yaml, key) in [
             (
-                VALID.replace(
-                    "    replacement_bps: 12500\n",
-                    "    replacement_bps: 12500\n    gas_limit_bps: 12000\n",
-                ),
-                "gas_limit_bps",
-            ),
-            (
-                VALID.replace("  max_age_s: 120\n", "  price_scale: 8\n  max_age_s: 120\n"),
-                "price_scale",
+                VALID.replace("  chain_id: 1\n", "  chain_id: 1\n  finality: finalized\n"),
+                "finality",
             ),
             (
                 VALID.replace(
-                    "  chain_id: 1\n",
-                    "  chain_id: 1\n  name: ethereum-mainnet\n",
+                    "product: phala-cloud\n",
+                    "product: phala-cloud\nproduct_kid: x/v1\n",
                 ),
-                "name",
+                "product_kid",
+            ),
+            (
+                VALID.replace(
+                    "  min_credit_minor: 100\n",
+                    "  min_credit_minor: 100\n  enabled: true\n",
+                ),
+                "enabled",
             ),
         ] {
             assert_ne!(yaml, VALID, "fixture edit for `{key}` must apply");
@@ -76,27 +159,25 @@ mod tests {
     }
 
     #[test]
-    fn operator_key_version_is_required_and_positive() {
-        assert!(
-            parse_and_validate(&VALID.replace("  operator_key_version: 1\n", ""), false)
-                .expect_err("missing operator key version must fail")
-                .contains("operator_key_version")
-        );
+    fn operator_key_version_defaults_to_one_and_must_be_positive() {
+        let route = parse_and_validate(VALID, false).expect("valid fixture");
+        assert_eq!(route.chain.operator_key_version().map(u32::from), Ok(1));
+        let with = |version: u32| {
+            VALID.replace(
+                "  rpc_providers: [alchemy, quicknode]\n",
+                &format!(
+                    "  rpc_providers: [alchemy, quicknode]\n  operator_key_version: {version}\n"
+                ),
+            )
+        };
         for template in [false, true] {
             assert!(
-                parse_and_validate(
-                    &VALID.replace("operator_key_version: 1", "operator_key_version: 0"),
-                    template
-                )
-                .expect_err("operator key version zero must fail")
-                .contains("chain.operator_key_version")
+                parse_and_validate(&with(0), template)
+                    .expect_err("operator key version zero must fail")
+                    .contains("chain.operator_key_version")
             );
         }
-        let rotated = parse_and_validate(
-            &VALID.replace("operator_key_version: 1", "operator_key_version: 2"),
-            false,
-        )
-        .expect("a later operator key version is valid");
+        let rotated = parse_and_validate(&with(2), false).expect("a later version is valid");
         assert_eq!(rotated.chain.operator_key_version().map(u32::from), Ok(2));
     }
 
@@ -108,12 +189,20 @@ mod tests {
                 "asset.decimals",
             ),
             (
-                VALID.replace("window_s: 900", "window_s: 0"),
-                "rate_lock.window_s",
+                format!("{VALID}quote:\n  window_s: 0\n"),
+                "quote.window_s",
             ),
             (
-                VALID.replace("spread_bps: 50", "spread_bps: 10001"),
+                format!("{VALID}quote:\n  spread_bps: 10001\n"),
                 "spread_bps",
+            ),
+            (
+                VALID.replace("symbol: pha\n", "symbol: PHA\n"),
+                "asset.symbol",
+            ),
+            (
+                VALID.replace("product: phala-cloud\n", "product: -phala\n"),
+                "product",
             ),
             (
                 VALID.replace(
@@ -138,10 +227,10 @@ mod tests {
             ),
             (
                 VALID.replace(
-                    "implementation:    \"0xfeb1871c9897251C74b39DFC74e577888290faE6\"",
-                    "implementation:    \"0x0000000000000000000000000000000000000000\"",
+                    "  rpc_providers: [alchemy, quicknode]\n",
+                    "  rpc_providers: [alchemy, quicknode]\n  implementation: \"0x0000000000000000000000000000000000000000\"\n",
                 ),
-                "chain.contracts.implementation",
+                "chain.implementation",
             ),
         ] {
             assert!(
@@ -154,25 +243,28 @@ mod tests {
     }
 
     #[test]
-    fn pricing_mode_is_required_and_stablecoin_may_omit_check() {
-        let missing_mode = VALID.replacen("  mode: spot\n", "", 1);
-        assert!(parse_and_validate(&missing_mode, false).is_err());
+    fn pricing_mode_defaults_to_spot_and_stablecoin_may_omit_check() {
+        let route = parse_and_validate(VALID, false).expect("valid fixture");
+        assert_eq!(route.pricing.mode, topup_core::route::PricingMode::Spot);
+        assert_eq!(
+            route.pricing.max_fx_deviation_bps.map(|bps| bps.value()),
+            Some(50)
+        );
 
-        let stablecoin = VALID
-            .replacen("  mode: spot", "  mode: stablecoin", 1)
-            .replacen(
-                "  check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }\n",
-                "",
-                1,
-            )
-            .replacen("  max_fx_deviation_bps: 50\n", "", 1);
-        parse_and_validate(&stablecoin, false).expect("stablecoin check is optional");
+        let stablecoin = VALID.replacen(
+            "  check: { source: binance, symbol: PHAUSDT }\n",
+            "  mode: stablecoin\n",
+            1,
+        );
+        let route = parse_and_validate(&stablecoin, false).expect("stablecoin check is optional");
+        assert_eq!(route.pricing.max_fx_deviation_bps, None);
 
-        let spot_without_fx_limit = VALID.replacen("  max_fx_deviation_bps: 50\n", "", 1);
+        let spot_without_check =
+            VALID.replacen("  check: { source: binance, symbol: PHAUSDT }\n", "", 1);
         assert!(
-            parse_and_validate(&spot_without_fx_limit, false)
-                .expect_err("spot FX limit must be required")
-                .contains("max_fx_deviation_bps")
+            parse_and_validate(&spot_without_check, false)
+                .expect_err("spot check must be required")
+                .contains("pricing.check")
         );
     }
 }

@@ -1,56 +1,33 @@
 # Fully valid schema fixture. Addresses are from the A1 deterministic test-vector deployment.
-chain:
-  chain_id: 1
-  finality: finalized
-  rpc_providers: [alchemy, quicknode]
-  operator_key_version: 1
-  contracts:
-    forwarder_factory: "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d"
-    implementation:    "0xfeb1871c9897251C74b39DFC74e577888290faE6"
-    treasury:          "0x0000000000000000000000000000000000007EA5"
-  flush:
-    schedule: "0 */6 * * *"
-    max_gas_ratio_bps: 200
-    native_price_asset: eth
-    max_fee_per_gas_wei: 500000000000
-    replacement_bps: 12500
-    min_operator_balance_wei: "10000000000000000"
-
+# It overrides defaults the tests rely on: providers, the chain defaults (so tests may change the
+# chain id), and the deposit and flush floors.
 route: phala-cloud-ethereum-pha-usd
 version: 1
+product: phala-cloud
+
+chain:
+  chain_id: 1
+  forwarder_factory: "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d"
+  treasury: "0x0000000000000000000000000000000000007EA5"
+  sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
+  rpc_providers: [alchemy, quicknode]
+  flush:
+    native_price_asset: eth
+    min_operator_balance_wei: "10000000000000000"
 
 asset:
+  symbol: pha
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
-  min_flush_atomic: "20000000000000000000000"
-  min_refund_atomic: "20"
-
-destination:
-  product: phala-cloud
-  unit_decimals: 2
-  product_kid: phala-cloud/v1
 
 pricing:
-  mode: spot
   primary: { source: coinmetrics, asset: pha }
-  check:   { source: binance, symbol: PHAUSDT, fx: { source: kraken, pair: USDT/USD } }
-  max_age_s: 120
-  max_deviation_bps: 100
-  max_fx_deviation_bps: 50
+  check: { source: binance, symbol: PHAUSDT }
 
-screening:
-  sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
-  min_deposit_atomic: "20000000000000000000"
-  max_deposit_atomic: "200000000000000000000000"
+limits:
   min_credit_minor: 100
-
-rate_lock:
-  enabled: true
-  window_s: 900
-  spread_bps: 50
-  lock_tolerance_bps: 100
-  max_creations_per_minute: 10
+  max_deposit_atomic: "200000000000000000000000"
+  min_refund_atomic: "20"
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
-
-alerts:
-  stuck_after_s: { detected: 1800, confirmed: 1800, credited: 172800 }
+  min_deposit_atomic: "20000000000000000000"
+  min_flush_atomic: "20000000000000000000000"

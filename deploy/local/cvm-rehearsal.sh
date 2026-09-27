@@ -224,9 +224,8 @@ printf 'factory=%s implementation=%s treasury=%s token=%s sanctions_oracle=%s\n'
 
 echo "== writing the route and rendering the staging compose"
 # The committed staging route with real addresses; the reference product is its product.
-sed -e "s|^\(    forwarder_factory: \).*|\1\"$factory\"|" \
-    -e "s|^\(    implementation: \).*|\1\"$implementation\"|" \
-    -e "s|^\(    treasury: \).*|\1\"$treasury\"|" \
+sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
+    -e "s|^\(  treasury: \).*|\1\"$treasury\"|" \
     -e "s|^\(  contract: \).*|\1\"$token\"|" \
     -e "s|^\(  sanctions_oracle: \).*|\1\"$oracle\"|" \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" >"$tmp/route.yaml"

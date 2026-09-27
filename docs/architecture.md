@@ -224,9 +224,9 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 from any contract in windows ≤ 2 000 blocks and ≤ 1 000 addresses; insert with
 `ON CONFLICT DO NOTHING`; advance the cursor after commit. New addresses backfill from
 creation (the chain's committed cursor when the address is issued); retired and lock addresses
-stay in the filter. Native ETH is a balance check at flush time. Each chain's finality rule is
-declared in the route's `chain` settings (Ethereum: `finalized`); a chain is enabled only after
-its rule is reviewed. Later option: Helios as one provider.
+stay in the filter. Native ETH is a balance check at flush time. Every chain uses the
+`finalized` tag; a chain whose finality does not map onto it is enabled only after a reviewed
+code change. Later option: Helios as one provider.
 
 **Head scan (display only)** per chain, on provider A, every 12 s (or the scanner poll interval
 if shorter): read non-zero `Transfer` logs emitted by the chain's routed token contracts to
@@ -292,8 +292,8 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   shows the lock `open` with `remaining_seconds = 0`, and cancellation is refused once the
   window has closed (`409 window_closed`). A lock whose address has received any deposit, even
   a rejected one, can no longer be cancelled (`409 pending_payment`).
-- Exposure counters sum `credit_minor` across routes, so every rate-lock route must use the
-  same `destination.unit_decimals`; the service refuses to load routes that differ.
+- Exposure counters sum `credit_minor` across routes, so every route must use the same
+  `unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to the persistent address" variant is deliberately not offered: matching
   a lock by amount alone is ambiguous, and the single-use address is the processor-standard
   answer.
@@ -554,13 +554,34 @@ lift writes `audit` with the reason and the removed block in the same transactio
 ## 14. Configuration and deployment
 
 One route file per chain and asset pair, with its chain settings inline, in the compose, hence
-attested: chain and its finality rule, RPC provider ids, factory and implementation addresses,
-treasury, token, unit decimals, product key id, and every threshold and spread.
-Changing a value is a new version and compose hash; deposits keep the version that created them.
-The route is the only source of the key id a product's requests are verified against; the
-database stores only the product's slug, webhook URL, and public key, and every loaded route
-that names one product must agree on the key id or startup fails. Bumping
-`operator_key_version` is such a new version; bump it only after the admin Safe has granted the
+attested. The file names only what differs per route or environment: route name and version,
+product, chain id, forwarder factory, treasury, asset symbol, contract, and decimals, price
+sources, and the policy limits (minimum credit, maximum deposit, refund floor, exposure caps).
+Every other value is a code default, overridable under its key in the same file, and as attested
+as the file because the image digest is part of the compose hash. `topup route show FILE` prints
+the resolved route, every value explicit (JSON, itself a valid route file); preflight reads the
+defaulted addresses from it. The defaults and why:
+
+| Value | Default |
+|---|---|
+| `chain.implementation` | the factory's first `CREATE` (nonce 1), which its constructor deploys; startup verifies `implementation()` on chain (§4) |
+| `chain.sanctions_oracle` | the Chainalysis oracle published for the chain (Ethereum and most EVM chains `0x40C5…aC8fb`, Base `0x3A91…D739B`); required on any other chain, such as Sepolia |
+| `chain.rpc_providers` | `[provider-a, provider-b]`, whose URLs are `TOPUP_RPC_PROVIDER_A_URL` and `_B_URL` |
+| `chain.operator_key_version` | 1; bumped only after an operator rotation (§15) |
+| `chain.flush.schedule`, `max_gas_ratio_bps`, `max_fee_per_gas_wei`, `replacement_bps` | `0 */6 * * *`, 200 (2% of value), 500 gwei (a runaway-fee guard), 12 500 (a 25% bump) |
+| `chain.flush.native_price_asset` | `eth` on Ethereum, Sepolia, and Base; required elsewhere |
+| `chain.flush.min_operator_balance_wei` | 0.05 ETH (staging overrides 0.01 ETH, its operator's float) |
+| `pricing.mode`, `pricing.check.fx` | `spot`; Kraken `USDT/USD` for a USDT-quoted market, required otherwise |
+| `pricing.max_age_s`, `max_deviation_bps`, `max_fx_deviation_bps` | 120 (two Coin Metrics intervals), 100, 50 |
+| `limits.min_deposit_atomic`, `limits.min_flush_atomic` | 0: `min_credit_minor` rejects dust, and the gas-ratio rule governs flush economics *(policy: finance confirms before production)* |
+| `quote.window_s`, `spread_bps`, `tolerance_bps`, `max_creations_per_minute` | 900, 50, 100, 10 |
+| `alerts.stuck_after_s` | detected 1 800, confirmed 1 800, credited 172 800 (credited waits for the six-hourly, gas-gated flush) |
+| `unit_decimals` | 2 (USD cents) |
+
+Only `finalized` finality is supported, so it is not configurable. A product's key id is
+`{product}/v1`; the database stores only the product's slug, webhook URL, and public key.
+Changing a value, including a default, is a new version and compose hash; deposits keep the
+version that created them. Bumping `operator_key_version` is such a new version; bump it only after the admin Safe has granted the
 new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
 other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
 is rendered into the compose, so it is attested too; a keyed RPC URL is attested with a `{key}`
@@ -577,9 +598,9 @@ scanned only while it has a loaded route, and its rate locks expire only by its 
 (§9), so a route version or a chain's last route is removed only after its open locks and
 in-flight deposits have resolved (`deploy/runbooks/route-retirement.md`).
 
-The route's attested `chain.flush` settings own the flush policy: the planning cron,
-`max_gas_ratio_bps`, native gas-price asset id, maximum EIP-1559 fee, replacement fee bump, and
-the operator gas reserve `min_operator_balance_wei` (§16).
+The route's `chain.flush` settings own the flush policy: the planning cron, `max_gas_ratio_bps`,
+native gas-price asset id, maximum EIP-1559 fee, replacement fee bump, and the operator gas
+reserve `min_operator_balance_wei` (§16).
 Gas policy compares gas-token value and token balance value in USD using separate reference
 rates. Changing any of these fields requires a new attested configuration version. Engineering
 limits that do not decide money are code constants: RPC timeout, replacement delay (3 blocks),

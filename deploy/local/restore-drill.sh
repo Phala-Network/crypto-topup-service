@@ -349,8 +349,7 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%
 routes_dir=$(mktemp -d)
 # The seeded deposit belongs to the `restore-drill` product, so the drill route names it.
 sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
-    -e 's|^  product: .*|  product: restore-drill|' \
-    -e 's|^  product_kid: .*|  product_kid: product/restore-drill|' \
+    -e 's|^product: .*|product: restore-drill|' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
 chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"

@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
+use topup_core::route::DestinationConfig;
 
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -58,7 +59,7 @@ pub async fn authenticate_product(
     let Some(kid) = state
         .routes
         .destination(&product.slug)
-        .map(|destination| destination.product_kid.clone())
+        .map(DestinationConfig::product_kid)
     else {
         return ApiError::unauthorized().into_response();
     };

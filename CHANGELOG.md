@@ -5,6 +5,17 @@ webhook receivers must ignore unknown fields.
 
 ## Unreleased
 
+### Changed
+
+- Route files name only what differs per route or environment (`route`, `version`, `product`,
+  `chain.{chain_id, forwarder_factory, treasury}`, `asset.{symbol, contract, decimals}`,
+  `pricing.{primary, check}`, and `limits`); every other value is a code default, overridable
+  under its key (architecture §14). `topup route show FILE` prints the resolved route. The
+  implementation defaults to the factory's first `CREATE`, the sanctions oracle to Chainalysis's
+  address on chains that have one, and a product's key id is `{product}/v1`. `finality`,
+  `destination.product_kid`, and `rate_lock.enabled` are removed; the `quotes` pause scope stops
+  quote creation. Staging's route moves to version 2.
+
 ### Added
 
 - `POST /v1/products/{p}/accounts/{ext}/rate-locks` and `POST …/deposit-address` create the

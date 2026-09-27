@@ -86,10 +86,10 @@ jq . "$tmp/contracts.json"
 echo "== creating the product key and rendering the sandbox route"
 uv run --locked --project "$root/sdk/python" topup-sdk keygen --keyid "$keyid" \
     --seed-out "$tmp/product.seed" >"$tmp/product-key.json"
-FORWARDER_FACTORY="$factory" IMPLEMENTATION="$implementation" TREASURY="$owner" \
+FORWARDER_FACTORY="$factory" TREASURY="$owner" \
     TEST_TOKEN=$(jq -er .test_token "$tmp/contracts.json") \
     SANCTIONS_ORACLE=$(jq -er .sanctions_oracle "$tmp/contracts.json") \
-    PRODUCT_SLUG="$slug" PRODUCT_KID="$keyid" \
+    PRODUCT_SLUG="$slug" \
     RATE_LOCK_WINDOW_S=45 \
     "$root/deploy/sandbox/render-route.sh" >"$TOPUP_LOCAL_ROUTES_DIR/sandbox.yaml"
 "${compose[@]}" run --rm --no-deps topup topup route validate /etc/topup/routes/sandbox.yaml
