@@ -706,8 +706,8 @@ make -C sdk/python generate  # after an openapi.json change
 
 Releases are tags: `sdk-py-v<version>` publishes `phala-pay` to PyPI and
 `sdk-js-v<version>` publishes `@phala/pay` to npm, from `.github/workflows/release-sdks.yml`
-after the SDK's tests pass on the tagged commit, with trusted publishing (no stored tokens) in the
-`release` environment.
+after the SDK's tests pass on the tagged commit, with trusted publishing (no stored tokens) from the
+`npm` and `pypi` environments.
 
 Regenerate the signing vectors only after an intentional profile change, then rerun the Rust
 test:

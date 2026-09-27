@@ -138,5 +138,5 @@ EIP-6963 wallet backed by the node, then decode the QR code and exercise the man
 
 ## Releases
 
-A tag `sdk-js-v<version>` matching `package.json` publishes to npm from the `release` workflow
-with trusted publishing and provenance. See [CHANGELOG.md](CHANGELOG.md).
+A tag `sdk-js-v<version>` matching `package.json` publishes to npm from the Release SDKs workflow
+(environment `npm`) with trusted publishing and provenance. See [CHANGELOG.md](CHANGELOG.md).

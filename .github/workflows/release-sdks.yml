@@ -8,9 +8,9 @@ name: Release SDKs
 # notes once the package is published (CONTRIBUTING.md, "Releasing an SDK").
 #
 # Publishing uses trusted publishing (OIDC) only: no token or secret is stored anywhere. The owner
-# registers this repository, this workflow file (release-sdks.yml), and the `release` environment
-# as the trusted publisher on npmjs.com and on pypi.org, and may add required reviewers to the
-# environment. npm's trusted publishing does not support self-hosted runners, so the publish jobs
+# registers this repository, this workflow file (release-sdks.yml), and the job's environment as
+# the trusted publisher: `npm` on npmjs.com and `pypi` on pypi.org. Each environment accepts only
+# its SDK's tags (sdk-js-v*, sdk-py-v*) and may add required reviewers. npm's trusted publishing does not support self-hosted runners, so the publish jobs
 # run on GitHub-hosted runners. npm refuses provenance from a private repository: `--provenance`
 # fails until the repository is public.
 
@@ -55,7 +55,7 @@ jobs:
   js-publish:
     needs: js-test
     runs-on: ubuntu-latest
-    environment: release
+    environment: npm
     permissions:
       contents: read
       id-token: write
@@ -108,7 +108,7 @@ jobs:
   py-publish:
     needs: py-test
     runs-on: ubuntu-latest
-    environment: release
+    environment: pypi
     permissions:
       contents: read
       id-token: write
