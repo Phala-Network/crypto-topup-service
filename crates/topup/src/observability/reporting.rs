@@ -32,8 +32,7 @@ const ALERT_FIELD: &str = "tags.alert";
 const SCRUBBED_FIELDS: [&str; 1] = ["account_id"];
 /// Context in which the tracing integration stores event fields.
 const TRACING_FIELDS_CONTEXT: &str = "Rust Tracing Fields";
-const RUNBOOKS: &str =
-    "https://github.com/Phala-Network/phala-pay/blob/main/deploy/runbooks/";
+const RUNBOOKS: &str = "https://github.com/Phala-Network/phala-pay/blob/main/deploy/runbooks/";
 /// Minimum interval between two events of the same issue; loops retry every few seconds.
 const EVENT_REPEAT_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Minimum interval between two check-ins of one monitor, below the Crons limit of six a minute.
