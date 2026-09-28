@@ -13,10 +13,26 @@ import { Forwarder } from "./Forwarder.sol";
 /// factory, the implementation, its treasury, and its salt; anyone may flush it, and its funds
 /// can only ever reach that treasury. There are no roles, no admin, and no constructor arguments.
 contract ForwarderFactory is ReentrancyGuardTransient {
+    error InsufficientGas();
     error ZeroTreasury();
 
     /// Revert data longer than this is truncated in `FlushFailed`.
     uint256 public constant MAX_REASON_LENGTH = 256;
+
+    /// Gas forwarded to a token's `balanceOf`, so a token cannot consume a batch's gas. A cold
+    /// read through an upgradeable proxy (USDC, USDT0) uses under 8 000.
+    uint256 public constant BALANCE_OF_GAS = 30_000;
+
+    /// Gas forwarded to one forwarder's `flush`, so a token or treasury cannot consume a batch's
+    /// gas. A cold standard ERC-20 transfer to a new holder, even through an upgradeable proxy
+    /// (USDC, USDT0), uses under 75 000, and a native send at most `Forwarder.NATIVE_SEND_GAS`
+    /// plus the value transfer and new-account costs; the rest is headroom for gas repricing. A
+    /// token whose transfer (with any recipient hook) needs more fails its target.
+    uint256 public constant FLUSH_GAS = 200_000;
+
+    /// Gas the factory keeps, beyond the callee's bound, for the call itself: a cold account
+    /// access (2 600) and the instructions between the gas check and the call.
+    uint256 private constant CALL_GAS_RESERVE = 5000;
 
     Forwarder public immutable implementation;
 
@@ -48,7 +64,9 @@ contract ForwarderFactory is ReentrancyGuardTransient {
 
     /// Moves the whole `token` balance (ETH when `token` is zero) of each forwarder of `treasury`
     /// named by `salts` to `treasury`. Callable by anyone. A forwarder holding nothing is skipped
-    /// and not deployed; one whose transfer fails emits `FlushFailed` and the batch continues.
+    /// and not deployed; one whose balance read or transfer fails, or exceeds its gas bound,
+    /// emits `FlushFailed` and the batch continues. Reverts with `InsufficientGas` rather than
+    /// give a target less than its gas bound.
     function flush(address treasury, bytes32[] calldata salts, address token)
         external
         nonReentrant
@@ -69,8 +87,16 @@ contract ForwarderFactory is ReentrancyGuardTransient {
         );
         uint256 balance = forwarder.balance;
         if (token != address(0)) {
-            // forge-lint: disable-next-line(calls-loop)
-            balance = IERC20(token).balanceOf(forwarder);
+            bool read;
+            bytes memory readError;
+            (read, balance, readError) =
+                _call(token, abi.encodeCall(IERC20.balanceOf, (forwarder)), BALANCE_OF_GAS, true);
+            if (!read) {
+                // The read was a `staticcall`, which cannot change state.
+                // forge-lint: disable-next-line(reentrancy-events)
+                emit FlushFailed(salt, forwarder, token, readError);
+                return;
+            }
         }
         if (balance == 0) return;
 
@@ -80,7 +106,8 @@ contract ForwarderFactory is ReentrancyGuardTransient {
             emit ForwarderCreated(salt, forwarder, treasury);
         }
 
-        (bool success, uint256 amount, bytes memory reason) = _flush(forwarder, token);
+        (bool success, uint256 amount, bytes memory reason) =
+            _call(forwarder, abi.encodeCall(Forwarder.flush, (token)), FLUSH_GAS, false);
         if (success) {
             // The event carries the amount returned by the completed transfer.
             // forge-lint: disable-next-line(reentrancy-events)
@@ -91,22 +118,31 @@ contract ForwarderFactory is ReentrancyGuardTransient {
         }
     }
 
-    /// Calls `Forwarder.flush(token)` and copies at most `MAX_REASON_LENGTH` bytes of revert
-    /// data, so a failing target cannot make the batch pay for copying a large revert.
-    function _flush(address forwarder, address token)
+    /// Calls `target` with exactly `gasLimit` gas (read-only when `isStatic`) and decodes one
+    /// word of return data. Fewer than 32 bytes of return data fail the call. On failure at most
+    /// `MAX_REASON_LENGTH` bytes of return data are copied, so a failing target cannot make the
+    /// batch pay for copying a large revert.
+    function _call(address target, bytes memory data, uint256 gasLimit, bool isStatic)
         private
-        returns (bool success, uint256 amount, bytes memory reason)
+        returns (bool success, uint256 word, bytes memory reason)
     {
-        bytes memory data = abi.encodeCall(Forwarder.flush, (token));
+        // The callee must receive the whole `gasLimit`: with less (the 63/64 rule), a caller
+        // choosing the transaction's gas could make any target fail. Running short reverts the
+        // batch instead, as the caller's own error.
+        // forge-lint: disable-next-line(require-revert-in-loop)
+        if (gasleft() < gasLimit + gasLimit / 63 + CALL_GAS_RESERVE) revert InsufficientGas();
         uint256 size;
         assembly ("memory-safe") {
-            success := call(gas(), forwarder, 0, add(data, 0x20), mload(data), 0, 0)
+            switch isStatic
+            case 0 { success := call(gasLimit, target, 0, add(data, 0x20), mload(data), 0, 0) }
+            default {
+                success := staticcall(gasLimit, target, add(data, 0x20), mload(data), 0, 0)
+            }
             size := returndatasize()
         }
-        // A clone of this factory's implementation returns exactly one word on success.
-        if (success && size == 32) {
-            amount = abi.decode(_returnData(32), (uint256));
-            return (success, amount, reason);
+        if (success && size >= 32) {
+            word = abi.decode(_returnData(32), (uint256));
+            return (success, word, reason);
         }
         success = false;
         reason = _returnData(size < MAX_REASON_LENGTH ? size : MAX_REASON_LENGTH);

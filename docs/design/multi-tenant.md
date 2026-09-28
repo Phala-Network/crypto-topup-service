@@ -229,8 +229,11 @@ merchant recomputes every address. `flush(treasury, salts[], token)` is public, 
 the destination is fixed in the address, so no party needs to be trusted with the timing. Per
 salt it skips empty addresses, deploys the clone if needed (`ForwarderCreated`), and moves the
 whole balance to the treasury (`Flushed`), or records `FlushFailed` and continues, like
-Multicall3's `allowFailure`; native sends are gas-bounded. The independent review before mainnet
-(`docs/plan.md`) covers the contracts.
+Multicall3's `allowFailure`. Every call a target makes is gas-bounded (the token's `balanceOf`,
+the forwarder's `flush`, and within it a native send), so no token or treasury can revert or
+exhaust the batch; a token needing more than the factory's `FLUSH_GAS` (200 000) per transfer
+cannot be swept and must not be enabled in a route (amended 2026-09-28). The independent review
+before mainnet (`docs/plan.md`) covers the contracts.
 
 ### D4: sweeping — the merchant's transaction
 

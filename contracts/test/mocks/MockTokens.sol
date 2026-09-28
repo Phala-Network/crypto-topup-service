@@ -165,3 +165,160 @@ contract SelectiveRevertingToken is ERC20 {
         return super.transfer(to, value);
     }
 }
+
+/// Token that misbehaves only for the accounts it is told to, so one target of a batch fails.
+contract HostileToken is ERC20 {
+    enum Mode {
+        Normal,
+        BalanceReverts,
+        BalanceReturnsShortData,
+        BalanceBurnsGas,
+        TransferBurnsGas
+    }
+
+    error Hostile();
+
+    mapping(address account => Mode) public modeOf;
+
+    constructor() ERC20("Hostile Token", "HOSTILE") { }
+
+    function mint(address account, uint256 amount) external {
+        _mint(account, amount);
+    }
+
+    function setMode(address account, Mode mode) external {
+        modeOf[account] = mode;
+    }
+
+    function balanceOf(address account) public view override returns (uint256) {
+        Mode mode = modeOf[account];
+        if (mode == Mode.BalanceReverts) revert Hostile();
+        if (mode == Mode.BalanceReturnsShortData) {
+            assembly ("memory-safe") {
+                mstore(0, 1)
+                return(0, 31)
+            }
+        }
+        if (mode == Mode.BalanceBurnsGas) _burnGas();
+        return super.balanceOf(account);
+    }
+
+    function transfer(address to, uint256 value) public override returns (bool) {
+        if (modeOf[msg.sender] == Mode.TransferBurnsGas) _burnGas();
+        return super.transfer(to, value);
+    }
+
+    function _burnGas() private pure {
+        assembly ("memory-safe") {
+            for { } 1 { } { }
+        }
+    }
+}
+
+interface ITokenReceiver {
+    function onTokenReceived(address from, uint256 value) external;
+}
+
+/// Token that calls the recipient's `onTokenReceived` hook after a transfer, as ERC-777 and
+/// ERC-1363 tokens do, and requires it to succeed.
+contract HookToken is ERC20 {
+    constructor() ERC20("Hook Receiver Token", "HOOKR") { }
+
+    function mint(address account, uint256 amount) external {
+        _mint(account, amount);
+    }
+
+    function transfer(address to, uint256 value) public override returns (bool) {
+        super.transfer(to, value);
+        if (to.code.length != 0) ITokenReceiver(to).onTokenReceived(msg.sender, value);
+        return true;
+    }
+}
+
+/// EIP-1967 upgradeable proxy, as USDC (`FiatTokenProxy`) and USDT0 put their tokens behind.
+contract TokenProxy {
+    bytes32 private constant IMPLEMENTATION_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    constructor(address implementation) {
+        assembly ("memory-safe") {
+            sstore(IMPLEMENTATION_SLOT, implementation)
+        }
+    }
+
+    fallback() external payable {
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let success := delegatecall(gas(), sload(IMPLEMENTATION_SLOT), 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            if iszero(success) { revert(0, returndatasize()) }
+            return(0, returndatasize())
+        }
+    }
+}
+
+/// USDC-like implementation (FiatToken v2.1): pausable, with an issuer blacklist checked for
+/// sender and recipient in separate storage, and `transfer` returning `true`.
+contract UsdcLikeToken {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    address public owner;
+    bool public paused;
+    mapping(address account => bool) public blacklisted;
+    mapping(address account => uint256) public balanceOf;
+    uint256 public totalSupply;
+
+    function mint(address account, uint256 amount) external {
+        balanceOf[account] += amount;
+        totalSupply += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(!paused, "Pausable: paused");
+        require(!blacklisted[msg.sender], "Blacklistable: account is blacklisted");
+        require(!blacklisted[to], "Blacklistable: account is blacklisted");
+        require(to != address(0), "ERC20: transfer to the zero address");
+        require(value <= balanceOf[msg.sender], "ERC20: transfer amount exceeds balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+}
+
+/// USDT-like implementation (Ethereum `TetherToken`): `transfer` returns nothing, and checks a
+/// deprecation flag, a sender blacklist, and a fee (zero, as on mainnet) before moving funds.
+contract UsdtLikeToken {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    address public owner;
+    bool public deprecated;
+    uint256 public basisPointsRate;
+    uint256 public maximumFee;
+    mapping(address account => bool) public isBlackListed;
+    mapping(address account => uint256) public balanceOf;
+    uint256 public totalSupply;
+
+    function mint(address account, uint256 amount) external {
+        balanceOf[account] += amount;
+        totalSupply += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
+    function transfer(address to, uint256 value) external {
+        require(msg.data.length >= 2 * 32 + 4);
+        require(!isBlackListed[msg.sender]);
+        require(!deprecated);
+        uint256 fee = (value * basisPointsRate) / 10_000;
+        if (fee > maximumFee) fee = maximumFee;
+        uint256 sendAmount = value - fee;
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += sendAmount;
+        if (fee > 0) {
+            balanceOf[owner] += fee;
+            emit Transfer(msg.sender, owner, fee);
+        }
+        emit Transfer(msg.sender, to, sendAmount);
+    }
+}

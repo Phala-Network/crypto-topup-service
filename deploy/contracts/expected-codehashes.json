@@ -14,14 +14,14 @@
   "factory_salt": "0x26f1d8427b0c2db52d02ee55402198e592a278fb8541ba4dfaefbd1ea7b09eee",
   "artifacts": {
     "ForwarderFactory": {
-      "creation_code_hash": "0xc690cef8e3fb4b8e0665b3788af54c4591782b3f5f93e919b6751519d8f1db45",
-      "runtime_template_code_hash": "0xf367d23428e189bef80b8903d1f31453fcee4c31d75f57eb0df929df54561e23",
+      "creation_code_hash": "0x203adb4390529b9b885e094a08abea4f88d25de3e0f6ef202d7532d5bbe6cbd5",
+      "runtime_template_code_hash": "0xba68b652c46ff52b46499a742ab1805017269a13aa0fdb0928bd2a9cb11cc3b0",
       "immutable_offsets": {
         "implementation": [
-          83,
-          439,
-          565,
-          768
+          105,
+          480,
+          606,
+          887
         ]
       }
     },

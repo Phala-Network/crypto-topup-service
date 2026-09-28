@@ -54,6 +54,12 @@ webhook receivers must ignore unknown fields. The format follows
 - `GET /v1/admin/deposits/{id}` returns the `Deposit` with an `admin` object (`state`, route,
   `transitions`, `events`); the separate admin deposit shapes are gone.
 - `livemode` and `metadata` are required on every object in the OpenAPI document.
+- `ForwarderFactory` bounds the gas of every call a target makes (`BALANCE_OF_GAS` 30 000 for a
+  token's `balanceOf`, `FLUSH_GAS` 200 000 for a forwarder's `flush`), so a token whose
+  `balanceOf` reverts, burns gas, or returns short data, or a transfer or treasury hook that burns
+  gas, emits `FlushFailed` for its own target only; a `flush` whose gas cannot cover a call's
+  whole bound reverts with `InsufficientGas`. The factory and implementation addresses change
+  (`deploy/CONTRACTS.md`).
 
 ### Added
 
