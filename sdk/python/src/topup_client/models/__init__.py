@@ -20,6 +20,7 @@ from .daily_report_response import DailyReportResponse
 from .deposit import Deposit
 from .deposit_event_response import DepositEventResponse
 from .deposit_list import DepositList
+from .deposit_metadata import DepositMetadata
 from .deposit_response import DepositResponse
 from .deposit_transition_response import DepositTransitionResponse
 from .due_diligence import DueDiligence
@@ -28,17 +29,21 @@ from .error_response import ErrorResponse
 from .error_type import ErrorType
 from .failed_check_report import FailedCheckReport
 from .issue_api_key_request import IssueApiKeyRequest
+from .metadata_clear import MetadataClear
+from .metadata_param_type_0 import MetadataParamType0
 from .nudge_response import NudgeResponse
 from .outbox_replay_response import OutboxReplayResponse
 from .pause_request import PauseRequest
 from .pause_response import PauseResponse
 from .quote import Quote
+from .quote_metadata import QuoteMetadata
 from .quote_payment import QuotePayment
 from .reconciliation_block_lift_response import ReconciliationBlockLiftResponse
 from .reconciliation_block_report import ReconciliationBlockReport
 from .reconciliation_round_report import ReconciliationRoundReport
 from .record_refund_request import RecordRefundRequest
 from .refund import Refund
+from .refund_metadata import RefundMetadata
 from .roll_api_key_request import RollApiKeyRequest
 from .route_daily_report import RouteDailyReport
 from .route_daily_report_age_in_state_max_seconds import RouteDailyReportAgeInStateMaxSeconds
@@ -47,6 +52,7 @@ from .route_daily_report_refunds_by_status import RouteDailyReportRefundsByStatu
 from .route_pause_response import RoutePauseResponse
 from .support_deposit_response import SupportDepositResponse
 from .update_account_request import UpdateAccountRequest
+from .update_metadata_request import UpdateMetadataRequest
 
 __all__ = (
     "AccountObject",
@@ -69,6 +75,7 @@ __all__ = (
     "Deposit",
     "DepositEventResponse",
     "DepositList",
+    "DepositMetadata",
     "DepositResponse",
     "DepositTransitionResponse",
     "DueDiligence",
@@ -77,17 +84,21 @@ __all__ = (
     "ErrorType",
     "FailedCheckReport",
     "IssueApiKeyRequest",
+    "MetadataClear",
+    "MetadataParamType0",
     "NudgeResponse",
     "OutboxReplayResponse",
     "PauseRequest",
     "PauseResponse",
     "Quote",
+    "QuoteMetadata",
     "QuotePayment",
     "ReconciliationBlockLiftResponse",
     "ReconciliationBlockReport",
     "ReconciliationRoundReport",
     "RecordRefundRequest",
     "Refund",
+    "RefundMetadata",
     "RollApiKeyRequest",
     "RouteDailyReport",
     "RouteDailyReportAgeInStateMaxSeconds",
@@ -96,4 +107,5 @@ __all__ = (
     "RoutePauseResponse",
     "SupportDepositResponse",
     "UpdateAccountRequest",
+    "UpdateMetadataRequest",
 )

@@ -336,6 +336,12 @@ impl ApiError {
         self
     }
 
+    /// The request parameter the error names.
+    #[cfg(test)]
+    pub(crate) fn param(&self) -> Option<&str> {
+        self.detail.param.as_deref()
+    }
+
     fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         let error_type = if status.is_server_error() {
             ErrorType::Api

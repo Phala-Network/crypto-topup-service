@@ -1569,6 +1569,93 @@
             "api_key": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "deposits"
+        ],
+        "summary": "Updates a deposit's `metadata`; parameters not sent are left unchanged. The quote's metadata is\nnot changed.",
+        "operationId": "update_deposit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit id, `dep_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deposit"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/v1/quotes": {
@@ -1757,6 +1844,93 @@
             "api_key": []
           },
           {}
+        ]
+      },
+      "post": {
+        "tags": [
+          "quotes"
+        ],
+        "summary": "Updates a quote's `metadata`, in any status; parameters not sent are left unchanged.",
+        "operationId": "update_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Quote id, `qt_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
         ]
       }
     },
@@ -1956,6 +2130,93 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "Updates a refund's `metadata`, in any status; parameters not sent are left unchanged.",
+        "operationId": "update_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Refund id, `re_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2593,6 +2854,10 @@
           "currency": {
             "type": "string",
             "description": "Lowercase ISO currency code; only `usd`."
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nA key set to `\"\"` is omitted. The deposit that pays the quote starts with a copy of it.\nPhala Pay never reads it. Do not store sensitive information in it, such as personal or\npayment details."
           }
         },
         "additionalProperties": false
@@ -2619,6 +2884,10 @@
           "destination_address": {
             "type": "string",
             "description": "Address the customer controls; never default it to the sender, which may be an exchange."
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nA key set to `\"\"` is omitted.\nPhala Pay never reads it. Do not store sensitive information in it, such as personal or\npayment details."
           }
         },
         "additionalProperties": false
@@ -2790,6 +3059,16 @@
             "format": "int64",
             "description": "Block-wide log index of the transfer; it changes if the transaction is re-included.",
             "minimum": 0
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the\nquote's when the deposit is recorded, independent of it afterwards; `{}` when none.\nAlways sent; optional in the schema like the quote's.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "object": {
             "type": "string",
@@ -3253,6 +3532,32 @@
         },
         "additionalProperties": false
       },
+      "MetadataClear": {
+        "type": "string",
+        "description": "`\"\"`: unset every key of the object's metadata.",
+        "enum": [
+          ""
+        ]
+      },
+      "MetadataParam": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Keys to set, or with `\"\"` to unset.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/schemas/MetadataClear",
+            "description": "`\"\"`: unset every key."
+          }
+        ],
+        "description": "A `metadata` parameter: an object of string values, where `\"\"` unsets the key, or `\"\"` to\nunset every key."
+      },
       "NudgeResponse": {
         "type": "object",
         "description": "Administrative deposit nudge result.",
@@ -3417,6 +3722,16 @@
           "id": {
             "type": "string",
             "description": "`qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, \"lock\",\nid))`, where `account` is your `acct_` id."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.\nAlways sent; optional in the schema so clients also parse objects from servers, and\nevents rendered, before metadata.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "object": {
             "type": "string",
@@ -3642,6 +3957,16 @@
           "id": {
             "type": "string",
             "description": "`re_` id."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.\nAlways sent; optional in the schema so clients also parse objects from servers, and\nevents rendered, before metadata.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "object": {
             "type": "string",
@@ -3872,6 +4197,17 @@
               "null"
             ],
             "description": "Replaces the URL of the account's webhook endpoints (until design PR 8)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateMetadataRequest": {
+        "type": "object",
+        "description": "`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the\nobject's updatable parameters, of which `metadata` is the one.",
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nMerged into the object's: a key set to a value is set, a key set to `\"\"` is unset, other\nkeys are kept, and `metadata: \"\"` unsets every key.\nPhala Pay never reads it. Do not store sensitive information in it, such as personal or\npayment details."
           }
         },
         "additionalProperties": false

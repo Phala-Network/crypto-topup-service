@@ -20,8 +20,10 @@ use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::{ensure_customer, validate_external_id};
+use super::metadata::{self, Object};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
+    UpdateMetadataRequest,
 };
 use super::repository;
 
@@ -152,6 +154,7 @@ pub(crate) async fn create_quote(
         ));
     }
     let credit = MinorAmount::new(request.amount);
+    let metadata = metadata::on_create(request.metadata.as_ref())?;
     let customer = ensure_customer(&state, merchant.scope, &request.account_id).await?;
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
@@ -167,10 +170,62 @@ pub(crate) async fn create_quote(
         &customer,
         route,
         credit,
+        &metadata,
     )
     .await
     .map_err(map_error)?;
     respond_with_client_secret(&state, lock).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/quotes/{id}",
+    params(
+        ("id" = String, Path, description = "Quote id, `qt_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    request_body = UpdateMetadataRequest,
+    responses(
+        (status = 200, description = "OK", body = Quote),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "quotes"
+)]
+/// Updates a quote's `metadata`, in any status; parameters not sent are left unchanged.
+pub(crate) async fn update_quote(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(request): ApiJson<UpdateMetadataRequest>,
+) -> ApiResult<Json<Quote>> {
+    merchant
+        .require(&state.pool, Permission::QuotesWrite)
+        .await?;
+    let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
+    let scope = merchant.scope;
+    if !metadata::update(
+        &state.pool,
+        Object::Quote,
+        scope,
+        quote,
+        request.metadata.as_ref(),
+    )
+    .await?
+    {
+        return Err(ApiError::not_found());
+    }
+    find_quote(&state.pool, &state.routes, scope, quote)
+        .await?
+        .ok_or_else(ApiError::not_found)
+        .map(Json)
 }
 
 #[utoipa::path(
@@ -219,7 +274,7 @@ pub(crate) async fn get_quote(
             .find(|(name, _)| name == "client_secret")
             .map(|(_, value)| value.as_str());
         let mut response = match client_quote(&state, &id, client_secret).await {
-            Ok(quote) => Json(QuoteView::Client(quote)).into_response(),
+            Ok(quote) => Json(QuoteView::Client(Box::new(quote))).into_response(),
             Err(error) => error.into_response(),
         };
         response.headers_mut().insert(
@@ -252,7 +307,7 @@ pub(crate) async fn get_quote(
         Ok::<_, ApiError>(quote)
     };
     match quote.await {
-        Ok(quote) => Json(QuoteView::Quote(quote)).into_response(),
+        Ok(quote) => Json(QuoteView::Quote(Box::new(quote))).into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -444,6 +499,7 @@ pub(crate) async fn quote_object(
             .consumed_by
             .map(|deposit| ExpandableDeposit::Id(ids::format(ids::DEPOSIT, deposit))),
         client_secret: None,
+        metadata: lock.metadata,
     })
 }
 

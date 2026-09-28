@@ -359,12 +359,12 @@ pub(crate) async fn insert_deposit_in(
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, route, route_version, asset_contract,
             from_address, amount_atomic, state, reason, next_attempt_at, receipt_log_index,
-            tx_from, tx_nonce, final_at
+            tx_from, tx_nonce, final_at, metadata
         )
         SELECT
             $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
             quote.customer_id, $9, $10, $11, $12, $13::text::numeric, $14, $15, $16, $17, $18,
-            $19::text::numeric, CASE WHEN $20 THEN now() END
+            $19::text::numeric, CASE WHEN $20 THEN now() END, quote.metadata
         FROM addresses AS address
         JOIN quotes AS quote ON quote.id = address.quote_id
         WHERE address.id = $8

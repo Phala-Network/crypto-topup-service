@@ -406,6 +406,8 @@ pub struct NewRefund<'a> {
     pub destination: EvmAddress,
     /// Requested amount; `None` refunds the remainder.
     pub amount: Option<AtomicAmount>,
+    /// The refund's validated metadata.
+    pub metadata: &'a super::metadata::Metadata,
     /// Audit actor.
     pub actor: &'a Actor,
 }
@@ -504,8 +506,8 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
         r#"
         INSERT INTO refunds
             (id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
-             requested_by)
-        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8)
+             requested_by, metadata)
+        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8, $9)
         "#,
     )
     .bind(refund_id)
@@ -516,6 +518,7 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     .bind(to_address)
     .bind(effective_route)
     .bind(refund.actor.to_string())
+    .bind(sqlx::types::Json(refund.metadata))
     .execute(&mut *transaction)
     .await?;
     insert_audit_tx(

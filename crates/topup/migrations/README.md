@@ -3,7 +3,7 @@
 Migrations run through the trusted database owner configured by `MIGRATE_DATABASE_URL`. The
 `topup migrate` command never falls back to `DATABASE_URL`.
 
-`20261004000000_multi_tenant` is the whole schema: docs/design/multi-tenant.md §14 on top of
+`20261004000000_multi_tenant` is the base schema: docs/design/multi-tenant.md §14 on top of
 docs/architecture.md §6. The pre-tenancy history (`20260922000000_initial_schema` through
 `20261003000000_fast_credit`) was squashed into it without a data migration, because no
 environment holding that history is kept: staging is reset (below) and production was never
@@ -95,6 +95,11 @@ service can only read it.
   re-rendered, so every endpoint, retry, and replay sends the same body.
 - `pending_transfers` is display-only, written by the head scan and cleared by the finalized
   scanner's cursor advance. Nothing that affects money reads it.
+- `quotes.metadata`, `deposits.metadata`, and `refunds.metadata` (`20261006080000_metadata`) are
+  Stripe's metadata, checked by `metadata_is_valid(jsonb)`: an object of at most 50 strings with
+  keys of 1 to 40 characters without `[` or `]` and values of 1 to 500 characters (an empty value
+  unsets a key, so none is stored). A deposit is inserted with its quote's metadata. The same
+  migration grants `deposits.write` to every holder of `quotes.write`.
 - The heartbeat RPO target is the code constant `topup::heartbeat::RPO_SECONDS`, not a column.
 - A `chain` reconciliation block written by the address-derivation or the per-forwarder custody
   check freezes that chain at runtime: pumps leave its deposits waiting, its scanner pauses, and

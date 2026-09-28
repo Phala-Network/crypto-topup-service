@@ -14,6 +14,7 @@ use rand::TryRng as _;
 use rand::rngs::SysRng;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use sqlx::types::Json;
 use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
@@ -39,7 +40,7 @@ macro_rules! select_lock {
            quote.amount_atomic::text AS amount_atomic,
            quote.price_scaled::text AS price_scaled,
            quote.credit_minor::text AS credit_minor,
-           quote.expires_at, quote.status, quote.created_at, quote.consumed_by
+           quote.expires_at, quote.status, quote.created_at, quote.consumed_by, quote.metadata
     FROM quotes AS quote
     JOIN addresses AS address ON address.quote_id = quote.id
     JOIN customers AS customer ON customer.id = quote.customer_id"#
@@ -113,6 +114,8 @@ pub struct RateLock {
     pub created_at: DateTime<Utc>,
     /// The deposit that consumed the lock, once consumed.
     pub consumed_by: Option<Uuid>,
+    /// The merchant's metadata (`crate::api` validates it).
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// The public id of a quote: `qt_` and the hex of its id. Quotes derive their address salt from
@@ -239,6 +242,7 @@ pub async fn create(
     customer: &Customer,
     route: &RouteFile,
     credit_minor: MinorAmount,
+    metadata: &BTreeMap<String, String>,
 ) -> Result<RateLock, RateLockError> {
     if customer.account_id != account.id {
         return Err(RateLockError::NotFound);
@@ -294,10 +298,10 @@ pub async fn create(
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-            credit_minor, expires_at, status, exposure_reserved, created_at
+            credit_minor, expires_at, status, exposure_reserved, created_at, metadata
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', true, $10)
+                $9, 'open', true, $10, $11)
         "#,
     )
     .bind(id)
@@ -310,6 +314,7 @@ pub async fn create(
     .bind(credit_minor.value().to_string())
     .bind(expires_at)
     .bind(now)
+    .bind(Json(metadata))
     .execute(&mut *transaction)
     .await?;
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only
@@ -350,6 +355,7 @@ pub async fn create(
         status: RateLockStatus::Open,
         created_at: now,
         consumed_by: None,
+        metadata: metadata.clone(),
     })
 }
 
@@ -835,6 +841,7 @@ struct RateLockRow {
     status: String,
     created_at: DateTime<Utc>,
     consumed_by: Option<Uuid>,
+    metadata: Json<BTreeMap<String, String>>,
 }
 
 impl TryFrom<RateLockRow> for RateLock {
@@ -864,6 +871,7 @@ impl TryFrom<RateLockRow> for RateLock {
             status: RateLockStatus::parse(&row.status)?,
             created_at: row.created_at,
             consumed_by: row.consumed_by,
+            metadata: row.metadata.0,
         })
     }
 }

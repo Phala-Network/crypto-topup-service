@@ -68,11 +68,12 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 
 | Call | API |
 |---|---|
-| `pay.quotes.create(account_id=, amount=, chain_id=, asset=, idempotency_key=)` | `POST /v1/quotes` |
+| `pay.quotes.create(account_id=, amount=, chain_id=, asset=, idempotency_key=, metadata=)` | `POST /v1/quotes` |
 | `pay.quotes.retrieve(id)` / `.cancel(id)` | `GET /v1/quotes/{id}`, `POST /v1/quotes/{id}/cancel` |
+| `pay.quotes.update(id, metadata=)` | `POST /v1/quotes/{id}` |
 | `pay.deposits.list(account_id=, quote=, status=, tx_hash=, created_gte=, created_lte=)` | `GET /v1/deposits`, every page |
-| `pay.deposits.retrieve(id)` | `GET /v1/deposits/{id}` |
-| `pay.refunds.create(deposit=, destination_address=, amount_atomic=)` / `.retrieve(id)` | `POST /v1/refunds`, `GET /v1/refunds/{id}` |
+| `pay.deposits.retrieve(id)` / `.update(id, metadata=)` | `GET /v1/deposits/{id}`, `POST /v1/deposits/{id}` |
+| `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
 | `pay.config.retrieve()` | `GET /v1/config` |
 | `pay.webhooks.construct_event(payload, headers, public_key)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 
@@ -83,6 +84,12 @@ service's stable `code`, `error_type`, and `param`. With `forwarder=(factory, im
 treasury)` pinned from the attested deployment and your treasury, `quotes.create` and
 `quotes.retrieve` also recompute the deposit address (from your account id, read once from
 `GET /v1/account` or passed as `account=`) and raise `AddressMismatchError` on a difference.
+
+`metadata` follows [Stripe's](https://docs.stripe.com/api/metadata): up to 50 string key/value
+pairs, keys of up to 40 characters without square brackets, values of up to 500 characters. An
+`update` merges: a key set to `""` is unset, and `metadata=""` unsets every key. A deposit starts
+with a copy of its quote's metadata, so an order id set on the quote arrives in the
+`deposit.credited` webhook's `data.object.metadata`. Do not store sensitive information in it.
 
 Lower-level modules: `topup_sdk` (webhook and admin request signatures, address derivation,
 attestation, `TopupClient`) and `topup_client` (generated from `crates/topup/openapi.json`; do not

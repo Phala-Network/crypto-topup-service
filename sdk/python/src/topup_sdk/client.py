@@ -8,6 +8,13 @@ failures, transient statuses, and `409 idempotency_key_in_use`:
   retry, so a retry returns the quote the first attempt created.
 - `cancel_quote`: canceling a canceled quote returns it unchanged.
 - `create_refund`: sends an `Idempotency-Key` like `create_quote`.
+- `update_quote`, `update_deposit`, `update_refund`: merging the same `metadata` again leaves the
+  object as the first attempt did.
+
+`metadata` is Stripe's: up to 50 string pairs, keys of up to 40 characters without square
+brackets, values of up to 500 characters. On an update a key set to `""` is unset and
+`metadata=""` unsets every key. A quote's metadata is copied to the deposit that pays it. Do not
+store sensitive information in it.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
 the factory, the implementation, the treasury, the account, and the quote id, and raise
@@ -21,9 +28,9 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import httpx
 
@@ -31,9 +38,9 @@ from topup_client import AuthenticatedClient
 from topup_client.api.account import get_account
 from topup_client.api.attestation import get_attestation
 from topup_client.api.config import get_config
-from topup_client.api.deposits import get_deposit, list_deposits
-from topup_client.api.quotes import cancel_quote, create_quote, get_quote
-from topup_client.api.refunds import create_refund, get_refund
+from topup_client.api.deposits import get_deposit, list_deposits, update_deposit
+from topup_client.api.quotes import cancel_quote, create_quote, get_quote, update_quote
+from topup_client.api.refunds import create_refund, get_refund, update_refund
 from topup_client.models import (
     AccountObject,
     AttestationResponse,
@@ -43,8 +50,11 @@ from topup_client.models import (
     Deposit,
     DepositList,
     ErrorResponse,
+    MetadataClear,
+    MetadataParamType0,
     Quote,
     Refund,
+    UpdateMetadataRequest,
 )
 from topup_client.types import UNSET, Response, Unset
 
@@ -58,6 +68,9 @@ T = TypeVar("T")
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 SECRET_KEY_PREFIXES = ("ppay_sk_test_", "ppay_sk_live_")
+
+Metadata = Mapping[str, str] | Literal[""]
+"""A `metadata` parameter: string pairs, where `""` unsets a key, or `""` to unset every key."""
 
 
 class TopupClient:
@@ -135,11 +148,13 @@ class TopupClient:
         asset: str,
         currency: str = "usd",
         idempotency_key: str | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Quote:
         """Quotes `amount` minor units (cents) for `account_id`, payable in `asset` on `chain_id`.
 
         Retries reuse one `Idempotency-Key`, so they return the quote the first attempt created;
-        pass your own key to make a retry after a crash safe too.
+        pass your own key to make a retry after a crash safe too. The deposit that pays the quote
+        starts with a copy of its `metadata`.
         """
         # The IETF Idempotency-Key header is an RFC 8941 string; the key is its content.
         key = sf_string(idempotency_key or str(uuid.uuid4()))
@@ -149,6 +164,7 @@ class TopupClient:
             currency=currency,
             chain_id=chain_id,
             asset=asset,
+            metadata=_metadata(metadata),
         )
         quote = self._call(
             lambda: create_quote.sync_detailed(client=self._client, body=body, idempotency_key=key),
@@ -159,6 +175,14 @@ class TopupClient:
     def get_quote(self, quote_id: str) -> Quote:
         """Returns a quote, for example to resume a checkout page."""
         quote = self._call(lambda: get_quote.sync_detailed(quote_id, client=self._client), Quote)
+        return self._checked(quote)
+
+    def update_quote(self, quote_id: str, *, metadata: Metadata | None = None) -> Quote:
+        """Merges `metadata` into the quote's, in any status."""
+        body = UpdateMetadataRequest(metadata=_metadata(metadata))
+        quote = self._call(
+            lambda: update_quote.sync_detailed(quote_id, client=self._client, body=body), Quote
+        )
         return self._checked(quote)
 
     def cancel_quote(self, quote_id: str) -> Quote:
@@ -211,6 +235,14 @@ class TopupClient:
             Deposit,
         )
 
+    def update_deposit(self, deposit_id: str, *, metadata: Metadata | None = None) -> Deposit:
+        """Merges `metadata` into the deposit's; the quote's is left unchanged."""
+        body = UpdateMetadataRequest(metadata=_metadata(metadata))
+        return self._call(
+            lambda: update_deposit.sync_detailed(deposit_id, client=self._client, body=body),
+            Deposit,
+        )
+
     def create_refund(
         self,
         deposit: str,
@@ -218,6 +250,7 @@ class TopupClient:
         amount_atomic: int | None = None,
         *,
         idempotency_key: str | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Refund:
         """Requests a refund of `deposit` (the unrefunded remainder unless `amount_atomic` is
         given) to an address the customer controls; finance approves and executes it.
@@ -229,6 +262,7 @@ class TopupClient:
             deposit=deposit,
             destination_address=destination_address,
             amount_atomic=UNSET if amount_atomic is None else str(amount_atomic),
+            metadata=_metadata(metadata),
         )
         return self._call(
             lambda: create_refund.sync_detailed(
@@ -241,6 +275,14 @@ class TopupClient:
         """Returns one refund; `expand` may name `deposit`."""
         return self._call(
             lambda: get_refund.sync_detailed(refund_id, client=self._client, expand=_unset(expand)),
+            Refund,
+        )
+
+    def update_refund(self, refund_id: str, *, metadata: Metadata | None = None) -> Refund:
+        """Merges `metadata` into the refund's."""
+        body = UpdateMetadataRequest(metadata=_metadata(metadata))
+        return self._call(
+            lambda: update_refund.sync_detailed(refund_id, client=self._client, body=body),
             Refund,
         )
 
@@ -293,6 +335,16 @@ class TopupClient:
 
 def _unset[V](value: V | None) -> V | Unset:
     return UNSET if value is None else value
+
+
+def _metadata(metadata: Metadata | None) -> MetadataParamType0 | MetadataClear | Unset:
+    if metadata is None:
+        return UNSET
+    if isinstance(metadata, str):
+        if metadata:
+            raise ValueError('metadata is a mapping of strings, or "" to unset every key')
+        return MetadataClear.VALUE_0
+    return MetadataParamType0.from_dict(dict(metadata))
 
 
 def _api_error(response: Response[Any]) -> ApiError:

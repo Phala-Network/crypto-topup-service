@@ -13,6 +13,7 @@ from typing import cast
 
 if TYPE_CHECKING:
     from ..models.deposit import Deposit
+    from ..models.quote_metadata import QuoteMetadata
     from ..models.quote_payment import QuotePayment
 
 
@@ -47,6 +48,10 @@ class Quote:
             returns a new secret and the earlier one stops working. Give it only to the paying
             customer's page, and do not log it.
         deposit (Deposit | None | str | Unset):
+        metadata (QuoteMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
+            when none.
+            Always sent; optional in the schema so clients also parse objects from servers, and
+            events rendered, before metadata.
         payment (None | QuotePayment | Unset):
     """
 
@@ -66,11 +71,13 @@ class Quote:
     status: str
     client_secret: None | str | Unset = UNSET
     deposit: Deposit | None | str | Unset = UNSET
+    metadata: QuoteMetadata | Unset = UNSET
     payment: None | QuotePayment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
         from ..models.quote_payment import QuotePayment  # noqa: PLC0415
 
         account_id = self.account_id
@@ -115,6 +122,10 @@ class Quote:
         else:
             deposit = self.deposit
 
+        metadata: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.metadata, Unset):
+            metadata = self.metadata.to_dict()
+
         payment: dict[str, Any] | None | Unset
         if isinstance(self.payment, Unset):
             payment = UNSET
@@ -147,6 +158,8 @@ class Quote:
             field_dict["client_secret"] = client_secret
         if deposit is not UNSET:
             field_dict["deposit"] = deposit
+        if metadata is not UNSET:
+            field_dict["metadata"] = metadata
         if payment is not UNSET:
             field_dict["payment"] = payment
 
@@ -155,6 +168,7 @@ class Quote:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
         from ..models.quote_payment import QuotePayment  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -212,6 +226,13 @@ class Quote:
 
         deposit = _parse_deposit(d.pop("deposit", UNSET))
 
+        _metadata = d.pop("metadata", UNSET)
+        metadata: QuoteMetadata | Unset
+        if isinstance(_metadata, Unset):
+            metadata = UNSET
+        else:
+            metadata = QuoteMetadata.from_dict(_metadata)
+
         def _parse_payment(data: object) -> None | QuotePayment | Unset:
             if data is None:
                 return data
@@ -246,6 +267,7 @@ class Quote:
             status=status,
             client_secret=client_secret,
             deposit=deposit,
+            metadata=metadata,
             payment=payment,
         )
 

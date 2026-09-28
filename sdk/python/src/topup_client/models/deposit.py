@@ -12,6 +12,7 @@ from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
+    from ..models.deposit_metadata import DepositMetadata
     from ..models.quote import Quote
 
 
@@ -48,6 +49,10 @@ class Deposit:
             amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
             asset (None | str | Unset): Asset code; `null` for a token without a route.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
+            metadata (DepositMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a
+                copy of the
+                quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
+                Always sent; optional in the schema like the quote's.
             price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
             quote (None | Quote | str | Unset):
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
@@ -75,6 +80,7 @@ class Deposit:
     amount: int | None | Unset = UNSET
     asset: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
+    metadata: DepositMetadata | Unset = UNSET
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
     rejection_reason: None | str | Unset = UNSET
@@ -82,6 +88,7 @@ class Deposit:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.deposit_metadata import DepositMetadata  # noqa: PLC0415
         from ..models.quote import Quote  # noqa: PLC0415
 
         account_id = self.account_id
@@ -133,6 +140,10 @@ class Deposit:
             exchange_rate = UNSET
         else:
             exchange_rate = self.exchange_rate
+
+        metadata: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.metadata, Unset):
+            metadata = self.metadata.to_dict()
 
         price_source: None | str | Unset
         if isinstance(self.price_source, Unset):
@@ -188,6 +199,8 @@ class Deposit:
             field_dict["asset"] = asset
         if exchange_rate is not UNSET:
             field_dict["exchange_rate"] = exchange_rate
+        if metadata is not UNSET:
+            field_dict["metadata"] = metadata
         if price_source is not UNSET:
             field_dict["price_source"] = price_source
         if quote is not UNSET:
@@ -201,6 +214,7 @@ class Deposit:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.deposit_metadata import DepositMetadata  # noqa: PLC0415
         from ..models.quote import Quote  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -262,6 +276,13 @@ class Deposit:
             return cast(None | str | Unset, data)
 
         exchange_rate = _parse_exchange_rate(d.pop("exchange_rate", UNSET))
+
+        _metadata = d.pop("metadata", UNSET)
+        metadata: DepositMetadata | Unset
+        if isinstance(_metadata, Unset):
+            metadata = UNSET
+        else:
+            metadata = DepositMetadata.from_dict(_metadata)
 
         def _parse_price_source(data: object) -> None | str | Unset:
             if data is None:
@@ -327,6 +348,7 @@ class Deposit:
             amount=amount,
             asset=asset,
             exchange_rate=exchange_rate,
+            metadata=metadata,
             price_source=price_source,
             quote=quote,
             rejection_reason=rejection_reason,

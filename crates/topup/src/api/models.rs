@@ -145,7 +145,59 @@ pub struct CreateQuoteRequest {
     pub chain_id: u64,
     /// Asset code of the payment on that chain, such as `pha`.
     pub asset: String,
+    /// Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40
+    /// characters without square brackets, values of up to 500 characters.
+    /// A key set to `""` is omitted. The deposit that pays the quote starts with a copy of it.
+    /// Phala Pay never reads it. Do not store sensitive information in it, such as personal or
+    /// payment details.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
 }
+
+/// `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the
+/// object's updatable parameters, of which `metadata` is the one.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateMetadataRequest {
+    /// Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40
+    /// characters without square brackets, values of up to 500 characters.
+    /// Merged into the object's: a key set to a value is set, a key set to `""` is unset, other
+    /// keys are kept, and `metadata: ""` unsets every key.
+    /// Phala Pay never reads it. Do not store sensitive information in it, such as personal or
+    /// payment details.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A `metadata` parameter: an object of string values, where `""` unsets the key, or `""` to
+/// unset every key.
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum MetadataParam {
+    /// Keys to set, or with `""` to unset.
+    Pairs(std::collections::BTreeMap<String, String>),
+    /// `""`: unset every key.
+    Clear(MetadataClear),
+}
+
+/// `""`: unset every key of the object's metadata.
+#[derive(Serialize)]
+pub struct MetadataClear;
+
+impl utoipa::PartialSchema for MetadataClear {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .enum_values(Some([""]))
+            .description(Some("`\"\"`: unset every key of the object's metadata."))
+            .into()
+    }
+}
+
+impl ToSchema for MetadataClear {}
 
 /// A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -191,6 +243,11 @@ pub struct Quote {
     /// returns a new secret and the earlier one stops working. Give it only to the paying
     /// customer's page, and do not log it.
     pub client_secret: Option<String>,
+    /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
+    /// Always sent; optional in the schema so clients also parse objects from servers, and
+    /// events rendered, before metadata.
+    #[schema(required = false)]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 /// The public view of a quote, read with its `client_secret` and without a signature, for the
@@ -237,9 +294,9 @@ pub struct ClientQuote {
 #[serde(untagged)]
 pub enum QuoteView {
     /// The product's view.
-    Quote(Quote),
+    Quote(Box<Quote>),
     /// The payer's view.
-    Client(ClientQuote),
+    Client(Box<ClientQuote>),
 }
 
 /// A payment observed at a quote's address. Display only: while `status` is `seen` it is not
@@ -341,6 +398,11 @@ pub struct Deposit {
     pub refunded: bool,
     /// Detection time, Unix seconds.
     pub created: i64,
+    /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the
+    /// quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
+    /// Always sent; optional in the schema like the quote's.
+    #[schema(required = false)]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 /// A page of a list, newest first (<https://docs.stripe.com/api/pagination>).
@@ -366,6 +428,14 @@ pub struct CreateRefundRequest {
     pub destination_address: String,
     /// Amount in base units, as a decimal string; the unrefunded remainder when absent.
     pub amount_atomic: Option<String>,
+    /// Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40
+    /// characters without square brackets, values of up to 500 characters.
+    /// A key set to `""` is omitted.
+    /// Phala Pay never reads it. Do not store sensitive information in it, such as personal or
+    /// payment details.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A refund of (part of) a deposit to the customer, executed by finance from the treasury.
@@ -387,6 +457,11 @@ pub struct Refund {
     pub tx_hash: Option<String>,
     /// Request time, Unix seconds.
     pub created: i64,
+    /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
+    /// Always sent; optional in the schema so clients also parse objects from servers, and
+    /// events rendered, before metadata.
+    #[schema(required = false)]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 /// What a product's UI reads instead of hardcoding: assets, limits, and quote terms.

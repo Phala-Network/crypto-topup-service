@@ -223,7 +223,8 @@ customers     id, account_id, livemode, client_reference_id, paused_scopes text[
               -- client_reference_id is the API's account_id; created by the customer's first quote
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash
+              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
+              metadata jsonb
 addresses     id, account_id, livemode, chain_id, quote_id UNIQUE, salt, treasury, address,
               deployed_block                      -- finalized ForwarderCreated for the pair
               UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
@@ -238,11 +239,11 @@ deposits      id, account_id, livemode, customer_id, chain_id, tx_hash, receipt_
               asset_contract, from_address, amount_atomic, tx_from, tx_nonce, confirmations_at,
               final_at, state, reason, attempt, next_attempt_at, lease_token, lease_until,
               valuation_at, price_scaled, price_source (spot|lock), credit_minor, quote jsonb,
-              created_at, updated_at
+              metadata jsonb, created_at, updated_at
               UNIQUE (chain_id, tx_hash, receipt_log_index)
               -- account, mode, and customer are the address's; log_index and the block columns are
               -- evidence that follows re-inclusion; tx_from and tx_nonce prove a dropped
-              -- transaction; swept requires final_at
+              -- transaction; swept requires final_at; metadata starts as the quote's
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
               -- also the finality watch's `final` and `followed` records (from_state = to_state)
 flushed       chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
@@ -253,7 +254,7 @@ flush_failures  chain_id, tx_hash, log_index, address_id, token, reason (revert 
               -- finalized FlushFailed events for a known address; its deposits stay unswept
 refunds       id, account_id, livemode, deposit_id, amount_atomic, to_address, tx_hash,
               status (requested|approved|sent|confirmed), requested_by, approved_by,
-              created_at   -- executed from the treasury Safe
+              metadata jsonb, created_at   -- executed from the treasury Safe
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
 events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account),
               object_id, actor (key_… | admin | system), data jsonb, created
@@ -263,6 +264,9 @@ webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_
 audit         id, account_id, actor_type (api_key|admin|system), actor_id, action, subject,
               reason, created_at
 ```
+
+`metadata` on quotes, deposits, and refunds is Stripe's (§12, Metadata): `NOT NULL DEFAULT '{}'`
+with `CHECK (metadata_is_valid(metadata))`, the same limits the API validates.
 
 Composite foreign keys tie each tenant row to its parent's account and mode (a quote to its
 customer, an address to its quote, a deposit to its address and customer, a refund to its
@@ -555,6 +559,8 @@ knows it. Where it departs, the last column says why.
 | Lists ([pagination](https://docs.stripe.com/api/pagination)) | `{object: "list", url, has_more, data}`, newest first; `limit` 1–100, `starting_after` or `ending_before` | Same |
 | Expansion ([expanding](https://docs.stripe.com/api/expanding_objects)) | `expand[]`, depth ≤ 4 | `expand[]` for a deposit's `quote`, a quote's `deposit`, and a refund's `deposit`; depth 1 |
 | Errors ([errors](https://docs.stripe.com/api/errors)) | `{error: {type, code, message, param, doc_url}}` | `{error: {type, code, message, param}}`; `type` is `invalid_request_error`, `idempotency_error`, or `api_error` |
+| Metadata ([metadata](https://docs.stripe.com/api/metadata)) | `metadata` on updatable objects: ≤ 50 string pairs, keys ≤ 40 characters without `[`/`]`, values ≤ 500; merged on update, `""` unsets a key, `metadata=""` unsets all | Same on quotes, deposits, and refunds, as JSON; a deposit starts with a copy of its quote's (below) |
+| Updates | `POST /v1/{object}/{id}` with the updatable parameters | Same, for `metadata` only |
 | Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | Same, per account and mode; a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
 | Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
@@ -587,13 +593,16 @@ its actor.
 GET    /v1/account                                                the key's account, in its mode
 GET|POST /v1/api_keys, GET|DELETE /v1/api_keys/{id}, POST /v1/api_keys/{id}/roll {expires_in}
 GET    /v1/config                                                 assets, limits, quote terms
-POST   /v1/quotes {account_id, amount, currency, chain_id, asset} single-use address + locked price; Idempotency-Key
+POST   /v1/quotes {account_id, amount, currency, chain_id, asset, metadata?} single-use address + locked price; Idempotency-Key
 GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
+POST   /v1/quotes/{id} {metadata}                                 update metadata, in any status
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
 GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
-POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or credited on the product's request; finance approves (§15)
+POST   /v1/deposits/{id} {metadata}                               update metadata (`deposits.write`)
+POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  rejected, or credited on the product's request; finance approves (§15)
 GET    /v1/refunds/{id}
+POST   /v1/refunds/{id} {metadata}                                update metadata
 GET    /v1/attestation?nonce=…                                    settlement key (§14)
 
 POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason, webhook_url?}   + first keys
@@ -608,6 +617,22 @@ POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
 GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 ```
+
+**Metadata.** Quotes, deposits, and refunds carry Stripe's
+[`metadata`](https://docs.stripe.com/api/metadata): up to 50 key/value pairs of strings, keys of
+1 to 40 characters without square brackets, values of up to 500 characters, set on create and by
+`POST /v1/{quotes|deposits|refunds}/{id}`. An update merges into the object's metadata
+([Metadata guide](https://docs.stripe.com/metadata)): a key with a value is set, a key with `""`
+is unset, other keys are kept, and `metadata: ""` unsets every key; the 50-key limit applies to
+the result. A violation is `400 parameter_invalid` naming `metadata` or `metadata[key]`, and the
+database checks the same rules. A deposit's metadata is initialized from its quote's when the
+deposit is recorded and is independent afterwards, as Stripe Checkout's
+`payment_intent_data.metadata` sets the PaymentIntent's and a PaymentIntent's metadata is
+snapshotted to its Charge; this lets an order id set at checkout arrive in `deposit.credited`.
+Every API key read and webhook `data.object` returns it; the payer's `client_secret` view omits
+it, as Stripe omits metadata from publishable-key reads. An `Idempotency-Key` identifies the
+whole request, metadata included. The service never reads metadata; merchants must not store
+sensitive information in it.
 
 Admin paths take an object's prefixed id or, for ids handed out before prefixed ids, its bare
 UUID; admin responses show prefixed ids.
