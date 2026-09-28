@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::locks::QuoteProvider;
+use crate::refunds::DestinationScreener;
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use axum::extract::{Extension, Request, State};
@@ -63,6 +64,8 @@ pub struct AppState {
     pub client_reads: Arc<ClientReadLimiter>,
     /// Per-account and platform rate limits of authenticated merchant requests.
     pub rate_limits: Arc<ApiRateLimiter>,
+    /// Sanctions screening of refund destinations.
+    pub refund_screening: Arc<dyn DestinationScreener>,
 }
 
 impl AppState {
@@ -97,8 +100,8 @@ impl AppState {
 }
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
-/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/api_keys/{id}`,
-/// or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`,
+/// `GET /v1/api_keys/{id}`, or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
 /// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
@@ -113,6 +116,9 @@ pub(crate) async fn event_data(
         crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, scope, id)
             .await
             .map(|quote| quote.map(serde_json::to_value)),
+        crate::db::EventObject::Refund(id) => deposits::find_refund(pool, scope, id)
+            .await
+            .map(|refund| refund.map(serde_json::to_value)),
         crate::db::EventObject::ApiKey(id) => crate::api_keys::get(pool, scope, id)
             .await
             .map(|key| key.map(|key| serde_json::to_value(keys::api_key_object(&key, None))))
@@ -159,6 +165,8 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(deposits::get_deposit, deposits::update_deposit))
         .routes(routes!(deposits::create_refund))
         .routes(routes!(deposits::get_refund, deposits::update_refund))
+        .routes(routes!(deposits::mark_refund_paid))
+        .routes(routes!(deposits::cancel_refund))
         .routes(routes!(account::get_account))
         .routes(routes!(keys::list_api_keys, keys::create_api_key))
         .routes(routes!(keys::get_api_key, keys::revoke_api_key))
@@ -183,8 +191,6 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::pause_route))
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))
-        .routes(routes!(handlers::approve_refund))
-        .routes(routes!(handlers::record_refund))
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::replay_outbox_event))
         .routes(routes!(handlers::daily_report))
@@ -364,6 +370,7 @@ mod tests {
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
+            refund_screening: Arc::new(crate::refunds::UnavailableDestinationScreener),
         };
         let response = super::router(state)
             .0

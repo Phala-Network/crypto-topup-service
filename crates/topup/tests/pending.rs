@@ -90,6 +90,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         rate_lock_quotes: Arc::new(FixedQuote),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
     })
     .0;
     let api = Api {

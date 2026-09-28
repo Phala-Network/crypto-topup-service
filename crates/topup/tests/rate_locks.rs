@@ -86,6 +86,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             rate_lock_quotes: Arc::new(FixedQuote),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
+            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
         })
         .0;
         let now = Utc::now().timestamp();
@@ -543,6 +544,7 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
             rate_lock_quotes: Arc::new(CentsPriceQuote),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
+            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
         })
         .0;
         let body = serde_json::to_vec(&json!({

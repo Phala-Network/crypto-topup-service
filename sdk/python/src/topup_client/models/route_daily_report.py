@@ -38,7 +38,7 @@ class RouteDailyReport:
         deposits_by_state (RouteDailyReportDepositsByState): Deposit counts keyed by state.
         open_rate_lock_exposure_atomic (str): Sum of unconsumed rate-lock token amounts.
         refunds_by_status (RouteDailyReportRefundsByStatus): Refund counts keyed by status.
-        rejected_holds_atomic (str): Rejected token amount still held after confirmed refunds.
+        rejected_holds_atomic (str): Rejected token amount still held after succeeded refunds.
         route (str): Stable route name.
         treasury_balance_note (str): Balance source or explicit reason the treasury balance is unavailable.
         unflushed_balance_atomic (str): Deposits not reversed minus finalized `Flushed` amounts: what the route's

@@ -34,7 +34,9 @@ refundable customer case, or a custody mismatch.
 
 ## Fix
 
-Eligible deposits go through [refund execution](refund-execution.md). Returning an unsupported
+The merchant refunds eligible deposits itself: it creates the refund, pays it from the treasury
+of the deposit's address, and attaches the transaction with `mark_paid`
+([integration guide, §3](../../docs/integration.md#3-refunds)). Returning an unsupported
 token first needs a flush of that token (the factory's `flush(treasury, salts, token)`, which
 anyone may call), as in [wrong-network deposit](wrong-network-deposit.md) step 3.
 

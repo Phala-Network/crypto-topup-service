@@ -1,8 +1,8 @@
 """The product refuses the credit, here because the workspace is suspended.
 
 Expect: the service credits the deposit and emits `deposit.credited`; the product holds it
-without a ledger credit (`account_suspended`) and requests its refund, which waits for finance
-(deploy/runbooks/refund-execution.md).
+without a ledger credit (`account_suspended`) and requests its refund, which stays `pending` until
+the merchant pays it and attaches the transaction with `mark_paid`.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Deposit view, admin-signed `GET /v1/admin/deposits/{id}` (`dep_…` or the UUID) | the deposit's stored facts with its transition timeline (each step's evidence) and its webhook `events` (`id`, `event_type`, `delivered_at`). The product finds deposits with its product-signed `GET /v1/deposits?tx_hash=…` or `?account_id=…` |
 | Attestation, `GET /v1/attestation?nonce=` | the settlement key ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
-| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); refund `approve`/`record` (`re_…` or the UUID); product issue and key replacement; reconciliation block `lift`; outbox event `replay` |
+| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`; outbox event `replay` |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
 Database rows the API does not expose (reconciliation findings, `flushed` and `flush_failures`,
@@ -70,7 +70,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | Merchant reports a secret key exposed or lost, or requests it did not make | [API key compromise and key recovery](api-key-compromise.md) |
 | Unswept credited deposits, a `FlushFailed` target | Not a platform alert: the merchant sweeps with its own wallet, and a target whose transfer failed (a token or treasury refusing it) is the merchant's to resolve ([deploy/README.md, "Sweeping"](../README.md#sweeping)) |
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
-| Approved refund | [Refund execution](refund-execution.md) |
+| A merchant's refund stays `pending` or `failed` | Not a platform action: the merchant pays refunds from the treasury of the deposit's address and attaches the transaction with `POST /v1/refunds/{id}/mark_paid`; a `failed` refund's `failure_reason` says why ([integration guide, §3](../../docs/integration.md#3-refunds)) |
 | Approved treasury migration | [Treasury change](treasury-change.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
 | Payment sent on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
@@ -87,7 +87,6 @@ in its current form against a CVM.
 |---|---|---|---|
 | Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
-| Refund execution | 2026-09-22, local | complete: request, approve, record, finality-checked confirm | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/phala-pay/pull/126) |
 | Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |

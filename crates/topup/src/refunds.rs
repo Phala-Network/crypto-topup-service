@@ -1,6 +1,14 @@
-//! Treasury refund transaction confirmation.
+//! Merchant refunds (design D5): screening a refund's destination, and verifying the transaction
+//! the merchant attached with `mark_paid` once it is final on both providers.
+//!
+//! The merchant pays a refund from the treasury of the deposit's own address; the service sends
+//! nothing. At `finalized`, both providers must show the same receipt with a `Transfer` of the
+//! deposit's token from that treasury to the destination for exactly the amount, in a log no other
+//! refund uses. Then the refund is `succeeded` and `deposit.refunded` is sent; a finalized
+//! transaction that does not pay it makes it `failed` with a `failure_reason`, which releases its
+//! reservation of the deposit, and sends `refund.failed`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +20,10 @@ use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::EvmClient;
+use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
+use topup_core::refund::{ExpectedRefund, RefundTransfer, match_refund_transfer};
 use topup_core::route::RouteFile;
+use topup_core::screening::SanctionsAnswer;
 use uuid::Uuid;
 
 use crate::routes::RouteSet;
@@ -21,65 +32,31 @@ sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
 }
 
-/// One sent refund requiring finalized chain verification.
+/// One provider's view of an attached refund transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundCheck {
-    /// Refund workflow identifier.
-    pub refund_id: Uuid,
-    /// Account receiving the webhook event.
-    pub account_id: Uuid,
-    /// Mode of the refunded deposit.
-    pub livemode: bool,
-    /// Related deposit identifier.
-    pub deposit_id: Uuid,
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Refunded ERC-20 contract.
-    pub asset_contract: Address,
-    /// Configured treasury Safe.
-    pub treasury: Address,
-    /// Customer-controlled refund destination.
-    pub to_address: Address,
-    /// Minimum atomic token amount expected in the transaction.
-    pub amount_atomic: U256,
-    /// Recorded treasury transaction hash.
-    pub tx_hash: B256,
-    /// Version of the recorded hash used to reject stale observations.
-    pub tx_version: i64,
-}
-
-/// One matching ERC-20 transfer log in a finalized refund transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundTransfer {
-    /// Global log index in the containing block.
-    pub log_index: u64,
-    /// Atomic amount transferred by this log.
-    pub transferred_atomic: U256,
-}
-
-/// Finality-aware observation of a recorded refund transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RefundObservation {
-    /// The transaction is absent or not yet finalized.
+pub enum RefundReceipt {
+    /// No receipt, or its block is above the provider's `finalized`.
     Pending,
-    /// The transaction is finalized with its matching transfer logs shown.
+    /// The receipt is at or below `finalized`.
     Finalized {
-        /// Finalized block containing the receipt.
+        /// Including block number.
         block_number: u64,
+        /// Including block hash.
+        block_hash: B256,
         /// Whether EVM execution succeeded.
         succeeded: bool,
-        /// Matching ERC-20 transfer logs in receipt order.
+        /// Every ERC-20 `Transfer` log of the receipt, in order.
         transfers: Vec<RefundTransfer>,
     },
 }
 
-/// Chain-read failure while checking a refund transaction.
+/// Chain-read failure while reading a refund transaction.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RefundReadError {
-    /// No RPC reader is configured for the chain.
+    /// No RPC client is configured for the chain.
     #[error("no refund reader for chain {0}")]
     UnknownChain(u64),
-    /// The chain's provider A is unusable.
+    /// A provider is unusable.
     #[error("refund RPC configuration: {0}")]
     Configuration(String),
     /// The RPC request failed during the named operation.
@@ -90,25 +67,26 @@ pub enum RefundReadError {
     MissingField(&'static str),
 }
 
-/// Finality-aware chain access used by the refund confirmation worker.
+/// One provider's finality-aware reads of refund transactions.
 #[async_trait]
 pub trait RefundChainReader: Send + Sync {
-    /// Observes one recorded transaction against the expected refund transfer.
-    async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError>;
+    /// Reads the transaction's receipt on `chain_id`.
+    async fn receipt(&self, chain_id: u64, tx_hash: B256)
+    -> Result<RefundReceipt, RefundReadError>;
 }
 
-/// Refund reads through each chain's shared provider-A client.
+/// Refund reads through one provider of each chain.
 pub struct EvmRefundChainReader {
     clients: BTreeMap<u64, Arc<EvmClient>>,
 }
 
 impl EvmRefundChainReader {
-    /// Reads every configured chain through its provider A.
-    pub fn from_routes(routes: &RouteSet) -> Result<Self, RefundReadError> {
+    /// Reads every configured chain through its provider at `index` (0 is A, 1 is B).
+    pub fn from_routes(routes: &RouteSet, index: usize) -> Result<Self, RefundReadError> {
         let mut clients = BTreeMap::new();
         for chain_id in routes.chain_ids() {
             let client = routes
-                .provider(chain_id, 0)
+                .provider(chain_id, index)
                 .map_err(|error| RefundReadError::Configuration(error.to_string()))?;
             clients.insert(chain_id, Arc::clone(client));
         }
@@ -124,68 +102,150 @@ impl EvmRefundChainReader {
 
 #[async_trait]
 impl RefundChainReader for EvmRefundChainReader {
-    async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError> {
+    async fn receipt(
+        &self,
+        chain_id: u64,
+        tx_hash: B256,
+    ) -> Result<RefundReceipt, RefundReadError> {
         let client = self
             .clients
-            .get(&check.chain_id)
-            .ok_or(RefundReadError::UnknownChain(check.chain_id))?;
+            .get(&chain_id)
+            .ok_or(RefundReadError::UnknownChain(chain_id))?;
         let receipt = client
-            .receipt(check.tx_hash)
+            .receipt(tx_hash)
             .await
             .map_err(|_| RefundReadError::Rpc("transaction receipt fetch"))?;
         let Some(receipt) = receipt else {
-            return Ok(RefundObservation::Pending);
+            return Ok(RefundReceipt::Pending);
         };
         let block_number = receipt
             .block_number
             .ok_or(RefundReadError::MissingField("receipt.block_number"))?;
+        let block_hash = receipt
+            .block_hash
+            .ok_or(RefundReadError::MissingField("receipt.block_hash"))?;
         let finalized = client
             .finalized_block()
             .await
             .map_err(|_| RefundReadError::Rpc("finalized head fetch"))?
             .ok_or(RefundReadError::MissingField("finalized block"))?;
         if block_number > finalized {
-            return Ok(RefundObservation::Pending);
+            return Ok(RefundReceipt::Pending);
         }
         let mut transfers = Vec::new();
         for log in receipt.logs() {
-            if log.address() != check.asset_contract {
-                continue;
-            }
             let Ok(transfer) = log.log_decode_validate::<Transfer>() else {
                 continue;
             };
-            if transfer.inner.data.from == check.treasury
-                && transfer.inner.data.to == check.to_address
-            {
-                transfers.push(RefundTransfer {
-                    log_index: log
-                        .log_index
-                        .ok_or(RefundReadError::MissingField("receipt.log.log_index"))?,
-                    transferred_atomic: transfer.inner.data.amount,
-                });
-            }
+            transfers.push(RefundTransfer {
+                log_index: log
+                    .log_index
+                    .ok_or(RefundReadError::MissingField("receipt.log.log_index"))?,
+                token: log.address(),
+                from: transfer.inner.data.from,
+                to: transfer.inner.data.to,
+                amount: transfer.inner.data.amount,
+            });
         }
-        Ok(RefundObservation::Finalized {
+        Ok(RefundReceipt::Finalized {
             block_number,
+            block_hash,
             succeeded: receipt.status(),
             transfers,
         })
     }
 }
 
-/// Runtime scheduling for refund confirmation checks.
+/// Sanctions screening of a refund destination on the route's chain and oracle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DestinationScreening {
+    /// Neither provider lists the destination.
+    Clear,
+    /// A provider lists the destination.
+    Sanctioned,
+    /// A provider could not answer; the request can be retried.
+    Unavailable,
+}
+
+/// Screens refund destinations (design §8: Phala's software does not help move funds to a
+/// sanctioned address).
+#[async_trait]
+pub trait DestinationScreener: Send + Sync {
+    /// Screens `destination` with `route`'s sanctions oracle on its chain.
+    async fn screen(&self, route: &RouteFile, destination: Address) -> DestinationScreening;
+}
+
+/// Screens through the route's sanctions oracle on its chain's first two providers, at provider
+/// A's `finalized` block, as the deposit screening step does at the deposit's block.
+pub struct OracleDestinationScreener {
+    routes: Arc<RouteSet>,
+}
+
+impl OracleDestinationScreener {
+    /// Screens on the providers of `routes`.
+    #[must_use]
+    pub const fn new(routes: Arc<RouteSet>) -> Self {
+        Self { routes }
+    }
+
+    async fn answers(
+        &self,
+        route: &RouteFile,
+        destination: Address,
+    ) -> Option<[SanctionsAnswer; 2]> {
+        let chain_id = route.chain.chain_id;
+        let primary = self.routes.provider(chain_id, 0).ok()?;
+        let secondary = self.routes.provider(chain_id, 1).ok()?;
+        let block = match primary.finalized_block().await {
+            Ok(Some(block)) => block,
+            Ok(None) | Err(_) => return None,
+        };
+        let oracle = SanctionsOracle::new(
+            Arc::clone(primary),
+            Arc::clone(secondary),
+            route.screening.sanctions_oracle,
+        )
+        .ok()?;
+        let result = oracle.sanctions(destination, block).await;
+        Some([result.provider_a, result.provider_b])
+    }
+}
+
+#[async_trait]
+impl DestinationScreener for OracleDestinationScreener {
+    async fn screen(&self, route: &RouteFile, destination: Address) -> DestinationScreening {
+        match self.answers(route, destination).await {
+            Some(answers) if answers.contains(&SanctionsAnswer::Sanctioned) => {
+                DestinationScreening::Sanctioned
+            }
+            Some([SanctionsAnswer::Clear, SanctionsAnswer::Clear]) => DestinationScreening::Clear,
+            Some(_) | None => DestinationScreening::Unavailable,
+        }
+    }
+}
+
+/// Screening that is never available, for an instance that creates no refunds.
+pub struct UnavailableDestinationScreener;
+
+#[async_trait]
+impl DestinationScreener for UnavailableDestinationScreener {
+    async fn screen(&self, _route: &RouteFile, _destination: Address) -> DestinationScreening {
+        DestinationScreening::Unavailable
+    }
+}
+
+/// Runtime scheduling for refund verification.
 #[derive(Clone, Copy, Debug)]
-pub struct RefundConfirmationConfig {
+pub struct RefundVerificationConfig {
     /// Delay between empty polls.
     pub poll_interval: Duration,
-    /// Delay before a sent refund is eligible for another check.
+    /// Delay before an attached transaction is read again.
     pub retry_interval: Duration,
-    /// Maximum duration of the complete receipt and finality observation.
+    /// Maximum duration of both providers' reads.
     pub observe_timeout: Duration,
 }
 
-impl Default for RefundConfirmationConfig {
+impl Default for RefundVerificationConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
@@ -195,145 +255,139 @@ impl Default for RefundConfirmationConfig {
     }
 }
 
-/// PostgreSQL-backed refund confirmation loop.
-pub struct RefundConfirmationWorker<R> {
-    pool: PgPool,
-    reader: R,
-    treasuries: BTreeMap<u64, Address>,
-    config: RefundConfirmationConfig,
+/// What one verification pass did with a refund.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Verification {
+    /// No refund was due.
+    Idle,
+    /// The transaction is not final on both providers, the providers disagree, or a read failed.
+    Waiting,
+    /// The refund succeeded.
+    Succeeded,
+    /// The refund failed.
+    Failed,
 }
 
-impl<R> RefundConfirmationWorker<R>
+/// PostgreSQL-backed verification of attached refund transactions on two providers.
+pub struct RefundVerificationWorker<A, B> {
+    pool: PgPool,
+    primary: A,
+    secondary: B,
+    config: RefundVerificationConfig,
+}
+
+impl<A, B> RefundVerificationWorker<A, B>
 where
-    R: RefundChainReader,
+    A: RefundChainReader,
+    B: RefundChainReader,
 {
-    /// Creates a worker and validates that each chain has one treasury.
-    pub fn new(
+    /// Verifies on provider A (`primary`) and provider B (`secondary`).
+    pub const fn new(
         pool: PgPool,
-        reader: R,
-        routes: &[RouteFile],
-        config: RefundConfirmationConfig,
-    ) -> Result<Self, RefundReadError> {
-        let mut treasuries = BTreeMap::new();
-        for route in routes {
-            match treasuries.insert(route.chain.chain_id, route.chain.contracts.treasury) {
-                Some(existing) if existing != route.chain.contracts.treasury => {
-                    return Err(RefundReadError::MissingField(
-                        "consistent chain treasury configuration",
-                    ));
-                }
-                Some(_) | None => {}
-            }
-        }
-        Ok(Self {
+        primary: A,
+        secondary: B,
+        config: RefundVerificationConfig,
+    ) -> Self {
+        Self {
             pool,
-            reader,
-            treasuries,
+            primary,
+            secondary,
             config,
-        })
+        }
     }
 
-    /// Checks at most one due sent refund.
-    pub async fn check_once(&self) -> Result<bool, sqlx::Error> {
+    /// Verifies at most one due refund.
+    pub async fn check_once(&self) -> Result<Verification, sqlx::Error> {
         let retry_seconds = i32::try_from(self.config.retry_interval.as_secs()).unwrap_or(i32::MAX);
         let Some(row) = claim_due_refund(&self.pool, retry_seconds).await? else {
-            return Ok(false);
+            return Ok(Verification::Idle);
         };
-        let chain_id = u64::try_from(row.chain_id).map_err(decode_error)?;
-        let Some(treasury) = self.treasuries.get(&chain_id).copied() else {
-            let evidence = json!({"result": "configuration_mismatch", "chain_id": chain_id});
-            persist_evidence(
-                &self.pool,
-                row.refund_id,
-                &row.tx_hash,
-                row.tx_version,
-                &evidence,
+        let check = row.into_check()?;
+        let reads = async {
+            tokio::join!(
+                self.primary.receipt(check.chain_id, check.tx_hash),
+                self.secondary.receipt(check.chain_id, check.tx_hash)
             )
-            .await?;
-            tracing::error!(refund_id = %row.refund_id, chain_id, "refund confirmation has no treasury configuration");
-            return Ok(true);
         };
-        let check = row.into_check(treasury)?;
-        match tokio::time::timeout(self.config.observe_timeout, self.reader.observe(&check)).await {
-            Ok(Ok(RefundObservation::Pending)) => {
-                persist_evidence(
-                    &self.pool,
-                    check.refund_id,
-                    &format!("{:#x}", check.tx_hash),
-                    check.tx_version,
-                    &json!({"result": "pending"}),
-                )
-                .await?;
-            }
-            Ok(Ok(RefundObservation::Finalized {
-                block_number,
-                succeeded,
-                transfers,
-            })) => {
-                let transferred_atomic = transfer_total(&transfers)?;
-                let matched = succeeded && transferred_atomic >= check.amount_atomic;
-                let evidence = json!({
-                    "result": if matched { "matched" } else { "mismatch" },
-                    "block_number": block_number,
-                    "succeeded": succeeded,
-                    "expected_amount_atomic": check.amount_atomic.to_string(),
-                    "matching_transfer_atomic": transferred_atomic.to_string(),
-                    "asset_contract": format!("{:#x}", check.asset_contract),
-                    "treasury": format!("{:#x}", check.treasury),
-                    "to_address": format!("{:#x}", check.to_address),
-                    "tx_hash": format!("{:#x}", check.tx_hash),
-                    "tx_version": check.tx_version,
-                    "transfer_logs": transfers.iter().map(|transfer| json!({
-                        "log_index": transfer.log_index,
-                        "amount_atomic": transfer.transferred_atomic.to_string(),
-                    })).collect::<Vec<_>>(),
-                });
-                if matched {
-                    if !confirm_refund(&self.pool, &check, &transfers, &evidence).await? {
-                        let unavailable = json!({
-                            "result": "payment_claim_unavailable",
-                            "tx_hash": format!("{:#x}", check.tx_hash),
-                            "tx_version": check.tx_version,
-                            "expected_amount_atomic": check.amount_atomic.to_string(),
-                        });
-                        persist_evidence(
-                            &self.pool,
-                            check.refund_id,
-                            &format!("{:#x}", check.tx_hash),
-                            check.tx_version,
-                            &unavailable,
-                        )
-                        .await?;
-                        tracing::error!(refund_id = %check.refund_id, tx_hash = %check.tx_hash, "finalized refund transfer was already claimed");
-                    }
-                } else {
-                    persist_evidence(
-                        &self.pool,
-                        check.refund_id,
-                        &format!("{:#x}", check.tx_hash),
-                        check.tx_version,
-                        &evidence,
-                    )
-                    .await?;
-                    tracing::error!(refund_id = %check.refund_id, tx_hash = %check.tx_hash, "finalized refund transaction does not match the approved transfer");
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(refund_id = %check.refund_id, %error, "refund confirmation chain read failed");
+        let (primary, secondary) = match tokio::time::timeout(self.config.observe_timeout, reads)
+            .await
+        {
+            Ok((Ok(primary), Ok(secondary))) => (primary, secondary),
+            Ok((Err(error), _) | (_, Err(error))) => {
+                tracing::warn!(refund_id = %check.refund_id, %error, "refund verification chain read failed");
+                return Ok(Verification::Waiting);
             }
             Err(_) => {
-                persist_evidence(
-                    &self.pool,
-                    check.refund_id,
-                    &format!("{:#x}", check.tx_hash),
-                    check.tx_version,
-                    &json!({"result": "observe_timeout"}),
-                )
-                .await?;
-                tracing::warn!(refund_id = %check.refund_id, "refund confirmation observation timed out");
+                persist_evidence(&self.pool, &check, &json!({"result": "observe_timeout"})).await?;
+                tracing::warn!(refund_id = %check.refund_id, "refund verification timed out");
+                return Ok(Verification::Waiting);
+            }
+        };
+        let (block_number, block_hash, succeeded, transfers) = match (&primary, &secondary) {
+            (
+                RefundReceipt::Finalized {
+                    block_number,
+                    block_hash,
+                    succeeded,
+                    transfers,
+                },
+                _,
+            ) if primary == secondary => (*block_number, *block_hash, *succeeded, transfers),
+            (RefundReceipt::Pending, _) | (_, RefundReceipt::Pending) => {
+                persist_evidence(&self.pool, &check, &json!({"result": "pending"})).await?;
+                return Ok(Verification::Waiting);
+            }
+            _ => {
+                persist_evidence(&self.pool, &check, &json!({"result": "providers_disagree"}))
+                    .await?;
+                tracing::warn!(refund_id = %check.refund_id, "providers disagree on a finalized refund transaction");
+                return Ok(Verification::Waiting);
+            }
+        };
+        let used = used_logs(&self.pool, &check).await?;
+        let outcome = match_refund_transfer(
+            &check.expected,
+            succeeded,
+            transfers,
+            check.log_index,
+            &used,
+        );
+        let evidence = json!({
+            "result": match outcome {
+                Ok(_) => "matched",
+                Err(reason) => reason.code(),
+            },
+            "block_number": block_number,
+            "block_hash": format!("{block_hash:#x}"),
+            "succeeded": succeeded,
+            "token": format!("{:#x}", check.expected.token),
+            "treasury": format!("{:#x}", check.expected.treasury),
+            "destination_address": format!("{:#x}", check.expected.destination),
+            "amount_atomic": check.expected.amount.to_string(),
+            "transfers": transfers.iter().map(|transfer| json!({
+                "log_index": transfer.log_index,
+                "token": format!("{:#x}", transfer.token),
+                "from": format!("{:#x}", transfer.from),
+                "to": format!("{:#x}", transfer.to),
+                "amount_atomic": transfer.amount.to_string(),
+            })).collect::<Vec<_>>(),
+        });
+        match outcome {
+            Ok(log_index) => {
+                if succeed(&self.pool, &check, log_index, &evidence).await? {
+                    return Ok(Verification::Succeeded);
+                }
+                // Another refund took the log since it was read; the next pass sees it used.
+                persist_evidence(&self.pool, &check, &json!({"result": "transfer_claimed"}))
+                    .await?;
+                Ok(Verification::Waiting)
+            }
+            Err(reason) => {
+                fail(&self.pool, &check, reason.code(), &evidence).await?;
+                tracing::warn!(refund_id = %check.refund_id, reason = reason.code(), "finalized refund transaction does not pay the refund");
+                Ok(Verification::Failed)
             }
         }
-        Ok(true)
     }
 
     /// Runs until cancellation, retrying database and chain failures indefinitely.
@@ -346,9 +400,9 @@ where
                 biased;
                 () = cancellation.cancelled() => return,
                 result = self.check_once() => match result {
-                    Ok(found) => !found,
+                    Ok(verification) => verification == Verification::Idle,
                     Err(error) => {
-                        tracing::error!(%error, "refund confirmation database poll failed");
+                        tracing::error!(%error, "refund verification database poll failed");
                         true
                     }
                 }
@@ -363,6 +417,17 @@ where
     }
 }
 
+struct RefundCheck {
+    refund_id: Uuid,
+    account_id: Uuid,
+    livemode: bool,
+    deposit_id: Uuid,
+    chain_id: u64,
+    tx_hash: B256,
+    log_index: Option<u64>,
+    expected: ExpectedRefund,
+}
+
 #[derive(FromRow)]
 struct RefundCheckRow {
     refund_id: Uuid,
@@ -370,31 +435,40 @@ struct RefundCheckRow {
     livemode: bool,
     deposit_id: Uuid,
     chain_id: i64,
-    asset_contract: String,
-    to_address: String,
-    amount_atomic: String,
     tx_hash: String,
-    tx_version: i64,
+    log_index: Option<i64>,
+    token: String,
+    treasury: String,
+    destination_address: String,
+    amount_atomic: String,
 }
 
 impl RefundCheckRow {
-    fn into_check(self, treasury: Address) -> Result<RefundCheck, sqlx::Error> {
+    fn into_check(self) -> Result<RefundCheck, sqlx::Error> {
         Ok(RefundCheck {
             refund_id: self.refund_id,
             account_id: self.account_id,
             livemode: self.livemode,
             deposit_id: self.deposit_id,
             chain_id: u64::try_from(self.chain_id).map_err(decode_error)?,
-            asset_contract: self.asset_contract.parse().map_err(decode_error)?,
-            treasury,
-            to_address: self.to_address.parse().map_err(decode_error)?,
-            amount_atomic: self.amount_atomic.parse().map_err(decode_error)?,
             tx_hash: self.tx_hash.parse().map_err(decode_error)?,
-            tx_version: self.tx_version,
+            log_index: self
+                .log_index
+                .map(u64::try_from)
+                .transpose()
+                .map_err(decode_error)?,
+            expected: ExpectedRefund {
+                token: self.token.parse().map_err(decode_error)?,
+                treasury: self.treasury.parse().map_err(decode_error)?,
+                destination: self.destination_address.parse().map_err(decode_error)?,
+                amount: self.amount_atomic.parse::<U256>().map_err(decode_error)?,
+            },
         })
     }
 }
 
+/// Claims the refund due first and pushes its next check back by `retry_seconds`. The expected
+/// sender is the treasury of the deposit's own address, fixed when the address was issued.
 async fn claim_due_refund(
     pool: &PgPool,
     retry_seconds: i32,
@@ -404,21 +478,22 @@ async fn claim_due_refund(
         WITH candidate AS (
             SELECT refund.id
             FROM refunds AS refund
-            WHERE refund.status = 'sent' AND refund.next_check_at <= now()
+            WHERE refund.status = 'pending' AND refund.tx_hash IS NOT NULL
+              AND refund.next_check_at <= now()
             ORDER BY refund.next_check_at, refund.id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
         UPDATE refunds AS refund
         SET next_check_at = now() + make_interval(secs => $1), updated_at = now()
-        FROM candidate, deposits AS deposit
+        FROM candidate, deposits AS deposit, addresses AS address
         WHERE refund.id = candidate.id
           AND deposit.id = refund.deposit_id
-        RETURNING refund.id AS refund_id, refund.account_id, refund.livemode,
-                  deposit.id AS deposit_id,
-                  deposit.chain_id, deposit.asset_contract, refund.to_address,
-                  refund.amount_atomic::text AS amount_atomic, refund.tx_hash,
-                  refund.tx_version
+          AND address.id = deposit.address_id
+        RETURNING refund.id AS refund_id, refund.account_id, refund.livemode, refund.deposit_id,
+                  refund.chain_id, refund.tx_hash, refund.log_index,
+                  deposit.asset_contract AS token, address.treasury,
+                  refund.destination_address, refund.amount_atomic::text AS amount_atomic
         "#,
     )
     .bind(retry_seconds)
@@ -426,109 +501,77 @@ async fn claim_due_refund(
     .await
 }
 
+/// Logs of the transaction that pay or are named by another live refund.
+async fn used_logs(pool: &PgPool, check: &RefundCheck) -> Result<BTreeSet<u64>, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT log_index
+        FROM refunds
+        WHERE chain_id = $1 AND tx_hash = $2 AND id <> $3 AND log_index IS NOT NULL
+          AND status IN ('pending', 'succeeded')
+        "#,
+    )
+    .bind(to_i64(check.chain_id)?)
+    .bind(format!("{:#x}", check.tx_hash))
+    .bind(check.refund_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|index| u64::try_from(index).map_err(decode_error))
+        .collect()
+}
+
 async fn persist_evidence(
     pool: &PgPool,
-    refund_id: Uuid,
-    tx_hash: &str,
-    tx_version: i64,
+    check: &RefundCheck,
     evidence: &Value,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         UPDATE refunds
-        SET confirmation_evidence = $4, updated_at = now()
-        WHERE id = $1 AND status = 'sent' AND tx_hash = $2 AND tx_version = $3
+        SET confirmation_evidence = $3, updated_at = now()
+        WHERE id = $1 AND status = 'pending' AND tx_hash = $2
         "#,
     )
-    .bind(refund_id)
-    .bind(tx_hash)
-    .bind(tx_version)
+    .bind(check.refund_id)
+    .bind(format!("{:#x}", check.tx_hash))
     .bind(evidence)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-async fn confirm_refund(
+/// Marks the refund `succeeded` with its log and sends `deposit.refunded`; `false` when the refund
+/// is no longer pending or another refund took the log first.
+async fn succeed(
     pool: &PgPool,
     check: &RefundCheck,
-    transfers: &[RefundTransfer],
+    log_index: u64,
     evidence: &Value,
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let tx_hash = format!("{:#x}", check.tx_hash);
-    let locked = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT true
-        FROM refunds
-        WHERE id = $1 AND status = 'sent' AND tx_hash = $2 AND tx_version = $3
-        FOR UPDATE
-        "#,
-    )
-    .bind(check.refund_id)
-    .bind(&tx_hash)
-    .bind(check.tx_version)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    if locked.is_none() {
-        transaction.rollback().await?;
-        return Ok(false);
-    }
-
-    let mut remaining = check.amount_atomic;
-    for transfer in transfers {
-        if remaining.is_zero() {
-            break;
-        }
-        let claimed = remaining.min(transfer.transferred_atomic);
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO refund_payment_claims (
-                refund_id, chain_id, tx_hash, log_index,
-                claimed_amount_atomic, transferred_amount_atomic
-            )
-            VALUES ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(check.refund_id)
-        .bind(i64::try_from(check.chain_id).map_err(decode_error)?)
-        .bind(&tx_hash)
-        .bind(i64::try_from(transfer.log_index).map_err(decode_error)?)
-        .bind(claimed.to_string())
-        .bind(transfer.transferred_atomic.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        if inserted.rows_affected() != 1 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-        remaining = remaining
-            .checked_sub(claimed)
-            .ok_or_else(|| decode_error("refund claim subtraction underflow"))?;
-    }
-    if !remaining.is_zero() {
-        transaction.rollback().await?;
-        return Ok(false);
-    }
-
     let updated = sqlx::query(
         r#"
         UPDATE refunds
-        SET status = 'confirmed', confirmation_evidence = $2,
-            confirmed_at = now(), updated_at = now()
-        WHERE id = $1 AND status = 'sent' AND tx_hash = $3 AND tx_version = $4
+        SET status = 'succeeded', log_index = $3, confirmation_evidence = $4, updated_at = now()
+        WHERE id = $1 AND status = 'pending' AND tx_hash = $2
         "#,
     )
     .bind(check.refund_id)
+    .bind(format!("{:#x}", check.tx_hash))
+    .bind(to_i64(log_index)?)
     .bind(evidence)
-    .bind(&tx_hash)
-    .bind(check.tx_version)
     .execute(&mut *transaction)
-    .await?;
-    if updated.rows_affected() != 1 {
-        transaction.rollback().await?;
-        return Ok(false);
+    .await;
+    match updated {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => return Ok(false),
+        Err(sqlx::Error::Database(error))
+            if error.constraint() == Some("refunds_transfer_unique") =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
     }
     // The event's object is the deposit, with its refunded amount (as Stripe's `charge.refunded`
     // is the charge); its id is derived from the refund, one event per refund.
@@ -549,12 +592,50 @@ async fn confirm_refund(
     Ok(true)
 }
 
-fn transfer_total(transfers: &[RefundTransfer]) -> Result<U256, sqlx::Error> {
-    transfers.iter().try_fold(U256::ZERO, |total, transfer| {
-        total
-            .checked_add(transfer.transferred_atomic)
-            .ok_or_else(|| decode_error("matching transfer sum overflow"))
-    })
+/// Marks the refund `failed` and sends `refund.failed` (Stripe's event for a failed refund), whose
+/// object is the refund with its `failure_reason`; the id is derived from the refund, one event per
+/// refund. Nothing is sent when the refund is no longer pending.
+async fn fail(
+    pool: &PgPool,
+    check: &RefundCheck,
+    reason: &str,
+    evidence: &Value,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE refunds
+        SET status = 'failed', failure_reason = $3, confirmation_evidence = $4, updated_at = now()
+        WHERE id = $1 AND status = 'pending' AND tx_hash = $2
+        "#,
+    )
+    .bind(check.refund_id)
+    .bind(format!("{:#x}", check.tx_hash))
+    .bind(reason)
+    .bind(evidence)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() == 1 {
+        crate::db::enqueue_in(
+            &mut transaction,
+            &crate::db::NewOutboxEvent {
+                id: topup_core::identity::event_id("refund.failed", check.refund_id),
+                event_type: "refund.failed".to_owned(),
+                account_id: check.account_id,
+                livemode: check.livemode,
+                object: crate::db::EventObject::Refund(check.refund_id),
+                next_attempt_at: chrono::Utc::now(),
+                actor: crate::db::SYSTEM_ACTOR.to_owned(),
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn to_i64(value: u64) -> Result<i64, sqlx::Error> {
+    i64::try_from(value).map_err(decode_error)
 }
 
 fn decode_error(error: impl Display) -> sqlx::Error {

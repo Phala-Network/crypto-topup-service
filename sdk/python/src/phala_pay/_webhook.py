@@ -9,7 +9,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from topup_client.models import Deposit, Quote
+from topup_client.models import Deposit, Quote, Refund
 from topup_sdk import SignatureError, load_public_key, verify_webhook_signature
 
 DEFAULT_TOLERANCE = 300
@@ -22,17 +22,17 @@ class SignatureVerificationError(SignatureError):
 @dataclass(frozen=True)
 class EventData:
     """`object` is the resource as it was when the event happened: a `Deposit` for `deposit.*`,
-    a `Quote` for `quote.*`, and the raw object for any other type."""
+    a `Quote` for `quote.*`, a `Refund` for `refund.*`, and the raw object for any other type."""
 
-    object: Deposit | Quote | dict[str, Any]
+    object: Deposit | Quote | Refund | dict[str, Any]
 
 
 @dataclass(frozen=True)
 class Event:
     """A verified event: `deposit.credited`, `deposit.rejected`, `deposit.reversed`,
-    `deposit.refunded`, or `quote.expired`. Its `id` is stable across retries and replays;
-    process each id once. Claw back the credit of a `deposit.reversed` deposit as for
-    `deposit.refunded`."""
+    `deposit.refunded`, `refund.failed`, or `quote.expired`. Its `id` is stable across retries
+    and replays; process each id once. Claw back the credit of a `deposit.reversed` deposit as
+    for `deposit.refunded`."""
 
     id: str
     type: str
@@ -51,6 +51,13 @@ class Event:
         """`data.object` of a `quote.*` event."""
         if not isinstance(self.data.object, Quote):
             raise TypeError(f"{self.type} does not carry a quote")
+        return self.data.object
+
+    @property
+    def refund(self) -> Refund:
+        """`data.object` of a `refund.*` event."""
+        if not isinstance(self.data.object, Refund):
+            raise TypeError(f"{self.type} does not carry a refund")
         return self.data.object
 
 
@@ -105,13 +112,15 @@ class Webhook:
         )
 
 
-def _resource(event_type: str, value: dict[str, Any]) -> Deposit | Quote | dict[str, Any]:
+def _resource(event_type: str, value: dict[str, Any]) -> Deposit | Quote | Refund | dict[str, Any]:
     resource = event_type.partition(".")[0]
     try:
         if resource == "deposit":
             return Deposit.from_dict(value)
         if resource == "quote":
             return Quote.from_dict(value)
+        if resource == "refund":
+            return Refund.from_dict(value)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"{event_type} carries a malformed {resource}") from error
     return value

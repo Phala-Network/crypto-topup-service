@@ -54,7 +54,7 @@ from the product API, the verified webhooks, and the product ledger of the refer
 | `underpayment` | 97% of the locked amount (tolerance is 1%) | `credited` at spot below the quote; lock not consumed; cancel is refused (`409 quote_payment_received` while the quote is open). |
 | `overpayment` | +0.5%, then +5% on a second lock | Within tolerance: lock price, exact quoted credit, `consumed`. Beyond: spot for the full amount, lock not consumed. |
 | `unsupported_asset` | A token without a route to a quote's address | `rejected`, `deposit.rejected` reason `unsupported_asset`; the product never receives `deposit.credited`. |
-| `product_refusal` | Payment for a suspended workspace | Deposit `credited`; the product holds it without a ledger credit (`account_suspended`) and requests its refund, which stays `requested` for finance. |
+| `product_refusal` | Payment for a suspended workspace | Deposit `credited`; the product holds it without a ledger credit (`account_suspended`) and requests its refund, which stays `pending` until the merchant pays it and marks it paid. |
 | `restart_mid_flow` | The product fulfills the credit but its acknowledgement is lost, then the service restarts | The restarted service delivers the same `deposit.credited` again; exactly one ledger credit. Needs `restart_command`, so it is skipped on Sepolia unless an operator runs it. |
 
 They cover, from the service side: a refusal is a hold and a refund request, delivery is retried

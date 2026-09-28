@@ -8,7 +8,7 @@
 //! - Receipt at or below `finalized` without the transfer, or no receipt on both providers while
 //!   the sender's nonce at `finalized` is past the transaction's (another transaction consumed
 //!   it): the deposit is `reversed`, `deposit.reversed` is sent if the account was told of it,
-//!   and a quote it consumed opens again (or expires).
+//!   a quote it consumed opens again (or expires), and its pending refunds are canceled.
 //! - No receipt and the nonce not consumed: the transaction is pending again; the watch waits and
 //!   alerts after an hour.
 //!
@@ -581,8 +581,9 @@ async fn record_evidence(
 
 /// Reverses a deposit that is still in the observed state and not final: the transition and, for
 /// a deposit the account was told of (`credited` or `rejected`), `deposit.reversed`; a quote it
-/// consumed opens again while its window lasts, or expires with `quote.expired`. A pending refund
-/// cannot exist: refunds require a final deposit.
+/// consumed opens again while its window lasts, or expires with `quote.expired`; its pending
+/// refunds are canceled (design D1). Refunds require a final deposit, so the cancel only keeps
+/// that rule whole should one ever be pending.
 async fn reverse_deposit(
     pool: &PgPool,
     deposit: &WatchedDeposit,
@@ -619,6 +620,16 @@ async fn reverse_deposit(
         deposit.attempt,
         &evidence,
     )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE refunds
+        SET status = 'canceled', updated_at = now()
+        WHERE deposit_id = $1 AND status = 'pending'
+        "#,
+    )
+    .bind(deposit.id)
+    .execute(&mut *transaction)
     .await?;
     if matches!(
         transition.from,

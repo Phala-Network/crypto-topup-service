@@ -474,6 +474,7 @@ fn router(pool: &sqlx::PgPool, route: &RouteFile) -> Result<axum::Router> {
         rate_lock_quotes: Arc::new(FixedQuote),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening: Arc::new(support::ClearScreener),
     })
     .0)
 }

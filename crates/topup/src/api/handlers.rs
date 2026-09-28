@@ -3,7 +3,6 @@
 use std::str::FromStr;
 
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::B256;
 use axum::Json;
 use axum::extract::State;
 use axum::response::Response;
@@ -20,11 +19,11 @@ use super::attestation::AttestationError;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, ApiQuery};
 use super::models::{
-    AccountResponse, AdminReasonRequest, AdminRefundResponse, ApiKeyObject, AttestationQuery,
-    AttestationResponse, Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse,
-    IssueApiKeyRequest, NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
-    ReconciliationBlockLiftResponse, RecordRefundRequest, RoutePauseResponse,
-    SupportDepositResponse, UpdateAccountRequest,
+    AccountResponse, AdminReasonRequest, ApiKeyObject, AttestationQuery, AttestationResponse,
+    Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
+    NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
+    ReconciliationBlockLiftResponse, RoutePauseResponse, SupportDepositResponse,
+    UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -306,61 +305,6 @@ pub(crate) async fn nudge_deposit(
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(
         repository::nudge_deposit(&state.pool, deposit_id, &admin_actor(&state)).await?,
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/admin/refunds/{id}/approve",
-    params(("id" = String, Path, description = "Refund id, `re_…` or the UUID")),
-    responses(
-        (status = 200, description = "OK", body = AdminRefundResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "admin"
-)]
-pub(crate) async fn approve_refund(
-    State(state): State<AppState>,
-    ApiPath(refund_id): ApiPath<String>,
-) -> ApiResult<Json<AdminRefundResponse>> {
-    let refund_id = parse_refund_id(&refund_id)?;
-    Ok(Json(
-        repository::approve_refund(
-            &state.pool,
-            refund_id,
-            state.routes.routes(),
-            &admin_actor(&state),
-        )
-        .await?,
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/admin/refunds/{id}/record",
-    params(("id" = String, Path, description = "Refund id, `re_…` or the UUID")),
-    request_body = RecordRefundRequest,
-    responses(
-        (status = 200, description = "OK", body = AdminRefundResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 409, description = "Conflict", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "admin"
-)]
-pub(crate) async fn record_refund(
-    State(state): State<AppState>,
-    ApiPath(refund_id): ApiPath<String>,
-    ApiJson(request): ApiJson<RecordRefundRequest>,
-) -> ApiResult<Json<AdminRefundResponse>> {
-    let refund_id = parse_refund_id(&refund_id)?;
-    let tx_hash = B256::from_str(&request.tx_hash)
-        .map_err(|_| ApiError::bad_request("tx_hash must be a 32-byte hexadecimal value"))?;
-    Ok(Json(
-        repository::record_refund(&state.pool, refund_id, tx_hash, &admin_actor(&state)).await?,
     ))
 }
 
@@ -707,10 +651,6 @@ fn validate_contact(contact: &Contact) -> ApiResult<()> {
 
 fn parse_account_id(id: &str) -> ApiResult<Uuid> {
     crate::ids::parse(crate::ids::ACCOUNT, id).ok_or_else(ApiError::not_found)
-}
-
-fn parse_refund_id(id: &str) -> ApiResult<Uuid> {
-    crate::ids::parse_or_uuid(crate::ids::REFUND, id).ok_or_else(ApiError::not_found)
 }
 
 fn admin_actor(state: &AppState) -> Actor {

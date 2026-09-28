@@ -8,16 +8,17 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.create_refund_request import CreateRefundRequest
 from ...models.error_response import ErrorResponse
+from ...models.mark_refund_paid_request import MarkRefundPaidRequest
 from ...models.refund import Refund
 from ...types import UNSET, Unset
 from typing import cast
 
 
 def _get_kwargs(
+    id: str,
     *,
-    body: CreateRefundRequest,
+    body: MarkRefundPaidRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -26,7 +27,9 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/refunds",
+        "url": "/v1/refunds/{id}/mark_paid".format(
+            id=quote(str(id), safe=""),
+        ),
     }
 
     _kwargs["json"] = body.to_dict()
@@ -55,15 +58,15 @@ def _parse_response(
 
         return response_401
 
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
+
+        return response_404
+
     if response.status_code == 409:
         response_409 = ErrorResponse.from_dict(response.json())
 
         return response_409
-
-    if response.status_code == 503:
-        response_503 = ErrorResponse.from_dict(response.json())
-
-        return response_503
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -83,20 +86,24 @@ def _build_response(
 
 
 def sync_detailed(
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: CreateRefundRequest,
+    body: MarkRefundPaidRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
-    """Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a
-    sanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is
-    reserved until the refund is canceled or fails. The destination must pass sanctions screening
-    (`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and
-    attaches the transaction with `mark_paid`.
+    """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
+    `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
+    `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
+    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
+    transaction returns the refund.
 
     Args:
+        id (str):
         idempotency_key (None | str | Unset):
-        body (CreateRefundRequest): `POST /v1/refunds` body.
+        body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
+            refund transaction.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -107,6 +114,7 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
+        id=id,
         body=body,
         idempotency_key=idempotency_key,
     )
@@ -119,20 +127,24 @@ def sync_detailed(
 
 
 def sync(
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: CreateRefundRequest,
+    body: MarkRefundPaidRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
-    """Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a
-    sanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is
-    reserved until the refund is canceled or fails. The destination must pass sanctions screening
-    (`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and
-    attaches the transaction with `mark_paid`.
+    """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
+    `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
+    `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
+    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
+    transaction returns the refund.
 
     Args:
+        id (str):
         idempotency_key (None | str | Unset):
-        body (CreateRefundRequest): `POST /v1/refunds` body.
+        body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
+            refund transaction.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -143,6 +155,7 @@ def sync(
     """
 
     return sync_detailed(
+        id=id,
         client=client,
         body=body,
         idempotency_key=idempotency_key,
@@ -150,20 +163,24 @@ def sync(
 
 
 async def asyncio_detailed(
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: CreateRefundRequest,
+    body: MarkRefundPaidRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
-    """Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a
-    sanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is
-    reserved until the refund is canceled or fails. The destination must pass sanctions screening
-    (`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and
-    attaches the transaction with `mark_paid`.
+    """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
+    `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
+    `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
+    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
+    transaction returns the refund.
 
     Args:
+        id (str):
         idempotency_key (None | str | Unset):
-        body (CreateRefundRequest): `POST /v1/refunds` body.
+        body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
+            refund transaction.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -174,6 +191,7 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
+        id=id,
         body=body,
         idempotency_key=idempotency_key,
     )
@@ -184,20 +202,24 @@ async def asyncio_detailed(
 
 
 async def asyncio(
+    id: str,
     *,
     client: AuthenticatedClient,
-    body: CreateRefundRequest,
+    body: MarkRefundPaidRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
-    """Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a
-    sanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is
-    reserved until the refund is canceled or fails. The destination must pass sanctions screening
-    (`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and
-    attaches the transaction with `mark_paid`.
+    """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
+    `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
+    `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
+    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
+    transaction returns the refund.
 
     Args:
+        id (str):
         idempotency_key (None | str | Unset):
-        body (CreateRefundRequest): `POST /v1/refunds` body.
+        body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
+            refund transaction.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -209,6 +231,7 @@ async def asyncio(
 
     return (
         await asyncio_detailed(
+            id=id,
             client=client,
             body=body,
             idempotency_key=idempotency_key,

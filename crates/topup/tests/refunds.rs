@@ -1,4 +1,4 @@
-//! C12 refund and support integration tests.
+//! Merchant refunds (design D5): request, attach the merchant's transaction, verify at finality.
 
 mod support;
 
@@ -17,30 +17,35 @@ use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
-use sqlx::Row;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{Account, NewDeposit};
+use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::refunds::{
-    EvmRefundChainReader, RefundChainReader, RefundCheck, RefundConfirmationConfig,
-    RefundConfirmationWorker, RefundObservation, RefundReadError, RefundTransfer,
+    DestinationScreener, DestinationScreening, EvmRefundChainReader, RefundChainReader,
+    RefundReadError, RefundReceipt, RefundVerificationConfig, RefundVerificationWorker,
+    Verification,
 };
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::chain::evm::EvmClient;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
+use topup_core::refund::RefundTransfer;
 use topup_core::route::RouteFile;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::seed::{self, NewAccount, NewAddress, NewCustomer};
+use support::seed::{self, FIXTURE_TREASURY, NewAccount, NewAddress, NewCustomer};
 use support::{TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request};
 
 const ADMIN_KID: &str = "admin/v1";
 const REFUND_DESTINATION: &str = "0x4444444444444444444444444444444444444444";
 const REFUND_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const OTHER_TX: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const SANCTIONED: &str = "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+
 /// A `POST /v1/refunds` body.
 fn refund_body(deposit: Uuid, destination: &str, amount: &str) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&json!({
@@ -50,360 +55,194 @@ fn refund_body(deposit: Uuid, destination: &str, amount: &str) -> Result<Vec<u8>
     }))?)
 }
 
-const REPLACEMENT_TX: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-
 #[tokio::test]
-async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
+async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
+        let pool = &database.app_pool;
         let admin_key = SigningKey::from_bytes(&[43; 32]);
-        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let (other, _) = seed_product(&database.app_pool, "builder").await?;
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let other = Merchant::seed(pool, &app, "builder").await?;
         let deposit =
-            seed_rejected_deposit(&database.app_pool, product.id, "refund-account", 150).await?;
+            seed_rejected_deposit(pool, merchant.account.id, "refund-account", 150).await?;
         let other_deposit =
-            seed_rejected_deposit(&database.app_pool, other.id, "other-account", 150).await?;
-        insert_transition(&database.app_pool, deposit).await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
+            seed_rejected_deposit(pool, other.account.id, "other-account", 150).await?;
 
-        let cross_tenant_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, cross_tenant_path, refund_body(other_deposit, REFUND_DESTINATION, "100")?, &product_key))
+        // Another account's deposit is unknown.
+        let (status, _) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(other_deposit, REFUND_DESTINATION, "100")?,
+            )
             .await?;
-        ensure!(response.status() == StatusCode::NOT_FOUND);
+        ensure!(status == StatusCode::NOT_FOUND);
 
-        seed::set_customer_paused_scopes(
-            &database.app_pool,
-            customer_id(&database.app_pool, deposit).await?,
-            &["refunds".to_owned()],
-        )
-        .await?;
-        let request_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, REFUND_DESTINATION, "100")?, &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_customer_paused_scopes(
-            &database.app_pool,
-            customer_id(&database.app_pool, deposit).await?,
-            &[],
-        )
-        .await?;
-
-        seed::set_account_paused_scopes(
-            &database.app_pool,
-            product.id,
-            &["refunds".to_owned()],
-        )
-        .await?;
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, REFUND_DESTINATION, "100")?, &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_account_paused_scopes(&database.app_pool, product.id, &[]).await?;
-
+        // Each pause scope level holds new refunds.
+        let customer = customer_id(pool, deposit).await?;
+        let paused = ["refunds".to_owned()];
+        seed::set_customer_paused_scopes(pool, customer, &paused).await?;
+        merchant.expect_paused(deposit).await?;
+        seed::set_customer_paused_scopes(pool, customer, &[]).await?;
+        seed::set_account_paused_scopes(pool, merchant.account.id, &paused).await?;
+        merchant.expect_paused(deposit).await?;
+        seed::set_account_paused_scopes(pool, merchant.account.id, &[]).await?;
         sqlx::query(
-            "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['refunds']) ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes",
+            "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['refunds'])",
         )
         .bind("phala-cloud-ethereum-pha-usd")
-        .execute(&database.app_pool)
+        .execute(pool)
         .await?;
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, REFUND_DESTINATION, "100")?, &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
+        merchant.expect_paused(deposit).await?;
         sqlx::query("UPDATE route_pauses SET paused_scopes = '{}' WHERE route = $1")
             .bind("phala-cloud-ethereum-pha-usd")
-            .execute(&database.app_pool)
+            .execute(pool)
             .await?;
 
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, REFUND_DESTINATION, "100")?, &product_key))
+        let (status, refund) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
+            )
             .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let requested = response_json(response).await?;
-        let refund_id = topup::ids::parse(topup::ids::REFUND, requested["id"].as_str().context("refund id")?)
-            .context("re_ id")?;
-        ensure!(requested["status"] == "pending" && requested["object"] == "refund");
-        ensure!(requested["deposit"] == format!("dep_{}", deposit.simple()));
-        ensure!(requested["amount_atomic"] == "100");
+        ensure!(status == StatusCode::OK, "{refund}");
+        ensure!(
+            refund["object"] == "refund" && refund["status"] == "pending",
+            "{refund}"
+        );
+        ensure!(refund["deposit"] == format!("dep_{}", deposit.simple()));
+        ensure!(refund["amount_atomic"] == "100");
+        ensure!(
+            refund["treasury"] == format!("{FIXTURE_TREASURY:#x}"),
+            "{refund}"
+        );
+        ensure!(refund["transaction_hash"].is_null() && refund["failure_reason"].is_null());
+        let id = refund["id"].as_str().context("refund id")?.to_owned();
+        let refund_id = topup::ids::parse(topup::ids::REFUND, &id).context("re_ id")?;
 
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, REFUND_DESTINATION, "100")?, &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["id"] == requested["id"]);
-        let refund_count: i64 = sqlx::query_scalar("SELECT count(*) FROM refunds")
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(refund_count == 1);
-
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::POST, request_path, refund_body(deposit, "0x6666666666666666666666666666666666666666", "60")?, &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::BAD_REQUEST);
-        let error = response_json(response).await?;
-        ensure!(error["error"]["code"] == "amount_too_large", "{error}");
-        ensure!(error["error"]["param"] == "amount_atomic", "{error}");
-
-        // A malformed id is an unknown refund; a path that is not UTF-8 names the parameter.
-        for (path, status, code, created) in [
+        // The refund is invisible to another account, whatever the action.
+        for (method, path, body) in [
+            (Method::GET, format!("/v1/refunds/{id}"), Vec::new()),
             (
-                format!("/v1/admin/refunds/re_{refund_id}/approve"),
-                StatusCode::NOT_FOUND,
-                "resource_missing",
-                now + 20,
+                Method::POST,
+                format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
             ),
-            (
-                "/v1/admin/refunds/re_%FF/approve".to_owned(),
-                StatusCode::BAD_REQUEST,
-                "parameter_invalid",
-                now + 21,
-            ),
+            (Method::POST, format!("/v1/refunds/{id}/cancel"), Vec::new()),
         ] {
-            let response = app
-                .clone()
-                .oneshot(signed_request(
-                    Method::POST,
-                    &path,
-                    Vec::new(),
-                    ADMIN_KID,
-                    &admin_key,
-                    created,
-                ))
-                .await?;
-            ensure!(response.status() == status, "{path}");
-            let error = response_json(response).await?;
-            ensure!(error["error"]["type"] == "invalid_request_error", "{error}");
-            ensure!(error["error"]["code"] == code, "{error}");
-            if status == StatusCode::BAD_REQUEST {
-                ensure!(error["error"]["param"] == "id", "{error}");
-            }
+            let (status, error) = other.call(method, &path, body).await?;
+            ensure!(status == StatusCode::NOT_FOUND, "{path}: {error}");
         }
 
-        // Operators take the `re_` id from the product API; the bare UUID of older logs also works.
-        let approve_path = format!(
-            "/v1/admin/refunds/{}/approve",
-            requested["id"].as_str().context("refund id")?
+        let (status, error) = merchant
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body("0xdd")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
+        ensure!(error["error"]["param"] == "transaction_hash", "{error}");
+
+        let (status, marked) = merchant
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{marked}");
+        ensure!(marked["status"] == "pending" && marked["transaction_hash"] == REFUND_TX);
+        // The same transaction again is a no-op; another one is refused while it is verified.
+        let (status, _) = merchant
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        let (status, error) = merchant
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(OTHER_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::CONFLICT);
+        ensure!(
+            error["error"]["code"] == "refund_unexpected_state",
+            "{error}"
         );
-        seed::set_customer_paused_scopes(
-            &database.app_pool,
-            customer_id(&database.app_pool, deposit).await?,
-            &["refunds".to_owned()],
-        )
-        .await?;
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
+
+        let paying = finalized(vec![transfer(
+            FIXTURE_TREASURY,
+            REFUND_DESTINATION,
+            100,
+            7,
+        )?]);
+        let worker = test_worker(
+            pool,
+            vec![RefundReceipt::Pending, paying.clone(), paying.clone()],
+            vec![
+                paying.clone(),
+                RefundReceipt::Finalized {
+                    block_number: 90,
+                    block_hash: B256::repeat_byte(0x0b),
+                    succeeded: true,
+                    transfers: vec![transfer(FIXTURE_TREASURY, REFUND_DESTINATION, 100, 7)?],
+                },
+                paying,
+            ],
+        );
+        // Not final on provider A yet, then the providers disagree on its block: it waits.
+        ensure!(worker.check_once().await? == Verification::Waiting);
+        ensure!(worker.check_once().await? == Verification::Waiting);
+        ensure!(refund_status(pool, refund_id).await? == "pending");
+        ensure!(worker.check_once().await? == Verification::Succeeded);
+        ensure!(worker.check_once().await? == Verification::Idle);
+
+        let (status, refund) = merchant
+            .call(
+                Method::GET,
+                &format!("/v1/refunds/{id}?expand[]=deposit"),
                 Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 7,
-            ))
+            )
             .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_customer_paused_scopes(
-            &database.app_pool,
-            customer_id(&database.app_pool, deposit).await?,
-            &[],
-        )
-        .await?;
-
-        seed::set_account_paused_scopes(
-            &database.app_pool,
-            product.id,
-            &["refunds".to_owned()],
-        )
-        .await?;
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 8,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_account_paused_scopes(&database.app_pool, product.id, &[]).await?;
-
-        sqlx::query(
-            "UPDATE route_pauses SET paused_scopes = ARRAY['refunds'] WHERE route = $1",
-        )
-        .bind("phala-cloud-ethereum-pha-usd")
-        .execute(&database.app_pool)
-        .await?;
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 9,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        sqlx::query("UPDATE route_pauses SET paused_scopes = '{}' WHERE route = $1")
-            .bind("phala-cloud-ethereum-pha-usd")
-            .execute(&database.app_pool)
-            .await?;
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 10,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let approved = response_json(response).await?;
-        ensure!(approved["status"] == "approved" && approved["id"] == requested["id"], "{approved}");
-
-        let record_path = format!("/v1/admin/refunds/{refund_id}/record");
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &record_path,
-                serde_json::to_vec(&json!({"tx_hash": REFUND_TX}))?,
-                ADMIN_KID,
-                &admin_key,
-                now + 11,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let recorded = response_json(response).await?;
-        ensure!(recorded["status"] == "sent" && recorded["id"] == requested["id"], "{recorded}");
-
-        let route = route_fixture();
-        let reader = ScriptedReader::new(vec![
-            RefundObservation::Finalized {
-                block_number: 90,
-                succeeded: true,
-                transfers: vec![RefundTransfer {
-                    log_index: 4,
-                    transferred_atomic: U256::from(99_u64),
-                }],
-            },
-            RefundObservation::Finalized {
-                block_number: 90,
-                succeeded: true,
-                transfers: vec![RefundTransfer {
-                    log_index: 4,
-                    transferred_atomic: U256::from(100_u64),
-                }],
-            },
-        ]);
-        let worker = RefundConfirmationWorker::new(
-            database.app_pool.clone(),
-            reader,
-            &[route],
-            RefundConfirmationConfig {
-                poll_interval: StdDuration::ZERO,
-                retry_interval: StdDuration::ZERO,
-                observe_timeout: StdDuration::from_secs(1),
-            },
-        )?;
-        ensure!(worker.check_once().await?);
-        let mismatch =
-            sqlx::query("SELECT status, confirmation_evidence FROM refunds WHERE id = $1")
-                .bind(refund_id)
-                .fetch_one(&database.app_pool)
-                .await?;
-        ensure!(mismatch.try_get::<String, _>("status")? == "sent");
-        ensure!(mismatch.try_get::<Value, _>("confirmation_evidence")?["result"] == "mismatch");
-        ensure!(worker.check_once().await?);
-
-        let confirmed =
-            sqlx::query("SELECT status, confirmation_evidence FROM refunds WHERE id = $1")
-                .bind(refund_id)
-                .fetch_one(&database.app_pool)
-                .await?;
-        ensure!(confirmed.try_get::<String, _>("status")? == "confirmed");
-        ensure!(confirmed.try_get::<Value, _>("confirmation_evidence")?["result"] == "matched");
-        let event = sqlx::query(
+        ensure!(status == StatusCode::OK);
+        ensure!(
+            refund["status"] == "succeeded" && refund["log_index"] == 7,
+            "{refund}"
+        );
+        ensure!(
+            refund["deposit"]["id"] == format!("dep_{}", deposit.simple()),
+            "{refund}"
+        );
+        ensure!(
+            refund["deposit"]["amount_refunded_atomic"] == "100",
+            "{refund}"
+        );
+        ensure!(refund["deposit"]["refunded"] == false, "{refund}");
+        let event = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
             "SELECT id, account_id, object_id FROM events WHERE type = 'deposit.refunded'",
         )
-        .fetch_one(&database.app_pool)
+        .fetch_one(pool)
         .await?;
         ensure!(
-            event.try_get::<Uuid, _>("id")?
-                == topup_core::identity::event_id("deposit.refunded", refund_id)
+            event
+                == (
+                    topup_core::identity::event_id("deposit.refunded", refund_id),
+                    merchant.account.id,
+                    deposit
+                )
         );
-        ensure!(event.try_get::<Uuid, _>("account_id")? == product.id);
-        ensure!(event.try_get::<Option<Uuid>, _>("object_id")? == Some(deposit));
 
-        let tx_hash: String = sqlx::query_scalar("SELECT tx_hash FROM deposits WHERE id = $1")
-            .bind(deposit)
-            .fetch_one(&database.app_pool)
+        let (status, error) = merchant
+            .post(&format!("/v1/refunds/{id}/cancel"), Vec::new())
             .await?;
-        let response = app
-            .clone()
-            .oneshot(merchant_request(Method::GET, &format!("/v1/deposits?tx_hash={tx_hash}"), Vec::new(), &product_key))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let lookup = response_json(response).await?;
-        ensure!(lookup["object"] == "list" && lookup["has_more"] == false);
-        let found = &lookup["data"][0];
-        ensure!(found["id"] == format!("dep_{}", deposit.simple()));
-        ensure!(found["account_id"] == "refund-account");
-        ensure!(found["amount_refunded_atomic"] == "100" && found["refunded"] == false);
-        let refund = app
-            .clone()
-            .oneshot(merchant_request(Method::GET, &format!("/v1/refunds/re_{}?expand[]=deposit", refund_id.simple()), Vec::new(), &product_key))
-            .await?;
-        ensure!(refund.status() == StatusCode::OK);
-        let refund = response_json(refund).await?;
-        ensure!(refund["status"] == "succeeded", "{refund}");
-        ensure!(refund["deposit"]["id"] == format!("dep_{}", deposit.simple()), "{refund}");
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::GET,
-                &format!("/v1/admin/deposits/dep_{}", deposit.simple()),
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 8,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let detail = response_json(response).await?;
-        ensure!(detail["id"] == format!("dep_{}", deposit.simple()), "{detail}");
-        ensure!(detail["external_id"] == "refund-account");
-        ensure!(detail["timeline"][0]["to_state"] == "rejected");
-        let response = app
-            .oneshot(signed_request(
-                Method::GET,
-                &format!("/v1/admin/deposits/{deposit}"),
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 9,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["id"] == detail["id"]);
+        ensure!(status == StatusCode::CONFLICT);
+        ensure!(
+            error["error"]["code"] == "refund_unexpected_state",
+            "{error}"
+        );
         Ok(())
     }
     .await;
@@ -412,152 +251,397 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
 }
 
 #[tokio::test]
-async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_state() -> Result<()>
-{
+async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservation() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
-        let admin_key = SigningKey::from_bytes(&[62; 32]);
-        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let pending = seed_deposit(
-            &database.app_pool,
-            product.id,
-            "pending-refund",
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[44; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        // The account has since moved to another treasury; its older addresses still pay the
+        // treasury they were issued for, and refunds of their deposits come from that one.
+        let current_treasury = Address::repeat_byte(0x7c);
+        sqlx::query(
+            r#"
+            INSERT INTO treasuries
+                (id, account_id, chain_id, address, proof_message, proof_signature,
+                 verified_at, effective_at)
+            VALUES ($1, $2, 1, $3, 'proof', 'signature', now(), now())
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(merchant.account.id)
+        .bind(format!("{current_treasury:#x}"))
+        .execute(pool)
+        .await?;
+
+        let cases = [
+            (
+                "from the account's current treasury",
+                finalized(vec![transfer(
+                    current_treasury,
+                    REFUND_DESTINATION,
+                    100,
+                    3,
+                )?]),
+                "sender_mismatch",
+            ),
+            (
+                "to another address",
+                finalized(vec![transfer(
+                    FIXTURE_TREASURY,
+                    "0x5555555555555555555555555555555555555555",
+                    100,
+                    3,
+                )?]),
+                "destination_mismatch",
+            ),
+            (
+                "one base unit short",
+                finalized(vec![transfer(FIXTURE_TREASURY, REFUND_DESTINATION, 99, 3)?]),
+                "amount_mismatch",
+            ),
+            (
+                "of another token",
+                finalized(vec![RefundTransfer {
+                    token: Address::repeat_byte(0x77),
+                    ..transfer(FIXTURE_TREASURY, REFUND_DESTINATION, 100, 3)?
+                }]),
+                "transfer_not_found",
+            ),
+            (
+                "reverted",
+                RefundReceipt::Finalized {
+                    block_number: 90,
+                    block_hash: B256::repeat_byte(0x09),
+                    succeeded: false,
+                    transfers: Vec::new(),
+                },
+                "transaction_failed",
+            ),
+        ];
+        let mut failed = Vec::new();
+        for (index, (name, receipt, reason)) in cases.into_iter().enumerate() {
+            let deposit =
+                seed_rejected_deposit(pool, merchant.account.id, &format!("case-{index}"), 100)
+                    .await?;
+            let id = merchant.refund(deposit, "100").await?;
+            let (status, _) = merchant
+                .post(
+                    &format!("/v1/refunds/{id}/mark_paid"),
+                    mark_paid_body(REFUND_TX)?,
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{name}");
+            let worker = test_worker(pool, vec![receipt.clone()], vec![receipt]);
+            ensure!(worker.check_once().await? == Verification::Failed, "{name}");
+            let (_, refund) = merchant
+                .call(Method::GET, &format!("/v1/refunds/{id}"), Vec::new())
+                .await?;
+            ensure!(refund["status"] == "failed", "{name}: {refund}");
+            ensure!(refund["failure_reason"] == reason, "{name}: {refund}");
+            failed.push((id.clone(), reason));
+            // The failed refund no longer holds the deposit: the whole amount can be refunded.
+            merchant.refund(deposit, "100").await?;
+        }
+
+        // Each failure sends one `refund.failed` about its refund, and nothing else is sent.
+        let events: Vec<(Uuid, String, String, Uuid)> = sqlx::query_as(
+            "SELECT id, type, object_type, object_id FROM events ORDER BY created, id",
+        )
+        .fetch_all(pool)
+        .await?;
+        ensure!(events.len() == failed.len(), "{events:?}");
+        for (id, _) in &failed {
+            let refund_id = topup::ids::parse(topup::ids::REFUND, id).context("re_ id")?;
+            ensure!(
+                events.contains(&(
+                    topup_core::identity::event_id("refund.failed", refund_id),
+                    "refund.failed".to_owned(),
+                    "refund".to_owned(),
+                    refund_id,
+                )),
+                "{id}: {events:?}"
+            );
+        }
+        // Delivered through the outbox, `data.object` is the failed refund with its reason.
+        let bodies = deliver_events(pool, merchant.account.id).await?;
+        ensure!(bodies.len() == failed.len(), "{bodies:?}");
+        for (id, reason) in &failed {
+            let body = bodies
+                .iter()
+                .find(|body| body["data"]["object"]["id"] == id.as_str())
+                .with_context(|| format!("no refund.failed for {id}"))?;
+            ensure!(body["type"] == "refund.failed", "{body}");
+            let refund = &body["data"]["object"];
+            ensure!(
+                refund["object"] == "refund" && refund["status"] == "failed",
+                "{body}"
+            );
+            ensure!(refund["failure_reason"] == *reason, "{body}");
+            ensure!(refund["transaction_hash"] == REFUND_TX, "{body}");
+        }
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[46; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let first_deposit = seed_rejected_deposit(pool, merchant.account.id, "first", 100).await?;
+        let second_deposit =
+            seed_rejected_deposit(pool, merchant.account.id, "second", 100).await?;
+        let first = merchant.refund(first_deposit, "100").await?;
+        let second = merchant.refund(second_deposit, "100").await?;
+
+        let (status, _) = merchant
+            .post(
+                &format!("/v1/refunds/{first}/mark_paid"),
+                serde_json::to_vec(&json!({"transaction_hash": REFUND_TX, "log_index": 7}))?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        // Naming a log another refund holds is refused at once.
+        let (status, error) = merchant
+            .post(
+                &format!("/v1/refunds/{second}/mark_paid"),
+                serde_json::to_vec(&json!({"transaction_hash": REFUND_TX, "log_index": 7}))?,
+            )
+            .await?;
+        ensure!(status == StatusCode::CONFLICT, "{error}");
+        ensure!(error["error"]["code"] == "transfer_already_used", "{error}");
+        // Without a log the transaction is accepted, and verification finds its only log taken.
+        let (status, _) = merchant
+            .post(
+                &format!("/v1/refunds/{second}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+
+        let paying = finalized(vec![transfer(
+            FIXTURE_TREASURY,
+            REFUND_DESTINATION,
+            100,
+            7,
+        )?]);
+        let worker = test_worker(
+            pool,
+            vec![paying.clone(), paying.clone()],
+            vec![paying.clone(), paying],
+        );
+        let mut outcomes = vec![worker.check_once().await?, worker.check_once().await?];
+        outcomes.sort_by_key(|outcome| format!("{outcome:?}"));
+        ensure!(
+            outcomes == [Verification::Failed, Verification::Succeeded],
+            "{outcomes:?}"
+        );
+        let (_, refund) = merchant
+            .call(Method::GET, &format!("/v1/refunds/{first}"), Vec::new())
+            .await?;
+        ensure!(
+            refund["status"] == "succeeded" && refund["log_index"] == 7,
+            "{refund}"
+        );
+        let (_, refund) = merchant
+            .call(Method::GET, &format!("/v1/refunds/{second}"), Vec::new())
+            .await?;
+        ensure!(refund["status"] == "failed", "{refund}");
+        ensure!(
+            refund["failure_reason"] == "transfer_already_used",
+            "{refund}"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[48; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_rejected_deposit(pool, merchant.account.id, "cancel", 150).await?;
+        let first = merchant.refund(deposit, "100").await?;
+        // A pending refund reserves its amount.
+        let (status, error) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "60")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST);
+        ensure!(error["error"]["code"] == "amount_too_large", "{error}");
+        ensure!(error["error"]["param"] == "amount_atomic", "{error}");
+
+        for _ in 0..2 {
+            let (status, canceled) = merchant
+                .post(&format!("/v1/refunds/{first}/cancel"), Vec::new())
+                .await?;
+            ensure!(
+                status == StatusCode::OK && canceled["status"] == "canceled",
+                "{canceled}"
+            );
+        }
+        let (status, error) = merchant
+            .post(
+                &format!("/v1/refunds/{first}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::CONFLICT);
+        ensure!(
+            error["error"]["code"] == "refund_unexpected_state",
+            "{error}"
+        );
+
+        // A refund already marked paid can still be canceled; verification then skips it.
+        let second = merchant.refund(deposit, "150").await?;
+        let (status, _) = merchant
+            .post(
+                &format!("/v1/refunds/{second}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        let (status, canceled) = merchant
+            .post(&format!("/v1/refunds/{second}/cancel"), Vec::new())
+            .await?;
+        ensure!(
+            status == StatusCode::OK && canceled["status"] == "canceled",
+            "{canceled}"
+        );
+        let worker = test_worker(pool, Vec::new(), Vec::new());
+        ensure!(worker.check_once().await? == Verification::Idle);
+        merchant.refund(deposit, "150").await?;
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit WHERE action LIKE 'refund_%' ORDER BY created_at, action",
+        )
+        .fetch_all(pool)
+        .await?;
+        ensure!(
+            actions
+                .iter()
+                .filter(|action| *action == "refund_canceled")
+                .count()
+                == 2
+        );
+        ensure!(
+            actions
+                .iter()
+                .filter(|action| *action == "refund_marked_paid")
+                .count()
+                == 1
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn only_a_refundable_deposit_to_a_screened_destination_is_refunded() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[61; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_rejected_deposit(pool, merchant.account.id, "screened", 100).await?;
+
+        let (status, error) = merchant
+            .post("/v1/refunds", refund_body(deposit, SANCTIONED, "100")?)
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
+        ensure!(
+            error["error"]["code"] == "destination_sanctioned",
+            "{error}"
+        );
+        ensure!(error["error"]["param"] == "destination_address", "{error}");
+        // Screening that cannot answer refuses too, for a retry.
+        let unscreened = Merchant {
+            app: test_router_with(pool, &admin_key, Arc::new(StaticScreener::Unavailable)),
+            ..merchant.clone()
+        };
+        let (status, _) = unscreened
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::SERVICE_UNAVAILABLE);
+        ensure!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM refunds")
+                .fetch_one(pool)
+                .await?
+                == 0
+        );
+
+        // Not refundable: a deposit still in the pipeline, and sanctioned funds.
+        let detected = seed_deposit(
+            pool,
+            merchant.account.id,
+            "detected",
             100,
             DepositState::Detected,
             None,
         )
         .await?;
-        let refundable =
-            seed_rejected_deposit(&database.app_pool, product.id, "approval-recheck", 100).await?;
-        let sanctioned =
-            seed_rejected_deposit(&database.app_pool, product.id, "sanctions-recheck", 100).await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
-
-        let pending_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(
-                Method::POST,
-                pending_path,
-                refund_body(pending, REFUND_DESTINATION, "100")?,
-                &product_key,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-
-        let request_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(
-                Method::POST,
-                request_path,
-                refund_body(refundable, REFUND_DESTINATION, "100")?,
-                &product_key,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let requested = response_json(response).await?;
-        let refund_id = topup::ids::parse(
-            topup::ids::REFUND,
-            requested["id"].as_str().context("refund id")?,
+        let sanctioned = seed_deposit(
+            pool,
+            merchant.account.id,
+            "sanctioned",
+            100,
+            DepositState::Rejected,
+            Some(RejectReason::Sanctioned),
         )
-        .context("re_ id")?;
-
-        sqlx::query("UPDATE deposits SET state = 'confirmed', reason = NULL WHERE id = $1")
-            .bind(refundable)
-            .execute(&database.app_pool)
-            .await?;
-        let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 2,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        let status: String = sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
-            .bind(refund_id)
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(status == "requested");
-        let approvals: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit WHERE action = 'refund_approved' AND subject = $1",
-        )
-        .bind(format!("refund:{refund_id}"))
-        .fetch_one(&database.app_pool)
         .await?;
-        ensure!(approvals == 0);
-
-        let app_for_credited = app.clone();
-        let sanctioned_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(
-                Method::POST,
-                sanctioned_path,
-                refund_body(sanctioned, REFUND_DESTINATION, "100")?,
-                &product_key,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let requested = response_json(response).await?;
-        let sanctioned_refund = topup::ids::parse(
-            topup::ids::REFUND,
-            requested["id"].as_str().context("refund id")?,
-        )
-        .context("re_ id")?;
-        sqlx::query("UPDATE deposits SET reason = 'sanctioned' WHERE id = $1")
-            .bind(sanctioned)
-            .execute(&database.app_pool)
-            .await?;
-        let approve_path = format!("/v1/admin/refunds/{sanctioned_refund}/approve");
-        let response = app
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 4,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        let status: String = sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
-            .bind(sanctioned_refund)
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(status == "requested");
-
-        // The product asks to refund a credit it did not apply (for example a closed
-        // workspace); finance still approves.
+        for deposit in [detected, sanctioned] {
+            let (status, error) = merchant
+                .post(
+                    "/v1/refunds",
+                    refund_body(deposit, REFUND_DESTINATION, "100")?,
+                )
+                .await?;
+            ensure!(status == StatusCode::CONFLICT, "{error}");
+            ensure!(
+                error["error"]["code"] == "deposit_not_refundable",
+                "{error}"
+            );
+        }
+        // A credited deposit the merchant chooses to refund.
         let credited = seed_deposit(
-            &database.app_pool,
-            product.id,
-            "credited-refund",
+            pool,
+            merchant.account.id,
+            "credited",
             100,
             DepositState::Credited,
             None,
         )
         .await?;
-        let credited_path = "/v1/refunds";
-        let response = app_for_credited
-            .oneshot(merchant_request(
-                Method::POST,
-                credited_path,
-                refund_body(credited, REFUND_DESTINATION, "100")?,
-                &product_key,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["status"] == "pending");
+        merchant.refund(credited, "100").await?;
         Ok(())
     }
     .await;
@@ -605,243 +689,6 @@ async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> 
             ))
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let admin_key = SigningKey::from_bytes(&[64; 32]);
-        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let deposit =
-            seed_rejected_deposit(&database.app_pool, product.id, "unsupported-refund", 100)
-                .await?;
-        sqlx::query(
-            r#"
-            UPDATE deposits
-            SET route = NULL, route_version = NULL, reason = 'unsupported_asset',
-                asset_contract = '0x7777777777777777777777777777777777777777'
-            WHERE id = $1
-            "#,
-        )
-        .bind(deposit)
-        .execute(&database.app_pool)
-        .await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
-        let request_path = "/v1/refunds";
-        let response = app
-            .clone()
-            .oneshot(merchant_request(
-                Method::POST,
-                request_path,
-                refund_body(deposit, REFUND_DESTINATION, "100")?,
-                &product_key,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let requested = response_json(response).await?;
-        let refund_id = topup::ids::parse(
-            topup::ids::REFUND,
-            requested["id"].as_str().context("refund id")?,
-        )
-        .context("re_ id")?;
-        let persisted_route: String = sqlx::query_scalar("SELECT route FROM refunds WHERE id = $1")
-            .bind(refund_id)
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(persisted_route == "phala-cloud-ethereum-pha-usd");
-
-        sqlx::query(
-            r#"
-            INSERT INTO route_pauses (route, paused_scopes)
-            VALUES ($1, ARRAY['refunds'])
-            ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes
-            "#,
-        )
-        .bind(&persisted_route)
-        .execute(&database.app_pool)
-        .await?;
-        let approve_path = format!("/v1/admin/refunds/{refund_id}/approve");
-        let response = app
-            .oneshot(signed_request(
-                Method::POST,
-                &approve_path,
-                Vec::new(),
-                ADMIN_KID,
-                &admin_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn one_transfer_log_confirms_only_one_refund() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let (product, _) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let first = seed_rejected_deposit(&database.app_pool, product.id, "claim-one", 100).await?;
-        let second =
-            seed_rejected_deposit(&database.app_pool, product.id, "claim-two", 100).await?;
-        let first_refund = seed_sent_refund(&database.app_pool, first, 100, REFUND_TX).await?;
-        let second_refund = seed_sent_refund(&database.app_pool, second, 100, REFUND_TX).await?;
-        let observation = RefundObservation::Finalized {
-            block_number: 90,
-            succeeded: true,
-            transfers: vec![RefundTransfer {
-                log_index: 7,
-                transferred_atomic: U256::from(100_u64),
-            }],
-        };
-        let worker = test_worker(
-            &database.app_pool,
-            ScriptedReader::new(vec![observation.clone(), observation]),
-        )?;
-        ensure!(worker.check_once().await?);
-        ensure!(worker.check_once().await?);
-
-        let confirmed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM refunds WHERE id = ANY($1) AND status = 'confirmed'",
-        )
-        .bind([first_refund, second_refund])
-        .fetch_one(&database.app_pool)
-        .await?;
-        let sent: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM refunds WHERE id = ANY($1) AND status = 'sent'",
-        )
-        .bind([first_refund, second_refund])
-        .fetch_one(&database.app_pool)
-        .await?;
-        let claims: i64 = sqlx::query_scalar("SELECT count(*) FROM refund_payment_claims")
-            .fetch_one(&database.app_pool)
-            .await?;
-        let events: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE type = 'deposit.refunded'")
-                .fetch_one(&database.app_pool)
-                .await?;
-        ensure!(confirmed == 1);
-        ensure!(sent == 1);
-        ensure!(claims == 1);
-        ensure!(events == 1);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-#[tokio::test]
-async fn corrected_hash_rejects_stale_observation_then_confirms_replacement() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let admin_key = SigningKey::from_bytes(&[46; 32]);
-        let (product, _) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let deposit =
-            seed_rejected_deposit(&database.app_pool, product.id, "correction", 100).await?;
-        let refund_id = seed_approved_refund(&database.app_pool, deposit, 100).await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let record_path = format!("/v1/admin/refunds/{refund_id}/record");
-        let now = Utc::now().timestamp();
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &record_path,
-                serde_json::to_vec(&json!({"tx_hash": REFUND_TX}))?,
-                ADMIN_KID,
-                &admin_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let stale_worker = test_worker(
-            &database.app_pool,
-            BlockingReader {
-                expected_tx: B256::from_str(REFUND_TX)?,
-                started: Arc::clone(&started),
-                release: Arc::clone(&release),
-            },
-        )?;
-        let stale_task = tokio::spawn(async move { stale_worker.check_once().await });
-        started.notified().await;
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::POST,
-                &record_path,
-                serde_json::to_vec(&json!({"tx_hash": REPLACEMENT_TX}))?,
-                ADMIN_KID,
-                &admin_key,
-                now + 1,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let corrected = response_json(response).await?;
-        ensure!(corrected["tx_hash"] == REPLACEMENT_TX);
-        ensure!(corrected["confirmation_evidence"]["previous_tx_hash"] == REFUND_TX);
-
-        release.notify_one();
-        ensure!(stale_task.await??);
-        let row = sqlx::query(
-            "SELECT status, tx_hash, tx_version, confirmation_evidence FROM refunds WHERE id = $1",
-        )
-        .bind(refund_id)
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(row.try_get::<String, _>("status")? == "sent");
-        ensure!(row.try_get::<String, _>("tx_hash")? == REPLACEMENT_TX);
-        ensure!(row.try_get::<i64, _>("tx_version")? == 2);
-        ensure!(row.try_get::<Value, _>("confirmation_evidence")?["result"] == "tx_hash_corrected");
-
-        let corrected_worker = test_worker(
-            &database.app_pool,
-            ScriptedReader::for_tx(
-                REPLACEMENT_TX,
-                vec![RefundObservation::Finalized {
-                    block_number: 91,
-                    succeeded: true,
-                    transfers: vec![RefundTransfer {
-                        log_index: 8,
-                        transferred_atomic: U256::from(100_u64),
-                    }],
-                }],
-            ),
-        )?;
-        ensure!(corrected_worker.check_once().await?);
-        let status: String = sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
-            .bind(refund_id)
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(status == "confirmed");
-        let correction_audits: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit WHERE action = 'refund_tx_hash_corrected' AND subject = $1",
-        )
-        .bind(format!("refund:{refund_id}"))
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(correction_audits == 1);
         Ok(())
     }
     .await;
@@ -974,7 +821,7 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
 }
 
 #[tokio::test]
-async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Result<()> {
+async fn evm_reader_reads_every_transfer_only_at_finality_and_times_out() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
@@ -987,91 +834,73 @@ async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Re
             StdDuration::from_millis(50),
         )?),
     )]));
-    let route = route_fixture();
-    let treasury = route.chain.contracts.treasury;
-    let destination = Address::from_str(REFUND_DESTINATION)?;
-    let cases = [
-        (1_u64, false, true, 0_usize),
-        (2, false, true, 0),
-        (3, false, true, 0),
-        (4, true, true, 0),
-        (5, false, false, 1),
-    ];
-    for (hash, pending, succeeded, transfers) in cases {
-        let observation = reader
-            .observe(&RefundCheck {
-                refund_id: Uuid::new_v4(),
-                account_id: Uuid::new_v4(),
-                livemode: true,
-                deposit_id: Uuid::new_v4(),
-                chain_id: 1,
-                asset_contract: route.asset.contract,
-                treasury,
-                to_address: destination,
-                amount_atomic: U256::from(100_u64),
-                tx_hash: B256::from(U256::from(hash)),
-                tx_version: 1,
-            })
-            .await?;
-        if pending {
-            ensure!(observation == RefundObservation::Pending);
-        } else {
-            let RefundObservation::Finalized {
-                succeeded: actual_succeeded,
-                transfers: actual_transfers,
-                ..
-            } = observation
-            else {
-                anyhow::bail!("expected finalized observation");
-            };
-            ensure!(actual_succeeded == succeeded);
-            ensure!(actual_transfers.len() == transfers);
-        }
+    let token = route_fixture().asset.contract;
+    // Scenario 1 transfers another token, 4 is above `finalized`, 5 reverted.
+    for scenario in [1_u64, 2, 3, 5] {
+        let receipt = reader.receipt(1, B256::from(U256::from(scenario))).await?;
+        let RefundReceipt::Finalized {
+            block_number,
+            succeeded,
+            transfers,
+            ..
+        } = receipt
+        else {
+            anyhow::bail!("scenario {scenario}: expected a finalized receipt");
+        };
+        ensure!(block_number == 90 && succeeded == (scenario != 5));
+        let [transfer] = transfers.as_slice() else {
+            anyhow::bail!("scenario {scenario}: expected one transfer");
+        };
+        ensure!(transfer.log_index == 7 && transfer.amount == U256::from(100_u64));
+        ensure!((transfer.token == token) == (scenario != 1));
     }
-    let hung = reader
-        .observe(&RefundCheck {
-            refund_id: Uuid::new_v4(),
-            account_id: Uuid::new_v4(),
-            livemode: true,
-            deposit_id: Uuid::new_v4(),
-            chain_id: 1,
-            asset_contract: route.asset.contract,
-            treasury,
-            to_address: destination,
-            amount_atomic: U256::from(100_u64),
-            tx_hash: B256::from(U256::from(6_u64)),
-            tx_version: 1,
-        })
-        .await;
-    ensure!(matches!(hung, Err(RefundReadError::Rpc(_))));
+    ensure!(reader.receipt(1, B256::from(U256::from(4_u64))).await? == RefundReceipt::Pending);
+    ensure!(matches!(
+        reader.receipt(1, B256::from(U256::from(6_u64))).await,
+        Err(RefundReadError::Rpc(_))
+    ));
+    ensure!(matches!(
+        reader.receipt(2, B256::ZERO).await,
+        Err(RefundReadError::UnknownChain(2))
+    ));
     server.abort();
     let _ = server.await;
     Ok(())
 }
 
 #[tokio::test]
-async fn worker_shutdown_cancels_a_hung_observation() -> Result<()> {
+async fn worker_shutdown_cancels_a_hung_read() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
-        let (product, _) = seed_product(&database.app_pool, "phala-cloud").await?;
-        let deposit =
-            seed_rejected_deposit(&database.app_pool, product.id, "hung-worker", 100).await?;
-        seed_sent_refund(&database.app_pool, deposit, 100, REFUND_TX).await?;
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[50; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_rejected_deposit(pool, merchant.account.id, "hung-worker", 100).await?;
+        let id = merchant.refund(deposit, "100").await?;
+        merchant
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+            )
+            .await?;
         let started = Arc::new(Notify::new());
-        let worker = RefundConfirmationWorker::new(
-            database.app_pool.clone(),
+        let worker = RefundVerificationWorker::new(
+            pool.clone(),
             HangingReader {
                 started: Arc::clone(&started),
             },
-            &[route_fixture()],
-            RefundConfirmationConfig {
+            HangingReader {
+                started: Arc::new(Notify::new()),
+            },
+            RefundVerificationConfig {
                 poll_interval: StdDuration::from_secs(60),
                 retry_interval: StdDuration::ZERO,
                 observe_timeout: StdDuration::from_secs(60),
             },
-        )?;
+        );
         let cancellation = CancellationToken::new();
         let child = cancellation.clone();
         let task = tokio::spawn(async move { worker.run(child).await });
@@ -1240,7 +1069,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
                 .context("undelivered age")?
                 >= 3_600
         );
-        ensure!(route["refunds_by_status"]["requested"] == 1);
+        ensure!(route["refunds_by_status"]["pending"] == 1);
         ensure!(route["age_in_state_max_seconds"]["credited"].as_u64().context("credited age")? >= 7_000);
         ensure!(route.get("flush_planning").is_none());
         let unrouted = routes
@@ -1258,59 +1087,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
     .await;
     let cleanup = database.cleanup().await;
     result.and(cleanup)
-}
-
-struct ScriptedReader {
-    expected_tx: B256,
-    observations: Mutex<VecDeque<RefundObservation>>,
-}
-
-impl ScriptedReader {
-    fn new(observations: Vec<RefundObservation>) -> Self {
-        Self::for_tx(REFUND_TX, observations)
-    }
-
-    fn for_tx(tx_hash: &str, observations: Vec<RefundObservation>) -> Self {
-        Self {
-            expected_tx: B256::from_str(tx_hash).expect("valid scripted refund tx"),
-            observations: Mutex::new(observations.into()),
-        }
-    }
-}
-
-#[async_trait]
-impl RefundChainReader for ScriptedReader {
-    async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError> {
-        assert_eq!(check.tx_hash, self.expected_tx);
-        assert_eq!(
-            check.to_address,
-            Address::from_str(REFUND_DESTINATION).expect("valid destination")
-        );
-        assert_eq!(check.amount_atomic, U256::from(100_u64));
-        self.observations
-            .lock()
-            .map_err(|_| RefundReadError::Rpc("mock lock"))?
-            .pop_front()
-            .ok_or(RefundReadError::Rpc("mock observation"))
-    }
-}
-
-struct BlockingReader {
-    expected_tx: B256,
-    started: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-struct HangingReader {
-    started: Arc<Notify>,
-}
-
-#[async_trait]
-impl RefundChainReader for HangingReader {
-    async fn observe(&self, _check: &RefundCheck) -> Result<RefundObservation, RefundReadError> {
-        self.started.notify_one();
-        std::future::pending().await
-    }
 }
 
 async fn refund_rpc(Json(request): Json<Value>) -> Json<Value> {
@@ -1414,44 +1190,184 @@ fn address_topic(address: &str) -> String {
     format!("0x{:0>64}", address.trim_start_matches("0x"))
 }
 
-#[async_trait]
-impl RefundChainReader for BlockingReader {
-    async fn observe(&self, check: &RefundCheck) -> Result<RefundObservation, RefundReadError> {
-        assert_eq!(check.tx_hash, self.expected_tx);
-        self.started.notify_one();
-        self.release.notified().await;
-        Ok(RefundObservation::Finalized {
-            block_number: 90,
-            succeeded: true,
-            transfers: vec![RefundTransfer {
-                log_index: 8,
-                transferred_atomic: U256::from(100_u64),
-            }],
+/// One account's API calls with its secret key.
+#[derive(Clone)]
+struct Merchant {
+    app: Router,
+    account: Account,
+    key: String,
+}
+
+impl Merchant {
+    async fn seed(pool: &sqlx::PgPool, app: &Router, name: &str) -> Result<Self> {
+        let (account, key) = seed_product(pool, name).await?;
+        Ok(Self {
+            app: app.clone(),
+            account,
+            key,
         })
+    }
+
+    async fn call(&self, method: Method, path: &str, body: Vec<u8>) -> Result<(StatusCode, Value)> {
+        let response = self
+            .app
+            .clone()
+            .oneshot(merchant_request(method, path, body, &self.key))
+            .await?;
+        let status = response.status();
+        Ok((status, response_json(response).await?))
+    }
+
+    async fn post(&self, path: &str, body: Vec<u8>) -> Result<(StatusCode, Value)> {
+        self.call(Method::POST, path, body).await
+    }
+
+    /// Creates a refund to the test destination and returns its `re_` id.
+    async fn refund(&self, deposit: Uuid, amount: &str) -> Result<String> {
+        let (status, refund) = self
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, amount)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{refund}");
+        ensure!(refund["status"] == "pending", "{refund}");
+        Ok(refund["id"].as_str().context("refund id")?.to_owned())
+    }
+
+    async fn expect_paused(&self, deposit: Uuid) -> Result<()> {
+        let (status, error) = self
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "100")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::CONFLICT, "{error}");
+        ensure!(error["error"]["code"] == "paused", "{error}");
+        Ok(())
     }
 }
 
-fn test_worker<R: RefundChainReader>(
+fn mark_paid_body(transaction_hash: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(
+        &json!({ "transaction_hash": transaction_hash }),
+    )?)
+}
+
+/// A transfer of the route fixture's token.
+fn transfer(from: Address, to: &str, amount: u64, log_index: u64) -> Result<RefundTransfer> {
+    Ok(RefundTransfer {
+        log_index,
+        token: route_fixture().asset.contract,
+        from,
+        to: Address::from_str(to)?,
+        amount: U256::from(amount),
+    })
+}
+
+fn finalized(transfers: Vec<RefundTransfer>) -> RefundReceipt {
+    RefundReceipt::Finalized {
+        block_number: 90,
+        block_hash: B256::repeat_byte(0x09),
+        succeeded: true,
+        transfers,
+    }
+}
+
+async fn refund_status(pool: &sqlx::PgPool, id: Uuid) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// One provider answering with a script of receipts, in order.
+struct ScriptedReader(Mutex<VecDeque<RefundReceipt>>);
+
+#[async_trait]
+impl RefundChainReader for ScriptedReader {
+    async fn receipt(
+        &self,
+        chain_id: u64,
+        tx_hash: B256,
+    ) -> Result<RefundReceipt, RefundReadError> {
+        assert_eq!(chain_id, 1);
+        assert_eq!(tx_hash, B256::from_str(REFUND_TX).expect("valid refund tx"));
+        self.0
+            .lock()
+            .map_err(|_| RefundReadError::Rpc("script lock"))?
+            .pop_front()
+            .ok_or(RefundReadError::Rpc("script exhausted"))
+    }
+}
+
+struct HangingReader {
+    started: Arc<Notify>,
+}
+
+#[async_trait]
+impl RefundChainReader for HangingReader {
+    async fn receipt(
+        &self,
+        _chain_id: u64,
+        _tx_hash: B256,
+    ) -> Result<RefundReceipt, RefundReadError> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+fn test_worker(
     pool: &sqlx::PgPool,
-    reader: R,
-) -> Result<RefundConfirmationWorker<R>> {
-    Ok(RefundConfirmationWorker::new(
+    primary: Vec<RefundReceipt>,
+    secondary: Vec<RefundReceipt>,
+) -> RefundVerificationWorker<ScriptedReader, ScriptedReader> {
+    RefundVerificationWorker::new(
         pool.clone(),
-        reader,
-        &[route_fixture()],
-        RefundConfirmationConfig {
+        ScriptedReader(Mutex::new(primary.into())),
+        ScriptedReader(Mutex::new(secondary.into())),
+        RefundVerificationConfig {
             poll_interval: StdDuration::ZERO,
             retry_interval: StdDuration::ZERO,
             observe_timeout: StdDuration::from_secs(1),
         },
-    )?)
+    )
 }
 
-fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
-    let route = route_fixture();
+/// Screening that lists [`SANCTIONED`], or that cannot answer.
+enum StaticScreener {
+    Listing,
+    Unavailable,
+}
+
+#[async_trait]
+impl DestinationScreener for StaticScreener {
+    async fn screen(&self, route: &RouteFile, destination: Address) -> DestinationScreening {
+        assert_eq!(route.chain.chain_id, 1);
+        match self {
+            Self::Unavailable => DestinationScreening::Unavailable,
+            Self::Listing if destination == Address::from_str(SANCTIONED).expect("address") => {
+                DestinationScreening::Sanctioned
+            }
+            Self::Listing => DestinationScreening::Clear,
+        }
+    }
+}
+
+fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> Router {
+    test_router_with(pool, admin_key, Arc::new(StaticScreener::Listing))
+}
+
+fn test_router_with(
+    pool: &sqlx::PgPool,
+    admin_key: &SigningKey,
+    refund_screening: Arc<dyn DestinationScreener>,
+) -> Router {
     let state = AppState {
         pool: pool.clone(),
-        routes: Arc::new(topup::routes::RouteSet::new(vec![route]).expect("route loads")),
+        routes: Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).expect("route loads")),
         admin_key: VerificationKey::from_base64(
             ADMIN_KID.to_owned(),
             &public_key_base64(admin_key),
@@ -1462,8 +1378,97 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening,
     };
     topup::api::router(state).0
+}
+
+/// Delivers every pending event of `account_id` to a local receiver and returns the bodies.
+async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Value>> {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/", listener.local_addr()?);
+    let receiver = Router::new().route(
+        "/",
+        post(move |Json(body): Json<Value>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().expect("receiver lock").push(body);
+                StatusCode::OK
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, receiver).await });
+    sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
+        .bind(account_id)
+        .bind(&url)
+        .execute(pool)
+        .await?;
+    let worker = DeliveryWorker::new(
+        pool.clone(),
+        Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).map_err(anyhow::Error::msg)?),
+        Arc::new(WebhookSigner(SigningKey::from_bytes(&[11; 32]))),
+        DeliveryConfig {
+            batch_size: 10,
+            request_timeout: StdDuration::from_secs(2),
+            claim_lease: StdDuration::from_secs(30),
+            poll_interval: StdDuration::from_millis(10),
+            response_body_limit: 16,
+            age_alert_threshold: StdDuration::from_secs(60),
+        },
+    )?;
+    for _ in 0..20 {
+        if worker.run_once().await? == 0 {
+            break;
+        }
+    }
+    server.abort();
+    let _ = server.await;
+    let bodies = received.lock().expect("receiver lock").clone();
+    Ok(bodies)
+}
+
+struct WebhookSigner(SigningKey);
+
+impl topup_core::Signer for WebhookSigner {
+    async fn sign_settlement(
+        &self,
+        content: &[u8],
+    ) -> Result<topup_core::Ed25519Signature, topup_core::SignerError> {
+        use ed25519_dalek::Signer as _;
+        Ok(topup_core::Ed25519Signature(
+            self.0.sign(content).to_bytes(),
+        ))
+    }
+
+    async fn settlement_public_key(
+        &self,
+    ) -> Result<topup_core::Ed25519PublicKey, topup_core::SignerError> {
+        Ok(topup_core::Ed25519PublicKey(
+            self.0.verifying_key().to_bytes(),
+        ))
+    }
+}
+
+async fn seed_refund_row(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO refunds (
+            id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
+            status
+        )
+        SELECT $1, account_id, livemode, chain_id, id, $3::text::numeric, $4, 'pending'
+        FROM deposits WHERE id = $2
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(deposit_id)
+    .bind(amount.to_string())
+    .bind(REFUND_DESTINATION)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn route_fixture() -> RouteFile {
@@ -1578,20 +1583,6 @@ async fn seed_deposit(
     Ok(deposit_id(1, tx_hash, 0))
 }
 
-async fn insert_transition(pool: &sqlx::PgPool, deposit_id: Uuid) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
-        VALUES ($1, $2, 'detected', 'rejected', 0, '{"reason":"out_of_bounds"}')
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(deposit_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn customer_id(pool: &sqlx::PgPool, deposit_id: Uuid) -> Result<Uuid> {
     Ok(
         sqlx::query_scalar("SELECT customer_id FROM deposits WHERE id = $1")
@@ -1646,56 +1637,6 @@ async fn seed_lock(
     Ok(())
 }
 
-async fn seed_approved_refund(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO refunds (
-            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
-            requested_by, approved_by
-        )
-        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
-               'phala-cloud-ethereum-pha-usd', 'approved', 'test', 'admin:test'
-        FROM deposits WHERE id = $2
-        "#,
-    )
-    .bind(id)
-    .bind(deposit_id)
-    .bind(amount.to_string())
-    .bind(REFUND_DESTINATION)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-async fn seed_sent_refund(
-    pool: &sqlx::PgPool,
-    deposit_id: Uuid,
-    amount: u64,
-    tx_hash: &str,
-) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO refunds (
-            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, tx_hash,
-            status, requested_by, approved_by, tx_version, next_check_at
-        )
-        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
-               'phala-cloud-ethereum-pha-usd', $5, 'sent', 'test', 'admin:test', 1, now()
-        FROM deposits WHERE id = $2
-        "#,
-    )
-    .bind(id)
-    .bind(deposit_id)
-    .bind(amount.to_string())
-    .bind(REFUND_DESTINATION)
-    .bind(tx_hash)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
 async fn seed_same_address_deposits(
     pool: &sqlx::PgPool,
     product_id: Uuid,
@@ -1743,27 +1684,6 @@ async fn seed_same_address_deposits(
         .await?;
     }
     Ok(format!("{receiving:#x}"))
-}
-
-async fn seed_refund_row(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO refunds (
-            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
-            requested_by
-        )
-        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
-               'phala-cloud-ethereum-pha-usd', 'requested', 'test'
-        FROM deposits WHERE id = $2
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(deposit_id)
-    .bind(amount.to_string())
-    .bind(REFUND_DESTINATION)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 async fn response_json(response: axum::response::Response) -> Result<Value> {

@@ -552,6 +552,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             rate_lock_quotes,
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
+            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
         };
         return serve_read_only(args.bind, state).await;
     }
@@ -612,16 +613,16 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     ));
     let pump = Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config)
         .context("invalid pump configuration")?;
-    let refund_config = topup::refunds::RefundConfirmationConfig::default();
-    let refund_reader = topup::refunds::EvmRefundChainReader::from_routes(&routes)
-        .context("failed to configure refund confirmation chain reader")?;
-    let refund_worker = topup::refunds::RefundConfirmationWorker::new(
+    let refund_reader = |index| {
+        topup::refunds::EvmRefundChainReader::from_routes(&routes, index)
+            .context("failed to configure refund verification chain reader")
+    };
+    let refund_worker = topup::refunds::RefundVerificationWorker::new(
         pool.clone(),
-        refund_reader,
-        routes.routes(),
-        refund_config,
-    )
-    .context("failed to configure refund confirmation worker")?;
+        refund_reader(0)?,
+        refund_reader(1)?,
+        topup::refunds::RefundVerificationConfig::default(),
+    );
     let finality_watch = topup::finality::FinalityWatch::from_routes(pool.clone(), &routes)
         .map_err(anyhow::Error::msg)
         .context("failed to configure the finality watch")?;
@@ -635,6 +636,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         rate_lock_quotes,
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening: Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
+            &routes,
+        ))),
     };
     let (application, _) = topup::api::router(state);
     tasks.spawn("API server", |cancellation| {
@@ -659,7 +663,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     tasks.spawn("finality watch", |cancellation| async move {
         finality_watch.run(cancellation).await;
     });
-    tasks.spawn("refund confirmation worker", |cancellation| async move {
+    tasks.spawn("refund verification worker", |cancellation| async move {
         refund_worker.run(cancellation).await;
     });
     for worker in 0..PUMPS {

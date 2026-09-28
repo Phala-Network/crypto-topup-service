@@ -10,6 +10,8 @@ failures, transient statuses, and `409 idempotency_key_in_use`:
 - `create_refund`: sends an `Idempotency-Key` like `create_quote`.
 - `create_deposit_address`: returns the customer's active address, so a repeat returns the same
   one; `rotate_deposit_address` sends an `Idempotency-Key` like `create_quote`.
+- `mark_refund_paid`: attaching the same transaction again returns the refund.
+- `cancel_refund`: canceling a canceled refund returns it unchanged.
 - `update_quote`, `update_deposit`, `update_refund`: merging the same `metadata` again leaves the
   object as the first attempt did.
 
@@ -50,7 +52,13 @@ from topup_client.api.deposit_addresses import (
 )
 from topup_client.api.deposits import get_deposit, list_deposits, update_deposit
 from topup_client.api.quotes import cancel_quote, create_quote, get_quote, update_quote
-from topup_client.api.refunds import create_refund, get_refund, update_refund
+from topup_client.api.refunds import (
+    cancel_refund,
+    create_refund,
+    get_refund,
+    mark_refund_paid,
+    update_refund,
+)
 from topup_client.models import (
     AccountObject,
     AttestationResponse,
@@ -63,6 +71,7 @@ from topup_client.models import (
     DepositAddressList,
     DepositList,
     ErrorResponse,
+    MarkRefundPaidRequest,
     MetadataClear,
     MetadataParamType0,
     Quote,
@@ -358,8 +367,9 @@ class TopupClient:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Refund:
-        """Requests a refund of `deposit` (the unrefunded remainder unless `amount_atomic` is
-        given) to an address the customer controls; finance approves and executes it.
+        """Creates a pending refund of `deposit` (the unrefunded remainder unless `amount_atomic`
+        is given) to an address the customer controls. Pay it from the refund's `treasury`, then
+        attach the transaction with `mark_refund_paid`.
 
         Retries reuse one `Idempotency-Key`, as `create_quote` does.
         """
@@ -374,6 +384,28 @@ class TopupClient:
             lambda: create_refund.sync_detailed(
                 client=self._client, body=body, idempotency_key=key
             ),
+            Refund,
+        )
+
+    def mark_refund_paid(
+        self, refund_id: str, transaction_hash: str, *, log_index: int | None = None
+    ) -> Refund:
+        """Attaches the transaction that pays a pending refund; the service verifies it at
+        finality. `log_index` names the paying `Transfer` log when one transaction pays several
+        refunds."""
+        body = MarkRefundPaidRequest(
+            transaction_hash=transaction_hash,
+            log_index=UNSET if log_index is None else log_index,
+        )
+        return self._call(
+            lambda: mark_refund_paid.sync_detailed(refund_id, client=self._client, body=body),
+            Refund,
+        )
+
+    def cancel_refund(self, refund_id: str) -> Refund:
+        """Cancels a pending refund and releases its reservation of the deposit."""
+        return self._call(
+            lambda: cancel_refund.sync_detailed(refund_id, client=self._client),
             Refund,
         )
 

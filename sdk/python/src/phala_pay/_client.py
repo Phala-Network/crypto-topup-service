@@ -223,8 +223,9 @@ class Refunds:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Refund:
-        """Requests a refund of `deposit` (its unrefunded remainder unless `amount_atomic` is
-        given) to an address the customer controls; finance approves and sends it."""
+        """Creates a pending refund of `deposit` (its unrefunded remainder unless `amount_atomic`
+        is given) to an address the customer controls; pay it from its `treasury`, then call
+        `mark_paid`."""
         return self._client.create_refund(
             deposit,
             destination_address,
@@ -232,6 +233,16 @@ class Refunds:
             idempotency_key=idempotency_key,
             metadata=metadata,
         )
+
+    def mark_paid(
+        self, refund_id: str, *, transaction_hash: str, log_index: int | None = None
+    ) -> Refund:
+        """Attaches the transaction that pays the refund; it is verified at finality."""
+        return self._client.mark_refund_paid(refund_id, transaction_hash, log_index=log_index)
+
+    def cancel(self, refund_id: str) -> Refund:
+        """Cancels a pending refund."""
+        return self._client.cancel_refund(refund_id)
 
     def retrieve(self, refund_id: str, *, expand: list[str] | None = None) -> Refund:
         return self._client.get_refund(refund_id, expand=expand)

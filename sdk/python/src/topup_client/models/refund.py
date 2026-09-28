@@ -21,21 +21,33 @@ T = TypeVar("T", bound="Refund")
 
 @_attrs_define
 class Refund:
-    """A refund of (part of) a deposit to the customer, executed by finance from the treasury.
+    """A refund of (part of) a deposit to the customer, which the merchant pays from the treasury of
+    the deposit's address and attaches with `mark_paid` (design D5).
 
-    Attributes:
-        amount_atomic (str): Token amount in base units, as a decimal string.
-        created (int): Request time, Unix seconds.
-        deposit (Deposit | str): A deposit id, or the deposit with `expand[]`.
-        destination_address (str): Destination address.
-        id (str): `re_` id.
-        object_ (str): Always `refund`.
-        status (str): `pending` (requested, approved, or sent) or `succeeded` (the transfer is final).
-        metadata (RefundMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
-            when none.
-            Always sent; optional in the schema so clients also parse objects from servers, and
-            events rendered, before metadata.
-        tx_hash (None | str | Unset): Refund transaction hash, once sent.
+        Attributes:
+            amount_atomic (str): Token amount in base units, as a decimal string.
+            created (int): Request time, Unix seconds.
+            deposit (Deposit | str): A deposit id, or the deposit with `expand[]`.
+            destination_address (str): Destination address.
+            id (str): `re_` id.
+            object_ (str): Always `refund`.
+            status (str): `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
+                final), `failed` (the attached transaction does not pay the refund; see
+                `failure_reason`), or `canceled`.
+            treasury (str): The treasury the refund must be paid from: the one the deposit's address pays, which may
+                differ from the account's current treasury.
+            failure_reason (None | str | Unset): Why the refund failed: `transaction_failed`, `transfer_not_found`,
+                `sender_mismatch`,
+                `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
+                added.
+            log_index (int | None | Unset): Block-wide index of the paying `Transfer` log: as named when marked paid, or
+                found at
+                verification.
+            metadata (RefundMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
+                when none.
+                Always sent; optional in the schema so clients also parse objects from servers, and
+                events rendered, before metadata.
+            transaction_hash (None | str | Unset): The attached refund transaction, once marked paid.
     """
 
     amount_atomic: str
@@ -45,8 +57,11 @@ class Refund:
     id: str
     object_: str
     status: str
+    treasury: str
+    failure_reason: None | str | Unset = UNSET
+    log_index: int | None | Unset = UNSET
     metadata: RefundMetadata | Unset = UNSET
-    tx_hash: None | str | Unset = UNSET
+    transaction_hash: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,15 +86,29 @@ class Refund:
 
         status = self.status
 
+        treasury = self.treasury
+
+        failure_reason: None | str | Unset
+        if isinstance(self.failure_reason, Unset):
+            failure_reason = UNSET
+        else:
+            failure_reason = self.failure_reason
+
+        log_index: int | None | Unset
+        if isinstance(self.log_index, Unset):
+            log_index = UNSET
+        else:
+            log_index = self.log_index
+
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
 
-        tx_hash: None | str | Unset
-        if isinstance(self.tx_hash, Unset):
-            tx_hash = UNSET
+        transaction_hash: None | str | Unset
+        if isinstance(self.transaction_hash, Unset):
+            transaction_hash = UNSET
         else:
-            tx_hash = self.tx_hash
+            transaction_hash = self.transaction_hash
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -92,12 +121,17 @@ class Refund:
                 "id": id,
                 "object": object_,
                 "status": status,
+                "treasury": treasury,
             }
         )
+        if failure_reason is not UNSET:
+            field_dict["failure_reason"] = failure_reason
+        if log_index is not UNSET:
+            field_dict["log_index"] = log_index
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
-        if tx_hash is not UNSET:
-            field_dict["tx_hash"] = tx_hash
+        if transaction_hash is not UNSET:
+            field_dict["transaction_hash"] = transaction_hash
 
         return field_dict
 
@@ -132,6 +166,26 @@ class Refund:
 
         status = d.pop("status")
 
+        treasury = d.pop("treasury")
+
+        def _parse_failure_reason(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        failure_reason = _parse_failure_reason(d.pop("failure_reason", UNSET))
+
+        def _parse_log_index(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        log_index = _parse_log_index(d.pop("log_index", UNSET))
+
         _metadata = d.pop("metadata", UNSET)
         metadata: RefundMetadata | Unset
         if isinstance(_metadata, Unset):
@@ -139,14 +193,14 @@ class Refund:
         else:
             metadata = RefundMetadata.from_dict(_metadata)
 
-        def _parse_tx_hash(data: object) -> None | str | Unset:
+        def _parse_transaction_hash(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
             return cast(None | str | Unset, data)
 
-        tx_hash = _parse_tx_hash(d.pop("tx_hash", UNSET))
+        transaction_hash = _parse_transaction_hash(d.pop("transaction_hash", UNSET))
 
         refund = cls(
             amount_atomic=amount_atomic,
@@ -156,8 +210,11 @@ class Refund:
             id=id,
             object_=object_,
             status=status,
+            treasury=treasury,
+            failure_reason=failure_reason,
+            log_index=log_index,
             metadata=metadata,
-            tx_hash=tx_hash,
+            transaction_hash=transaction_hash,
         )
 
         refund.additional_properties = d

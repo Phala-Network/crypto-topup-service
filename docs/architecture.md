@@ -261,11 +261,12 @@ flushed       chain_id, tx_hash, log_index, address_id, token, treasury, amount_
 flush_failures  chain_id, tx_hash, log_index, address_id, token, reason (revert data, hex),
               block_number, block_hash      PRIMARY KEY (chain_id, tx_hash, log_index)
               -- finalized FlushFailed events for a known address; its deposits stay unswept
-refunds       id, account_id, livemode, deposit_id, amount_atomic, to_address, tx_hash,
-              status (requested|approved|sent|confirmed), requested_by, approved_by,
-              metadata jsonb, created_at   -- executed from the treasury Safe
+refunds       id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
+              tx_hash, log_index, status (pending|succeeded|failed|canceled), failure_reason,
+              metadata jsonb, created_at   -- paid by the merchant from the address's treasury
+              UNIQUE (chain_id, tx_hash, log_index) among pending and succeeded refunds
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
-events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account),
+events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account|refund),
               object_id, actor (key_… | admin | system), data jsonb, created
               -- data: the object, rendered at the first delivery attempt
 webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
@@ -345,8 +346,8 @@ receipt:
 A reversal is one transaction: the `reversed` transition with its evidence; `deposit.reversed`
 (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`) when the product was told of the
 deposit (`credited` or `rejected`); and a quote the deposit consumed opens again while its window
-lasts, or expires with `quote.expired`. A pending refund cannot exist: refunds require a final
-deposit (§12). The watch raises `TopupDepositReversed`. A reversed deposit is never claimed again,
+lasts, or expires with `quote.expired`; its pending refunds are canceled, though none can exist
+while refunds require a final deposit (§12). The watch raises `TopupDepositReversed`. A reversed deposit is never claimed again,
 never swept, and not counted in custody reconciliation (§13).
 
 ## 8. Chain, valuation, screening
@@ -609,8 +610,8 @@ up to 7 days, or is revoked at once), and revoke, except the mode's last key tha
 revoked nor expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
 admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live
-mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, drives the
-refund workflow, lifts reconciliation blocks (§13), and replays webhook events; each change writes
+mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, lifts
+reconciliation blocks (§13), and replays webhook events; each change writes
 `audit`, and each key or account change is also an `api_key.*` or `account.updated` event with
 its actor.
 
@@ -630,7 +631,9 @@ POST   /v1/deposit_addresses/{id}/rotate                          retire it and 
 GET    /v1/deposits?account_id&quote&deposit_address&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
 POST   /v1/deposits/{id} {metadata}                               update metadata (`deposits.write`)
-POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  rejected, or credited on the product's request; finance approves (§15)
+POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  pending; the merchant pays it from its treasury (§15)
+POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}  verified at finality: succeeded or failed
+POST   /v1/refunds/{id}/cancel                                    a pending refund
 GET    /v1/refunds/{id}
 POST   /v1/refunds/{id} {metadata}                                update metadata
 GET    /v1/attestation?nonce=…                                    settlement key (§14)
@@ -642,7 +645,6 @@ GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook
 POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
-POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
 GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
@@ -722,24 +724,29 @@ has to be whole: like Stripe's Charge, the deposit carries `amount_refunded_atom
 `asset` is `null` for a token without a route; exactly one of `quote` and `deposit_address` is
 set, naming what the receiving address belongs to. Routes, versions, and valuation evidence are in the admin view.
 
-**Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, status, tx_hash,
-created}`. `amount_atomic` defaults to the unrefunded remainder. `status` is `pending` while
-requested, approved, or sent, and `succeeded` once the transfer is final; finance's steps are
-visible in the admin API. An ineligible deposit is `409 deposit_not_refundable`; one that is not
-final yet, and so could still be reversed, is `409 deposit_not_final`; an amount above the
-remainder is `400 amount_too_large`. A reversed deposit is not refundable.
+**Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, treasury, status,
+failure_reason, transaction_hash, log_index, created}`, Stripe's Refund statuses in BTCPay's
+payout flow (design D5). `amount_atomic` defaults to the unrefunded remainder and is reserved
+while the refund is `pending`. `treasury` is the one the deposit's address pays, which the merchant
+pays the refund from and attaches with `mark_paid`. At `finalized`, both providers must show a
+`Transfer` of the deposit's token from that treasury to the destination for exactly the amount, in
+a log no other refund holds; then `succeeded` and `deposit.refunded`, otherwise `failed` with
+`failure_reason` and the reservation released. An ineligible deposit is
+`409 deposit_not_refundable`; one that is not final yet, and so could still be reversed, is
+`409 deposit_not_final`; an amount above the remainder is `400 amount_too_large`; a sanctioned
+destination is `400 destination_sanctioned`. A reversed deposit is not refundable.
 
 **Errors.** Codes are stable; messages are not.
 
 | Status | `type` | `code` |
 |---|---|---|
-| 400 | `invalid_request_error` | `parameter_missing`, `parameter_invalid`, `parameter_unknown`, `amount_too_small`, `amount_too_large` (each with `param`) |
+| 400 | `invalid_request_error` | `parameter_missing`, `parameter_invalid`, `parameter_unknown`, `amount_too_small`, `amount_too_large`, `destination_sanctioned` (each with `param`) |
 | 400 | `idempotency_error` | `idempotency_key_reused` (the same key with another request) |
 | 401 | `invalid_request_error` | `api_key_missing`, `api_key_invalid`, `api_key_expired`; `signature_invalid` (admin) |
 | 403 | `invalid_request_error` | `testmode_charges_only`, `permission_denied` |
 | 404 | `invalid_request_error` | `resource_missing` |
 | 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry) |
-| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_address_cap_exceeded`, `deposit_address_retired`, `deposit_not_refundable`, `deposit_not_final`, `paused`, `chain_frozen` |
+| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_address_cap_exceeded`, `deposit_address_retired`, `deposit_not_refundable`, `deposit_not_final`, `refund_unexpected_state`, `transfer_already_used`, `paused`, `chain_frozen` |
 | 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; quote creations and deposit address rotations per customer; quote reads by `client_secret`) |
 | 503 | `api_error` | `unavailable` (no fresh price, database unavailable) |
 | 500 | `api_error` | `internal_error` |
@@ -751,9 +758,11 @@ The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, wi
 `{id: "evt_…", object: "event", type, created, data: {object}}`: `deposit.credited`,
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
-refund) carry the deposit, and `quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
+refund) carry the deposit, `refund.failed` (the attached transaction is final but does not pay the
+refund; one per refund) the refund with its `failure_reason`, and `quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
 delivery attempt and stored, so every retry and replay sends the same body. Every event id is
-`uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded`, so a
+`uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded` and
+`refund.failed`, so a
 re-emission after a restore deduplicates for every type. `deposit.credited` is the fulfillment
 event (§11) and `deposit.reversed` claws it back like `deposit.refunded`; the others are
 informational and never change balances. Nothing is sent before the route's confirmation: the
@@ -985,14 +994,14 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 |---|---|
 | Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's persistent address per chain and asset, rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
-| Refunds | Only a final deposit is refunded (`409 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
+| Refunds | Only a final deposit is refunded (`409 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | The merchant pays its own sweep gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sweep, and open quote exposure up to the caps. |
 | Rotation | Settlement key: add `settlement/v2`; products accept both for 30 days. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `refunds`) at account, customer, or route level; no pause stops a sweep, since anyone can flush a forwarder to its own treasury. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
-| Runbooks before pilot | API key compromise and key recovery, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, refund execution, rejected funds at treasury, deposit reversed. |
+| Runbooks before pilot | API key compromise and key recovery, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, rejected funds at treasury, deposit reversed. |
 
 ## 16. Observability and tests
 
@@ -1082,7 +1091,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Notifications on credited, rejected, refunded, lock expired; preferences and history | P | ✓ (basic) | ✓ | |
 | Support lookup by hash, address, lock ref, workspace, order; case owner and response target | S+P | ✓ | | |
 | Manual `nudge` of a deposit; audited | S | ✓ | | |
-| Refund policy and treasury refund workflow (request → approve → Safe → record → notify) | S+F+P | ✓ | | |
+| Refund policy and merchant refund flow (request → pay from treasury → mark paid → verify → notify) | S+F+P | ✓ | | |
 | Limits page: caps, remaining, reset time; allowlist and limit-increase requests | S+P | ✓ | | |
 | Workspace roles for deposit, history, export, refund request | P | ✓ | | |
 | Post-credit view: balance, debt settled, service resumed; low-balance prompt to prefilled quote | P | ✓ | | |

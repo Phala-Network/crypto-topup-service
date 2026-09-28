@@ -75,7 +75,7 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 | `pay.deposit_addresses.retrieve(id)` / `.list(client_reference_id=, status=, chain_id=)` / `.rotate(id)` / `.update(id, metadata=)` | `GET /v1/deposit_addresses[/{id}]`, `POST /v1/deposit_addresses/{id}/rotate`, `POST /v1/deposit_addresses/{id}` |
 | `pay.deposits.list(account_id=, quote=, deposit_address=, status=, tx_hash=, created_gte=, created_lte=)` | `GET /v1/deposits`, every page |
 | `pay.deposits.retrieve(id)` / `.update(id, metadata=)` | `GET /v1/deposits/{id}`, `POST /v1/deposits/{id}` |
-| `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
+| `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.mark_paid(id, transaction_hash=, log_index=)` / `.cancel(id)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `POST /v1/refunds/{id}/mark_paid`, `POST /v1/refunds/{id}/cancel`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
 | `pay.config.retrieve()` | `GET /v1/config` |
 | `pay.webhooks.construct_event(payload, headers, public_key)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 

@@ -12,6 +12,7 @@ use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
 use crate::ids;
+use crate::refunds::DestinationScreening;
 use crate::routes::RouteSet;
 use crate::tenancy::{Permission, Scope};
 
@@ -21,8 +22,8 @@ use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::metadata::{self, Metadata, Object};
 use super::models::{
-    CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote, Refund,
-    UpdateMetadataRequest,
+    CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote,
+    MarkRefundPaidRequest, Refund, UpdateMetadataRequest,
 };
 use super::repository::{self, NewRefund};
 
@@ -282,14 +283,17 @@ pub(crate) async fn update_deposit(
             description = "`deposit_not_refundable`, `deposit_not_final`, `paused`, or \
                            `idempotency_key_in_use`",
             body = ErrorResponse
-        )
+        ),
+        (status = 503, description = "Destination screening is unavailable; retry", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "refunds"
 )]
-/// Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-/// other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
-/// must be final.
+/// Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a
+/// sanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is
+/// reserved until the refund is canceled or fails. The destination must pass sanctions screening
+/// (`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and
+/// attaches the transaction with `mark_paid`.
 pub(crate) async fn create_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -323,6 +327,16 @@ pub(crate) async fn create_refund(
         .transpose()?;
     let metadata = metadata::on_create(request.metadata.as_ref())?;
     let route = state.refund_route(merchant.scope, deposit_id).await?;
+    let actor = merchant.actor();
+    match state.refund_screening.screen(route, destination).await {
+        DestinationScreening::Clear => {}
+        DestinationScreening::Sanctioned => return Err(ApiError::destination_sanctioned()),
+        DestinationScreening::Unavailable => {
+            return Err(ApiError::service_unavailable(
+                "sanctions screening of the destination is unavailable; retry",
+            ));
+        }
+    }
     let refund_id = repository::request_refund(
         &state.pool,
         &NewRefund {
@@ -332,11 +346,11 @@ pub(crate) async fn create_refund(
             destination,
             amount,
             metadata: &metadata,
-            actor: &merchant.actor(),
+            actor: &actor,
         },
     )
     .await?;
-    let refund = find_refund(&state, merchant.scope, refund_id)
+    let refund = find_refund(&state.pool, merchant.scope, refund_id)
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
@@ -369,7 +383,7 @@ pub(crate) async fn get_refund(
         .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["deposit"])?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
-    let mut refund = find_refund(&state, merchant.scope, id)
+    let mut refund = find_refund(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     if expand.contains(&"deposit")
@@ -429,10 +443,122 @@ pub(crate) async fn update_refund(
     {
         return Err(ApiError::not_found());
     }
-    find_refund(&state, scope, id)
+    find_refund(&state.pool, scope, id)
         .await?
         .ok_or_else(ApiError::not_found)
         .map(Json)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/refunds/{id}/mark_paid",
+    params(
+        ("id" = String, Path, description = "Refund id, `re_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    request_body = MarkRefundPaidRequest,
+    responses(
+        (status = 200, description = "OK", body = Refund),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (
+            status = 409,
+            description = "`refund_unexpected_state` (not pending, or marked paid with another \
+                           transaction), `transfer_already_used`, or `idempotency_key_in_use`",
+            body = ErrorResponse
+        )
+    ),
+    security(("api_key" = [])),
+    tag = "refunds"
+)]
+/// Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
+/// `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
+/// `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
+/// (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+/// `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
+/// transaction returns the refund.
+pub(crate) async fn mark_refund_paid(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(request): ApiJson<MarkRefundPaidRequest>,
+) -> ApiResult<Json<Refund>> {
+    merchant
+        .require(&state.pool, Permission::RefundsWrite)
+        .await?;
+    let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
+    let tx_hash = B256::from_str(&request.transaction_hash)
+        .ok()
+        .filter(|_| request.transaction_hash.len() == 66)
+        .ok_or_else(|| {
+            ApiError::invalid_param(
+                "transaction_hash",
+                "transaction_hash must be 0x and 32 bytes of hex",
+            )
+        })?;
+    repository::mark_refund_paid(
+        &state.pool,
+        merchant.scope,
+        id,
+        tx_hash,
+        request.log_index,
+        &merchant.actor(),
+    )
+    .await?;
+    let refund = find_refund(&state.pool, merchant.scope, id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(Json(refund))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/refunds/{id}/cancel",
+    params(
+        ("id" = String, Path, description = "Refund id, `re_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    responses(
+        (status = 200, description = "OK", body = Refund),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (
+            status = 409,
+            description = "`refund_unexpected_state` (succeeded or failed) or `idempotency_key_in_use`",
+            body = ErrorResponse
+        )
+    ),
+    security(("api_key" = [])),
+    tag = "refunds"
+)]
+/// Cancels a pending refund and releases its reservation of the deposit, whether or not a
+/// transaction was attached; canceling a canceled refund returns it. Once its verification has
+/// ended (`succeeded` or `failed`), a refund cannot be canceled.
+pub(crate) async fn cancel_refund(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Refund>> {
+    merchant
+        .require(&state.pool, Permission::RefundsWrite)
+        .await?;
+    let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
+    repository::cancel_refund(&state.pool, merchant.scope, id, &merchant.actor()).await?;
+    let refund = find_refund(&state.pool, merchant.scope, id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(Json(refund))
 }
 
 /// The scope's deposit `id`, if it exists.
@@ -469,36 +595,50 @@ async fn expanded_quote(
     Ok(Some(ExpandableQuote::Object(Box::new(quote))))
 }
 
-async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Option<Refund>> {
+/// The scope's refund `id`, if it exists.
+pub(crate) async fn find_refund(
+    pool: &PgPool,
+    scope: Scope,
+    id: Uuid,
+) -> ApiResult<Option<Refund>> {
     let row = sqlx::query_as::<_, RefundRow>(
         r#"
-        SELECT id, deposit_id, amount_atomic::text AS amount_atomic, to_address, status, tx_hash,
-               created_at, metadata
-        FROM refunds
-        WHERE id = $1 AND account_id = $2 AND livemode = $3
+        SELECT refund.id, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
+               refund.destination_address, address.treasury, refund.status,
+               refund.failure_reason, refund.tx_hash, refund.log_index, refund.created_at,
+               refund.metadata
+        FROM refunds AS refund
+        JOIN deposits AS deposit ON deposit.id = refund.deposit_id
+        JOIN addresses AS address ON address.id = deposit.address_id
+        WHERE refund.id = $1 AND refund.account_id = $2 AND refund.livemode = $3
         "#,
     )
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| Refund {
-        id: ids::format(ids::REFUND, row.id),
-        object: "refund".to_owned(),
-        deposit: ExpandableDeposit::Id(ids::format(ids::DEPOSIT, row.deposit_id)),
-        amount_atomic: row.amount_atomic,
-        destination_address: row.to_address,
-        status: if row.status == "confirmed" {
-            "succeeded"
-        } else {
-            "pending"
-        }
-        .to_owned(),
-        tx_hash: row.tx_hash,
-        created: row.created_at.timestamp(),
-        metadata: row.metadata.0,
-    }))
+    row.map(|row| {
+        Ok(Refund {
+            id: ids::format(ids::REFUND, row.id),
+            object: "refund".to_owned(),
+            deposit: ExpandableDeposit::Id(ids::format(ids::DEPOSIT, row.deposit_id)),
+            amount_atomic: row.amount_atomic,
+            destination_address: row.destination_address,
+            treasury: row.treasury,
+            status: row.status,
+            failure_reason: row.failure_reason,
+            transaction_hash: row.tx_hash,
+            log_index: row
+                .log_index
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| ApiError::internal())?,
+            created: row.created_at.timestamp(),
+            metadata: row.metadata.0,
+        })
+    })
+    .transpose()
 }
 
 #[derive(FromRow)]
@@ -506,9 +646,12 @@ struct RefundRow {
     id: Uuid,
     deposit_id: Uuid,
     amount_atomic: String,
-    to_address: String,
+    destination_address: String,
+    treasury: String,
     status: String,
+    failure_reason: Option<String>,
     tx_hash: Option<String>,
+    log_index: Option<i64>,
     created_at: DateTime<Utc>,
     metadata: JsonColumn<Metadata>,
 }
@@ -554,7 +697,7 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
                COALESCE((
                    SELECT sum(refund.amount_atomic)
                    FROM refunds AS refund
-                   WHERE refund.deposit_id = deposit.id AND refund.status = 'confirmed'
+                   WHERE refund.deposit_id = deposit.id AND refund.status = 'succeeded'
                ), 0)::text AS amount_refunded_atomic,
                deposit.created_at, deposit.metadata
         FROM deposits AS deposit

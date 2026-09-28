@@ -428,3 +428,17 @@ pub fn skip(reason: &str) -> Result<()> {
     eprintln!("skipping integration test: {reason}");
     Ok(())
 }
+
+/// Refund destination screening that clears every address.
+pub struct ClearScreener;
+
+#[async_trait::async_trait]
+impl topup::refunds::DestinationScreener for ClearScreener {
+    async fn screen(
+        &self,
+        _route: &topup_core::route::RouteFile,
+        _destination: alloy_primitives::Address,
+    ) -> topup::refunds::DestinationScreening {
+        topup::refunds::DestinationScreening::Clear
+    }
+}
