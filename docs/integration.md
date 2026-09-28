@@ -16,8 +16,10 @@ Phala Pay has two SDKs, both in this repository:
   `PhalaPay(...).quotes.create(...)` and `.webhooks.construct_event(...)` in Stripe's shape, over
   `topup_sdk` (signing, verification, address recomputation, `topup-sdk send-test-event`) and
   `topup_client`, generated from the OpenAPI document.
-- [sdk/js](../sdk/js), `@phala/pay`: the browser checkout, `<Checkout>` for
-  React and a framework-agnostic core.
+- [sdk/js](../sdk/js), `@phala/pay`: the browser checkout, `<Checkout>` and `<DepositAddress>`
+  for React and a framework-agnostic core, and `@phala/pay/server` (webhook `constructEvent`,
+  address recomputation, offline `flushTransaction` and `safeBatch`), which never takes a secret
+  key.
 
 Samples below use them; every step is plain HTTP and ed25519, so any backend language can do the
 same.
@@ -51,16 +53,18 @@ same response, secret included, which is how a reloaded page resumes.
 ```python
 from phala_pay import PhalaPay
 
-# PHALA_PAY_SECRET_KEY is your secret key, "ppay_sk_test_…" or "ppay_sk_live_…".
-pay = PhalaPay(api_base=PHALA_PAY_API_BASE, api_key=PHALA_PAY_SECRET_KEY)
+# PHALA_PAY_SECRET_KEY is your secret key, "ppay_sk_test_…" or "ppay_sk_live_…". FORWARDER is the
+# (factory, implementation) pair pinned from the attested deployment (§5.5): every quote's address
+# is recomputed from it before it is returned, and one you cannot derive raises.
+pay = PhalaPay(api_base=PHALA_PAY_API_BASE, api_key=PHALA_PAY_SECRET_KEY, forwarder=FORWARDER)
 
 @app.post("/topups")
 def create_topup(body: TopupRequest, team: Team = Depends(current_team)) -> dict[str, str]:
     quote = pay.quotes.create(
-        account_id=team.id, amount=body.amount, chain_id=11155111, asset="pha",
+        client_reference_id=team.id, amount=body.amount, chain_id=11155111, asset="pha",
         idempotency_key=body.order_id,
     )
-    return {"client_secret": quote.client_secret}
+    return {"client_secret": quote.client_secret, "expected_address": quote.address}
 ```
 
 **2. Frontend: render the checkout.** The component reads the quote's public view with the client
@@ -73,17 +77,22 @@ import { Checkout } from "@phala/pay/react";
 
 <Checkout
   clientSecret={clientSecret}
+  expectedAddress={expectedAddress}
   apiBase={PHALA_PAY_API_BASE}
   onSuccess={() => router.refresh()}
   onExpire={() => startOver()}
 />
 ```
 
-Its wallet button reads "Pay with crypto" (`buttonText`); `appearance` themes it to match the
-page, and `onChange` reports every status change (§1.2). Without React,
-`new PhalaPay({ apiBase }).checkout(clientSecret)` gives the same live status.
+`expectedAddress` is required: it is the address your backend recomputed, and the checkout fails
+closed, showing nothing to pay, when the quote it reads names another one. Its wallet button reads
+"Pay with crypto" (`buttonText`); `appearance` themes it to match the page, a test-mode quote says
+"Test mode", and `onChange` reports every status change (§1.2). Without React,
+`new PhalaPay({ apiBase }).checkout(clientSecret, { expectedAddress })` gives the same live
+status.
 
-**3. Webhook: verify and fulfil once.** Credit `amount` cents to `account_id` once per deposit id,
+**3. Webhook: verify and fulfil once.** Credit `amount` cents to `client_reference_id` once per
+deposit id,
 commit, then answer `2xx`; `onSuccess` in the browser is display only (§2).
 
 ```python
@@ -98,12 +107,14 @@ async def webhook(request: Request) -> Response:
     except (SignatureVerificationError, ValueError):
         return Response(status_code=400)
     if event.type == "deposit.credited":
-        credit_once(event.deposit.id, event.deposit.account_id, event.deposit.amount)
+        credit_once(event.deposit.id, event.deposit.client_reference_id, event.deposit.amount)
     elif event.type in ("deposit.reversed", "deposit.refunded"):
         claw_back_once(event.id, event.deposit.id)
     return Response(status_code=200)
 ```
 
+A Node backend verifies the same way with `constructEvent(rawBody, headers, WEBHOOK_KEYS,
+{ expectedAccount: ACCOUNT, expectedLivemode: false })` from `@phala/pay/server`.
 [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) is this backend in full, with an
 idempotent SQLite ledger and tests; the staging reference product serves the Phala Pay demo, a
 cloud console's billing page, at `/demo/`.
@@ -124,8 +135,8 @@ chain before then, the deposit is reversed and a signed `deposit.reversed` tells
 credit back, exactly as for a refund (§2.3). Phala Cloud owns the balance: it
 verifies the signature and credits the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
-addresses are CREATE2 forwarders that can only pay the treasury; the service sweeps them there in
-batches.
+addresses are CREATE2 forwarders that can only pay your treasury; you sweep them there when you
+choose, from your own wallet or Safe (§1.7).
 
 ```mermaid
 sequenceDiagram
@@ -175,13 +186,13 @@ the typical credit time (`typical_credit_seconds`, 30), and the typical finality
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
 when you sweep, and never reduces a credit.
 
-`POST /v1/quotes {account_id, amount, currency: "usd", chain_id, asset, metadata?}` with an
+`POST /v1/quotes {client_reference_id, amount, currency: "usd", chain_id, asset, metadata?}` with an
 `Idempotency-Key` returns the quote:
 
 ```json
 {
-  "id": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", "object": "quote", "account_id": "team-42",
-  "amount": 2500, "currency": "usd", "chain_id": 11155111, "asset": "pha",
+  "id": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", "object": "quote", "livemode": false,
+  "client_reference_id": "team-42", "treasury": "0x…", "amount": 2500, "currency": "usd", "chain_id": 11155111, "asset": "pha",
   "amount_atomic": "100502600000000000000", "exchange_rate": "0.24875621",
   "address": "0x…", "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…&uint256=…",
   "status": "open", "expires_at": 1790410500, "created": 1790409600,
@@ -190,7 +201,10 @@ when you sweep, and never reduces a credit.
 }
 ```
 
-- `account_id` is your workspace id (1 to 200 characters); its account is created by its first quote.
+- `client_reference_id` is your customer's id, such as your workspace id (1 to 200 characters,
+  Stripe Checkout's name); the customer is created by its first quote or deposit address.
+- `treasury` is the treasury the quote's address pays: your treasury of the chain when it was
+  created (§1.6).
 - `amount` is an integer in US cents; `amount_atomic` is the exact token amount to pay, a decimal
   string in base units, rounded up to four token decimals (the route's `quote.amount_decimals`) so
   the payer reads and types a short amount such as `100.5026 PHA`; show every digit of it. The
@@ -202,8 +216,8 @@ when you sweep, and never reduces a credit.
   time is never reported as expired: hide the address once `expires_at` has passed and offer a
   new quote.
 - `payment` is what the waiting screen shows once a transfer is seen on chain, display only:
-  `status` (`seen` once in a block, `final` once it is a deposit at the route's confirmation;
-  the name predates fast credit), `tx_hash`, `amount_atomic`,
+  `status` (`seen` once in a block, `recorded` once it is a deposit at the route's
+  confirmation), `chain_id`, `asset`, `tx_hash`, `amount_atomic`,
   `confirmations` and `estimated_final_at` while `seen`, `matches_quote` (credited at the quoted
   price when true), and the `dep_` id it has or will have. A seen payment can disappear in a
   reorg and is never a credit.
@@ -231,19 +245,24 @@ Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 [architecture §9](architecture.md#9-quotes).
 
 **Recompute every address before you show it.** A quote's address salt is
-`keccak256(abi.encode("phala-cloud", account_id, "lock", quote_id))`, and the address commits to
-the factory, the implementation, your treasury, and that salt; with all three addresses pinned,
-`TopupClient` recomputes it and raises
-`AddressMismatchError`, so a user never pays an address you did not derive. You need no address
-records of your own to credit: `deposit.credited` carries the deposit, which names the workspace
-(`account_id`) and the quote (`quote`), also for a late or wrong-amount payment.
+`keccak256(abi.encode(account, client_reference_id, "lock", quote_id))` with `account` your
+`acct_` id, and the address is the factory's `CREATE2` clone of the implementation over the
+quote's `treasury` and that salt. `PhalaPay` requires the pinned `forwarder=(factory,
+implementation)`, recomputes every quote, and raises `AddressMismatchError`, so a user never pays
+an address you did not derive; `treasuries={chain_id: treasury}` additionally refuses a quote over
+any treasury but yours. Pass the recomputed `address` to the page as `<Checkout expectedAddress>`,
+which fails closed on any other. You need no address records of your own to credit:
+`deposit.credited` carries the deposit, which names the customer (`client_reference_id`) and the
+quote (`quote`), also for a late or wrong-amount payment.
 
 **The payer's page.** Hand the quote's `client_secret` to the paying customer's page only, and
 do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without an API key, from any
-origin, as Stripe.js reads a PaymentIntent: `{id, object, status, amount, currency, asset,
-decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
+origin, as Stripe.js reads a PaymentIntent: `{id, object, livemode, status, amount, currency,
+asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
 confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the route's
-confirmation, being valued and screened), `credited`, or `rejected` (contact support). It carries no account, price, deposit id,
+confirmation, being valued and screened), `credited`, `rejected` (contact support), or `reversed`
+(the credited payment's transaction left the chain before finality: it did not happen). It
+carries no account, price, deposit id,
 or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
 repeat with the same `Idempotency-Key` within 24 hours returns the same response, secret included.
 `@phala/pay`'s `<Checkout>` is this page.
@@ -270,6 +289,7 @@ dark one with a light brand color), `colorBackground`, `colorText`, `colorTextSe
 ```tsx
 <Checkout
   clientSecret={clientSecret}
+  expectedAddress={expectedAddress}
   apiBase={PHALA_PAY_API_BASE}
   appearance={{ theme: "dark", variables: { colorPrimary: "#cdfa50", accessibleColorOnColorPrimary: "#161616" } }}
   onChange={({ status }) => setPaymentInFlight(status === "seen" || status === "confirming")}
@@ -280,10 +300,14 @@ dark one with a light brand color), `colorBackground`, `colorText`, `colorTextSe
 
 ### 1.3 Payment outcomes
 
-A deposit's `status` is `detected → confirmed → credited → swept`, or `rejected` with a
-`rejection_reason`, or `reversed`
-([architecture §7](architecture.md#7-states-and-pump)). Nothing is reported as a deposit before
-the route's confirmation (two blocks on Ethereum); a deposit is final about 15 minutes later.
+A deposit's `status` is `pending` (recorded at the route's confirmation and being valued and
+screened, or held while `settlement` is paused), then `credited`, or `rejected` with a
+`rejection_reason`, or `reversed` (Stripe's `status` with booleans beside it). `final` turns true
+once the deposit's block is final (about 15 minutes after paying on Ethereum; a final deposit can
+no longer be reversed, and only a final one is refunded), and `swept` once a finalized sweep after
+it moved its forwarder's balance to your treasury (§1.7). Nothing is reported as a deposit before
+the route's confirmation (two blocks on Ethereum)
+([architecture §7](architecture.md#7-states-and-pump)).
 The staging deposit driver asserts these outcomes on Sepolia
 ([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
@@ -337,7 +361,7 @@ record id in metadata instead.
   other metadata is `400 idempotency_key_reused`.
 
 ```python
-quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111, asset="pha",
+quote = pay.quotes.create(client_reference_id="team-42", amount=2500, chain_id=11155111, asset="pha",
                           idempotency_key=order.id, metadata={"order_id": order.id})
 pay.deposits.update(deposit.id, metadata={"fulfilled_at": str(now)})
 pay.refunds.update(refund.id, metadata={"ticket": ""})   # unsets `ticket`
@@ -372,7 +396,8 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
 #    {"chain_id": 84532, "address": "0xabc…", "treasury": "0x…", "assets": [ … ]}]}
 ```
 
-- `POST /v1/deposit_addresses {client_reference_id}` returns the customer's **active** address,
+- `POST /v1/deposit_addresses {client_reference_id}` returns the customer's **active** address
+  with a new `client_secret` for the customer's page,
   issuing it the first time: call it whenever the page opens; the same request returns the same
   address until it is rotated, and it adds a network supported since. Addresses are per mode: a
   test key never sees a live address, and `networks` lists the chains of that mode.
@@ -399,13 +424,21 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   the `chain_id` and `address` it arrived on.
 - `GET /v1/deposit_addresses/{id}` and `GET /v1/deposit_addresses?client_reference_id=…&status=…`
   read them; `GET /v1/deposits?deposit_address=da_…` lists what reached one.
+- `payments` lists the address's payments of the last 24 hours, newest first, in a quote's
+  `payment` shape: `seen` within about a block of arriving (with its `confirmations`), then
+  `recorded` as a deposit, which `GET /v1/deposits?deposit_address=da_…` follows to `credited`.
+  Display only: credit from `deposit.credited`. The customer's page reads the same, without an
+  API key, from `GET /v1/deposit_addresses/{id}?client_secret=…` (`ClientDepositAddress`, any
+  origin, rate-limited), with each payment's progress: `seen`, `confirming`, `credited`,
+  `rejected`, or `reversed`. Each create or rotation issues a new secret and the newest 10 stay
+  valid, as a Stripe CustomerSession's; give it only to that customer's page and do not log it.
 - Recompute the address before showing it, as for quotes: the salt is
   `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`
   with the types `(string, bool, string, string, uint256)` (no chain, no asset), and each
   network's address is the factory's `CREATE2` for that network's `treasury` and the salt.
-  `PhalaPay(..., forwarder=(factory, implementation, treasury))` checks every network of an active
-  address and raises `AddressMismatchError`; `topup_sdk.deposit_address(...)` recomputes any
-  version offline.
+  `PhalaPay(..., forwarder=(factory, implementation))` checks every network of an active address
+  over its `treasury` (and against `treasuries=` when pinned) and raises `AddressMismatchError`;
+  `topup_sdk.deposit_address(...)` recomputes any version offline.
 - A network pays the treasury it was issued for, forever. When your treasury on one network
   changes, that network's address changes (the others do not); payments to the old address on
   that network are still credited and still reach the old treasury, and a refund of such a deposit
@@ -421,8 +454,10 @@ Let the customer pick the network and the token; show that network, the token co
 address with a copy button, and a QR of that token's `payment_uri` (it carries the token, chain,
 and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any amount is credited
 at the market rate when it arrives, usually in about 30 seconds. You can reuse this address."
-`<DepositAddress depositAddress={…}>` from `@phala/pay/react` renders exactly that from `address`
-and `networks`; pass only those to the browser.
+`<DepositAddress depositAddress={…} clientSecret={…} apiBase={…}>` from `@phala/pay/react`
+renders exactly that from `address` and `networks` (pass only those and the `client_secret` to the
+browser) and, with the secret, shows each payment as it arrives: "1.5 PHA received on Sepolia, 1
+confirmation", then "credited".
 
 ### 1.6 Treasuries
 
@@ -441,7 +476,9 @@ curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $
 ```
 
 - **EOA:** sign with `personal_sign` (EIP-191), for example `cast wallet sign "$MESSAGE"`;
-  `deploy/sandbox/set-treasury.sh` does both steps from a test key.
+  `deploy/sandbox/set-treasury.sh` does both steps from a test key, and the Python SDK does them
+  with `pay.treasuries.set_eoa(chain_id=…, address=…, private_key=…)` (install
+  `phala-pay[eoa]`); it refuses a key that is not the address's before anything is sent.
 - The address is screened for sanctions (`400 treasury_sanctioned`), again when a pending change
   is due to apply (a listed one is `canceled` with `cancellation_reason: "sanctioned"`), and every
   day while it is your treasury: a listed treasury pauses your account's `quotes` and
@@ -500,10 +537,70 @@ await submitTreasury({ chain_id, message: challenge.message, signature }) // POS
   `operation: DelegateCall` to the Safe's `SignMessageLib`, calling
   `signMessage(hashSafeMessage(challenge.message))`, records the approval in the Safe; submit
   `"signature": "0x"` once that transaction is at `finalized`, within the challenge's 24 hours.
+- Submit the collected signature with the Python SDK as for an EOA:
+  `challenge = pay.treasuries.challenge(chain_id=…, address=SAFE)`, the owners sign
+  `challenge.message` as above, then `pay.treasuries.create(chain_id=…, message=challenge.message,
+  signature=signature)`.
 - The service's tests run exactly these three flows (1-of-1, 2-of-3, and `SignMessageLib`) against
   Safe v1.4.1 built from `safe-global/safe-smart-account` at tag v1.4.1, whose code equals the
   canonical deployment's, and refuse a non-owner's signature, too few signatures, and an owner's
   `personal_sign` of the message.
+
+### 1.7 Balance, sweeps, and the forwarder export
+
+Payments wait in their forwarders until you sweep them to your treasury: nothing Phala runs can
+move them, and a forwarder can pay only the treasury in its address. You choose when, and pay the
+gas, with one `factory.flush(treasury, salts, token)` per token and treasury (design D4).
+
+- `GET /v1/balance` (`pay.balance.retrieve()`, Stripe's Balance): per chain and token, the
+  `amount_atomic` your forwarders hold (deposits not reversed, minus finalized sweeps) and the
+  `final_amount_atomic` part of it from final deposits, which is safe to sweep.
+- `GET /v1/forwarders` (`pay.forwarders.list()`): every forwarder issued in the mode, for quotes
+  and for deposit address networks (current and superseded, `superseded_at`), with its `chain_id`,
+  `address`, `factory`, `salt`, and `treasury`: the export that keeps your funds recomputable and
+  sweepable even without Phala Pay. With `sweepable=<token>` it lists only forwarders with a final
+  unswept balance of that token that may be swept: never one holding a deposit rejected as
+  `sanctioned`, and never one paying a treasury a sanctions list names (`503` when screening
+  cannot answer).
+- `GET /v1/sweeps` (`pay.sweeps.list()`, Stripe's Payouts): every finalized `Flushed` event of
+  your forwarders, whoever sent the flush, as `sw_…` objects with the forwarder, token, treasury,
+  amount, and transaction. A deposit is `swept` once a sweep after it moved its forwarder's balance.
+
+The call is built offline, from the forwarders, by the SDKs:
+
+```python
+from topup_sdk import flush_transactions, safe_batch, write_safe_batch
+
+forwarders = list(pay.forwarders.list(chain_id=1, sweepable=PHA))
+calls = flush_transactions(forwarders, PHA)  # one {to, data, value} per treasury, 200 each
+# An EOA treasury, or any wallet: send each call as an ordinary transaction.
+# A Safe treasury: write a Transaction Builder batch for the owners.
+write_safe_batch("sweep.json", safe_batch(1, SAFE, calls, name="Phala Pay sweep 2026-10"))
+```
+
+The batch file is the Safe{Wallet} Transaction Builder's `BatchFile`
+([models.ts](https://github.com/safe-global/safe-react-apps/blob/e8cccfb9a1042fa2954087988bae59c3b8c81780/apps/tx-builder/src/typings/models.ts)),
+with the app's own `meta.checksum`, so it imports without a "modified" warning. An owner opens
+Safe{Wallet} > Apps > Transaction Builder, drags the file in, and creates the batch; the owners
+sign and execute it as any Safe transaction
+([Safe help](https://help.safe.global/en/articles/40841-transaction-builder)).
+`@phala/pay/server` has the same `flushTransactions` and `safeBatch` for a Node backend.
+`pay.export_account(directory)` writes every list, `forwarders.json` included, to JSON files.
+
+### 1.8 Confirmations and pausing
+
+- **A stricter confirmation.** `POST /v1/account {"confirmation_policies": [{"chain_id": 1,
+  "confirmations": "finalized"}]}` (`pay.account.update(confirmation_policies={1: "finalized"})`)
+  credits that chain's payments only at the stricter of the route's floor and your value: a depth
+  such as `"12"`, `"safe"`, or `"finalized"`, never weaker than the route's (`400` otherwise);
+  `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
+  `typical_credit_seconds`, and `GET /v1/account` lists your policies. Use `finalized` for goods
+  you cannot claw back; a deposit waits `pending` meanwhile.
+- **Pause issuing.** `POST /v1/account/pause {"scopes": ["quotes"]}` (`pay.account.pause_quotes()`)
+  stops new quotes, deposit addresses, and networks in both modes, for an emergency such as a
+  leaked key during a treasury time-lock; payments to existing addresses keep being credited.
+  `POST /v1/account/resume` lifts your own pause; a pause the operator set stays in
+  `paused_scopes` until the operator lifts it. Both are announced as `account.updated`.
 
 ## 2. Webhooks and fulfillment
 
@@ -523,18 +620,19 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
 {"id": "evt_26a20351ab10595a852f9c1aa0372d73", "object": "event", "type": "deposit.credited",
  "created": 1790409590,
  "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit",
-                     "account_id": "team-42", "quote": "qt_…", "status": "credited",
+                     "client_reference_id": "team-42", "quote": "qt_…", "status": "credited",
                      "amount": 1234, "currency": "usd", "price_source": "quote",
                      "metadata": {"order_id": "6735"}, …}}}
 ```
 
 - `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
-  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a
-  finalized flush covered it before that first delivery.
+  first delivered and never changed afterwards; its `status` is `credited` (its `swept` is true if
+  a finalized sweep covered it before that first delivery).
 - `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
   otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
-  valued at spot; it is `null` only for a legacy persistent address.
+  valued at spot; it is `null` for a deposit address's payment, which names its
+  `deposit_address` instead.
 - `metadata` is the deposit's, which starts as a copy of the quote's (§1.4). As the rest of
   `data.object`, it is what the deposit held at the first delivery.
 - `webhook-id` is the event's `id`: `evt_` and the hex of
@@ -568,7 +666,7 @@ def fulfill(credit: CreditedDeposit) -> None:
             orders.insert(credit.fulfillment_key, status="held")
             return  # support later requests a refund (§2.4)
         orders.insert(credit.fulfillment_key, status="paid")
-        ledger.credit(credit.account_id, credit.amount)
+        ledger.credit(credit.client_reference_id, credit.amount)
 ```
 
 `phala_pay`'s `webhooks.construct_event` (Quickstart) is the same verification with a typed
@@ -587,7 +685,7 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 | 6 | On `deposit.reversed`, claw back the credit applied for that deposit id, as for `deposit.refunded`, once per event id (a held credit was never applied). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. |
 
 Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
-`credited` or `swept` with the same amount; recompute the deposit id, `dep_` and the hex of
+`status: "credited"` with the same amount; recompute the deposit id, `dep_` and the hex of
 `uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}")` (`topup_sdk.deposit_id`), where
 `receipt_log_index` is the transfer's position among its transaction's receipt logs (0 for a plain
 token transfer), and verify the cited log on your own node at finality; per-deposit and per-period caps as review holds. None is needed for
@@ -602,8 +700,8 @@ closed or suspended workspace, your own caps), record it as held and answer `2xx
 has a destination address from the user, an operator refunds it from your admin (§3): you pay
 it from your treasury, attach the transaction, and `deposit.refunded` follows. To
 stop crediting an account before deposits arrive, pause its `settlement` scope
-(the operator's `POST /v1/admin/accounts/{acct}/customers/{account_id}/pause`): its deposits
-then wait in `confirmed` until you resume.
+(the operator's `POST /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause`): its
+deposits then wait `pending` until it is resumed.
 
 ### 2.5 Phala Cloud ledger mapping
 
@@ -653,7 +751,7 @@ the service's public key.
 
 | Type | When | `data.object` |
 |---|---|---|
-| `deposit.credited` | Final, priced, and screened: fulfill it (§2). | The deposit |
+| `deposit.credited` | At the route's confirmation, priced and screened: fulfill it (§2). | The deposit |
 | `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
 | `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Claw back its credit as for `deposit.refunded` (§2.3). | The deposit, `status: "reversed"` |
 | `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
@@ -671,9 +769,9 @@ The account events (`account.*` including `account.treasury.*`, `api_key.*`, `we
 every enabled endpoint of the mode receives them whatever its `enabled_events`. Every event names
 its `actor`: the key id (`key_…`) that caused it, `admin` for the operator, or `system`.
 
-Every object names its `account_id`. Before the route's confirmation nothing is sent: a checkout
-page shows the payment from the quote's `payment` (or the payer's `payment_status` read by
-`client_secret`).
+Every deposit and quote names its `client_reference_id`. Before the route's confirmation nothing
+is sent: a page shows the payment from the quote's `payment` or the deposit address's `payments`
+(or the payer's view read by `client_secret`).
 
 ### 2.7 Receipts
 
@@ -793,13 +891,14 @@ cd sdk/python
 uv run --locked topup-sdk keygen --keyid test-webhooks/v1 --seed-out /tmp/test-service.seed
 # Configure your test instance to pin the printed public key in place of your webhook key, then:
 uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
-  --seed-file /tmp/test-service.seed --account acct_… --account-id test-workspace --amount 250
+  --seed-file /tmp/test-service.seed --account acct_… --client-reference-id test-workspace \
+  --amount 250
 ```
 
 It sends a signed test-mode `deposit.credited` of your account, the same event again, a copy
 signed by another key, and another account's event signed by the pinned key, and passes when
 your answers are `2xx`, `2xx`, `4xx`, and `4xx`. Then check your ledger: exactly one credit
-of `--amount` cents for `--account-id`. The reference product's tests
+of `--amount` cents for `--client-reference-id`. The reference product's tests
 ([deploy/product/tests](../deploy/product/tests)) are a worked example of the §2 obligations.
 
 ### 4.3 Staging
@@ -822,8 +921,11 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       and the receiver checking your `acct_…` id and `livemode: true`.
 - [ ] Your live treasury proven on every chain you accept (§1.6), and your receiver alerting you on
       `account.treasury.pending`.
-- [ ] Every address recomputed before display; the `client_secret` handed only to the paying
-      customer's page and never logged.
+- [ ] Every address recomputed before display (`PhalaPay(forwarder=…)`, optionally
+      `treasuries=…`) and passed as `<Checkout expectedAddress>`; the `client_secret` handed only
+      to the paying customer's page and never logged.
+- [ ] A sweep path (§1.7): `flush_transactions` from an EOA, or a `safe_batch` file for the
+      treasury Safe's owners.
 - [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
       state.
 - [ ] Quote, waiting, history, and exception UI per
@@ -886,7 +988,7 @@ export NONCE="$(openssl rand -hex 32)"
 curl -fsS -H "Authorization: Bearer $PHALA_PAY_SECRET_KEY" \
   "$TOPUP_ORIGIN/v1/attestation?nonce=$NONCE" > attestation.json
 # The official dstack verifier, pinned by digest (Docker): quote, TCB, event log, OS image.
-jq '{quote: null, attestation: .quote}' attestation.json |
+jq '{quote: null, attestation: .tdx_quote}' attestation.json |
   deploy/dstack-verifier.sh > verification.json
 jq -e --arg app "$APP_ID" --arg compose "$COMPOSE_HASH" \
   --arg report_data "$(jq -r '.report_data' attestation.json)" '
@@ -963,21 +1065,28 @@ unknown, or revoked one `401 api_key_invalid`, and a rolled key past its expiry
 (Stripe's numbers), with a platform-wide test-mode ceiling: `429 rate_limit`, retry with backoff.
 
 ```python
-from topup_sdk import TopupClient
+from phala_pay import PhalaPay
 
 # The forwarder factory and implementation, pinned from the attested deployment like your webhook
-# keys (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
+# keys (§5.3): every quote and deposit address is recomputed before it is returned. Pinning your
+# treasury per chain is optional hardening.
 forwarder = (
     "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",  # factory
     "0x70B714508BFa441449DC09f790Ca03Baa5170360",  # implementation
-    "0x936c1991f8dA9a919fa11b557a3514719f5A4504",  # treasury
 )
-with TopupClient(
-    "https://pay-api-staging.phala.com", PHALA_PAY_SECRET_KEY, forwarder=forwarder
-) as client:
-    config = client.get_config()
-    quote = client.create_quote("team-42", 2500, chain_id=11155111, asset="pha")
+with PhalaPay(
+    "https://pay-api-staging.phala.com",
+    PHALA_PAY_SECRET_KEY,
+    forwarder=forwarder,
+    treasuries={11155111: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"},
+) as pay:
+    config = pay.config.retrieve()
+    quote = pay.quotes.create(client_reference_id="team-42", amount=2500, chain_id=11155111,
+                              asset="pha")
 ```
+
+A failed request raises `ApiError` with `status_code`, `code`, `param`, and `request_id` (the
+response's `Request-Id`), to quote to support.
 
 Your account id, `acct_…` (`GET /v1/account`), is the first input of every quote's address salt;
 the client reads it once for the address check, or takes it as `account=`.
@@ -1005,33 +1114,45 @@ on every retry.
 ### 5.7 Endpoints
 
 Every path is a top-level resource; your key names your account and its mode, and another
-account's or the other mode's objects answer `404`, as a missing one does. `account_id` is your workspace id (1 to 200 characters).
+account's or the other mode's objects answer `404`, as a missing one does. `client_reference_id`
+is your customer's id (1 to 200 characters). `PhalaPay` has one resource per row, in Stripe's
+shape (`pay.quotes.create`, `pay.events.list`, …); the column names the lower-level `TopupClient`
+method.
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
-| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes`, the key's `livemode`, and the mode's `webhook_keys` versions. | `get_account` |
+| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes` (the operator's and yours), the key's `livemode`, the mode's `webhook_keys` versions, and your `confirmation_policies`. | `get_account` |
+| `POST /v1/account` `{confirmation_policies}` | Require a stricter confirmation per chain (§1.8). | `update_account` |
+| `POST /v1/account/pause`, `POST /v1/account/resume` `{scopes: ["quotes"]}` | Pause or resume issuing quotes and deposit addresses (§1.8). | `pause_quotes`, `resume_quotes` |
 | `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
-| `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset, metadata?}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
-| `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
+| `POST /v1/quotes` `{client_reference_id, amount, currency: "usd", chain_id, asset, metadata?}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The customer is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
+| `GET /v1/quotes` | Your quotes, newest first; filters `client_reference_id`, `status`; `limit`, `starting_after`, `ending_before` (`qt_…`). | `list_quotes` |
+| `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`, `reversed`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
 | `POST /v1/quotes/{id}` `{metadata}` | Update the quote's metadata (§1.4). | `update_quote` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
-| `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
+| `POST /v1/deposit_addresses` `{client_reference_id, metadata?}`, `POST /v1/deposit_addresses/{id}/rotate` | The customer's active deposit address, with a new `client_secret` (§1.5). | `create_deposit_address`, `rotate_deposit_address` |
+| `GET /v1/deposit_addresses`, `GET\|POST /v1/deposit_addresses/{id}` | Read and update deposit addresses, with their `payments`; with `?client_secret=` and no API key, the customer's `ClientDepositAddress`. | `list_deposit_addresses`, `get_deposit_address`, `update_deposit_address` |
+| `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `client_reference_id`, `quote`, `deposit_address`, `status` (`pending`, `credited`, `rejected`, `reversed`), `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/deposits/{id}` `{metadata}` | Update the deposit's metadata (§1.4); the quote's is unchanged. | `update_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | A `pending` refund of a final deposit (§3), paid by you from its `treasury`; `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
 | `POST /v1/refunds/{id}/mark_paid` `{transaction_hash, log_index?}` | Attach the transaction that pays the refund; verified at finality (§3). | `mark_refund_paid` |
 | `POST /v1/refunds/{id}/cancel` | Cancel a pending refund and release its reservation. | `cancel_refund` |
+| `GET /v1/refunds` | Your refunds, newest first; filters `deposit`, `status`. | `list_refunds` |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until its transaction is final, then `succeeded` or `failed`, or `canceled`; `expand[]=deposit`. | `get_refund` |
 | `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
-| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
-| `POST /v1/treasuries/challenge` `{chain_id, address}` | The EIP-4361 message proving `address` as your treasury on `chain_id` (§1.6). | — |
-| `POST /v1/treasuries` `{chain_id, message, signature}` | Set the chain's treasury with the signed message: `active`, or `pending` for 48 hours for a later live change (§1.6). | — |
-| `GET /v1/treasuries`, `GET /v1/treasuries/{id}` | Your treasuries in the key's mode, newest first; filters `chain_id`, `status`. | — |
-| `POST /v1/treasuries/{id}/cancel` | Cancel a pending change. | — |
+| `GET /v1/balance` | What your forwarders hold per chain and token (§1.7). | `get_balance` |
+| `GET /v1/sweeps` | Finalized sweeps of your forwarders, newest first; filters `chain_id`, `forwarder`, `token` (§1.7). | `list_sweeps` |
+| `GET /v1/forwarders` | Every forwarder with its `(factory, salt, treasury)`; `sweepable=<token>` for the ones to sweep (§1.7). | `list_forwarders` |
+| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | `list_api_keys`, `create_api_key`, `get_api_key`, `revoke_api_key`, `roll_api_key` |
+| `POST /v1/treasuries/challenge` `{chain_id, address}` | The EIP-4361 message proving `address` as your treasury on `chain_id` (§1.6). | `create_treasury_challenge` |
+| `POST /v1/treasuries` `{chain_id, message, signature}` | Set the chain's treasury with the signed message: `active`, or `pending` for 48 hours for a later live change (§1.6). | `create_treasury` |
+| `GET /v1/treasuries`, `GET /v1/treasuries/{id}` | Your treasuries in the key's mode, newest first; filters `chain_id`, `status`. | `list_treasuries`, `get_treasury` |
+| `POST /v1/treasuries/{id}/cancel` | Cancel a pending change. | `cancel_treasury` |
 | `GET /v1/attestation?nonce=` | Your account's webhook keys in the key's mode, with evidence (§5.3). | `attestation` |
 | `POST /v1/account/webhook_keys/roll` `{expires_in?}` | Roll the mode's webhook key (§5.3). | `roll_webhook_key` |
-| `GET\|POST /v1/webhook_endpoints`, `GET\|POST\|DELETE /v1/webhook_endpoints/{id}`, `POST /v1/webhook_endpoints/{id}/test` | Your webhook endpoints (§5.11). | — |
-| `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/{id}/resend` | Your events and audit log; resend one to an endpoint (§5.11). | — |
+| `GET\|POST /v1/webhook_endpoints`, `GET\|POST\|DELETE /v1/webhook_endpoints/{id}`, `POST /v1/webhook_endpoints/{id}/test` | Your webhook endpoints (§5.11). | `*_webhook_endpoint(s)` |
+| `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/{id}/resend` | Your events and audit log; resend one to an endpoint (§5.11). | `list_events`, `get_event`, `resend_event` |
 
 ### 5.8 Errors
 

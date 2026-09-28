@@ -22,6 +22,17 @@ retry until delivered, with backoff capped at 1 h, and only the receiver's `410 
 merchant disables an endpoint. With no email channel, a disabled single endpoint would fail
 silently and a paid deposit would never be credited (§11, D11).
 
+**Amendment of 2026-09-28 (owner's API audit, PR 10).** The sweep builder and address export
+follow Stripe's shapes: `GET /v1/balance` (per chain and token, unswept and final unswept amounts,
+Stripe's Balance), `GET /v1/sweeps` as the history of finalized `Flushed` events (`sw_…`, Stripe's
+Payouts), and `GET /v1/forwarders` (`fwd_…`) replacing `GET /v1/addresses`; the `flush` calldata is
+built by the SDKs offline, and `GET /v1/forwarders?sweepable=<token>` keeps §8's guarantee (no
+forwarder holding a sanctioned deposit, no sanctioned treasury). A deposit's `status` is `pending`,
+`credited`, `rejected`, or `reversed`, with the booleans `final` and `swept`; a quote's `payment`
+reports `seen` or `recorded`, and deposit addresses carry the same `payments` with a
+`client_secret` (Stripe's CustomerSession) for the customer's page. `<Checkout expectedAddress>` is
+required.
+
 ## 1. Context
 
 Before this design (architecture before PR 1): a **product** was the tenant, registered by the
@@ -179,10 +190,10 @@ Every account sweeps the same way, with one `factory.flush(treasury, salts[], to
 token:
 
 - The SDK's `flush_transaction(factory, treasury, salts, token)` encodes the call offline from the
-  address list (`GET /v1/addresses`, §13); `GET /v1/sweeps` is a convenience that lists unswept
-  balances per chain and token (ledger and on-chain balances) with the same call and a gas
-  estimate. Neither ever builds a flush to a sanctioned treasury or includes an address holding a
-  sanctioned deposit (§8).
+  forwarder list (`GET /v1/forwarders`, §13); `GET /v1/forwarders?sweepable=<token>` lists the
+  forwarders to pass it, never one paying a sanctioned treasury or holding a sanctioned deposit
+  (§8). `GET /v1/balance` reports unswept amounts per chain and token, and `GET /v1/sweeps` the
+  finalized `Flushed` events (amended 2026-09-28).
 - **EOA treasury or any wallet:** send the call as an ordinary transaction (a script, a cron job,
   or any wallet).
 - **Safe treasury:** the SDK's `safe_batch(chain_id, safe, calls)` writes the calls as a Safe
@@ -629,7 +640,7 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   token must equal its final deposits minus its finalized `Flushed` amounts; a mismatch freezes the
   chain's crediting and alerts. Factory events count only for known `(address, treasury)` pairs.
 - **Export and closure.** The list endpoints are the export (GDPR Art. 20, a "structured, commonly
-  used and machine-readable format"): quotes, deposits, refunds, events, and `GET /v1/addresses`
+  used and machine-readable format"): quotes, deposits, refunds, events, and `GET /v1/forwarders`
   with every address's `(chain, factory, salt, treasury)`, so funds stay sweepable without Phala;
   the SDK's `export_account(dir)` pages through them into JSON files. Closure (PR 13) is an
   operator action at the merchant's request: keys revoked, webhooks stopped, the contact deleted
@@ -730,12 +741,13 @@ GET    /v1/deposit_addresses?client_reference_id&status, GET|POST /v1/deposit_ad
 POST   /v1/deposit_addresses/{id}/rotate
 GET    /v1/deposits?client_reference_id&quote&status&tx_hash&created[...]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}
-GET    /v1/addresses?chain_id&…                      (chain, factory, salt, treasury) per address
+GET    /v1/forwarders?chain_id&sweepable&…           (chain, factory, salt, treasury) per address
 POST   /v1/refunds {deposit, amount_atomic, destination_address}
 POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}
 POST   /v1/refunds/{id}/cancel
 GET    /v1/refunds/{id}
-GET    /v1/sweeps?chain_id&token                     unswept balances and the flush call {to, data}
+GET    /v1/balance                                   unswept amounts per chain and token
+GET    /v1/sweeps?chain_id&forwarder&token           finalized Flushed events (the flush is built offline)
 GET    /v1/events?type&created[...], GET /v1/events/{id}, POST /v1/events/{id}/resend
 GET|POST /v1/webhook_endpoints, GET|POST|DELETE /v1/webhook_endpoints/{id}, POST …/{id}/test
 GET    /v1/attestation?nonce=…                       authenticated; binds the account's key
@@ -746,8 +758,9 @@ POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, reaso
 POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}      recovery key
 ```
 
-- Objects and events carry `livemode`; events carry `account` and `actor`. Deposit gains
-  `status: reversed`, `confirmations`, `final` (bool), `swept`. Quote gains `treasury`. Events add
+- Objects and events carry `livemode`; events carry `account` and `actor`. Deposit `status` is
+  `pending`, `credited`, `rejected`, or `reversed`, with `final` and `swept` booleans. Quote gains
+  `treasury`. Events add
   `deposit.reversed` and the account events of §11.
 - **D15: metadata.** Quotes, deposits, and refunds carry Stripe's
   [`metadata`](https://docs.stripe.com/api/metadata) exactly: at most 50 string pairs, keys of up
@@ -787,7 +800,7 @@ citing old numbers are corrected by the PR that next touches them.
 | 7 | Treasuries through the API: proof, time-lock, events | ✓ | 4, 5 | |
 | 8 | Webhook endpoints, account events, delivery | ✓ | 6 | |
 | 9 | Refunds | ✓ | 4 | |
-| 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | |
+| 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | in review |
 | 11 | Deploy, docs, staging reset | ✓ | 1–10 | |
 | 12 | Restricted keys | | 5 | |
 | 13 | Account closure | | 5 | |

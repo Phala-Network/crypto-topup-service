@@ -6,7 +6,40 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- The API's name for your customer is `client_reference_id` everywhere: `pay.quotes.create(
+  client_reference_id=…)`, `pay.deposits.list(client_reference_id=…)`, `Quote`/`Deposit`
+  `.client_reference_id`, `CreditedDeposit.client_reference_id`, and `topup-sdk send-test-event
+  --client-reference-id`. `lock_salt(account, client_reference_id, quote_id)` names its parameters
+  so (the salt is unchanged).
+- `PhalaPay(…, forwarder=(factory, implementation))` is required and a pair: every quote is
+  recomputed over its own `treasury` and every deposit address network over its own, failing
+  closed with `AddressMismatchError`; the optional `treasuries={chain_id: treasury}` pins the
+  treasury each may pay. `TopupClient(forwarder=)` takes the same pair.
+- A deposit's `status` is `pending`, `credited`, `rejected`, or `reversed`, with booleans `final`
+  and `swept`; `CreditedDeposit` accepts only `credited`.
+- `Quote.payment` is the shared `Payment` model (`status` `seen` or `recorded`, with `chain_id` and
+  `asset`); `QuotePayment` is gone. `DepositAddress.payments` uses the same model.
+- `AttestationResponse.tdx_quote` replaces `.quote`.
+- Every object's `livemode` and `metadata` are required in the generated models.
+
 ### Added
+
+- `pay.account` (`retrieve`, `update(confirmation_policies=)`, `pause_quotes`, `resume_quotes`,
+  `roll_webhook_key`), `pay.api_keys`, `pay.webhook_endpoints`, `pay.events` (`list`, `retrieve`,
+  `resend`), `pay.treasuries` (`challenge`, `create`, `set_eoa`, `list`, `retrieve`, `cancel`),
+  `pay.balance`, `pay.sweeps`, `pay.forwarders`, `pay.quotes.list`, `pay.refunds.list`, and
+  `pay.export_account(directory)`, with the matching `TopupClient` methods.
+- `ApiError.request_id`, read from the response's `Request-Id` (or `X-Request-Id`).
+- Offline sweeping: `topup_sdk.flush_transaction(factory, treasury, salts, token)`,
+  `flush_transactions(forwarders, token)`, `safe_batch(chain_id, safe, calls)` writing the Safe
+  Transaction Builder's `BatchFile` JSON with the app's checksum, `write_safe_batch`, and
+  `batch_checksum`.
+- `topup_sdk.sign_treasury_challenge(message, private_key, address=)`, the EIP-191 proof of an EOA
+  treasury (extra `phala-pay[eoa]`), and `topup_sdk.quote_address(...)`.
+- `DepositAddress.client_secret` and `.payments`; the generated client reads a deposit address's
+  public `ClientDepositAddress`.
 
 - The generated client covers treasuries (design D10): `topup_client.api.treasuries`
   (`create_treasury_challenge`, `create_treasury`, `list_treasuries`, `get_treasury`,

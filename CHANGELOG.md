@@ -7,7 +7,42 @@ webhook receivers must ignore unknown fields. The format follows
 
 ## [Unreleased]
 
+### Changed (breaking; nothing is live)
+
+- API vocabulary (docs/design/multi-tenant.md §16 PR 10, and the Stripe-conventions audit): the
+  merchant's customer is `client_reference_id` everywhere (`POST /v1/quotes`, quotes, deposits,
+  `GET /v1/deposits?client_reference_id=`, and the admin path
+  `/v1/admin/accounts/{acct}/customers/{client_reference_id}/pause|resume`).
+- Deposit `status` is `pending` (recorded at the route's confirmation, being valued and
+  screened, or held by a `settlement` pause), `credited`, `rejected`, or `reversed`; the new
+  booleans `final` (its block is final) and `swept` (a finalized `Flushed` event after it moved its
+  forwarder's balance) replace the `detected`, `confirmed`, and `swept` statuses. The status filter
+  takes the new values.
+- A quote's `payment` is the shared `Payment` object: `status` `seen` or `recorded` (was `final`),
+  with `chain_id` and `asset`; `matches_quote` is `null` on a deposit address.
+- `GET /v1/attestation`'s `quote` is `tdx_quote` (and so is `topup attest`'s output).
+- `GET /v1/admin/deposits/{id}` returns the `Deposit` with an `admin` object (`state`, route,
+  `transitions`, `events`); the separate admin deposit shapes are gone.
+- `livemode` and `metadata` are required on every object in the OpenAPI document.
+
 ### Added
+
+- `POST /v1/account {confirmation_policies}` requires, per chain, a confirmation stricter than the
+  route's floor (a depth, `safe`, or `finalized`), applied to every deposit not credited yet;
+  `GET /v1/config` reports the effective `confirmations` and `typical_credit_seconds`, and the
+  account lists its `confirmation_policies`. `POST /v1/account/pause|resume {scopes: ["quotes"]}`
+  pauses the merchant's own quotes and deposit addresses; an operator's pause stays until the
+  operator lifts it. Both announce `account.updated`.
+- `GET /v1/balance` (per chain and token, unswept and final unswept amounts), `GET /v1/sweeps`
+  (finalized `Flushed` events as `sw_…` objects), and `GET /v1/forwarders` (`fwd_…`, every issued
+  address with its `factory`, `salt`, `treasury`, `quote` or `deposit_address`, and
+  `superseded_at`; `sweepable=<token>` lists only forwarders safe to sweep, never one holding a
+  sanctioned deposit or paying a sanctioned treasury).
+- `GET /v1/quotes` and `GET /v1/refunds` lists.
+- Deposit addresses carry `payments` (the last 24 hours, `seen` within about a block, then
+  `recorded`) and each create or rotation returns a `client_secret`; with it and no API key,
+  `GET /v1/deposit_addresses/{id}?client_secret=` returns the customer's `ClientDepositAddress`.
+- `ClientQuote.livemode`, and `payment_status: "reversed"`.
 
 - Treasuries through the API (docs/design/multi-tenant.md D10, §16 PR 7).
   `POST /v1/treasuries/challenge {chain_id, address}` returns an EIP-4361 `treasury_challenge`

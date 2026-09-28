@@ -18,14 +18,14 @@ rare one means the chain, or a provider, is misbehaving.
 1. Read the deposit's timeline and events (the admin deposit view):
 
    ```sh
-   admin GET "/v1/admin/deposits/$DEPOSIT_ID" | jq ".deposit, .timeline, .events"
+   admin GET "/v1/admin/deposits/$DEPOSIT_ID" | jq "del(.admin), .admin.transitions, .admin.events"
    ```
 
-   In the `timeline`, the transition to `reversed` has `evidence.result`
+   In `admin.transitions`, the transition to `reversed` has `evidence.result`
    `dropped_nonce_consumed` (with `tx_from`, `tx_nonce`, and each provider's nonce at
    `finalized`) or `transfer_absent_at_finality` (with the block both providers showed). The
    watch's records (`evidence.stage` `finality`, `result` `followed`) show where the transaction
-   was followed; `deposit.final_at` stays `null` on a reversed deposit.
+   was followed; `admin.final_at` stays `null` (and `final` false) on a reversed deposit.
 2. Read the transaction on both providers:
 
    ```sh

@@ -364,7 +364,7 @@ that account and mode (merchants run the same check, docs/integration.md §5.3):
 export NONCE="$(openssl rand -hex 32)"
 curl -fsS -H "Authorization: Bearer $SECRET_KEY" \
   "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
-jq '{quote: null, attestation: .quote}' public-attestation.json |
+jq '{quote: null, attestation: .tdx_quote}' public-attestation.json |
   deploy/dstack-verifier.sh > public-verification.json
 jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" \
   --arg compose "$(jq -j '.compose_file' attestation.json | sha256sum | cut -d' ' -f1)" \

@@ -6,7 +6,28 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `<Checkout expectedAddress>` is required, as are `expectedAddress` in `createCheckout`,
+  `useCheckout`, `PhalaPay.checkout(clientSecret, { expectedAddress })`, and the second argument of
+  `retrieveQuote`/`PhalaPay.retrieveQuote`: the address your backend recomputed. A quote naming
+  another address fails closed with `CheckoutError` `address_mismatch`; the component shows
+  nothing to pay.
+- `ClientQuote` has `livemode` (the checkout shows "Test mode") and `payment_status: "reversed"`;
+  `CheckoutStatus` gains `reversed`, with "reversed" copy.
+
 ### Added
+
+- `<DepositAddress clientSecret apiBase pollInterval?>` follows the address's payments and shows
+  each within about a block of arriving ("1.5 PHA received on Sepolia, 1 confirmation"), then
+  credited, rejected, or reversed; `retrieveDepositAddress`, `parseClientDepositAddress`, and
+  `depositAddressIdFromClientSecret` read the same public view.
+- `@phala/pay/server`, which takes no secret key: `constructEvent(payload, headers, publicKeys,
+  { expectedAccount, expectedLivemode })` verifies Standard Webhooks `v1a` deliveries with
+  WebCrypto (Node 20+, Deno, Bun, edge runtimes), failing closed for another account or mode;
+  `forwarderAddress`, `lockSalt`, `depositAddressSalt`, `quoteAddress`, and `depositAddress`
+  recompute addresses; `flushTransaction`, `flushTransactions`, `safeBatch`, and `batchChecksum`
+  build sweeps offline, with the Transaction Builder's `BatchFile` type.
 
 - `<DepositAddress depositAddress chainId? asset?>` (`@phala/pay/react`): a customer's persistent
   deposit address, one address for all supported tokens and networks. The payer picks a network

@@ -519,7 +519,7 @@ fn print_attestation(
         "livemode": args.live,
         "webhook_keys": webhook_keys,
         "report_data": hex::encode(report_data),
-        "quote": hex::encode(quote),
+        "tdx_quote": hex::encode(quote),
         "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
         "compose_hash": if compose_hash.is_empty() { String::new() } else { format!("0x{}", hex::encode(compose_hash)) },
     });
