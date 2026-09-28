@@ -5,6 +5,7 @@ use std::str::FromStr;
 use alloy_eips::BlockNumberOrTag;
 use axum::Json;
 use axum::extract::State;
+use axum::http::header;
 use axum::response::Response;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
@@ -372,6 +373,30 @@ pub(crate) async fn replay_outbox_event(
         )
         .await?,
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/metrics",
+    responses((
+        status = 200,
+        description = "OK: the process's counters in the Prometheus text format, such as \
+                       `topup_rpc_calls_total{provider, chain_id, method}`; they restart at zero \
+                       with the process",
+        body = String,
+        content_type = "text/plain"
+    )),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+pub(crate) async fn metrics() -> ([(header::HeaderName, &'static str); 1], String) {
+    (
+        [(
+            header::CONTENT_TYPE,
+            crate::observability::metrics::CONTENT_TYPE,
+        )],
+        crate::observability::metrics::render(),
+    )
 }
 
 #[utoipa::path(

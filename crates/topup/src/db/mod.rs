@@ -23,7 +23,6 @@ pub use deposits::{
 pub use outbox::{EventObject, NewOutboxEvent, SYSTEM_ACTOR, enqueue_in};
 pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,
-    list_watched_addresses,
 };
 pub use scanner::{
     ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,

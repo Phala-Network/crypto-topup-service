@@ -134,6 +134,11 @@ impl Anvil {
         Ok(())
     }
 
+    pub fn block_number(&self) -> Result<u64> {
+        let output = run_checked("cast", &["block-number", "--rpc-url", &self.rpc_url], None)?;
+        Ok(String::from_utf8(output.stdout)?.trim().parse()?)
+    }
+
     pub fn reset(&self) -> Result<()> {
         run_checked(
             "cast",

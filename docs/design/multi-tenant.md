@@ -104,11 +104,14 @@ Exchanges credit withdrawable balances to anonymous users; a merchant crediting 
 can claw back, so a shallower default is proportionate, and the account policy raises it.
 
 **Mechanics (implemented by PR 1, specified in architecture §7, §8, §11).** One scanner per
-chain polls the head every 2 s and confirms on provider B at the required confirmation, then
+chain polls the head once per block time, locked onto block arrival, scans each new block for
+transfers to every issued address in one request, and confirms on provider B at the required
+confirmation, then
 values, screens, and credits in the same pass: **credited in about 30 seconds** at the default;
 `GET /v1/config` reports the typical credit time for the account's policy. A deposit's identity
 is its transfer's position in its transaction's receipt (`receipt_log_index`), which survives
-re-inclusion. A finality watch re-reads every not-yet-final deposit's receipt on both providers:
+re-inclusion. A finality watch re-reads every not-yet-final deposit's receipt on both providers
+once its recorded block is final:
 same log at or below `finalized` → `final`; re-included in a newer block → followed, not
 reversed; the transfer gone at finality, or the transaction **proven dropped** (no receipt and
 the sender's nonce consumed at `finalized`: Etherscan's "Dropped & Replaced",
@@ -282,10 +285,9 @@ fail closed, as for quotes (§8), and recompute any version offline.
 screening, events, chain-sourced sweeps (D4), refunds (D5), and per-forwarder reconciliation (§13).
 The forwarder is an ordinary `addresses` row, owned by a deposit address instead of a quote, so
 every mechanism that reads `addresses` covers it. Its deposit has `quote: null` and
-`deposit_address: "da_…"`, and `deposit.credited` carries that object. The fast scan and the head
-scan watch every deposit address (they are issued addresses that can be paid at any time), not only
-open quotes; the finalized scanner covers all addresses as before. The always-on per-block scan of
-all issued addresses (the scanner performance work) includes them.
+`deposit_address: "da_…"`, and `deposit.credited` carries that object. The per-block scan and
+the finalized backstop read every issued address (architecture §8), so a deposit address, active
+or retired, is credited at the route's confirmation like any other.
 
 **Quotes or deposit addresses.** A quote locks a price for an exact amount for a short window: use
 it for a purchase of a known amount. A deposit address takes any amount at any time and credits
@@ -542,7 +544,8 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
 - **Caps** are per account and per mode only: open quotes (default 1 000 live, 100 test), active
   deposit addresses (default 100 000 live, 1 000 test; §5a), open amount per customer and per
   account *(policy)*, max deposit (route). There is no global cap: the
-  merchant, not Phala, bears price exposure. Open quotes bound the scanner's watched-address set.
+  merchant, not Phala, bears price exposure. The scanner's cost does not grow with addresses in
+  token mode (architecture §8).
 - **Pause** scopes per account (`quotes`, `settlement`, `refunds`) and per route; the operator
   uses them for abuse and incidents. A merchant pauses and resumes its own `quotes` through
   `POST /v1/account/pause|resume`, for emergencies such as a leaked key during a treasury

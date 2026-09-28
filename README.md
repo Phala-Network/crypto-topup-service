@@ -41,8 +41,8 @@ flowchart LR
 ```text
 product asks for a quote; the account is created with it
   → service locks the price and computes a CREATE2 forwarder address (no key, nothing deployed)
-  → a display-only head scan shows the payment as "seen, N confirmations" within a block
-  → scanner reads finalized blocks and records the transfer
+  → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
+  → and records the transfer once its block reaches the route's confirmation (2 on Ethereum)
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
   → credited: a signed deposit.credited webhook, retried until the product fulfills it once
@@ -85,11 +85,13 @@ permission to create roles and schema objects; the command never falls back to t
 uppercasing and replacing non-alphanumeric characters with underscores; a URL with the placeholder
 `{key}` takes the API key in `TOPUP_RPC_<ID>_KEY` there, so the URL can be attested while the key
 stays sealed (deploy/README.md, "Sealing the secrets"); the first provider is
-provider A for finalized scanning. For each chain and asset the scanner uses the highest supplied
-route version. The scanner poll interval is `--scanner-poll-interval-s`, defaulting to 15 seconds.
-A display-only head scan on provider A reads `[finalized + 1, latest]` every 12 seconds (or the
-scanner poll interval, if shorter) for the pending view and wakes the finalized scan as soon as
-`finalized` advances; it never creates or changes a deposit.
+provider A for scanning. For each chain and asset the scanner uses the highest supplied route
+version. A head loop on provider A polls `eth_blockNumber` once per block time
+(`--head-poll-interval-s`, 12 seconds by default) and reads each new block's transfers to every
+issued address in one request; `finalized` is read at most every `--finalized-poll-interval-s`
+(60 seconds), and its advances drive the finalized backstop, the finality watch, and reconciliation
+(`--reconcile-interval-s`, at most every 600 seconds). docs/architecture.md §8 has the cadences,
+and deploy/README.md ("Measuring RPC usage") the call counters and a cost formula.
 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
 address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as

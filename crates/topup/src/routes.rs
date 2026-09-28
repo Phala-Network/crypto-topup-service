@@ -111,7 +111,7 @@ impl RouteSet {
                     .rpc_providers
                     .iter()
                     .enumerate()
-                    .map(|(position, provider)| resolve_provider(provider, position))
+                    .map(|(position, provider)| resolve_provider(provider, position, chain_id))
                     .collect(),
             });
             let first = &chain.config;
@@ -187,11 +187,15 @@ impl RouteSet {
     }
 }
 
-fn resolve_provider(provider: &str, index: usize) -> Result<Arc<EvmClient>, ProviderError> {
+fn resolve_provider(
+    provider: &str,
+    index: usize,
+    chain_id: u64,
+) -> Result<Arc<EvmClient>, ProviderError> {
     let label = provider_label(provider, index);
     match configured_provider_url(provider) {
         Ok(url) => EvmClient::new(&url)
-            .map(|client| Arc::new(client.with_provider(label.clone())))
+            .map(|client| Arc::new(client.with_provider(label.clone()).with_chain_id(chain_id)))
             .map_err(|_| ProviderError::InvalidUrl { label }),
         Err(UnresolvedProvider::MissingUrl(environment)) => {
             Err(ProviderError::MissingUrl { label, environment })

@@ -1,32 +1,32 @@
-//! ERC-20 deposit scanners: the fast scan at the route's confirmation, driven by the head loop
-//! every 2 s, and the finalized scan, which records any transfer the fast scan missed and indexes
-//! the forwarder factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events for the same
-//! addresses, whoever called the factory (design §13).
+//! ERC-20 deposit scanners: the per-block scan of the head loop ([`head`]), which records
+//! transfers at the route's confirmation about one block time after they reach it, and the
+//! finalized backstop, which records any transfer the per-block scan missed and indexes the
+//! forwarder factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events for the same
+//! addresses, whoever called the factory (design §13), once per `finalized` advance.
 
-mod confirmed;
 mod head;
 
-pub use confirmed::{ConfirmedScan, confirmed_scan_once};
-pub use head::{HEAD_SCAN_INTERVAL, HeadScan, head_scan_once};
+pub use head::{
+    DEFAULT_HEAD_POLL_INTERVAL, FinalizedHeads, HeadScan, head_scan_once, scan_new_blocks,
+};
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use alloy_primitives::Address;
 use chrono::Utc;
 use sqlx::PgPool;
-use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
-    ChainError, ChainReader, FinalizedReader, MAX_ADDRESSES_PER_REQUEST, MAX_BLOCKS_PER_REQUEST,
-    TransferLog,
+    ChainError, ChainReader, FinalizedReader, MAX_BLOCKS_PER_REQUEST, TransferLog,
 };
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::retry::backoff;
-use topup_core::route::ChainConfig;
+use topup_core::route::{Backstop, ChainConfig};
 use tracing::Instrument as _;
 
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
@@ -35,6 +35,34 @@ use crate::routes::RouteSet;
 
 /// Maximum inclusive block count scanned in one window.
 pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
+
+/// Scanner timing (`topup run --head-poll-interval-s`, `--finalized-poll-interval-s`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanConfig {
+    /// Delay between `eth_blockNumber` polls of provider A; `None` uses
+    /// [`DEFAULT_HEAD_POLL_INTERVAL`], one block time.
+    pub head_poll_interval: Option<Duration>,
+    /// Least delay between reads of provider A's `finalized` head, whose advance wakes the
+    /// finalized backstop, the finality watch, and the reconciler.
+    pub finalized_poll_interval: Duration,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            head_poll_interval: None,
+            finalized_poll_interval: DEFAULT_FINALIZED_POLL_INTERVAL,
+        }
+    }
+}
+
+/// Default least delay between `finalized` reads: an Ethereum epoch (6.4 minutes) advances it,
+/// so a minute adds at most a sixth of an epoch before an advance is acted on.
+pub const DEFAULT_FINALIZED_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Longest wait of the finalized backstop without an advance: a published head could be missed
+/// only if the head loop stopped, and the backstop then reads `finalized` itself.
+const BACKSTOP_FALLBACK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Scanner failure.
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +128,16 @@ pub struct ChainRoutes {
     /// Shared chain configuration.
     pub chain: ChainConfig,
     routes: BTreeMap<Address, RouteSelection>,
+    backstop: Backstop,
+}
+
+impl ChainRoutes {
+    /// Whether transfers are requested token-wide and kept locally: unless a current route of the
+    /// chain asks for address mode, whose any-token requests then cover every route.
+    #[must_use]
+    pub fn token_mode(&self) -> bool {
+        self.backstop == Backstop::Token
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +196,13 @@ pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
         .chain_ids()
         .filter_map(|chain_id| {
             let chain = routes.chain(chain_id)?.clone();
+            let backstop = if routes.current().any(|route| {
+                route.chain.chain_id == chain_id && route.asset.backstop == Backstop::Addresses
+            }) {
+                Backstop::Addresses
+            } else {
+                Backstop::Token
+            };
             let selected = routes
                 .current()
                 .filter(|route| route.chain.chain_id == chain_id)
@@ -174,6 +219,7 @@ pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
             Some(ChainRoutes {
                 chain,
                 routes: selected,
+                backstop,
             })
         })
         .collect()
@@ -182,14 +228,15 @@ pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
 /// Scans one chain through its current finalized head and commits durable progress.
 ///
 /// Each window records the transfers to every address and the factory's events about them before
-/// the cursor passes it, so everything at or below the cursor is indexed at finality.
+/// the cursor passes it, so everything at or below the cursor is indexed at finality. A window
+/// costs one transfer request (token mode, or one per 1 000 addresses in address mode) and one
+/// factory request, whatever the number of addresses.
 pub async fn scan_once<R: ChainReader>(
     pool: &PgPool,
     reader: &R,
     routes: &ChainRoutes,
 ) -> Result<ScanStats, ScannerError> {
     let chain_id = routes.chain.chain_id;
-    let factory = routes.chain.contracts.forwarder_factory;
     let cursor = db::get_cursor(pool, chain_id).await?.unwrap_or(0);
     if crate::reconciler::chain_is_blocked(pool, chain_id).await? {
         tracing::warn!(
@@ -207,46 +254,45 @@ pub async fn scan_once<R: ChainReader>(
         return Err(ScannerError::FinalizedBehindCursor { cursor, finalized });
     }
     let addresses = db::list_scan_addresses(pool, chain_id).await?;
-    let address_index = address_index(&addresses);
     let mut stats = ScanStats {
         cursor,
         finalized,
         ..ScanStats::default()
     };
 
+    // Addresses issued at or below the cursor are read once from their creation block to the
+    // cursor, together.
     let pending_backfills = addresses
         .iter()
         .filter(|address| !address.backfilled && address.created_block <= cursor)
         .cloned()
         .collect::<Vec<_>>();
-    for address in &pending_backfills {
-        for (from_block, to_block) in scan_windows(address.created_block, cursor.min(finalized))? {
-            let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
-            let committed = async {
-                let logs = reader
-                    .transfer_logs_to(&[address.address], from_block, to_block)
-                    .await?;
-                let deposits = resolve_logs(logs, &address_index, routes)?;
-                let factory_logs = reader
-                    .factory_logs(factory, &[address.address], from_block, to_block)
-                    .await?;
-                let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
-                let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
-                Ok::<_, ScannerError>((committed, indexed))
-            }
-            .instrument(span)
+    if let Some(from) = pending_backfills
+        .iter()
+        .map(|address| address.created_block)
+        .min()
+    {
+        for (from_block, to_block) in scan_windows(from, cursor.min(finalized))? {
+            let committed = scan_window(
+                pool,
+                reader,
+                routes,
+                &pending_backfills,
+                from_block,
+                to_block,
+            )
             .await?;
             record_committed(chain_id, &mut stats, committed.0)?;
             stats.record_factory(committed.1);
         }
-        db::commit_scan(pool, chain_id, &[], &[address.id], None, None).await?;
-        stats.record_backfilled(1)?;
+        let ids = pending_backfills
+            .iter()
+            .map(|address| address.id)
+            .collect::<Vec<_>>();
+        db::commit_scan(pool, chain_id, &[], &ids, None, None).await?;
+        stats.record_backfilled(ids.len())?;
     }
 
-    let tracked = addresses
-        .iter()
-        .map(|address| address.address)
-        .collect::<Vec<_>>();
     let mut pending_backfill_marks = addresses
         .iter()
         .filter(|address| !address.backfilled)
@@ -263,23 +309,9 @@ pub async fn scan_once<R: ChainReader>(
     }
 
     for (from_block, to_block) in scan_windows(start, finalized)? {
-        for batch in tracked.chunks(MAX_ADDRESSES_PER_REQUEST) {
-            let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
-            let committed = async {
-                let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
-                let deposits = resolve_logs(logs, &address_index, routes)?;
-                let factory_logs = reader
-                    .factory_logs(factory, batch, from_block, to_block)
-                    .await?;
-                let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
-                let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
-                Ok::<_, ScannerError>((committed, indexed))
-            }
-            .instrument(span)
-            .await?;
-            record_committed(chain_id, &mut stats, committed.0)?;
-            stats.record_factory(committed.1);
-        }
+        let committed = scan_window(pool, reader, routes, &addresses, from_block, to_block).await?;
+        record_committed(chain_id, &mut stats, committed.0)?;
+        stats.record_factory(committed.1);
         let backfilled = pending_backfill_marks
             .iter()
             .filter(|(_, created_block)| **created_block <= to_block)
@@ -306,11 +338,59 @@ pub async fn scan_once<R: ChainReader>(
     Ok(stats)
 }
 
-/// Runs every configured chain scanner until cancellation or all chains stop.
+/// Records one window's transfers to `addresses` at or above each address's creation block, and
+/// the factory's events about them.
+async fn scan_window<R: ChainReader>(
+    pool: &PgPool,
+    reader: &R,
+    routes: &ChainRoutes,
+    addresses: &[ScanAddress],
+    from_block: u64,
+    to_block: u64,
+) -> Result<(ScanCommit, db::FactoryCommit), ScannerError> {
+    let chain_id = routes.chain.chain_id;
+    let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
+    async {
+        let index = address_index(addresses);
+        let created = |address: Address| index.get(&address).map(|known| known.created_block);
+        let logs = head::issued_transfers(reader, routes, addresses, from_block, to_block)
+            .await?
+            .into_iter()
+            .filter(|log| created(log.to).is_some_and(|block| log.block_number >= block))
+            .collect();
+        let deposits = resolve_logs(logs, &index, routes)?;
+        let physical = addresses
+            .iter()
+            .map(|address| address.address)
+            .collect::<Vec<_>>();
+        let factory_logs = reader
+            .factory_logs(
+                routes.chain.contracts.forwarder_factory,
+                &physical,
+                from_block,
+                to_block,
+            )
+            .await?
+            .into_iter()
+            .filter(|log| {
+                created(log.event.forwarder()).is_some_and(|block| log.block_number >= block)
+            })
+            .collect::<Vec<_>>();
+        let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
+        let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
+        Ok((committed, indexed))
+    }
+    .instrument(span)
+    .await
+}
+
+/// Runs every configured chain scanner until cancellation or all chains stop, publishing each
+/// chain's `finalized` advances to `finalized_heads`.
 pub async fn run(
     pool: PgPool,
     route_set: &RouteSet,
-    poll_interval: Duration,
+    config: ScanConfig,
+    finalized_heads: FinalizedHeads,
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
     let mut tasks = JoinSet::new();
@@ -322,12 +402,14 @@ pub async fn run(
         let reader = FinalizedReader::new(Arc::clone(client));
         let chain_pool = pool.clone();
         let chain_cancellation = cancellation.child_token();
+        let chain_heads = finalized_heads.clone();
         tasks.spawn(async move {
             run_chain(
                 chain_pool,
                 reader,
                 routes,
-                poll_interval,
+                config,
+                chain_heads,
                 chain_cancellation,
             )
             .await
@@ -379,49 +461,74 @@ pub async fn run(
     }
 }
 
-async fn run_chain(
+/// Runs one chain's head loop and finalized backstop on provider A's `reader` until
+/// cancellation, or until the backstop stops on a non-retryable failure.
+pub async fn run_chain(
     pool: PgPool,
     reader: FinalizedReader,
     routes: ChainRoutes,
-    poll_interval: Duration,
+    config: ScanConfig,
+    finalized_heads: FinalizedHeads,
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
     let chain_id = routes.chain.chain_id;
-    let finalized_advanced = Notify::new();
+    let backstop_healthy = AtomicBool::new(true);
+    // The published head when the last pass started; the next pass waits for a higher one.
+    let scanned_from = AtomicU64::new(0);
     let finalized_scan = run_scan_loop(
         chain_id,
-        poll_interval,
+        &backstop_healthy,
         cancellation.clone(),
-        || scan_once(&pool, &reader, &routes),
+        || {
+            let published = finalized_heads.get(chain_id).map_or(0, |head| head.number);
+            scanned_from.store(published, Ordering::Relaxed);
+            scan_once(&pool, &reader, &routes)
+        },
         |delay| {
-            let finalized_advanced = &finalized_advanced;
+            let mut advances = finalized_heads.subscribe();
+            let known = scanned_from.load(Ordering::Relaxed);
             async move {
+                let advanced = async {
+                    let waited = advances
+                        .wait_for(|heads| {
+                            heads.get(&chain_id).is_some_and(|head| head.number > known)
+                        })
+                        .await
+                        .is_ok();
+                    if !waited {
+                        std::future::pending::<()>().await;
+                    }
+                };
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
-                    () = finalized_advanced.notified() => {}
+                    () = advanced => {}
                 }
             }
         },
         || OsJitter.next_u64(),
     );
-    let head_scan = head::run_head_loop(
+    let head_loop = head::run_head_loop(
         &pool,
         &reader,
         &routes,
-        poll_interval.min(HEAD_SCAN_INTERVAL),
-        &finalized_advanced,
+        &config,
+        &finalized_heads,
+        &backstop_healthy,
         cancellation,
     );
     // The head loop returns only on cancellation; the finalized loop's result is the chain's.
     tokio::select! {
         result = finalized_scan => result,
-        () = head_scan => Ok(()),
+        () = head_loop => Ok(()),
     }
 }
 
+/// Runs the finalized backstop after every `finalized` advance `sleep` waits for, or after
+/// [`BACKSTOP_FALLBACK_INTERVAL`]; a transient failure retries with backoff and marks the
+/// backstop unhealthy for the scanner's monitor until a pass succeeds.
 async fn run_scan_loop<Scan, ScanFuture, Sleep, SleepFuture, Jitter>(
     chain_id: u64,
-    poll_interval: Duration,
+    healthy: &AtomicBool,
     cancellation: CancellationToken,
     mut scan: Scan,
     mut sleep: Sleep,
@@ -435,7 +542,6 @@ where
     Jitter: FnMut() -> u64,
 {
     let mut retry_attempt = 0_u32;
-    let monitor = crate::observability::CronMonitor::scanner(chain_id);
     loop {
         let result = tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
@@ -444,7 +550,7 @@ where
         let delay = match result {
             Ok(stats) => {
                 retry_attempt = 0;
-                monitor.check_in(true);
+                healthy.store(true, Ordering::Relaxed);
                 tracing::info!(
                     chain_id,
                     cursor = stats.cursor,
@@ -455,9 +561,10 @@ where
                     swept = stats.factory.swept,
                     "finalized chain scan committed"
                 );
-                poll_interval
+                BACKSTOP_FALLBACK_INTERVAL
             }
             Err(error) if error.is_retryable() => {
+                healthy.store(false, Ordering::Relaxed);
                 let delay = backoff(retry_attempt, jitter());
                 retry_attempt = retry_attempt.saturating_add(1);
                 tracing::warn!(
@@ -470,6 +577,7 @@ where
                 delay
             }
             Err(error) => {
+                healthy.store(false, Ordering::Relaxed);
                 tracing::error!(
                     chain_id,
                     error_category = error.category(),
@@ -620,9 +728,10 @@ mod tests {
         ]));
         let sleeps = Mutex::new(Vec::new());
 
+        let healthy = AtomicBool::new(true);
         let error = run_scan_loop(
             1,
-            Duration::from_secs(15),
+            &healthy,
             CancellationToken::new(),
             || {
                 future::ready(
@@ -648,8 +757,9 @@ mod tests {
         ));
         assert_eq!(
             *sleeps.lock().expect("sleeps lock"),
-            vec![Duration::ZERO, Duration::from_secs(15)]
+            vec![Duration::ZERO, BACKSTOP_FALLBACK_INTERVAL]
         );
+        assert!(!healthy.load(Ordering::Relaxed));
         assert!(results.lock().expect("results lock").is_empty());
     }
 
@@ -711,6 +821,7 @@ mod tests {
                     version: route.version,
                 },
             )]),
+            backstop: Backstop::Token,
         }
     }
 

@@ -11,7 +11,6 @@ use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
-use super::scanner::ScanAddress;
 use super::types::{
     address_hex, atomic_decimal, b256_hex, parse_address, parse_atomic_decimal, parse_b256, to_i64,
     to_u64,
@@ -90,45 +89,6 @@ pub struct HeadCommit {
     pub seen: u64,
     /// Rows removed as reorged, unwatched, or finalized.
     pub removed: u64,
-}
-
-/// Addresses the head and fast scans watch: quote addresses whose quote is neither completed nor
-/// canceled, until one hour after expiry, and every deposit address, active or retired, since a
-/// customer may pay one at any time. Payments to any other issued address are still found by the
-/// finalized scanner; they are only credited at finality instead of at the route's confirmation.
-pub async fn list_watched_addresses(
-    pool: &PgPool,
-    chain_id: u64,
-) -> Result<Vec<ScanAddress>, sqlx::Error> {
-    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
-        r#"
-        SELECT address.id, address.address
-        FROM addresses AS address
-        JOIN quotes AS quote ON quote.id = address.quote_id
-        WHERE address.chain_id = $1
-          AND quote.status IN ('open', 'expired')
-          AND quote.consumed_by IS NULL
-          AND quote.expires_at + interval '1 hour' > now()
-        UNION ALL
-        SELECT address.id, address.address
-        FROM addresses AS address
-        WHERE address.chain_id = $1 AND address.deposit_address_id IS NOT NULL
-        "#,
-    )
-    .bind(chain_id)
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter()
-        .map(|(id, address)| {
-            Ok(ScanAddress {
-                id,
-                address: parse_address(&address)?,
-                created_block: 0,
-                backfilled: true,
-            })
-        })
-        .collect()
 }
 
 /// Replaces the pending view of blocks `from_block..=head_block` with `transfers`, in one

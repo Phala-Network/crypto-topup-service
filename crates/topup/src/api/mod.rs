@@ -194,6 +194,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::replay_outbox_event))
         .routes(routes!(handlers::daily_report))
+        .routes(routes!(handlers::metrics))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_admin,

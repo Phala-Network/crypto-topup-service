@@ -1,5 +1,9 @@
 //! Detected-to-confirmed deposit step: both providers show the same log at the transfer's receipt
 //! position, in the same block, at the route's required confirmation; then the deposit is valued.
+//!
+//! One check reads, on each provider, the one head the confirmation needs and the transaction's
+//! receipt; the block time and the nonce come from the recorded deposit, which its block hash
+//! and transaction hash fix.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -11,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use topup_adapters::chain::evm::{
-    ChainError, ChainReader, FinalizedReader, ReceiptLookup, TransferLog,
+    ChainError, ChainReader, FinalizedReader, KnownTransfer, ReceiptLookup, TransferLog,
 };
 use topup_adapters::pricing::PriceSource;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
@@ -41,6 +45,7 @@ trait ConfirmationReader: Send + Sync {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
+        known: Option<KnownTransfer>,
     ) -> Result<ReceiptLookup, ChainError>;
 }
 
@@ -60,8 +65,14 @@ where
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
+        known: Option<KnownTransfer>,
     ) -> Result<ReceiptLookup, ChainError> {
-        ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await
+        match known {
+            Some(known) => {
+                ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
+            }
+            None => ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await,
+        }
     }
 }
 
@@ -479,15 +490,20 @@ async fn confirmed_evidence(
     address: Address,
 ) -> FinalityResult {
     let confirmations = chains.confirmations;
+    let known = deposit.tx_nonce.map(|tx_nonce| KnownTransfer {
+        block_hash: deposit.block_hash,
+        block_time: deposit.block_time,
+        tx_nonce,
+    });
     let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = tokio::join!(
         chains.primary.confirmation_heads(confirmations),
         chains.secondary.confirmation_heads(confirmations),
         chains
             .primary
-            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
+            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
         chains
             .secondary
-            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
+            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
     );
     let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = match (
         primary_heads,

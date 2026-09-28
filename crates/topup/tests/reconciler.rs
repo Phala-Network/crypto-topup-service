@@ -50,6 +50,7 @@ struct MockChain {
     balances: Mutex<BTreeMap<Address, U256>>,
     balance_reads: Mutex<Vec<(u64, Vec<Address>)>>,
     derived: Mutex<BTreeMap<B256, Address>>,
+    derivation_reads: Mutex<Vec<Vec<B256>>>,
 }
 
 impl MockChain {
@@ -136,6 +137,7 @@ impl ReconciliationChain for MockChain {
         if self.fail_derivation.load(Ordering::SeqCst) {
             return Err(ReconciliationError::Chain("addressOf timed out".to_owned()));
         }
+        self.derivation_reads.lock().unwrap().push(salts.to_vec());
         let derived = self.derived.lock().unwrap();
         Ok(salts
             .iter()
@@ -422,6 +424,18 @@ async fn custody_is_checked_per_forwarder_at_the_indexed_finalized_block() -> Re
         let swept = seed_identity(&pool, &route, 71).await?;
         let unsettled = seed_identity(&pool, &route, 72).await?;
         let idle = seed_identity(&pool, &route, 73).await?;
+        // Swept to zero by its ledger: its balance is not read.
+        let emptied = seed_identity(&pool, &route, 74).await?;
+        seed_deposit(
+            &pool,
+            &route,
+            &emptied,
+            DepositSeed::new(75, DepositState::Swept)
+                .block(100)
+                .amount(250),
+        )
+        .await?;
+        seed_flushed(&pool, &route, &emptied, 120, 4, 250).await?;
         seed_deposit(
             &pool,
             &route,
@@ -472,7 +486,7 @@ async fn custody_is_checked_per_forwarder_at_the_indexed_finalized_block() -> Re
             .await?;
 
         let chain = Arc::new(MockChain::at(150));
-        chain.derive(&[&swept, &unsettled, &idle]);
+        chain.derive(&[&swept, &unsettled, &idle, &emptied]);
         chain
             .balances
             .lock()
@@ -490,7 +504,8 @@ async fn custody_is_checked_per_forwarder_at_the_indexed_finalized_block() -> Re
         ensure!(chain.balance_reads.lock().unwrap().is_empty());
 
         // The scanner lags the finalized head: the check reads at the scanner's block, where every
-        // transfer and factory event is indexed, and only forwarders with settled activity.
+        // transfer and factory event is indexed, and only forwarders whose settled ledger holds
+        // unswept funds.
         scanned_through(&pool, 140).await?;
         ensure!(
             reconciler
@@ -885,6 +900,43 @@ fn rpc_log(log: &TransferLog) -> Value {
 }
 
 #[tokio::test]
+async fn each_stored_derivation_is_read_once_until_its_row_changes() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        let seed = seed_identity(&pool, &route, 92).await?;
+        let chain = Arc::new(MockChain::at(0));
+        chain.derive(&[&seed]);
+        let reconciler = reconciler(&pool, route.clone(), chain.clone())?;
+        ensure!(
+            reconciler
+                .check(CheckName::AddressDerivation)
+                .await?
+                .is_empty()
+        );
+        ensure!(
+            reconciler
+                .check(CheckName::AddressDerivation)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.derivation_reads.lock().unwrap().as_slice() == [vec![seed.salt]]);
+
+        // A changed row is read again, and a mismatch still freezes the chain.
+        sqlx::query("UPDATE addresses SET address = $2 WHERE id = $1")
+            .bind(seed.address_id)
+            .bind(format!("{:#x}", Address::repeat_byte(0x93)))
+            .execute(&pool)
+            .await?;
+        let findings = reconciler.check(CheckName::AddressDerivation).await?;
+        ensure!(findings.len() == 1, "unexpected findings: {findings:?}");
+        ensure!(chain.derivation_reads.lock().unwrap().len() == 2);
+        ensure!(frozen_chains(&pool, &*route_set(route)?).await? == BTreeSet::from([CHAIN_ID]));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn only_chain_checks_freeze_and_findings_are_idempotent() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
@@ -1150,7 +1202,11 @@ async fn loop_respects_cancellation() -> Result<()> {
             let cancellation = cancellation.clone();
             async move {
                 reconciler
-                    .run_loop(StdDuration::from_secs(60), cancellation)
+                    .run_loop(
+                        StdDuration::from_secs(60),
+                        topup::scanner::FinalizedHeads::default(),
+                        cancellation,
+                    )
                     .await;
             }
         });
@@ -1187,7 +1243,7 @@ async fn loop_publishes_failed_checks_for_the_daily_report() -> Result<()> {
             }
         };
         tokio::select! {
-            () = reconciler.run_loop(StdDuration::from_secs(3_600), cancellation.clone()) => {}
+            () = reconciler.run_loop(StdDuration::from_secs(3_600), topup::scanner::FinalizedHeads::default(), cancellation.clone()) => {}
             result = tokio::time::timeout(StdDuration::from_secs(10), round) => result?,
         }
         cancellation.cancel();

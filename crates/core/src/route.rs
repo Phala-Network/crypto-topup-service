@@ -332,6 +332,23 @@ pub struct AssetConfig {
     pub decimals: u8,
     /// Minimum deposit amount eligible for a treasury refund.
     pub min_refund_atomic: AtomicAmount,
+    /// How the chain's transfer logs of this token are requested.
+    pub backstop: Backstop,
+}
+
+/// How a route's transfers are requested from provider A, by the per-block scan and the
+/// finalized backstop alike (architecture §8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backstop {
+    /// Every `Transfer` of the token contract, kept locally when its recipient is an issued
+    /// address: one request per block range whatever the address count. For tokens with few
+    /// transfers per block, such as PHA.
+    #[default]
+    Token,
+    /// `Transfer`s of any token to issued addresses, 1 000 addresses per request. For tokens with
+    /// many transfers per block, such as USDC, whose token-wide logs would be large.
+    Addresses,
 }
 
 /// The unit credits are counted in.
@@ -522,6 +539,9 @@ pub struct AssetSpec {
     pub contract: Address,
     /// ERC-20 decimal count, attested because credit math depends on it.
     pub decimals: u8,
+    /// How transfers are requested; default [`Backstop::Token`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backstop: Option<Backstop>,
 }
 
 /// Price sources of a route file.
@@ -778,6 +798,7 @@ impl TryFrom<RouteSpec> for RouteFile {
                 contract: spec.asset.contract,
                 decimals: spec.asset.decimals,
                 min_refund_atomic: spec.limits.min_refund_atomic,
+                backstop: spec.asset.backstop.unwrap_or_default(),
             },
             livemode: spec.livemode,
             destination: DestinationConfig {
@@ -851,6 +872,7 @@ impl From<RouteFile> for RouteSpec {
                 symbol: route.asset.symbol,
                 contract: route.asset.contract,
                 decimals: route.asset.decimals,
+                backstop: Some(route.asset.backstop),
             },
             pricing: PricingSpec {
                 mode: Some(route.pricing.mode),

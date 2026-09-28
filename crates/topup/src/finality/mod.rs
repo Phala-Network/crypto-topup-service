@@ -1,5 +1,7 @@
-//! Finality watch (design D1, architecture §7): every deposit that is not final yet is re-read on
-//! both providers by its transaction's receipt whenever provider A's `finalized` advances.
+//! Finality watch (design D1, architecture §7): whenever provider A's `finalized` advances, every
+//! deposit that is not final yet and whose recorded block is now at or below it is re-read on both
+//! providers by its transaction's receipt: one receipt per provider and deposit, plus provider B's
+//! `finalized` once per pass that has such a deposit. Nothing is read while no deposit waits.
 //!
 //! - Receipt at or below `finalized` on both, with the same transfer at the deposit's receipt
 //!   position: the deposit is final (`final_at`), and its evidence follows the block it is in.
@@ -25,7 +27,8 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
-    ChainError, ChainReader, FinalizedReader, ReceiptLookup, TransferLog,
+    ChainError, ChainReader, FinalizedHead, FinalizedReader, KnownTransfer, ReceiptLookup,
+    TransferLog,
 };
 use topup_core::deposit::{DepositState, reverse};
 use topup_core::identity::{event_id, reversed_event_id};
@@ -34,9 +37,10 @@ use uuid::Uuid;
 
 use crate::db::{self, EventObject, NewOutboxEvent};
 use crate::routes::RouteSet;
+use crate::scanner::FinalizedHeads;
 
-/// How often provider A's `finalized` is polled; a pass runs only when it advanced.
-pub const FINALITY_POLL_INTERVAL: Duration = Duration::from_secs(12);
+/// Delay before a failed pass is retried without a new `finalized` advance.
+const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// Deposits re-read in one pass, oldest block first.
 const WATCH_BATCH: i64 = 500;
 /// A transaction that left the chain without a replacement is alerted on after this long.
@@ -63,6 +67,7 @@ trait WatchReader: Send + Sync {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
+        known: Option<KnownTransfer>,
     ) -> Result<ReceiptLookup, ChainError>;
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError>;
 }
@@ -77,8 +82,14 @@ impl<R: ChainReader + Send + Sync> WatchReader for R {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
+        known: Option<KnownTransfer>,
     ) -> Result<ReceiptLookup, ChainError> {
-        ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await
+        match known {
+            Some(known) => {
+                ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
+            }
+            None => ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await,
+        }
     }
 
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
@@ -150,8 +161,23 @@ impl FinalityWatch {
         }
     }
 
-    /// Re-reads every deposit of `chain_id` that is neither final nor reversed.
+    /// Reads provider A's `finalized` and re-reads every deposit of `chain_id` that is neither
+    /// final nor reversed and whose recorded block is at or below it.
     pub async fn watch_once(&self, chain_id: u64) -> Result<WatchStats, FinalityError> {
+        let chain = self
+            .chains
+            .get(&chain_id)
+            .ok_or(FinalityError::UnknownChain(chain_id))?;
+        let finalized = chain.primary.finalized().await?;
+        self.watch_at(chain_id, finalized).await
+    }
+
+    /// [`Self::watch_once`] at provider A's `primary_finalized`, as the head loop published it.
+    async fn watch_at(
+        &self,
+        chain_id: u64,
+        primary_finalized: u64,
+    ) -> Result<WatchStats, FinalityError> {
         let chain = self
             .chains
             .get(&chain_id)
@@ -160,21 +186,25 @@ impl FinalityWatch {
         if crate::reconciler::chain_is_blocked(&self.pool, chain_id).await? {
             return Ok(stats);
         }
-        let deposits = unfinal_deposits(&self.pool, chain_id).await?;
+        let deposits = unfinal_deposits(&self.pool, chain_id, primary_finalized).await?;
         if deposits.is_empty() {
             return Ok(stats);
         }
-        let (primary_finalized, secondary_finalized) =
-            tokio::try_join!(chain.primary.finalized(), chain.secondary.finalized())?;
+        let secondary_finalized = chain.secondary.finalized().await?;
         for deposit in deposits {
             stats.watched = stats.watched.saturating_add(1);
+            let known = deposit.origin.map(|(_, tx_nonce)| KnownTransfer {
+                block_hash: deposit.block_hash,
+                block_time: deposit.block_time,
+                tx_nonce,
+            });
             let (primary, secondary) = tokio::try_join!(
                 chain
                     .primary
-                    .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
+                    .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
                 chain
                     .secondary
-                    .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index),
+                    .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
             )?;
             let nonces = match (&primary, &secondary, deposit.origin) {
                 (ReceiptLookup::Missing, ReceiptLookup::Missing, Some((from, _))) => {
@@ -207,31 +237,28 @@ impl FinalityWatch {
         Ok(stats)
     }
 
-    /// Runs a pass per chain whenever provider A's `finalized` advanced, until cancellation.
-    /// Failures are logged and retried at the next poll.
-    pub async fn run(&self, cancellation: CancellationToken) {
+    /// Runs a pass per chain whenever `heads` publishes an advance of provider A's `finalized`,
+    /// until cancellation. A failed pass is retried after a minute.
+    pub async fn run(&self, heads: FinalizedHeads, cancellation: CancellationToken) {
+        let mut advances = heads.subscribe();
         let mut watched = BTreeMap::<u64, u64>::new();
         let monitor = crate::observability::CronMonitor::finality_watch();
         loop {
-            monitor.check_in(true);
-            for (&chain_id, chain) in &self.chains {
-                let finalized = tokio::select! {
-                    () = cancellation.cancelled() => return,
-                    result = chain.primary.finalized() => result,
-                };
-                let finalized = match finalized {
-                    Ok(finalized) => finalized,
-                    Err(error) => {
-                        tracing::warn!(chain_id, %error, "finality watch head read failed");
-                        continue;
-                    }
+            let published = advances.borrow_and_update().clone();
+            let mut healthy = true;
+            for &chain_id in self.chains.keys() {
+                let Some(&FinalizedHead {
+                    number: finalized, ..
+                }) = published.get(&chain_id)
+                else {
+                    continue;
                 };
                 if watched.get(&chain_id) == Some(&finalized) {
                     continue;
                 }
                 let result = tokio::select! {
                     () = cancellation.cancelled() => return,
-                    result = self.watch_once(chain_id) => result,
+                    result = self.watch_at(chain_id, finalized) => result,
                 };
                 match result {
                     Ok(stats) => {
@@ -249,13 +276,20 @@ impl FinalityWatch {
                         }
                     }
                     Err(error) => {
+                        healthy = false;
                         tracing::warn!(chain_id, %error, "finality watch pass failed; retrying");
                     }
                 }
             }
+            monitor.check_in(healthy);
             tokio::select! {
                 () = cancellation.cancelled() => return,
-                () = tokio::time::sleep(FINALITY_POLL_INTERVAL) => {}
+                changed = advances.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(RETRY_INTERVAL).await;
+                    }
+                }
+                () = tokio::time::sleep(RETRY_INTERVAL) => {}
             }
         }
     }
@@ -469,9 +503,11 @@ fn decide(
     }
 }
 
+/// Deposits of `chain_id` that are neither final nor reversed, recorded at or below `finalized`.
 async fn unfinal_deposits(
     pool: &PgPool,
     chain_id: u64,
+    finalized: u64,
 ) -> Result<Vec<WatchedDeposit>, FinalityError> {
     let rows = sqlx::query(
         r#"
@@ -482,12 +518,14 @@ async fn unfinal_deposits(
         FROM deposits AS deposit
         JOIN addresses AS address ON address.id = deposit.address_id
         WHERE deposit.chain_id = $1 AND deposit.final_at IS NULL AND deposit.state <> 'reversed'
+          AND deposit.block_number <= $3
         ORDER BY deposit.block_number, deposit.id
         LIMIT $2
         "#,
     )
     .bind(to_i64(chain_id)?)
     .bind(WATCH_BATCH)
+    .bind(to_i64(finalized)?)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
