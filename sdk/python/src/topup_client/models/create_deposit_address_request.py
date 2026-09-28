@@ -24,8 +24,6 @@ class CreateDepositAddressRequest:
     """`POST /v1/deposit_addresses` body.
 
     Attributes:
-        asset (str): Asset code on that chain, such as `pha`.
-        chain_id (int): EVM chain, one of `GET /v1/config` `assets[].chain_id`.
         client_reference_id (str): Your identifier of the customer, 1 to 200 characters; the customer is created on
             first use.
         metadata (MetadataClear | MetadataParamType0 | Unset): A `metadata` parameter: an object of string values, where
@@ -33,17 +31,11 @@ class CreateDepositAddressRequest:
             unset every key.
     """
 
-    asset: str
-    chain_id: int
     client_reference_id: str
     metadata: MetadataClear | MetadataParamType0 | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
-
-        asset = self.asset
-
-        chain_id = self.chain_id
 
         client_reference_id = self.client_reference_id
 
@@ -59,8 +51,6 @@ class CreateDepositAddressRequest:
 
         field_dict.update(
             {
-                "asset": asset,
-                "chain_id": chain_id,
                 "client_reference_id": client_reference_id,
             }
         )
@@ -74,10 +64,6 @@ class CreateDepositAddressRequest:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
 
         d = dict(src_dict)
-        asset = d.pop("asset")
-
-        chain_id = d.pop("chain_id")
-
         client_reference_id = d.pop("client_reference_id")
 
         def _parse_metadata(data: object) -> MetadataClear | MetadataParamType0 | Unset:
@@ -100,8 +86,6 @@ class CreateDepositAddressRequest:
         metadata = _parse_metadata(d.pop("metadata", UNSET))
 
         create_deposit_address_request = cls(
-            asset=asset,
-            chain_id=chain_id,
             client_reference_id=client_reference_id,
             metadata=metadata,
         )

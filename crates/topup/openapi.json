@@ -1278,17 +1278,6 @@
             }
           },
           {
-            "name": "chain_id",
-            "in": "query",
-            "description": "Only this chain's addresses",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            }
-          },
-          {
             "name": "limit",
             "in": "query",
             "description": "1 to 100, default 10",
@@ -1359,7 +1348,7 @@
         "tags": [
           "deposit_addresses"
         ],
-        "summary": "Returns the customer's active deposit address for `chain_id` and `asset`, issuing one if it\nhas none: the same request always returns the same address until it is rotated.",
+        "summary": "Returns the customer's active deposit address, one address for every supported token on every\nsupported network of the key's mode, issuing it if the customer has none: the same request\nalways returns the same address until it is rotated. It also adds the address's network on a\nchain supported since it was issued, and replaces a chain's network whose treasury changed.",
         "operationId": "create_deposit_address",
         "parameters": [
           {
@@ -1417,7 +1406,7 @@
             }
           },
           "409": {
-            "description": "`deposit_address_cap_exceeded`, `paused`, `chain_frozen`, or `idempotency_key_in_use`",
+            "description": "`deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new address and every chain is frozen or paused), or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1583,7 +1572,7 @@
         "tags": [
           "deposit_addresses"
         ],
-        "summary": "Retires an active deposit address and returns the customer's new one for the same chain and\nasset. Payments to the retired address are still credited at spot; stop showing it.",
+        "summary": "Retires an active deposit address and returns the customer's new one, a new address on every\nnetwork. Payments to the retired address are still credited at spot; stop showing it.",
         "operationId": "rotate_deposit_address",
         "parameters": [
           {
@@ -1640,7 +1629,7 @@
             }
           },
           "409": {
-            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen`, or `idempotency_key_in_use`",
+            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen` (every chain is frozen or paused), or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -3302,21 +3291,9 @@
         "type": "object",
         "description": "`POST /v1/deposit_addresses` body.",
         "required": [
-          "client_reference_id",
-          "chain_id",
-          "asset"
+          "client_reference_id"
         ],
         "properties": {
-          "asset": {
-            "type": "string",
-            "description": "Asset code on that chain, such as `pha`."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain, one of `GET /v1/config` `assets[].chain_id`.",
-            "minimum": 0
-          },
           "client_reference_id": {
             "type": "string",
             "description": "Your identifier of the customer, 1 to 200 characters; the customer is created on first use."
@@ -3552,7 +3529,7 @@
               "string",
               "null"
             ],
-            "description": "The deposit address that received the transfer, `da_…`; `null` for a quote's address.\nPayments to a deposit address, active or retired, are credited at spot. This service\nalways sends it; it is optional in the schema so clients also parse responses and events\nfrom servers that predate it."
+            "description": "The deposit address that received the transfer, `da_…`, on `chain_id` at `address`; `null`\nfor a quote's address. Payments to a deposit address, active or retired, are credited at\nspot. This service\nalways sends it; it is optional in the schema so clients also parse responses and events\nfrom servers that predate it."
           },
           "exchange_rate": {
             "type": [
@@ -3638,37 +3615,26 @@
       },
       "DepositAddress": {
         "type": "object",
-        "description": "A customer's persistent deposit address for one chain and asset, like a bank-transfer virtual\naccount: any amount sent to it is credited to the customer at the market (spot) price when it\narrives. Rotation retires it and issues a new one; a retired address is still credited.",
+        "description": "A customer's persistent deposit address, like a bank-transfer virtual account: one address for\nevery supported token on every supported network. Any amount of a supported token sent to it\nis credited to the customer at the market (spot) price when it arrives. Rotation retires it and\nissues a new one on every network; a retired address is still credited.",
         "required": [
           "id",
           "object",
           "livemode",
           "client_reference_id",
-          "chain_id",
-          "asset",
-          "address",
-          "payment_uri",
-          "treasury",
           "version",
           "salt",
           "status",
           "created",
-          "metadata"
+          "metadata",
+          "networks"
         ],
         "properties": {
           "address": {
-            "type": "string",
-            "description": "The forwarder address to pay."
-          },
-          "asset": {
-            "type": "string",
-            "description": "Asset code."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain identifier.",
-            "minimum": 0
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address shared by every network, when all of `networks` have the same one; `null`\nwhen a network's treasury differs, and so its address (see `networks`), or when there is\nno network."
           },
           "client_reference_id": {
             "type": "string",
@@ -3697,13 +3663,16 @@
               "type": "string"
             }
           },
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositAddressNetwork"
+            },
+            "description": "The address on each supported network of the mode it was issued on, by `chain_id`, with\nthe tokens it takes there."
+          },
           "object": {
             "type": "string",
             "description": "Always `deposit_address`."
-          },
-          "payment_uri": {
-            "type": "string",
-            "description": "EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the\npayer chooses it."
           },
           "retired_at": {
             "type": [
@@ -3715,21 +3684,47 @@
           },
           "salt": {
             "type": "string",
-            "description": "CREATE2 salt, 32 bytes of hex."
+            "description": "CREATE2 salt, 32 bytes of hex; the same on every network."
           },
           "status": {
             "type": "string",
             "description": "`active`, or `retired` by a rotation; payments to either are credited."
           },
-          "treasury": {
-            "type": "string",
-            "description": "The treasury the forwarder pays, fixed when the address was issued."
-          },
           "version": {
             "type": "integer",
             "format": "int64",
-            "description": "The address's version among the customer's addresses for this chain and asset, from 1.\nThe salt is `keccak256(abi.encode(account, livemode, client_reference_id,\n\"deposit_address\", chain_id, asset, version))`, with the types `(string, bool, string,\nstring, uint256, string, uint256)` and `account` your `acct_` id; the address is the\nfactory's `CREATE2` over the treasury and that salt.",
+            "description": "The address's version among the customer's addresses, from 1. The salt is\n`keccak256(abi.encode(account, livemode, client_reference_id, \"deposit_address\", version))`,\nwith the types `(string, bool, string, string, uint256)` and `account` your `acct_` id; it\nnames no chain or asset. On each network the address is the factory's `CREATE2` over that\nnetwork's treasury and the salt.",
             "minimum": 0
+          }
+        }
+      },
+      "DepositAddressAsset": {
+        "type": "object",
+        "description": "A token a deposit address takes on one network.",
+        "required": [
+          "asset",
+          "contract",
+          "decimals",
+          "payment_uri"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset code, such as `pha`."
+          },
+          "contract": {
+            "type": "string",
+            "description": "ERC-20 contract address."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "ERC-20 decimal count.",
+            "minimum": 0
+          },
+          "payment_uri": {
+            "type": "string",
+            "description": "EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the\npayer chooses it."
           }
         }
       },
@@ -3761,6 +3756,39 @@
           "url": {
             "type": "string",
             "description": "The list's path, `/v1/deposit_addresses`."
+          }
+        }
+      },
+      "DepositAddressNetwork": {
+        "type": "object",
+        "description": "A deposit address on one network (EVM chain).",
+        "required": [
+          "chain_id",
+          "address",
+          "treasury",
+          "assets"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The forwarder address to pay on this chain."
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositAddressAsset"
+            },
+            "description": "The supported tokens on this chain; any other token sent to the address is not credited."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "treasury": {
+            "type": "string",
+            "description": "The treasury the forwarder pays. The address is the same on every network whose treasury\nis the same address."
           }
         }
       },

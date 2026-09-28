@@ -41,8 +41,6 @@ struct DepositAddressVector {
     account: String,
     livemode: bool,
     client_reference_id: String,
-    chain_id: u64,
-    asset: String,
     version: u64,
     treasury: String,
     salt: String,
@@ -90,8 +88,6 @@ fn reproduces_all_foundry_create2_vectors() -> Result<(), Box<dyn Error>> {
             &vector.account,
             vector.livemode,
             &vector.client_reference_id,
-            vector.chain_id,
-            &vector.asset,
             vector.version,
         );
         assert_eq!(salt, B256::from_str(&vector.salt)?);

@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{Account, NewDeposit};
+use topup::deposit_addresses::{self, Chain};
 use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::refunds::{
     DestinationScreener, DestinationScreening, EvmRefundChainReader, RefundChainReader,
@@ -383,6 +384,136 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
             ensure!(refund["failure_reason"] == *reason, "{body}");
             ensure!(refund["transaction_hash"] == REFUND_TX, "{body}");
         }
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_deposit_address_refund_is_paid_from_that_networks_own_treasury() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[49; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let customer = seed_customer(pool, merchant.account.id, "team-42").await?;
+        // The customer's deposit address on chain 1 over the fixture treasury; the account then
+        // moves chain 1 to another treasury, which supersedes that network with a forwarder over
+        // the new one. Both are still credited.
+        let old = Chain::of(&route_fixture());
+        let current_treasury = Address::repeat_byte(0x7c);
+        let current = Chain {
+            treasury: current_treasury,
+            ..old
+        };
+        let (issued, _) =
+            deposit_addresses::create(pool, &merchant.account, &customer, &[old], None).await?;
+        let (moved, _) =
+            deposit_addresses::create(pool, &merchant.account, &customer, &[current], None).await?;
+        ensure!(moved.id == issued.id);
+        let [old_network] = issued.networks.as_slice() else {
+            anyhow::bail!("one network: {issued:?}");
+        };
+        let [current_network] = moved.networks.as_slice() else {
+            anyhow::bail!("one network: {moved:?}");
+        };
+        ensure!(old_network.treasury == FIXTURE_TREASURY);
+        ensure!(current_network.treasury == current_treasury);
+        ensure!(old_network.address != current_network.address);
+        sqlx::query(
+            r#"
+            INSERT INTO treasuries
+                (id, account_id, chain_id, address, proof_message, proof_signature,
+                 verified_at, effective_at)
+            VALUES ($1, $2, 1, $3, 'proof', 'signature', now(), now())
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(merchant.account.id)
+        .bind(format!("{current_treasury:#x}"))
+        .execute(pool)
+        .await?;
+
+        // A deposit to the superseded network is refunded from that network's treasury: a
+        // payment from the account's current treasury fails it, and one from the old treasury
+        // pays it.
+        let to_old = seed_deposit_to(pool, old_network.address_id, 100, 0x51).await?;
+        let (status, refund) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(to_old, REFUND_DESTINATION, "100")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{refund}");
+        ensure!(
+            refund["treasury"] == format!("{FIXTURE_TREASURY:#x}"),
+            "{refund}"
+        );
+        let id = refund["id"].as_str().context("refund id")?.to_owned();
+        let receipt = finalized(vec![transfer(
+            current_treasury,
+            REFUND_DESTINATION,
+            100,
+            3,
+        )?]);
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        let worker = test_worker(pool, vec![receipt.clone()], vec![receipt]);
+        ensure!(worker.check_once().await? == Verification::Failed);
+        let (_, failed) = merchant
+            .call(Method::GET, &format!("/v1/refunds/{id}"), Vec::new())
+            .await?;
+        ensure!(failed["failure_reason"] == "sender_mismatch", "{failed}");
+
+        let id = merchant.refund(to_old, "100").await?;
+        let receipt = finalized(vec![transfer(
+            FIXTURE_TREASURY,
+            REFUND_DESTINATION,
+            100,
+            4,
+        )?]);
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        let worker = test_worker(pool, vec![receipt.clone()], vec![receipt]);
+        ensure!(worker.check_once().await? == Verification::Succeeded);
+
+        // A deposit to the current network is refunded from the current treasury, and the old
+        // treasury does not pay it.
+        let to_current = seed_deposit_to(pool, current_network.address_id, 100, 0x52).await?;
+        let (status, refund) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(to_current, REFUND_DESTINATION, "100")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{refund}");
+        ensure!(
+            refund["treasury"] == format!("{current_treasury:#x}"),
+            "{refund}"
+        );
+        let id = refund["id"].as_str().context("refund id")?.to_owned();
+        let receipt = finalized(vec![transfer(
+            FIXTURE_TREASURY,
+            REFUND_DESTINATION,
+            100,
+            5,
+        )?]);
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        let worker = test_worker(pool, vec![receipt.clone()], vec![receipt]);
+        ensure!(worker.check_once().await? == Verification::Failed);
+        let id = merchant.refund(to_current, "100").await?;
+        let receipt = finalized(vec![transfer(
+            current_treasury,
+            REFUND_DESTINATION,
+            100,
+            6,
+        )?]);
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        let worker = test_worker(pool, vec![receipt.clone()], vec![receipt]);
+        ensure!(worker.check_once().await? == Verification::Succeeded);
         Ok(())
     }
     .await;
@@ -1235,6 +1366,18 @@ impl Merchant {
         Ok(refund["id"].as_str().context("refund id")?.to_owned())
     }
 
+    /// Attaches `transaction_hash` to refund `id`.
+    async fn mark_paid(&self, id: &str, transaction_hash: &str) -> Result<()> {
+        let (status, refund) = self
+            .post(
+                &format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(transaction_hash)?,
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{refund}");
+        Ok(())
+    }
+
     async fn expect_paused(&self, deposit: Uuid) -> Result<()> {
         let (status, error) = self
             .post(
@@ -1580,6 +1723,44 @@ async fn seed_deposit(
         },
     )
     .await?;
+    Ok(deposit_id(1, tx_hash, 0))
+}
+
+/// A final, rejected deposit of the route fixture's token to the forwarder row `address_id`.
+async fn seed_deposit_to(
+    pool: &sqlx::PgPool,
+    address_id: Uuid,
+    amount: u64,
+    tag: u8,
+) -> Result<Uuid> {
+    let tx_hash = B256::repeat_byte(tag);
+    ensure!(
+        topup::db::insert_deposit(
+            pool,
+            &NewDeposit {
+                chain_id: 1,
+                tx_hash,
+                log_index: 0,
+                receipt_log_index: 0,
+                tx_from: Address::ZERO,
+                tx_nonce: 0,
+                is_final: true,
+                block_number: 80,
+                block_hash: B256::repeat_byte(tag.wrapping_add(1)),
+                block_time: Utc::now() - Duration::hours(2),
+                address_id,
+                route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
+                route_version: Some(1),
+                asset_contract: route_fixture().asset.contract,
+                from_address: Address::from_str("0x3333333333333333333333333333333333333333")?,
+                amount_atomic: AtomicAmount::new(U256::from(amount)),
+                state: DepositState::Rejected,
+                reason: Some(RejectReason::OutOfBounds),
+                next_attempt_at: Utc::now() + Duration::hours(1),
+            },
+        )
+        .await?
+    );
     Ok(deposit_id(1, tx_hash, 0))
 }
 

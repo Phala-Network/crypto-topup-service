@@ -292,7 +292,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
-| Deposit address (§1.5), active or retired, any amount | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`. |
+| Deposit address (§1.5), active or retired, any amount of any supported token on any listed network | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`, its `chain_id`, and its `address`. |
 | Token without a route | Once confirmed, `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
@@ -342,12 +342,14 @@ pay.refunds.update(refund.id, metadata={"ticket": ""})   # unsets `ticket`
 
 ### 1.5 Deposit addresses
 
-A deposit address is the customer's own address for one chain and asset, like the stable
-bank-transfer details Stripe gives each customer
-([customer balance funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions)).
-It never expires: the customer sends **any amount, at any time**, and each transfer is credited at
-the market (spot) rate when it arrives, about 30 seconds after paying, through the same
-`deposit.credited` webhook as a quote payment.
+A deposit address is the customer's own address, **one address for all supported tokens and
+networks**, like the stable bank-transfer details Stripe gives each customer
+([customer balance funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions)),
+and like the one deposit address an exchange gives a user for every token and every EVM chain.
+It never expires: the customer sends **any amount of a supported token, at any time, on any
+supported network**, and each transfer is credited at the market (spot) rate when it arrives,
+about 30 seconds after paying, through the same `deposit.credited` webhook as a quote payment.
+**Send only supported tokens**: a token that is not listed is not credited.
 
 | Use | When |
 |---|---|
@@ -355,49 +357,69 @@ the market (spot) rate when it arrives, about 30 seconds after paying, through t
 | A deposit address | Top-ups and balances: the amount is the customer's choice, they may pay repeatedly, or they pay from an exchange that cannot send an exact amount within a window. |
 
 ```python
-address = pay.deposit_addresses.create(client_reference_id="team-42", chain_id=11155111,
-                                       asset="pha", metadata={"team_id": "team-42"})
+address = pay.deposit_addresses.create(client_reference_id="team-42",
+                                       metadata={"team_id": "team-42"})
 # {"id": "da_…", "object": "deposit_address", "livemode": false, "client_reference_id": "team-42",
-#  "chain_id": 11155111, "asset": "pha", "address": "0x…",
-#  "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…", "treasury": "0x…",
-#  "version": 1, "salt": "0x…", "status": "active", "created": 1790409600, "retired_at": null,
-#  "metadata": {"team_id": "team-42"}}
+#  "address": "0xabc…", "version": 1, "salt": "0x…", "status": "active",
+#  "created": 1790409600, "retired_at": null, "metadata": {"team_id": "team-42"},
+#  "networks": [
+#    {"chain_id": 11155111, "address": "0xabc…", "treasury": "0x…",
+#     "assets": [{"asset": "pha", "contract": "0x…", "decimals": 18,
+#                 "payment_uri": "ethereum:0x…@11155111/transfer?address=0xabc…"}]},
+#    {"chain_id": 84532, "address": "0xabc…", "treasury": "0x…", "assets": [ … ]}]}
 ```
 
-- `POST /v1/deposit_addresses {client_reference_id, chain_id, asset}` returns the customer's
-  **active** address for that chain and asset, issuing it the first time: call it whenever the
-  page opens; the same request returns the same address until it is rotated. Addresses are per
-  mode: a test key never sees a live address.
+- `POST /v1/deposit_addresses {client_reference_id}` returns the customer's **active** address,
+  issuing it the first time: call it whenever the page opens; the same request returns the same
+  address until it is rotated, and it adds a network supported since. Addresses are per mode: a
+  test key never sees a live address, and `networks` lists the chains of that mode.
+- **One address, or one per network.** The address is the same on every network whose treasury is
+  the same address (an EOA, or a Safe deployed at the same address on each chain); then the
+  top-level `address` is it. Where a network's treasury differs, that network's address differs,
+  and the top-level `address` is `null`: show each network's own `networks[].address` then, never
+  one address for all.
+- Show only the networks in `networks` and the tokens in their `assets`. A transfer of a listed
+  token on a listed network is credited; any other token is recorded as `rejected
+  (unsupported_asset)` and not credited. Funds sent on a network that is not listed are not seen:
+  they stay at the address on that chain and can be swept only once the forwarder factory is
+  deployed there, and only if your treasury is the same address on that chain; contact the
+  operator.
 - `POST /v1/deposit_addresses/{id}/rotate` retires the address and returns the customer's next
-  one (for example after the address was exposed somewhere it should not be). **A retired address
-  is still credited**; stop showing it, but never tell the customer a payment to it is lost. A
-  customer rotates at most 10 times an hour (`429 rate_limit`), and rotating a retired address is
-  `409 deposit_address_retired`.
+  one, a new address on every network (for example after the address was exposed somewhere it
+  should not be). **A retired address is still credited**; stop showing it, but never tell the
+  customer a payment to it is lost. A customer rotates at most 10 times an hour
+  (`429 rate_limit`), and rotating a retired address is `409 deposit_address_retired`.
 - `metadata` (§1.4) on the create request is merged into the returned address's;
   `POST /v1/deposit_addresses/{id} {"metadata": {…}}` updates it on an active or retired address,
   a rotation carries it to the next address, and each deposit to the address starts with a copy,
-  so it arrives in `deposit.credited` like a quote's.
+  so it arrives in `deposit.credited` like a quote's. The deposit names the `deposit_address` and
+  the `chain_id` and `address` it arrived on.
 - `GET /v1/deposit_addresses/{id}` and `GET /v1/deposit_addresses?client_reference_id=…&status=…`
   read them; `GET /v1/deposits?deposit_address=da_…` lists what reached one.
 - Recompute the address before showing it, as for quotes: the salt is
-  `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
-  asset, version))` with the types `(string, bool, string, string, uint256, string, uint256)`,
-  and the address is the factory's `CREATE2` for `treasury` and that salt. `PhalaPay(...,
-  forwarder=(factory, implementation, treasury))` checks every active address and raises
-  `AddressMismatchError`; `topup_sdk.deposit_address(...)` recomputes any version offline.
-- An address pays the treasury it was issued for, forever. When your treasury changes, your
-  active addresses are rotated to the new one; payments to retired addresses still reach the old
-  treasury, so keep control of it (you are told through `account.treasury.*` events).
+  `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`
+  with the types `(string, bool, string, string, uint256)` (no chain, no asset), and each
+  network's address is the factory's `CREATE2` for that network's `treasury` and the salt.
+  `PhalaPay(..., forwarder=(factory, implementation, treasury))` checks every network of an active
+  address and raises `AddressMismatchError`; `topup_sdk.deposit_address(...)` recomputes any
+  version offline.
+- A network pays the treasury it was issued for, forever. When your treasury on one network
+  changes, that network's address changes (the others do not); payments to the old address on
+  that network are still credited and still reach the old treasury, and a refund of such a deposit
+  is paid from the old treasury, so keep control of it (you are told through `account.treasury.*`
+  events).
 - Limits: 100 000 active addresses per account in live mode and 1 000 in test mode
   (`409 deposit_address_cap_exceeded`; ask the operator to raise it); no new address is issued
-  while `quotes` is paused (`409 paused`).
+  while `quotes` is paused (`409 paused`), and a network frozen by reconciliation gets no new
+  address until it is lifted.
 
-**Page copy.** Show the network, the token, the full address with a copy button, and a QR of
-`payment_uri` (it carries the token and address and no amount): "Send any amount of PHA on
-Sepolia only. It is credited at the market rate when it arrives, usually in about 30 seconds.
-You can reuse this address." `<DepositAddress depositAddress={…}>` from `@phala/pay/react`
-renders exactly that from the fields `address`, `chain_id`, `asset`, and `payment_uri`; pass
-only those to the browser.
+**Page copy.** "One address for all supported tokens and networks. Send only supported tokens."
+Let the customer pick the network and the token; show that network, the token contract, the full
+address with a copy button, and a QR of that token's `payment_uri` (it carries the token, chain,
+and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any amount is credited
+at the market rate when it arrives, usually in about 30 seconds. You can reuse this address."
+`<DepositAddress depositAddress={…}>` from `@phala/pay/react` renders exactly that from `address`
+and `networks`; pass only those to the browser.
 
 ## 2. Webhooks and fulfillment
 

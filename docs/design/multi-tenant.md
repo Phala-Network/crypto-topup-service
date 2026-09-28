@@ -58,7 +58,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 | D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
-| D16 | Deposit addresses | A persistent, rotatable forwarder per customer, chain, and asset; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
+| D16 | Deposit addresses | One persistent, rotatable address per customer for every supported token on every chain (owner's decision, 2026-09-28), the same address wherever the treasury is the same; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
 
 ## 4. Fast credit and reversal (D1)
 
@@ -237,31 +237,50 @@ flowchart LR
 flow") removed the earlier implementation without the owner's approval; this section restores the
 decision and fits it to the multi-tenant design. Quotes stay the flow for a fixed price.
 
+**Amendment, 2026-09-28 (owner's decision): one address per customer.** #194 issued one address
+per customer, chain, and asset. The owner decided that **a customer has one deposit address across
+all chains and all assets**, following exchange practice: an exchange gives a user one deposit
+address for every token, and the same address on every EVM chain. Reasoning: a customer should see
+and save one address, not one per token and network; a payer who picks another supported token or
+network still reaches the customer; and the forwarder design already allows it, because the
+factory and implementation are at the same address on every chain (design PR 2), so `CREATE2`
+gives the same address wherever the salt and treasury are the same. The salt therefore drops the
+chain and the asset. What cannot be the same is made explicit, never hidden: a chain whose
+treasury is a different address has a different forwarder address, and the API shows it per
+network.
+
 **Precedent.** Stripe's customer balance gives each customer stable bank-transfer details: "In
 live mode, Stripe supplies each customer with a unique set of bank transfer details", created or
 retrieved with `POST /v1/customers/{id}/funding_instructions`, and "Funds sent to any address are
 routed to the customer balance"
 ([Stripe, funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions),
-checked 2026-09-28). A deposit address is that virtual account on chain: one per customer, chain,
-and asset, any amount, credited to the customer.
+checked 2026-09-28). A deposit address is that virtual account on chain: one per customer, for any
+supported token on any supported chain, any amount, credited to the customer.
 
 **Resource.** `deposit_address` (`da_…`), per account and mode:
 
 ```text
-POST /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}   the active address
+POST /v1/deposit_addresses {client_reference_id, metadata?}          the active address
 GET  /v1/deposit_addresses/{id}, POST /v1/deposit_addresses/{id} {metadata}
-GET  /v1/deposit_addresses?client_reference_id&status&chain_id&limit&starting_after&ending_before
+GET  /v1/deposit_addresses?client_reference_id&status&limit&starting_after&ending_before
 POST /v1/deposit_addresses/{id}/rotate                               retire it, return the next one
 ```
 
-Fields: `id`, `object`, `livemode`, `client_reference_id`, `chain_id`, `asset`, `address`,
-`payment_uri` (EIP-681 ERC-20 transfer **without** an amount), `treasury`, `version`, `salt`,
-`status` (`active | retired`), `created`, `retired_at`, `metadata` (D15). Creation is idempotent without an
-`Idempotency-Key`: it returns the customer's active address for the chain and asset and issues one
-only when there is none, as Stripe's funding instructions "create or retrieve". Rotation retires
-the address (`retired`, `retired_at`) and issues the next version; a retired address cannot be
-rotated again (`409 deposit_address_retired`). `metadata` follows D15: the create request's is
-merged into the returned address's (as an update would, so repeating a create is harmless),
+Fields: `id`, `object`, `livemode`, `client_reference_id`, `address`, `version`, `salt`, `status`
+(`active | retired`), `created`, `retired_at`, `metadata` (D15), and `networks`: for each chain of
+the mode with a current route, `{chain_id, address, treasury, assets: [{asset, contract, decimals,
+payment_uri}]}`, where `payment_uri` is the EIP-681 ERC-20 transfer of that token **without** an
+amount. The top-level `address` is the address when every network has the same one, and `null`
+when a network's treasury, and so its address, differs (or there is no network): a client shows
+the one address when it is set and each network's otherwise, so a differing address is never
+hidden behind a shared one. Creation is idempotent without an `Idempotency-Key`: it returns the
+customer's active address and issues one only when there is none, as Stripe's funding
+instructions "create or retrieve"; it also adds the address's network on a chain supported since
+(the same address when the treasury is the same) and replaces a network whose treasury changed
+(below). Rotation retires the address (`retired`, `retired_at`) and issues the next version, a new
+address on every network; a retired address cannot be rotated again
+(`409 deposit_address_retired`). `metadata` follows D15: the create request's is merged into the
+returned address's (as an update would, so repeating a create is harmless),
 `POST /v1/deposit_addresses/{id}` merges into an active or retired address's, a rotation carries
 it to the next version, and each deposit to the address starts with a copy, as a quote's deposit
 does.
@@ -269,46 +288,71 @@ does.
 **Address.** The same v2 forwarder as a quote's, `CREATE2` over the treasury and a salt (D3):
 
 ```text
-salt = keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address",
-                            chain_id, asset, version))
-       types (string, bool, string, string, uint256, string, uint256); account = acct_ id
-address = factory.addressOf(treasury, salt)
+salt = keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))
+       types (string, bool, string, string, uint256); account = acct_ id
+address on a chain = factory.addressOf(treasury of that chain, salt)
 ```
 
-`version` counts the customer's addresses for the chain and asset from 1. The Foundry script writes
-vectors (`contracts/test-vectors/create2.json`, `deposit_address`) that the Rust core and the
-Python SDK reproduce; the SDKs recompute every active address against the pinned forwarder and
-fail closed, as for quotes (§8), and recompute any version offline.
+`version` counts the customer's addresses from 1. The address is identical on every chain whose
+treasury is the same address (an EOA, or a Safe deployed at the same address on each chain); where
+a chain's treasury differs, that chain's address differs. The Foundry script writes vectors
+(`contracts/test-vectors/create2.json`, `deposit_address`, including one salt under two
+treasuries) that the Rust core and the Python SDK reproduce; the SDKs recompute every network of an
+active address against the pinned forwarder and fail closed, as for quotes (§8), and recompute any
+version offline from the salt inputs and a network's treasury.
 
-**Crediting.** Any transfer to an active **or retired** deposit address is credited **at spot**
-(no quote) through the one pipeline: fast credit at the route's confirmation (D1), reversal,
-screening, events, chain-sourced sweeps (D4), refunds (D5), and per-forwarder reconciliation (§13).
-The forwarder is an ordinary `addresses` row, owned by a deposit address instead of a quote, so
-every mechanism that reads `addresses` covers it. Its deposit has `quote: null` and
-`deposit_address: "da_…"`, and `deposit.credited` carries that object. The per-block scan and
-the finalized backstop read every issued address (architecture §8), so a deposit address, active
-or retired, is credited at the route's confirmation like any other.
+**Crediting.** A transfer of **any supported token of the chain** to an active **or retired**
+deposit address is credited **at spot** (no quote) through the one pipeline: fast credit at the
+route's confirmation (D1), reversal, screening, events, chain-sourced sweeps (D4), refunds (D5),
+and per-forwarder reconciliation (§13). A token without a route on that chain is recorded
+`rejected (unsupported_asset)`, as at a quote's address. Each chain's forwarder is an ordinary
+`addresses` row owned by the deposit address (its network on that chain), so every mechanism that
+reads `addresses` covers it. Its deposit has `quote: null`, `deposit_address: "da_…"`, and the
+chain and address it arrived on (`chain_id`, `address`), and `deposit.credited` carries that
+object. The set of issued addresses of a chain includes every customer's address on that chain,
+active, retired, and superseded: the per-block scan and the finalized backstop read every issued
+address (architecture §8), so a deposit address is credited at the route's confirmation like any
+other. With `asset.backstop: token` a transfer of a token without a route is not requested by the
+scan; the reconciler's missing-deposit pass records it after finality.
+
+**Unsupported or unlisted chain.** Funds sent to the address on a chain without a route are not
+seen or credited. They stay at that deterministic address and become sweepable once the factory
+is deployed on that chain (`CREATE2` gives the same forwarder there), **provided the account's
+treasury is the same address on that chain**; otherwise the forwarder that `CREATE2` gives over
+that chain's treasury is another address, and the funds are recoverable only by an operator
+deploying a forwarder over the original treasury. The same holds on a chain that gains a route
+later, until the address's network is added there by the next creation: payments made before are
+not credited automatically, and the integration guide tells merchants to list only the networks
+in `networks` and to send only the listed tokens.
 
 **Quotes or deposit addresses.** A quote locks a price for an exact amount for a short window: use
 it for a purchase of a known amount. A deposit address takes any amount at any time and credits
 the market rate on arrival: use it for top-ups and balances, and for payers who send from an
 exchange and cannot hit an exact amount or window.
 
-**Treasury.** An address is bound to the treasury effective when it is issued, like every
-forwarder (D2). When a treasury change takes effect (D10, design PR 7), PR 7 **must rotate every
-active deposit address of the account on that chain** in the same transaction, so new payments go
-to the new treasury; creation also replaces an active address whose treasury is no longer the
-effective one, so a missed rotation is repaired on the next call (`effective_treasury` in
-`crates/topup/src/deposit_addresses.rs` is the PR 7 hook). **Retired addresses keep being
-credited, and their funds reach the old treasury**, which the forwarder's clone argument fixes for
-good: merchants learn of the change through `account.treasury.pending` and `.updated` (D10) and
-must keep control of an old treasury while customers may still pay retired addresses.
+**Treasury.** Each network is bound to the treasury of its chain effective when it is issued, like
+every forwarder (D2). When a treasury change takes effect on a chain (D10, design PR 7), **that
+chain's network of the address changes**: PR 7 must supersede the chain's network of every
+deposit address of the account in the same transaction, with a forwarder over the new treasury and
+the same salt; the address on the other chains is unchanged, and the object's top-level `address`
+becomes `null` while the chains differ. Creation already supersedes an active address's network
+whose treasury is no longer the effective one, so a missed update is repaired on the next call
+(`Chain::of` and `sync_networks` in `crates/topup/src/deposit_addresses.rs` are the PR 7 hook; a
+treasury changed back to an earlier one makes that network current again). **A superseded network
+is kept as retired for that chain: it keeps being watched and credited, and its funds reach the old
+treasury**, which the forwarder's clone argument fixes for good, and a refund of its deposit is
+paid from that old treasury (D5). Merchants learn of the change through `account.treasury.pending`
+and `.updated` (D10) and must keep control of an old treasury while customers may still pay an old
+address. Retired versions likewise keep paying the treasuries they were issued for.
 
 **Limits.** Active deposit addresses per account and mode are capped (default 100 000 live,
 1 000 test; the operator raises it in `account_limits.max_active_deposit_addresses`):
-`409 deposit_address_cap_exceeded`. A customer may rotate 10 times per rolling hour
-(`429 rate_limit`). No new address is issued while `quotes` is paused for the account, the
-customer, or the route (§12), or while reconciliation froze the chain; reads keep working.
+`409 deposit_address_cap_exceeded`; with one address per customer this is a cap on customers with
+an address. A customer may rotate 10 times per rolling hour (`429 rate_limit`). No new address or
+network is issued while `quotes` is paused for the account or the customer (§12); a chain frozen by
+reconciliation, or whose every route is paused for `quotes`, gets no new network, and a new address
+or rotation is refused (`409 chain_frozen`, or `paused`) only when no chain can take one. Existing
+networks, reads, and crediting keep working.
 
 ## 6. Tenant model and names (D6)
 
@@ -320,9 +364,9 @@ erDiagram
     ACCOUNT ||--o{ TREASURY : "per chain"
     ACCOUNT ||--o{ CUSTOMER : "client_reference_id"
     CUSTOMER ||--o{ QUOTE : creates
-    CUSTOMER ||--o{ DEPOSIT_ADDRESS : "per chain and asset, rotatable"
+    CUSTOMER ||--o{ DEPOSIT_ADDRESS : "one active, rotatable"
     QUOTE ||--o| ADDRESS : "single-use"
-    DEPOSIT_ADDRESS ||--|| ADDRESS : "persistent"
+    DEPOSIT_ADDRESS ||--|{ ADDRESS : "one current per chain"
     ADDRESS ||--o{ DEPOSIT : receives
     DEPOSIT ||--o{ REFUND : "merchant-paid"
     ACCOUNT ||--o{ EVENT : emits
@@ -613,11 +657,12 @@ treasuries      id, account_id, chain_id, address, proof_message, proof_signatur
 treasury_challenges nonce PK, account_id, livemode, chain_id, address, expires_at, used_at
 customers       id, account_id, livemode, client_reference_id, paused_scopes
                 UNIQUE (account_id, livemode, client_reference_id)
-deposit_addresses id (da_…), account_id, livemode, customer_id, chain_id, asset, route, version,
+deposit_addresses id (da_…), account_id, livemode, customer_id, version,
                 status (active | retired), created_at, retired_at, metadata jsonb
-                UNIQUE (customer_id, chain_id, asset, version); one active per (customer, chain, asset)
+                UNIQUE (customer_id, version); one active per customer
 addresses       id, account_id, livemode, chain_id, quote_id | deposit_address_id (exactly one), salt,
-                treasury, address UNIQUE (chain_id, address)
+                treasury, address UNIQUE (chain_id, address), superseded_at (deposit address
+                networks); one current (not superseded) row per (deposit_address_id, chain_id)
 quotes          (today's rate_locks) + account_id, livemode, customer_id, metadata jsonb
 deposits        + account_id, livemode, receipt_log_index, confirmations_at, final_at, metadata jsonb;
                 state adds `reversed`; UNIQUE (chain_id, tx_hash, receipt_log_index)
@@ -662,8 +707,8 @@ POST   /v1/quotes {client_reference_id, amount, currency, chain_id, asset}
 GET    /v1/quotes/{id}                               unsigned ?client_secret= as today
 POST   /v1/quotes/{id} {metadata}                  update (D15); likewise /v1/deposits/{id}, /v1/refunds/{id}
 POST   /v1/quotes/{id}/cancel
-POST   /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}   the active address (§5a)
-GET    /v1/deposit_addresses?client_reference_id&status&chain_id, GET|POST /v1/deposit_addresses/{id}
+POST   /v1/deposit_addresses {client_reference_id, metadata?}   the active address, every network (§5a)
+GET    /v1/deposit_addresses?client_reference_id&status, GET|POST /v1/deposit_addresses/{id}
 POST   /v1/deposit_addresses/{id}/rotate
 GET    /v1/deposits?client_reference_id&quote&status&tx_hash&created[...]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}
@@ -751,8 +796,8 @@ other mode; an event for A fails verification with B's key.
 **PR 7 — treasuries.** Challenge and proof endpoints; SIWE and EIP-1271 verification (both
 providers, `finalized`, ERC-6492 refused), nonce binding and expiry, 48 h time-lock with cancel
 through the API, `account.treasury.pending|updated|canceled` events, screening; quotes take the
-effective treasury; rotate every active deposit address of the account on the chain when a
-change takes effect (§5a). Tests: EOA, deployed Safe with an off-chain Safe message and with
+effective treasury; supersede the chain's network of every deposit address of the account when a
+change takes effect on that chain, keeping the old network credited (§5a). Tests: EOA, deployed Safe with an off-chain Safe message and with
 `SignMessageLib`, undeployed Safe, expired message, reused nonce, cancel during the lock.
 
 **PR 8 — webhook endpoints.** Endpoints API, `enabled_events`, test event, smokescreen sidecar

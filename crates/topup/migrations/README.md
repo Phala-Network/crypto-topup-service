@@ -32,6 +32,15 @@ exactly one of them set, `account_limits.max_active_deposit_addresses`, and the
 `deposit_addresses.read` and `.write` permissions. Its down migration refuses to run once a
 deposit address exists.
 
+`20261010000000_one_deposit_address` applies the owner's 2026-09-28 decision of one deposit
+address per customer across all chains and assets: it drops `deposit_addresses.chain_id`, `asset`,
+and `route`, makes the version and the active address unique per customer, lets a deposit address
+own one `addresses` row per chain (at most one without `superseded_at`, the current network), and
+adds `addresses.superseded_at` for a network replaced after a treasury change, which stays watched
+and credited. It refuses to run, and so does its down migration, while any deposit address exists
+(none was issued in the per-chain shape). It is numbered after `20261009000000` so that it applies
+after the refunds migration on a database that already has it.
+
 `20261009000000_merchant_refunds` (design PR 9) replaces the operator refund workflow with the
 merchant's two-step flow (design D5): statuses `pending`, `succeeded`, `failed`, `canceled`;
 `chain_id`, `destination_address` (was `to_address`), `log_index`, and `failure_reason`; one

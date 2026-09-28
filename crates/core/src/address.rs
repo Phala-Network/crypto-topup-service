@@ -14,19 +14,19 @@ pub fn lock_salt(product_slug: &str, external_id: &str, lock_ref: &str) -> B256 
 }
 
 /// Derives the salt of a customer's persistent deposit address:
-/// `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
-/// asset, version))`, with the types `(string, bool, string, string, uint256, string, uint256)`.
+/// `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`,
+/// with the types `(string, bool, string, string, uint256)`.
 ///
-/// `account` is the merchant's `acct_` id, `asset` the route's asset code (such as `pha`), and
-/// `version` counts the customer's addresses for the chain and asset from 1; each rotation takes
-/// the next version, so a merchant recomputes every address it was ever given.
+/// `account` is the merchant's `acct_` id and `version` counts the customer's addresses from 1;
+/// each rotation takes the next version, so a merchant recomputes every address it was ever given.
+/// The salt names no chain and no asset: the factory and implementation have one address on every
+/// chain, so the customer's forwarder is the same address on every chain whose treasury is the
+/// same address, and takes every supported token there.
 #[must_use]
 pub fn deposit_address_salt(
     account: &str,
     livemode: bool,
     client_reference_id: &str,
-    chain_id: u64,
-    asset: &str,
     version: u64,
 ) -> B256 {
     keccak256(
@@ -35,8 +35,6 @@ pub fn deposit_address_salt(
             livemode,
             client_reference_id,
             "deposit_address",
-            U256::from(chain_id),
-            asset,
             U256::from(version),
         )
             .abi_encode_params()
