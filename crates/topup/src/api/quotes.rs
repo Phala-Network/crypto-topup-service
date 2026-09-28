@@ -22,8 +22,8 @@ use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::ensure_customer;
 use super::metadata::{self, Object};
 use super::models::{
-    ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
-    UpdateMetadataRequest,
+    ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteList,
+    QuoteView, UpdateMetadataRequest,
 };
 use super::repository;
 
@@ -181,6 +181,115 @@ pub(crate) async fn create_quote(
     .await
     .map_err(map_error)?;
     respond_with_client_secret(&state, lock).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/quotes",
+    params(
+        ("client_reference_id" = Option<String>, Query, description = "Only this customer's quotes"),
+        ("status" = Option<String>, Query, description = "`open`, `complete`, `expired`, or `canceled`"),
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`qt_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`qt_` id: the page before it")
+    ),
+    responses(
+        (status = 200, description = "OK", body = QuoteList),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "quotes"
+)]
+/// The account's quotes in the key's mode, newest first, with Stripe's cursor pagination.
+pub(crate) async fn list_quotes(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<QuoteList>> {
+    merchant
+        .require(&state.pool, Permission::QuotesRead)
+        .await?;
+    let mut client_reference_id = None;
+    let mut status_filter = None;
+    let mut limit = 10;
+    let mut starting_after = None;
+    let mut ending_before = None;
+    for (name, value) in query_pairs(query.as_deref()) {
+        match name.as_str() {
+            "client_reference_id" => client_reference_id = Some(value),
+            "status" => {
+                status_filter = Some(match value.as_str() {
+                    "open" => RateLockStatus::Open,
+                    "complete" => RateLockStatus::Consumed,
+                    "expired" => RateLockStatus::Expired,
+                    "canceled" => RateLockStatus::Cancelled,
+                    _ => return Err(ApiError::invalid_param("status", "unknown status")),
+                });
+            }
+            "limit" => {
+                limit = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|limit| (1..=100).contains(limit))
+                    .ok_or_else(|| ApiError::invalid_param("limit", "limit must be 1 to 100"))?;
+            }
+            "starting_after" | "ending_before" => {
+                let id = ids::parse(ids::QUOTE, &value)
+                    .ok_or_else(|| ApiError::invalid_param(name.clone(), "not a qt_ id"))?;
+                if name == "starting_after" {
+                    starting_after = Some(id);
+                } else {
+                    ending_before = Some(id);
+                }
+            }
+            other => {
+                return Err(
+                    ApiError::unknown_param(format!("unknown parameter {other}")).with_param(other),
+                );
+            }
+        }
+    }
+    let cursor = match (starting_after, ending_before) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "starting_after and ending_before are mutually exclusive",
+            ));
+        }
+        (Some(id), None) => Some((id, false)),
+        (None, Some(id)) => Some((id, true)),
+        (None, None) => None,
+    };
+    let (locks, has_more) = locks::list(
+        &state.pool,
+        merchant.scope,
+        client_reference_id.as_deref(),
+        status_filter,
+        cursor,
+        limit,
+    )
+    .await
+    .map_err(|error| match (error, cursor) {
+        (RateLockError::NotFound, Some((_, before))) => ApiError::invalid_param(
+            if before {
+                "ending_before"
+            } else {
+                "starting_after"
+            },
+            "no such quote",
+        ),
+        (error, _) => map_error(error),
+    })?;
+    let mut data = Vec::with_capacity(locks.len());
+    for lock in locks {
+        data.push(quote_object(&state.pool, &state.routes, lock).await?);
+    }
+    Ok(Json(QuoteList {
+        object: "list".to_owned(),
+        url: "/v1/quotes".to_owned(),
+        has_more,
+        data,
+    }))
 }
 
 #[utoipa::path(

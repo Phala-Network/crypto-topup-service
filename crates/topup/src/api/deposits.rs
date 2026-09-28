@@ -23,7 +23,7 @@ use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::metadata::{self, Metadata, Object};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote,
-    MarkRefundPaidRequest, Refund, UpdateMetadataRequest,
+    MarkRefundPaidRequest, Refund, RefundList, UpdateMetadataRequest,
 };
 use super::repository::{self, NewRefund};
 
@@ -354,6 +354,142 @@ pub(crate) async fn create_refund(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
+}
+
+const REFUND_STATUSES: [&str; 4] = ["pending", "succeeded", "failed", "canceled"];
+
+#[utoipa::path(
+    get,
+    path = "/v1/refunds",
+    params(
+        ("deposit" = Option<String>, Query, description = "Only this deposit's refunds, `dep_…`"),
+        ("status" = Option<String>, Query, description = "`pending`, `succeeded`, `failed`, or `canceled`"),
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`re_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`re_` id: the page before it")
+    ),
+    responses(
+        (status = 200, description = "OK", body = RefundList),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "refunds"
+)]
+/// The account's refunds in the key's mode, newest first, with Stripe's cursor pagination.
+pub(crate) async fn list_refunds(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<RefundList>> {
+    merchant
+        .require(&state.pool, Permission::RefundsRead)
+        .await?;
+    let scope = merchant.scope;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT refund.id FROM refunds AS refund WHERE refund.account_id = ",
+    );
+    builder
+        .push_bind(scope.account_id())
+        .push(" AND refund.livemode = ")
+        .push_bind(scope.livemode());
+    let mut limit = DEFAULT_LIMIT;
+    let mut starting_after = None;
+    let mut ending_before = None;
+    for (name, value) in query_pairs(query.as_deref()) {
+        match name.as_str() {
+            "deposit" => {
+                let deposit = ids::parse(ids::DEPOSIT, &value)
+                    .ok_or_else(|| ApiError::invalid_param("deposit", "not a dep_ id"))?;
+                builder.push(" AND refund.deposit_id = ").push_bind(deposit);
+            }
+            "status" => {
+                if !REFUND_STATUSES.contains(&value.as_str()) {
+                    return Err(ApiError::invalid_param("status", "unknown status"));
+                }
+                builder.push(" AND refund.status = ").push_bind(value);
+            }
+            "limit" => {
+                limit = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
+                    .ok_or_else(|| ApiError::invalid_param("limit", "limit must be 1 to 100"))?;
+            }
+            "starting_after" | "ending_before" => {
+                let id = ids::parse(ids::REFUND, &value)
+                    .ok_or_else(|| ApiError::invalid_param(name.clone(), "not a re_ id"))?;
+                if name == "starting_after" {
+                    starting_after = Some(id);
+                } else {
+                    ending_before = Some(id);
+                }
+            }
+            other => {
+                return Err(
+                    ApiError::unknown_param(format!("unknown parameter {other}")).with_param(other),
+                );
+            }
+        }
+    }
+    let (cursor, before) = match (starting_after, ending_before) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "starting_after and ending_before are mutually exclusive",
+            ));
+        }
+        (Some(id), None) => (Some((id, "starting_after")), false),
+        (None, Some(id)) => (Some((id, "ending_before")), true),
+        (None, None) => (None, false),
+    };
+    if let Some((id, param)) = cursor {
+        let created_at: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT created_at FROM refunds WHERE id = $1 AND account_id = $2 AND livemode = $3",
+        )
+        .bind(id)
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| ApiError::invalid_param(param, "no such refund"))?;
+        builder
+            .push(if before {
+                " AND (refund.created_at, refund.id) > ("
+            } else {
+                " AND (refund.created_at, refund.id) < ("
+            })
+            .push_bind(created_at)
+            .push(", ")
+            .push_bind(id)
+            .push(")");
+    }
+    builder
+        .push(if before {
+            " ORDER BY refund.created_at ASC, refund.id ASC LIMIT "
+        } else {
+            " ORDER BY refund.created_at DESC, refund.id DESC LIMIT "
+        })
+        .push_bind(limit.saturating_add(1));
+    let mut ids: Vec<Uuid> = builder.build_query_scalar().fetch_all(&state.pool).await?;
+    let has_more = i64::try_from(ids.len()).map_err(|_| ApiError::internal())? > limit;
+    ids.truncate(usize::try_from(limit).map_err(|_| ApiError::internal())?);
+    if before {
+        ids.reverse();
+    }
+    let mut data = Vec::with_capacity(ids.len());
+    for id in ids {
+        data.push(
+            find_refund(&state.pool, scope, id)
+                .await?
+                .ok_or_else(ApiError::internal)?,
+        );
+    }
+    Ok(Json(RefundList {
+        object: "list".to_owned(),
+        url: "/v1/refunds".to_owned(),
+        has_more,
+        data,
+    }))
 }
 
 #[utoipa::path(

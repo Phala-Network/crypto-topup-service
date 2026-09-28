@@ -2726,6 +2726,98 @@
       }
     },
     "/v1/quotes": {
+      "get": {
+        "tags": [
+          "quotes"
+        ],
+        "summary": "The account's quotes in the key's mode, newest first, with Stripe's cursor pagination.",
+        "operationId": "list_quotes",
+        "parameters": [
+          {
+            "name": "client_reference_id",
+            "in": "query",
+            "description": "Only this customer's quotes",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`open`, `complete`, `expired`, or `canceled`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`qt_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`qt_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "quotes"
@@ -3081,6 +3173,98 @@
       }
     },
     "/v1/refunds": {
+      "get": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "The account's refunds in the key's mode, newest first, with Stripe's cursor pagination.",
+        "operationId": "list_refunds",
+        "parameters": [
+          {
+            "name": "deposit",
+            "in": "query",
+            "description": "Only this deposit's refunds, `dep_…`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`pending`, `succeeded`, `failed`, or `canceled`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`re_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`re_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "refunds"
@@ -6719,6 +6903,37 @@
           }
         }
       },
+      "QuoteList": {
+        "type": "object",
+        "description": "A page of quotes, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Quote"
+            },
+            "description": "The quotes."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more quotes follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/quotes`."
+          }
+        }
+      },
       "QuotePayment": {
         "type": "object",
         "description": "A payment observed at a quote's address. Display only: while `status` is `seen` it is not\nfinal, may still disappear in a reorg, and nothing has been credited.",
@@ -6957,6 +7172,37 @@
           "treasury": {
             "type": "string",
             "description": "The treasury the refund must be paid from: the one the deposit's address pays, which may\ndiffer from the account's current treasury."
+          }
+        }
+      },
+      "RefundList": {
+        "type": "object",
+        "description": "A page of refunds, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Refund"
+            },
+            "description": "The refunds."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more refunds follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/refunds`."
           }
         }
       },

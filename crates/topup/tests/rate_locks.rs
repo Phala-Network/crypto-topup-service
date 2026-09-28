@@ -186,6 +186,33 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         ensure!(signed.status() == StatusCode::OK);
         let signed = response_json(signed).await?;
         ensure!(signed["client_reference_id"] == "account-rl" && signed["client_secret"].is_null());
+        // The list pages the account's quotes newest first and filters by customer and status.
+        let listed = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::GET,
+                "/v1/quotes?client_reference_id=account-rl&status=open",
+                Vec::new(),
+                &product_key,
+            ))
+            .await?;
+        ensure!(listed.status() == StatusCode::OK);
+        let listed = response_json(listed).await?;
+        ensure!(listed["object"] == "list" && listed["url"] == "/v1/quotes");
+        ensure!(listed["data"][0]["id"] == quote_id.as_str(), "{listed}");
+        ensure!(listed["data"][0]["client_secret"].is_null());
+        for query in ["client_reference_id=nobody", "status=expired"] {
+            let other = app
+                .clone()
+                .oneshot(merchant_request(
+                    Method::GET,
+                    &format!("/v1/quotes?{query}"),
+                    Vec::new(),
+                    &product_key,
+                ))
+                .await?;
+            ensure!(response_json(other).await?["data"] == json!([]), "{query}");
+        }
         let other_quote = format!("qt_{}", Uuid::new_v4().simple());
         for (path, secret) in [
             (other_quote.as_str(), client_secret),

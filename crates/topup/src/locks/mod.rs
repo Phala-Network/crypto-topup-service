@@ -447,6 +447,79 @@ pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<RateLoc
     row.map(TryInto::try_into).transpose()
 }
 
+/// A page of the scope's quotes, newest first, and whether more follow in the direction of the
+/// page (Stripe's cursor pagination): `cursor` is the quote after which (or, with `before`,
+/// before which) the page starts. A cursor outside the scope is `NotFound`.
+pub async fn list(
+    pool: &PgPool,
+    scope: Scope,
+    client_reference_id: Option<&str>,
+    status: Option<RateLockStatus>,
+    cursor: Option<(Uuid, bool)>,
+    limit: i64,
+) -> Result<(Vec<RateLock>, bool), RateLockError> {
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(select_lock!());
+    builder
+        .push(" WHERE quote.account_id = ")
+        .push_bind(scope.account_id())
+        .push(" AND quote.livemode = ")
+        .push_bind(scope.livemode());
+    if let Some(client_reference_id) = client_reference_id {
+        builder
+            .push(" AND customer.client_reference_id = ")
+            .push_bind(client_reference_id.to_owned());
+    }
+    if let Some(status) = status {
+        builder
+            .push(" AND quote.status = ")
+            .push_bind(status.code());
+    }
+    let before = cursor.is_some_and(|(_, before)| before);
+    if let Some((id, _)) = cursor {
+        let (created_at,): (DateTime<Utc>,) = sqlx::query_as(
+            "SELECT created_at FROM quotes WHERE id = $1 AND account_id = $2 AND livemode = $3",
+        )
+        .bind(id)
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_optional(pool)
+        .await?
+        .ok_or(RateLockError::NotFound)?;
+        builder
+            .push(if before {
+                " AND (quote.created_at, quote.id) > ("
+            } else {
+                " AND (quote.created_at, quote.id) < ("
+            })
+            .push_bind(created_at)
+            .push(", ")
+            .push_bind(id)
+            .push(")");
+    }
+    builder
+        .push(if before {
+            " ORDER BY quote.created_at ASC, quote.id ASC LIMIT "
+        } else {
+            " ORDER BY quote.created_at DESC, quote.id DESC LIMIT "
+        })
+        .push_bind(limit.saturating_add(1));
+    let mut rows = builder
+        .build_query_as::<RateLockRow>()
+        .fetch_all(pool)
+        .await?;
+    let limit = usize::try_from(limit).map_err(|_| RateLockError::DatabaseInvariant)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    if before {
+        rows.reverse();
+    }
+    let locks = rows
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<RateLock>, _>>()?;
+    Ok((locks, has_more))
+}
+
 /// Cancels an unpaid open lock, releasing its exposure, and appends an audit row atomically.
 ///
 /// Any deposit row for the lock address, including a rejected one, means funds already arrived at

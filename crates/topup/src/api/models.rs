@@ -245,6 +245,32 @@ pub struct Quote {
     pub metadata: std::collections::BTreeMap<String, String>,
 }
 
+/// A page of quotes, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct QuoteList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/quotes`.
+    pub url: String,
+    /// Whether more quotes follow in the direction of this page.
+    pub has_more: bool,
+    /// The quotes.
+    pub data: Vec<Quote>,
+}
+
+/// A page of refunds, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RefundList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/refunds`.
+    pub url: String,
+    /// Whether more refunds follow in the direction of this page.
+    pub has_more: bool,
+    /// The refunds.
+    pub data: Vec<Refund>,
+}
+
 /// The public view of a quote, read with its `client_secret` and without a signature, for the
 /// payer's checkout page. It has no account or internal fields.
 #[derive(Clone, Debug, Serialize, ToSchema)]

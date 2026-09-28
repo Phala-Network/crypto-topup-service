@@ -172,7 +172,7 @@ pub(crate) async fn event_data(
 pub fn router(state: AppState) -> (Router, OpenApi) {
     let merchant = OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
-        .routes(routes!(quotes::create_quote))
+        .routes(routes!(quotes::list_quotes, quotes::create_quote))
         .routes(routes!(quotes::update_quote))
         .routes(routes!(quotes::cancel_quote))
         .routes(routes!(
@@ -183,7 +183,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(deposit_addresses::rotate_deposit_address))
         .routes(routes!(deposits::list_deposits))
         .routes(routes!(deposits::get_deposit, deposits::update_deposit))
-        .routes(routes!(deposits::create_refund))
+        .routes(routes!(deposits::list_refunds, deposits::create_refund))
         .routes(routes!(deposits::get_refund, deposits::update_refund))
         .routes(routes!(deposits::mark_refund_paid))
         .routes(routes!(deposits::cancel_refund))
