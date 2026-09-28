@@ -249,6 +249,9 @@ def _check_rejection(
     )
     if refund_to is None:
         return
+    # A deposit is rejected at the route's confirmations but refunded only once final.
+    LOG.info("deposit %s: waiting for finality to request its refund", deposit.id)
+    deposit, _ = _wait_for_account(api, team, timeout, lambda view: _final(view, address))
     refund = api.refund(team, deposit.id, refund_to, deposit.amount_atomic)
     LOG.info(
         "refund %s is %s: pay %s atomic from %s to %s, then attach the transaction with "
@@ -324,6 +327,11 @@ def _rejected(view: dict[str, Any], address: str) -> tuple[Deposit, dict[str, An
     if _find_event(view, "deposit.rejected", id=deposit.id) is None:
         return None
     return deposit, view
+
+
+def _final(view: dict[str, Any], address: str) -> tuple[Deposit, dict[str, Any]] | None:
+    deposit = _deposit_at(view, address)
+    return (deposit, view) if deposit is not None and deposit.final else None
 
 
 def _wait_for_account(
