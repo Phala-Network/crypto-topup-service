@@ -14,9 +14,8 @@ import {
   type Refund,
   type Timeline,
 } from "./api.js";
-import { Detail, Details, Disclosure, ExplorerLink, StatusBadge, describe } from "./common.js";
+import { Detail, Details, ExplorerLink, InfoTip, StatusBadge, Subsection, describe, errorMessage, wallet } from "./common.js";
 import { statusLabel, tokens } from "./format.js";
-import { errorMessage, transferTokens } from "./testTokens.js";
 
 /**
  * The refund flow (design D5): declare the refund, pay it from the treasury the deposit's address
@@ -38,20 +37,27 @@ export function Refunds({
   const symbol = account.token.symbol;
   const refundable = deposit.final && (deposit.status === "credited" || deposit.status === "rejected");
   return (
-    <Disclosure summary={`Refunds (${timeline.refunds.length})`}>
+    <Subsection
+      title={`Refunds (${timeline.refunds.length})`}
+      id="refunds-title"
+      aside={
+        <InfoTip label="About refunds">
+          The merchant refunds from its own treasury: declare the refund, pay it from the treasury that this
+          deposit's address pays, then attach the transaction. Phala Pay verifies it once the transaction is final
+          and never moves funds. Here you play the merchant's finance team.
+        </InfoTip>
+      }
+    >
       <p className="text-muted-foreground">
-        The merchant refunds from its own treasury: declare the refund, pay it from the treasury{" "}
-        <ExplorerLink account={account} kind="address" value={account.treasury} /> that this
-        deposit's address pays, then attach the transaction. Phala Pay verifies it once the
-        transaction is final and never moves funds. Here you play the merchant's finance team. On
-        this staging demo the treasury is Phala's finance Safe, which you do not control: a refund
-        you pay from your own wallet is verified and <strong>fails</strong> with{" "}
+        On this staging demo the treasury{" "}
+        <ExplorerLink account={account} kind="address" value={account.treasury} /> is Phala's finance Safe, which
+        you do not control: a refund you pay from your own wallet is verified and <strong>fails</strong> with{" "}
         <code>sender_mismatch</code>, which is exactly what should happen.
       </p>
       {refundable ? (
         <RefundForm deposit={deposit} symbol={symbol} onCreated={onChanged} />
       ) : (
-        <p data-testid="refund-unavailable">
+        <p data-testid="refund-unavailable" className="text-muted-foreground">
           {deposit.status === "reversed"
             ? "A reversed deposit cannot be refunded."
             : "Refunds need a final deposit (the service answers 400 deposit_not_final before)."}
@@ -64,7 +70,7 @@ export function Refunds({
           ))}
         </ul>
       )}
-    </Disclosure>
+    </Subsection>
   );
 }
 
@@ -103,7 +109,7 @@ function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: 
     );
   };
   return (
-    <form className="flex flex-col gap-3" onSubmit={submit} aria-label="Declare a refund">
+    <form className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]" onSubmit={submit} aria-label="Declare a refund">
       <Field>
         <FieldLabel htmlFor={amountId}>
           Amount ({symbol}, at most {tokens(remaining.toString(), symbol)})
@@ -126,10 +132,14 @@ function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: 
           onChange={(event) => setDestination(event.target.value)}
         />
       </Field>
-      <Button type="submit" variant="outline" className="self-start" disabled={state.pending}>
+      <Button type="submit" variant="outline" className="self-start sm:col-span-2" disabled={state.pending}>
         {state.pending ? "Declaring…" : "Declare refund"}
       </Button>
-      {state.error !== null && <ErrorAlert text={state.error} />}
+      {state.error !== null && (
+        <div className="sm:col-span-2">
+          <ErrorAlert text={state.error} />
+        </div>
+      )}
     </form>
   );
 }
@@ -168,13 +178,13 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
   const transfer = refund.transfer;
   return (
     <li
-      className="flex flex-col gap-2 rounded-lg border p-3"
+      className="flex flex-col gap-3 rounded-lg border bg-card p-4"
       data-testid="refund"
       data-refund={refund.id}
       data-status={refund.status}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono" title={refund.id}>
+        <span className="font-mono text-muted-foreground" title={refund.id}>
           {refund.id.slice(0, 11)}…
         </span>
         <StatusBadge status={refund.status}>{statusLabel(refund.status)}</StatusBadge>
@@ -253,14 +263,18 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
               disabled={state.pending !== null}
               onClick={() => {
                 setState({ pending: "wallet", error: null });
-                transferTokens(account.network.chain_id, transfer.token, transfer.to, BigInt(transfer.amount_atomic)).then(
-                  (sent) => {
-                    setHash(sent);
-                    setState({ pending: null, error: null });
-                  },
-                  (error: unknown) =>
-                    setState({ pending: null, error: errorMessage(error, "The wallet did not send it.") }),
-                );
+                wallet()
+                  .then(({ transferTokens }) =>
+                    transferTokens(account.network.chain_id, transfer.token, transfer.to, BigInt(transfer.amount_atomic)),
+                  )
+                  .then(
+                    (sent) => {
+                      setHash(sent);
+                      setState({ pending: null, error: null });
+                    },
+                    (error: unknown) =>
+                      setState({ pending: null, error: errorMessage(error, "The wallet did not send it.") }),
+                  );
               }}
             >
               {state.pending === "wallet" ? "Confirm in your wallet…" : "Pay it from my wallet instead"}

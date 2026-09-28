@@ -32,6 +32,26 @@ export function time(seconds: number): string {
   });
 }
 
+/** A table's date, `Sep 28, 15:21`. */
+export function day(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
+/** The time of day, `15:21:05`: a log's timestamp. */
+export function clock(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 /** `12 s`, `3 min 5 s`, or `1 h 2 min`. */
 export function duration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));

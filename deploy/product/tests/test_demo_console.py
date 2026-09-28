@@ -249,6 +249,7 @@ def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
     (tmp_path / "index.html").write_text("<!doctype html><title>Phala Pay</title>")
     (tmp_path / "assets").mkdir()
     (tmp_path / "assets" / "index-0a1b2c.js").write_text("export {};")
+    (tmp_path / "assets" / "geist-latin-3d4e5f.woff2").write_bytes(b"wOF2")
     (tmp_path / "secret.txt").write_text("not served")
     (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
     service = Service()
@@ -498,11 +499,17 @@ def test_serves_the_page_at_the_root(demo: tuple[DemoConsole, Service]) -> None:
     csp = page.headers["content-security-policy"]
     assert csp.startswith("default-src 'none'; script-src 'self';")
     assert "connect-src 'self' http://service.test;" in csp
+    # The bundled typeface, and no other font origin.
+    assert "; font-src 'self'; " in csp
     # Its assets, by content hash; nothing else at the root is the website's.
     asset = console.handle("GET", "/assets/index-0a1b2c.js", {}, b"")
     assert asset.status == HTTPStatus.OK
     assert asset.headers["cache-control"] == "public, max-age=31536000"
     assert "content-security-policy" not in asset.headers
+    font = console.handle("GET", "/assets/geist-latin-3d4e5f.woff2", {}, b"")
+    assert font.status == HTTPStatus.OK
+    assert font.headers["content-type"] == "font/woff2"
+    assert font.body == b"wOF2"
     assert console.handle("POST", "/", {}, b"").status == HTTPStatus.METHOD_NOT_ALLOWED
     for path in ["/index.html", "/secret.txt", "/webhooks", "/healthz", "/accounts/x"]:
         assert not console.handles(path)

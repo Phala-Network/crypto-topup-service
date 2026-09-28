@@ -93,6 +93,7 @@ CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 # `demo_quotes.api` keeps the quote's creation request for the developer view.
 SCHEMA = """
@@ -223,10 +224,12 @@ class DemoConsole:
             raise ValueError(f"{root} has no built website page (index.html)")
         service = urlsplit(config.service_url)
         # The page reads the public quote and deposit address views from the service, and sends
-        # the visitor's own wallet requests through the wallet's provider (no network access).
+        # the visitor's own wallet requests through the wallet's provider (no network access). Its
+        # typeface is bundled with its assets.
         self.csp = (
             "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            f"img-src 'self' data:; connect-src 'self' {service.scheme}://{service.netloc}; "
+            "img-src 'self' data:; font-src 'self'; "
+            f"connect-src 'self' {service.scheme}://{service.netloc}; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         )
         self.secure_cookie = urlsplit(config.public_url).scheme == "https"

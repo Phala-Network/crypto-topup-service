@@ -120,8 +120,3 @@ export async function sendCall(chainId: number, call: { to: string; data: string
     value: BigInt(call.value),
   });
 }
-
-export function errorMessage(error: unknown, fallback: string): string {
-  const message = error instanceof Error ? error.message.split("\n")[0] : undefined;
-  return message ?? fallback;
-}
