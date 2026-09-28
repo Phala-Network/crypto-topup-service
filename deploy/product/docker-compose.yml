@@ -1,10 +1,12 @@
 # Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
 # receiver with fulfillment, the account API, and the public Phala Pay demo page at
 # PRODUCT_PUBLIC_URL/demo/ of deploy/product/reference_product for the
-# phala-cloud product on the Sepolia staging route. Deploy (target `product`) renders this file with
-# deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
-# (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they
-# are attested and a change is a compose upgrade. The only env value is PRODUCT_API_KEY, the
+# phala-cloud product on the Sepolia staging route, served on its custom domain PRODUCT_DOMAIN
+# (PRODUCT_PUBLIC_URL is https://PRODUCT_DOMAIN) by dstack-ingress, as topup's is. Deploy (target
+# `product`) renders this file with deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and
+# the public settings (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_DOMAIN, PRODUCT_GATEWAY_DOMAIN,
+# PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they are attested and a change is a
+# compose upgrade. The only env value is PRODUCT_API_KEY, the
 # product's Phala Pay restricted test key (ppay_rk_test_…, with the permissions listed in
 # deploy/product/staging.env.example), sealed by the owner.
 services:
@@ -15,15 +17,13 @@ services:
     # Compose recreates a container only when its service definition changes, not when an inline
     # config's content does, and a restart keeps the old config file. The renderer sets this label
     # to the digest of the rendered file, so every rendered change recreates the product.
-    labels:
+    labels: &rendered-labels
       phala-pay.rendered-sha256: "${PRODUCT_RENDERED_SHA256:-}"
     configs:
       - source: product_config
         target: /etc/product/config.json
     volumes:
       - ledger:/data
-    ports:
-      - "8089:8089"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     healthcheck:
@@ -34,8 +34,32 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # The single public ingress, as in topup's compose (deploy/README.md, "Custom domain"): the
+  # official dstack-ingress 2.6, pinned by the same digest, terminates TLS for PRODUCT_DOMAIN inside
+  # the CVM with a tls-alpn-01 certificate and forwards the TCP stream to product:8089.
+  dstack-ingress:
+    labels: *rendered-labels
+    image: ghcr.io/dstack-tee/dstack-ingress:2.6@sha256:c212abb7bedec4d7b54a82bcf9972e58e39a4757cc811faeb6017eee6c0673b0
+    environment:
+      CHALLENGE_TYPE: tls-alpn-01
+      DOMAIN: "${PRODUCT_DOMAIN:-}"
+      GATEWAY_DOMAIN: "${PRODUCT_GATEWAY_DOMAIN:-}"
+      TARGET_ENDPOINT: product:8089
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - ingress_certs:/etc/letsencrypt
+      - ingress_evidences:/evidences
+    depends_on:
+      product:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   ledger:
+  ingress_certs:
+  ingress_evidences:
 
 # `account` is the product's Phala Pay account id (`acct_…`, from POST /v1/admin/accounts): commit
 # it here before the product is deployed (the zero placeholder fails the online preflight). With the

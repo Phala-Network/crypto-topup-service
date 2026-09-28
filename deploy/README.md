@@ -10,7 +10,7 @@ are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Inciden
 | Where | What | Deployed by |
 |---|---|---|
 | topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `smokescreen` (the [webhook egress](#webhook-egress) proxy), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
-| Staging reference-product CVM | [product/docker-compose.yml](product/docker-compose.yml), port 8089 | Deploy, target `product` |
+| Staging reference-product CVM | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
 | Object storage (Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | Sentry project `phala-network/crypto-topup-service` | errors, alerts, Crons and Uptime monitors | the service itself |
 | Ethereum (Sepolia for staging) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
@@ -61,6 +61,7 @@ key, and the database passwords: that is a key migration, not an image bump.
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
+   | `PRODUCT_DOMAIN` | `staging` only: the reference product's [custom domain](#custom-domain), `pay.phala.com` |
 
    No variable or secret names a treasury or a transaction-signing key: treasuries are each
    account's own, set through the API, and the service sends no transactions.
@@ -182,7 +183,7 @@ an RPC provider's API key is not one: its URL has `{key}` where the key goes, an
 |---|---|
 | `AWS_ENDPOINT`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the Environment variables of the same name |
 | `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT` | derived ([One-time setup](#one-time-setup-human-only-repository-owner), step 4) |
-| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variable, and the CVM node's gateway: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` |
+| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variable, and the CVM node's gateway: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` (the product's `PRODUCT_DOMAIN` and `PRODUCT_GATEWAY_DOMAIN` likewise, with `PRODUCT_PUBLIC_URL` `https://$PRODUCT_DOMAIN`) |
 | `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE` | the release's digests; the image digest is also the Sentry release |
 | `TOPUP_RESTORE_FROM_BACKUP`, `TOPUP_SERVICE_ENABLED` | the variant: service `off`, `on`; `--restore-check`: `on`, `read-only` |
 | ingress | the variant: the service runs `dstack-ingress` on 443 and publishes no topup port; `--restore-check` runs no ingress and publishes topup on 8081 (blocks after `# only-in: VARIANT` in the compose) |
@@ -209,14 +210,19 @@ unset because the account document is published. Like `keys` and `topup` it moun
 socket (its instance id and the evidence quote), which is why it is pinned by digest and attested
 with the compose.
 
-**HUMAN-ONLY, owner of the domain's Cloudflare zone**, once per CVM instance. Every topup Deploy
-run lists the records, in the tls-alpn-01 format of the pinned README:
+The staging reference product is served the same way: the same pinned dstack-ingress in its
+compose terminates TLS for `$PRODUCT_DOMAIN` and forwards to `product:8089`, so the demo, the
+product's webhook endpoint, and its account API are at `https://$PRODUCT_DOMAIN`.
+
+**HUMAN-ONLY, owner of the domain's Cloudflare zone**, once per CVM instance. Every Deploy run
+lists the records for its target's domain (`$DOMAIN`: `$TOPUP_DOMAIN` or `$PRODUCT_DOMAIN`), in
+the tls-alpn-01 format of the pinned README:
 
 | Type | Name | Content |
 |---|---|---|
-| CNAME | `$TOPUP_DOMAIN` | `$TOPUP_GATEWAY_DOMAIN` |
-| TXT | `_dstack-app-address.$TOPUP_DOMAIN` | `<instance_id>:443` |
-| CAA (optional) | `$TOPUP_DOMAIN` | `0 issue "letsencrypt.org;validationmethods=tls-alpn-01;accounturi=<ACME account>"` |
+| CNAME | `$DOMAIN` | the CVM node's gateway, `gateway.<base domain>` |
+| TXT | `_dstack-app-address.$DOMAIN` | `<instance_id>:443` |
+| CAA (optional) | `$DOMAIN` | `0 issue "letsencrypt.org;validationmethods=tls-alpn-01;accounturi=<ACME account>"` |
 
 - DNS only (grey cloud): a proxied name resolves to Cloudflare, so neither the CA nor a client
   reaches the gateway.
@@ -673,8 +679,9 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   preflight until a PR sets the real id. It pins its account's test-mode webhook keys from the
   authenticated attestation at `TOPUP_ORIGIN`, fetched with `PRODUCT_API_KEY`, at startup or on the
   first webhook when the key is sealed later (until then it answers `503`, and topup retries).
-- **Attested settings.** `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`), `PRODUCT_PUBLIC_URL` (its own
-  gateway URL), `PRODUCT_RPC_URL` (a keyless Sepolia RPC: it is published and the product seals no
+- **Attested settings.** `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`), `PRODUCT_PUBLIC_URL`
+  (`https://$PRODUCT_DOMAIN`, its [custom domain](#custom-domain)), `PRODUCT_DOMAIN` and
+  `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), `PRODUCT_RPC_URL` (a keyless Sepolia RPC: it is published and the product seals no
   RPC key), and `PRODUCT_DRIVER_PUBLIC_KEY`.
 
 The product also serves the public **Phala Pay demo** at `PRODUCT_PUBLIC_URL/demo/`
@@ -726,9 +733,11 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
    ([Treasury setup](#treasury-setup), Safe message; in test mode it applies at once). Open a PR
    setting the product config's `account` in [product/docker-compose.yml](product/docker-compose.yml)
    to the new `acct_…` id, and merge it.
-4. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
-   `.env.product` holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands the summary
-   prints. Then, with the secret key, register the product's endpoint:
+4. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
+   [DNS records](#custom-domain) for `$PRODUCT_DOMAIN` the summary lists, seal `.env.product`
+   holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and Deploy
+   `upgrade` with the same release, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
+   the certificate evidence. Then, with the secret key, register the product's endpoint:
    `POST /v1/webhook_endpoints {"url": "<PRODUCT_PUBLIC_URL>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.
 5. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the

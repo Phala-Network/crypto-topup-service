@@ -114,6 +114,7 @@ grep -F 'TOPUP_IMAGE must not use the zero digest placeholder' "$tmp/zero.err" >
 product_env() {
     env PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
         TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
+        PRODUCT_DOMAIN=product.example PRODUCT_GATEWAY_DOMAIN=gateway.dstack.example \
         PRODUCT_RPC_URL=https://rpc.example/sepolia \
         PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= "$@" \
         "$root/deploy/product/render-compose.sh"

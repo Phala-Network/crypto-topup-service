@@ -95,7 +95,7 @@ echo "== compose"
 if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \
     2>"$tmp/compose.err"; then
     image=$(jq -r '.services.product.image' "$tmp/compose.json")
-    printf '%s\n' "$image" >"$tmp/images"
+    jq -r '.services[].image' "$tmp/compose.json" | sort -u >"$tmp/images"
     if ! [[ "$image" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]] || [[ "$image" == *@sha256:0000000000000000000000000000000000000000000000000000000000000000 ]]; then
         fail "image $image is not a nonzero repository@sha256 digest; run render-compose.sh"
     fi
@@ -115,6 +115,22 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     else
         fail "the compose's product_config is not a JSON object"
     fi
+    # The custom domain (deploy/README.md, "Custom domain"): dstack-ingress terminates TLS for
+    # PRODUCT_DOMAIN, the host of PRODUCT_PUBLIC_URL, and forwards to product:8089.
+    for name in DOMAIN GATEWAY_DOMAIN CHALLENGE_TYPE TARGET_ENDPOINT; do
+        setting[INGRESS_$name]=$(jq -r --arg name "$name" \
+            '.services["dstack-ingress"].environment[$name] // "" | strings' "$tmp/compose.json")
+    done
+    hostname='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    [[ "${setting[INGRESS_DOMAIN]}" =~ $hostname &&
+        "https://${setting[INGRESS_DOMAIN]}" == "${setting[PRODUCT_PUBLIC_URL]-}" ]] ||
+        fail "dstack-ingress must serve PRODUCT_DOMAIN, the host of PRODUCT_PUBLIC_URL"
+    [[ "${setting[INGRESS_GATEWAY_DOMAIN]}" =~ $hostname ]] ||
+        fail "PRODUCT_GATEWAY_DOMAIN must be the dstack gateway's host name, for example" \
+            "gateway.dstack-pha-prod5.phala.network"
+    [[ "${setting[INGRESS_CHALLENGE_TYPE]}" == tls-alpn-01 &&
+        "${setting[INGRESS_TARGET_ENDPOINT]}" == product:8089 ]] ||
+        fail "dstack-ingress must use tls-alpn-01 and forward to product:8089"
     # The product's Phala Pay account: the account its webhooks and attestation must name, and the
     # first input of every address it pins.
     [[ "${account-}" =~ ^acct_[0-9a-f]{32}$ ]] ||
@@ -123,8 +139,8 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
         [[ "${setting[$name]-}" =~ $origin_pattern ]] ||
             fail "$name must be https://HOST[:PORT] in lowercase with no path"
     done
-    if [[ "${setting[PRODUCT_PUBLIC_URL]-}" == *.invalid ]]; then
-        echo "note: PRODUCT_PUBLIC_URL is provisional; the gateway URL replaces it after provisioning"
+    if [[ "${setting[INGRESS_GATEWAY_DOMAIN]}" == *.invalid ]]; then
+        echo "note: PRODUCT_GATEWAY_DOMAIN is provisional; the CVM's gateway replaces it after provisioning"
     fi
     rpc=${setting[PRODUCT_RPC_URL]-}
     [[ "$rpc" == https://* ]] || fail "PRODUCT_RPC_URL must use https"
@@ -135,7 +151,8 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
         driver_key_bytes=0
     [[ "$driver_key_bytes" == 32 ]] || fail "PRODUCT_DRIVER_PUBLIC_KEY must be standard base64 of 32 bytes"
     if env PRODUCT_IMAGE="$image" TOPUP_ORIGIN="${setting[TOPUP_ORIGIN]-}" \
-        PRODUCT_PUBLIC_URL="${setting[PRODUCT_PUBLIC_URL]-}" PRODUCT_RPC_URL="$rpc" \
+        PRODUCT_PUBLIC_URL="${setting[PRODUCT_PUBLIC_URL]-}" PRODUCT_DOMAIN="${setting[INGRESS_DOMAIN]}" \
+        PRODUCT_GATEWAY_DOMAIN="${setting[INGRESS_GATEWAY_DOMAIN]}" PRODUCT_RPC_URL="$rpc" \
         PRODUCT_DRIVER_PUBLIC_KEY="${setting[PRODUCT_DRIVER_PUBLIC_KEY]-}" \
         "$root/deploy/product/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>"$tmp/render.err"; then
         cmp -s "$tmp/fresh.yml" "$compose" ||
