@@ -31,14 +31,21 @@ type ApiResult<T> = Result<T, ApiError>;
 
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 100;
-const DEPOSIT_STATES: [&str; 6] = [
-    "detected",
-    "confirmed",
-    "credited",
-    "swept",
-    "rejected",
-    "reversed",
+/// A deposit's merchant-visible `status` and the processing states it covers.
+const DEPOSIT_STATUSES: [(&str, &[&str]); 4] = [
+    ("pending", &["detected", "confirmed"]),
+    ("credited", &["credited", "swept"]),
+    ("rejected", &["rejected"]),
+    ("reversed", &["reversed"]),
 ];
+
+/// The merchant-visible `status` of a processing state.
+pub(crate) fn deposit_status(state: &str) -> &'static str {
+    DEPOSIT_STATUSES
+        .iter()
+        .find(|(_, states)| states.contains(&state))
+        .map_or("pending", |(status, _)| status)
+}
 
 #[utoipa::path(
     get,
@@ -47,7 +54,7 @@ const DEPOSIT_STATES: [&str; 6] = [
         ("client_reference_id" = Option<String>, Query, description = "Only this customer's deposits"),
         ("quote" = Option<String>, Query, description = "Only deposits to this quote's address"),
         ("deposit_address" = Option<String>, Query, description = "Only deposits to this deposit address, `da_…`"),
-        ("status" = Option<String>, Query, description = "Only deposits in this status"),
+        ("status" = Option<String>, Query, description = "Only deposits in this status: `pending`, `credited`, `rejected`, or `reversed`"),
         ("tx_hash" = Option<String>, Query, description = "Only deposits in this transaction"),
         ("created[gte]" = Option<i64>, Query, description = "Created at or after, Unix seconds"),
         ("created[lte]" = Option<i64>, Query, description = "Created at or before, Unix seconds"),
@@ -91,10 +98,14 @@ pub(crate) async fn list_deposits(
             .push(" AND address.deposit_address_id = ")
             .push_bind(deposit_address);
     }
-    if let Some(status) = &filters.status {
-        builder
-            .push(" AND deposit.state = ")
-            .push_bind(status.clone());
+    if let Some(states) = filters.states {
+        builder.push(" AND deposit.state = ANY(").push_bind(
+            states
+                .iter()
+                .map(|state| (*state).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        builder.push(")");
     }
     if let Some(tx_hash) = &filters.tx_hash {
         builder
@@ -803,6 +814,7 @@ struct DepositRow {
     deposit_address_id: Option<Uuid>,
     state: String,
     is_final: bool,
+    swept: bool,
     reason: Option<String>,
     chain_id: i64,
     route: Option<String>,
@@ -829,7 +841,15 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
         SELECT deposit.id, deposit.livemode, customer.client_reference_id,
                address.quote_id,
                address.deposit_address_id,
-               deposit.state, deposit.final_at IS NOT NULL AS is_final, deposit.reason, deposit.chain_id, deposit.route,
+               deposit.state, deposit.final_at IS NOT NULL AS is_final,
+               deposit.state = 'swept' OR EXISTS (
+                   SELECT 1 FROM flushed
+                   WHERE flushed.address_id = deposit.address_id
+                     AND flushed.token = deposit.asset_contract
+                     AND (flushed.block_number, flushed.log_index)
+                         > (deposit.block_number, deposit.log_index)
+               ) AS swept,
+               deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
                deposit.credit_minor::text AS credit_minor,
                deposit.price_scaled::text AS price_scaled, deposit.price_source,
@@ -873,8 +893,9 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         deposit_address: row
             .deposit_address_id
             .map(crate::deposit_addresses::public_id),
-        status: row.state,
+        status: deposit_status(&row.state).to_owned(),
         is_final: row.is_final,
+        swept: row.swept,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
         asset,
@@ -908,6 +929,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         refunded,
         created: row.created_at.timestamp(),
         metadata: row.metadata.0,
+        admin: None,
     })
 }
 
@@ -915,7 +937,7 @@ struct ListFilters {
     client_reference_id: Option<String>,
     quote: Option<Uuid>,
     deposit_address: Option<Uuid>,
-    status: Option<String>,
+    states: Option<&'static [&'static str]>,
     tx_hash: Option<String>,
     created_gte: Option<DateTime<Utc>>,
     created_lte: Option<DateTime<Utc>>,
@@ -930,7 +952,7 @@ impl ListFilters {
             client_reference_id: None,
             quote: None,
             deposit_address: None,
-            status: None,
+            states: None,
             tx_hash: None,
             created_gte: None,
             created_lte: None,
@@ -954,10 +976,11 @@ impl ListFilters {
                         })?);
                 }
                 "status" => {
-                    if !DEPOSIT_STATES.contains(&value.as_str()) {
-                        return Err(ApiError::invalid_param("status", "unknown status"));
-                    }
-                    filters.status = Some(value.clone());
+                    let (_, states) = DEPOSIT_STATUSES
+                        .iter()
+                        .find(|(status, _)| status == value)
+                        .ok_or_else(|| ApiError::invalid_param("status", "unknown status"))?;
+                    filters.states = Some(states);
                 }
                 "tx_hash" => {
                     let hash = B256::from_str(value).map_err(|_| {

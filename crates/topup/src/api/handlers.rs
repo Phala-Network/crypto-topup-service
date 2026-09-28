@@ -18,9 +18,9 @@ use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
     AccountPauseRequest, AccountResponse, AdminReasonRequest, ApiKeyObject, Contact,
-    CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
+    CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, Deposit, IssueApiKeyRequest,
     NudgeResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
-    RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
+    RoutePauseResponse, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -156,23 +156,28 @@ pub(crate) async fn issue_api_key(
     path = "/v1/admin/deposits/{id}",
     params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
     responses(
-        (status = 200, description = "OK", body = SupportDepositResponse),
+        (status = 200, description = "OK: the deposit as its account sees it, with `admin`", body = Deposit),
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// One deposit of any account with its stored facts, transitions, and webhook events.
+/// One deposit of any account, as its account sees it, with its internals, transitions, and
+/// events in `admin`.
 pub(crate) async fn admin_get_deposit(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<SupportDepositResponse>> {
+) -> ApiResult<Json<Deposit>> {
     let id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
-    repository::admin_deposit(&state.pool, id)
+    let (scope, admin) = repository::admin_deposit(&state.pool, id)
         .await?
-        .map(Json)
-        .ok_or_else(ApiError::not_found)
+        .ok_or_else(ApiError::not_found)?;
+    let mut deposit = super::deposits::find_deposit(&state.pool, &state.routes, scope, id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    deposit.admin = Some(Box::new(admin));
+    Ok(Json(deposit))
 }
 
 #[utoipa::path(
@@ -215,10 +220,10 @@ pub(crate) async fn resume_account(
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/accounts/{account}/customers/{customer}/pause",
+    path = "/v1/admin/accounts/{account}/customers/{client_reference_id}/pause",
     params(
         ("account" = String, Path, description = "Account id, `acct_…`"),
-        ("customer" = String, Path, description = "The account's identifier of its customer, its `client_reference_id`")
+        ("client_reference_id" = String, Path, description = "The account's identifier of its customer")
     ),
     request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
@@ -228,18 +233,18 @@ pub(crate) async fn resume_account(
 /// Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 pub(crate) async fn pause_customer(
     State(state): State<AppState>,
-    ApiPath((account, customer)): ApiPath<(String, String)>,
+    ApiPath((account, client_reference_id)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_customer_scopes(&state, &account, &customer, request, true).await
+    mutate_customer_scopes(&state, &account, &client_reference_id, request, true).await
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/accounts/{account}/customers/{customer}/resume",
+    path = "/v1/admin/accounts/{account}/customers/{client_reference_id}/resume",
     params(
         ("account" = String, Path, description = "Account id, `acct_…`"),
-        ("customer" = String, Path, description = "The account's identifier of its customer, its `client_reference_id`")
+        ("client_reference_id" = String, Path, description = "The account's identifier of its customer")
     ),
     request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
@@ -249,10 +254,10 @@ pub(crate) async fn pause_customer(
 /// Resumes scopes of one customer of an account.
 pub(crate) async fn resume_customer(
     State(state): State<AppState>,
-    ApiPath((account, customer)): ApiPath<(String, String)>,
+    ApiPath((account, client_reference_id)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_customer_scopes(&state, &account, &customer, request, false).await
+    mutate_customer_scopes(&state, &account, &client_reference_id, request, false).await
 }
 
 #[utoipa::path(

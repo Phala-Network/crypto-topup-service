@@ -715,7 +715,7 @@ async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Res
                 .create_with_secret(&fixture.live_key, "team-42")
                 .await?;
             let id = object["id"].as_str().context("id")?;
-            ensure!(object["pending_payments"] == json!([]), "{object}");
+            ensure!(object["payments"] == json!([]), "{object}");
             // A second create issues another secret; both read the address.
             let (_, second) = fixture
                 .create_with_secret(&fixture.live_key, "team-42")
@@ -766,14 +766,16 @@ async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Res
             ensure!(status == StatusCode::OK, "{merchant}");
             let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit_id(1, tx_hash, 0));
             ensure!(
-                merchant["pending_payments"]
+                merchant["payments"]
                     == json!([{
-                        "chain_id": 1, "asset": "pha", "amount_atomic": "7",
+                        "status": "seen", "chain_id": 1, "asset": "pha", "amount_atomic": "7",
                         "tx_hash": format!("{tx_hash:#x}"), "confirmations": 1,
-                        "deposit": deposit,
+                        "estimated_final_at": merchant["payments"][0]["estimated_final_at"],
+                        "matches_quote": null, "deposit": deposit,
                     }]),
                 "{merchant}"
             );
+            ensure!(merchant["payments"][0]["estimated_final_at"].is_i64());
             let (_, view) = fixture.client_read(id, &secret).await?;
             let payments = view["payments"].as_array().context("payments")?;
             ensure!(payments.len() == 1, "{view}");
@@ -781,17 +783,12 @@ async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Res
             ensure!(payments[0]["asset"] == "pha" && payments[0]["decimals"] == 18);
             ensure!(payments[0]["amount_atomic"] == "7");
             // The public view carries no merchant fields.
-            for field in [
-                "client_reference_id",
-                "metadata",
-                "salt",
-                "pending_payments",
-            ] {
+            for field in ["client_reference_id", "metadata", "salt", "client_secret"] {
                 ensure!(view.get(field).is_none(), "{field} in {view}");
             }
             ensure!(view["networks"][0].get("treasury").is_none());
 
-            // Recorded as a deposit, it leaves the pending list and shows its status.
+            // Recorded as a deposit, it is `recorded` and the page shows the deposit's progress.
             ensure!(
                 db::insert_deposit(
                     pool,
@@ -827,7 +824,11 @@ async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Res
                     Value::Null,
                 )
                 .await?;
-            ensure!(merchant["pending_payments"] == json!([]), "{merchant}");
+            ensure!(
+                merchant["payments"][0]["status"] == "recorded",
+                "{merchant}"
+            );
+            ensure!(merchant["payments"][0]["deposit"] == deposit, "{merchant}");
             let (_, view) = fixture.client_read(id, &secret).await?;
             ensure!(view["payments"][0]["status"] == "confirming", "{view}");
             sqlx::query("UPDATE deposits SET state = 'reversed' WHERE tx_hash = $1")

@@ -212,8 +212,9 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             webhook_endpoints::delete_webhook_endpoint
         ))
         .routes(routes!(webhook_endpoints::test_webhook_endpoint))
+        .routes(routes!(sweeps::get_balance))
         .routes(routes!(sweeps::list_sweeps))
-        .routes(routes!(sweeps::list_addresses))
+        .routes(routes!(sweeps::list_forwarders))
         .routes(routes!(events::list_events))
         .routes(routes!(events::get_event))
         .routes(routes!(events::resend_event))

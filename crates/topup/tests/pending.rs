@@ -206,7 +206,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     );
     ensure!(pending_rows(pool).await? == 0, "finalized row was kept");
     let payment = api.payment("checkout-1").await?;
-    ensure!(payment["status"] == "final", "unexpected {payment}");
+    ensure!(payment["status"] == "recorded", "unexpected {payment}");
     ensure!(payment["confirmations"].is_null());
     // Final but not yet valued and screened.
     ensure!(api.client_progress("checkout-1").await? == ("confirming".to_owned(), None));
@@ -261,7 +261,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     .await?;
     let payment = api.payment("checkout-2").await?;
     ensure!(
-        payment["status"] == "final"
+        payment["status"] == "recorded"
             && payment["deposit"] == topup::ids::format(topup::ids::DEPOSIT, underpayment),
         "consumed lock does not show its consuming deposit: {payment}"
     );

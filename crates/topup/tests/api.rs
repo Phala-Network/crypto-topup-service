@@ -1090,7 +1090,7 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
                 .collect();
             let expected = report_data(&[0, 1, 2, 3], &account.public_id, livemode, &keys)
                 .context("report data")?;
-            ensure!(response["object"] == "attestation" && response["quote"] == "");
+            ensure!(response["object"] == "attestation" && response["tdx_quote"] == "");
             ensure!(response["account"] == account.public_id.as_str());
             ensure!(response["livemode"] == livemode);
             ensure!(returned == listed, "{response}");

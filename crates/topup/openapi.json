@@ -330,93 +330,6 @@
         ]
       }
     },
-    "/v1/addresses": {
-      "get": {
-        "tags": [
-          "addresses"
-        ],
-        "summary": "Every forwarder address issued in the key's mode, for quotes and for deposit address networks\n(current and superseded), with the `(factory, implementation, salt, treasury)` it is derived\nfrom: the export that keeps funds recomputable and sweepable without Phala Pay (design §13).\nPages follow `id` order.",
-        "operationId": "list_addresses",
-        "parameters": [
-          {
-            "name": "chain_id",
-            "in": "query",
-            "description": "Only this chain's addresses",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "1 to 100, default 10",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "starting_after",
-            "in": "query",
-            "description": "`addr_` id: the page after it",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ending_before",
-            "in": "query",
-            "description": "`addr_` id: the page before it",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddressList"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
     "/v1/admin/accounts": {
       "post": {
         "tags": [
@@ -637,7 +550,7 @@
         ]
       }
     },
-    "/v1/admin/accounts/{account}/customers/{customer}/pause": {
+    "/v1/admin/accounts/{account}/customers/{client_reference_id}/pause": {
       "post": {
         "tags": [
           "admin"
@@ -655,9 +568,9 @@
             }
           },
           {
-            "name": "customer",
+            "name": "client_reference_id",
             "in": "path",
-            "description": "The account's identifier of its customer, its `client_reference_id`",
+            "description": "The account's identifier of its customer",
             "required": true,
             "schema": {
               "type": "string"
@@ -713,7 +626,7 @@
         ]
       }
     },
-    "/v1/admin/accounts/{account}/customers/{customer}/resume": {
+    "/v1/admin/accounts/{account}/customers/{client_reference_id}/resume": {
       "post": {
         "tags": [
           "admin"
@@ -731,9 +644,9 @@
             }
           },
           {
-            "name": "customer",
+            "name": "client_reference_id",
             "in": "path",
-            "description": "The account's identifier of its customer, its `client_reference_id`",
+            "description": "The account's identifier of its customer",
             "required": true,
             "schema": {
               "type": "string"
@@ -928,7 +841,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "One deposit of any account with its stored facts, transitions, and webhook events.",
+        "summary": "One deposit of any account, as its account sees it, with its internals, transitions, and\nevents in `admin`.",
         "operationId": "admin_get_deposit",
         "parameters": [
           {
@@ -943,11 +856,11 @@
         ],
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "OK: the deposit as its account sees it, with `admin`",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SupportDepositResponse"
+                  "$ref": "#/components/schemas/Deposit"
                 }
               }
             }
@@ -1674,6 +1587,42 @@
         ]
       }
     },
+    "/v1/balance": {
+      "get": {
+        "tags": [
+          "balance"
+        ],
+        "summary": "What the account's forwarders hold in the key's mode, per chain and token: deposits not\nreversed minus finalized sweeps, and the part of it from final deposits, which is safe to\nsweep. A forwarder's funds can only ever reach its treasury.",
+        "operationId": "get_balance",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Balance"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/config": {
       "get": {
         "tags": [
@@ -2173,7 +2122,7 @@
           {
             "name": "status",
             "in": "query",
-            "description": "Only deposits in this status",
+            "description": "Only deposits in this status: `pending`, `credited`, `rejected`, or `reversed`",
             "required": false,
             "schema": {
               "type": "string"
@@ -2709,6 +2658,130 @@
           },
           "409": {
             "description": "`webhook_endpoint_disabled`: enable the endpoint first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/forwarders": {
+      "get": {
+        "tags": [
+          "forwarders"
+        ],
+        "summary": "Every forwarder issued in the key's mode, for quotes and for deposit address networks\n(current and superseded), with the `(factory, salt, treasury)` its address derives from: the\nexport that keeps funds recomputable and sweepable without Phala Pay (design §13). With\n`sweepable`, the forwarders to pass to the SDK's `flush_transaction` or `safe_batch`, one call\nper chain and treasury. Pages follow `id` order.",
+        "operationId": "list_forwarders",
+        "parameters": [
+          {
+            "name": "chain_id",
+            "in": "query",
+            "description": "Only this chain's forwarders",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "quote",
+            "in": "query",
+            "description": "Only this quote's forwarder, `qt_…`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deposit_address",
+            "in": "query",
+            "description": "Only this deposit address's networks, `da_…`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sweepable",
+            "in": "query",
+            "description": "A token contract: only forwarders with a final unswept balance of it that may be swept, never one holding a deposit rejected as sanctioned or paying a treasury a sanctions list names",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`fwd_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`fwd_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwarderList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`sweepable`: treasury screening is unavailable; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -3693,13 +3766,13 @@
         "tags": [
           "sweeps"
         ],
-        "summary": "The sweepable balances of the key's mode, by chain, token, and treasury, each with the\n`factory.flush(treasury, salts, token)` call that moves them (design D4). A forwarder's\nbalance is its final deposits, reversed ones excluded, minus the finalized `Flushed` amounts,\nso a sweep never counts a deposit that could still be reversed. A forwarder holding a deposit\nrejected as sanctioned is never listed, and no call is built to a treasury a sanctions list\nnames. Anyone may send the call; the sender pays the gas. The Python SDK's `safe_batch` turns\nthe calls into a Safe Transaction Builder file.",
+        "summary": "The sweeps of the key's mode, newest first: every finalized `Flushed` event of a forwarder of\nthe account, whoever sent the `flush`. A deposit is `swept` once a sweep after it moved its\nforwarder's balance.",
         "operationId": "list_sweeps",
         "parameters": [
           {
             "name": "chain_id",
             "in": "query",
-            "description": "Only this chain.",
+            "description": "Only this chain's sweeps",
             "required": false,
             "schema": {
               "type": "integer",
@@ -3708,9 +3781,46 @@
             }
           },
           {
+            "name": "forwarder",
+            "in": "query",
+            "description": "Only this forwarder's sweeps, `fwd_…`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "token",
             "in": "query",
-            "description": "Only this token contract.",
+            "description": "Only sweeps of this token contract",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`sw_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`sw_` id: the page before it",
             "required": false,
             "schema": {
               "type": "string"
@@ -3740,16 +3850,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Treasury screening is unavailable; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -4751,117 +4851,6 @@
         },
         "additionalProperties": false
       },
-      "AddressList": {
-        "type": "object",
-        "description": "A page of addresses in `id` order (<https://docs.stripe.com/api/pagination>).",
-        "required": [
-          "object",
-          "url",
-          "has_more",
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/AddressObject"
-            },
-            "description": "The addresses."
-          },
-          "has_more": {
-            "type": "boolean",
-            "description": "Whether more addresses follow in the direction of this page."
-          },
-          "object": {
-            "type": "string",
-            "description": "Always `list`."
-          },
-          "url": {
-            "type": "string",
-            "description": "The list's path, `/v1/addresses`."
-          }
-        }
-      },
-      "AddressObject": {
-        "type": "object",
-        "description": "An address the account was issued (design §13): everything needed to recompute it and to\nsweep it without Phala Pay.",
-        "required": [
-          "id",
-          "object",
-          "livemode",
-          "chain_id",
-          "address",
-          "factory",
-          "implementation",
-          "salt",
-          "treasury",
-          "client_reference_id",
-          "created"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "The forwarder address: `factory`'s `CREATE2` clone of `implementation` over `treasury`\nand `salt`."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain identifier.",
-            "minimum": 0
-          },
-          "client_reference_id": {
-            "type": "string",
-            "description": "Your identifier of the customer."
-          },
-          "created": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When the quote or deposit address it belongs to was created, Unix seconds."
-          },
-          "deposit_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The deposit address it is a network of, `da_…`; `null` for a quote's address."
-          },
-          "factory": {
-            "type": "string",
-            "description": "The forwarder factory."
-          },
-          "id": {
-            "type": "string",
-            "description": "Address id, `addr_…`."
-          },
-          "implementation": {
-            "type": "string",
-            "description": "The forwarder implementation the clone delegates to."
-          },
-          "livemode": {
-            "type": "boolean",
-            "description": "The mode."
-          },
-          "object": {
-            "type": "string",
-            "description": "Always `address`."
-          },
-          "quote": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The quote the address was issued for, `qt_…`; `null` for a deposit address's network."
-          },
-          "salt": {
-            "type": "string",
-            "description": "The `CREATE2` salt, 32 bytes of hex."
-          },
-          "treasury": {
-            "type": "string",
-            "description": "The treasury the forwarder pays, fixed in its address."
-          }
-        }
-      },
       "AdminReasonRequest": {
         "type": "object",
         "description": "Administrative action body; `reason` is recorded in the action's audit row.",
@@ -4987,7 +4976,7 @@
           "livemode",
           "webhook_keys",
           "report_data",
-          "quote"
+          "tdx_quote"
         ],
         "properties": {
           "account": {
@@ -5002,13 +4991,13 @@
             "type": "string",
             "description": "Always `attestation`."
           },
-          "quote": {
-            "type": "string",
-            "description": "Versioned dstack attestation bytes as lowercase hexadecimal."
-          },
           "report_data": {
             "type": "string",
             "description": "`sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖\npublic_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,\n`livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is\nits version as 4 big-endian bytes and its 32 raw public-key bytes."
+          },
+          "tdx_quote": {
+            "type": "string",
+            "description": "Versioned dstack TDX quote bytes as lowercase hexadecimal."
           },
           "webhook_keys": {
             "type": "array",
@@ -5016,6 +5005,69 @@
               "$ref": "#/components/schemas/WebhookKeyObject"
             },
             "description": "The keys that sign the account's deliveries in this mode: the current one first, then any\nprevious one still signing during a rotation."
+          }
+        }
+      },
+      "Balance": {
+        "type": "object",
+        "description": "The account's balance held in its forwarders, in the key's mode (Stripe's Balance): what\npayments put there and no finalized `Flushed` event has moved to a treasury yet.",
+        "required": [
+          "object",
+          "livemode",
+          "unswept"
+        ],
+        "properties": {
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `balance`."
+          },
+          "unswept": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BalanceAmount"
+            },
+            "description": "One entry per chain and token held."
+          }
+        }
+      },
+      "BalanceAmount": {
+        "type": "object",
+        "description": "A token's unswept amounts on one chain.",
+        "required": [
+          "chain_id",
+          "token",
+          "amount_atomic",
+          "final_amount_atomic"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": "string",
+            "description": "Every deposit not reversed, minus finalized sweeps, in base units, as a decimal string."
+          },
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Asset code; `null` for a token without a route."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "final_amount_atomic": {
+            "type": "string",
+            "description": "The part of `amount_atomic` from final deposits, which can no longer be reversed: what is\nsafe to sweep."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token contract."
           }
         }
       },
@@ -5743,6 +5795,7 @@
           "client_reference_id",
           "status",
           "final",
+          "swept",
           "chain_id",
           "asset_contract",
           "amount_atomic",
@@ -5761,6 +5814,17 @@
           "address": {
             "type": "string",
             "description": "Receiving forwarder address."
+          },
+          "admin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DepositAdmin",
+                "description": "The operator's view of the deposit's internals; only in `GET /v1/admin/deposits/{id}`."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "amount": {
             "type": [
@@ -5896,7 +5960,11 @@
           },
           "status": {
             "type": "string",
-            "description": "`detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is\nnot in the final chain: claw back a credit as for `deposit.refunded`). New values may be\nadded."
+            "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a\ncredit as for `deposit.refunded`). New values may be added."
+          },
+          "swept": {
+            "type": "boolean",
+            "description": "Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of\nits token to the treasury (`GET /v1/sweeps`), whoever sent the flush."
           },
           "tx_hash": {
             "type": "string",
@@ -5926,7 +5994,7 @@
           "created",
           "metadata",
           "networks",
-          "pending_payments"
+          "payments"
         ],
         "properties": {
           "address": {
@@ -5981,12 +6049,12 @@
             "type": "string",
             "description": "Always `deposit_address`."
           },
-          "pending_payments": {
+          "payments": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DepositAddressPendingPayment"
+              "$ref": "#/components/schemas/Payment"
             },
-            "description": "Transfers to the address seen in a block but not recorded as deposits yet, oldest first:\ndisplay only (a reorg can remove one, and nothing is credited until its deposit is). Once\na transfer reaches the route's confirmation it is a deposit, listed by\n`GET /v1/deposits?deposit_address=…`."
+            "description": "Payments to the address in the last 24 hours, newest first, at most 10, as a quote's\n`payment`: `seen` in a block within about a block time of arriving, then `recorded` as a\ndeposit. Display only; credit from `deposit.credited`."
           },
           "retired_at": {
             "type": [
@@ -6106,48 +6174,6 @@
           }
         }
       },
-      "DepositAddressPendingPayment": {
-        "type": "object",
-        "description": "A transfer to a deposit address seen in a block and not yet recorded as a deposit.",
-        "required": [
-          "chain_id",
-          "asset",
-          "amount_atomic",
-          "tx_hash",
-          "confirmations",
-          "deposit"
-        ],
-        "properties": {
-          "amount_atomic": {
-            "type": "string",
-            "description": "Token amount in base units, as a decimal string."
-          },
-          "asset": {
-            "type": "string",
-            "description": "Asset code."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain identifier.",
-            "minimum": 0
-          },
-          "confirmations": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Blocks on top of and including the transfer's block at the last head scan.",
-            "minimum": 0
-          },
-          "deposit": {
-            "type": "string",
-            "description": "The `dep_` id the deposit will have once recorded."
-          },
-          "tx_hash": {
-            "type": "string",
-            "description": "Transaction hash."
-          }
-        }
-      },
       "DepositAddressView": {
         "oneOf": [
           {
@@ -6161,12 +6187,96 @@
         ],
         "description": "`GET /v1/deposit_addresses/{id}` returns a `DepositAddress` to a request with an API key and a\n`ClientDepositAddress` to a request by `client_secret`."
       },
-      "DepositEventResponse": {
+      "DepositAdmin": {
         "type": "object",
-        "description": "One webhook event about a deposit and its delivery state.",
+        "description": "The operator's view of a deposit's internals (`GET /v1/admin/deposits/{id}`), returned as the\n`admin` field of the deposit; never present in a merchant response or an event.",
+        "required": [
+          "account",
+          "state",
+          "receipt_log_index",
+          "block_time",
+          "updated_at",
+          "transitions",
+          "events"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "The merchant account the deposit belongs to, `acct_…`."
+          },
+          "block_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Including block time."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositEventDelivery"
+            },
+            "description": "Events about the deposit in ascending creation order, with their delivery."
+          },
+          "final_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When both providers showed the transfer at or below `finalized`."
+          },
+          "price_scaled": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Eight-decimal scaled price as a decimal string."
+          },
+          "receipt_log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Position of the transfer log in its transaction's receipt; with the chain and transaction,\nthe deposit's identity.",
+            "minimum": 0
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Selected route."
+          },
+          "route_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Selected route version.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "The processing state: `detected`, `confirmed`, `credited`, `swept`, `rejected`, or\n`reversed` (`status` is its merchant view)."
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositTransition"
+            },
+            "description": "Transitions in ascending creation order."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last processing update time."
+          }
+        }
+      },
+      "DepositEventDelivery": {
+        "type": "object",
+        "description": "An event about a deposit and its delivery state.",
         "required": [
           "id",
-          "event_type",
+          "type",
           "created_at"
         ],
         "properties": {
@@ -6183,13 +6293,13 @@
             "format": "date-time",
             "description": "When the last of the account's webhook endpoints accepted the event, or `null` while one\nhas not or the account has none."
           },
-          "event_type": {
-            "type": "string",
-            "description": "Event type, such as `deposit.credited`."
-          },
           "id": {
             "type": "string",
-            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`."
+            "description": "Event id, `evt_…`."
+          },
+          "type": {
+            "type": "string",
+            "description": "Event type, such as `deposit.credited`."
           }
         }
       },
@@ -6224,180 +6334,9 @@
           }
         }
       },
-      "DepositResponse": {
+      "DepositTransition": {
         "type": "object",
-        "description": "A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).",
-        "required": [
-          "id",
-          "account",
-          "livemode",
-          "client_reference_id",
-          "chain_id",
-          "tx_hash",
-          "receipt_log_index",
-          "log_index",
-          "block_number",
-          "block_time",
-          "address",
-          "asset_contract",
-          "from_address",
-          "amount_atomic",
-          "state",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "account": {
-            "type": "string",
-            "description": "The merchant account the deposit belongs to, `acct_…`."
-          },
-          "address": {
-            "type": "string",
-            "description": "Receiving forwarder address."
-          },
-          "amount_atomic": {
-            "type": "string",
-            "description": "Atomic token amount encoded as a decimal string."
-          },
-          "asset_contract": {
-            "type": "string",
-            "description": "Canonical token contract address."
-          },
-          "block_number": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Including block number.",
-            "minimum": 0
-          },
-          "block_time": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Including block time."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain identifier.",
-            "minimum": 0
-          },
-          "client_reference_id": {
-            "type": "string",
-            "description": "The merchant's identifier of the customer the deposit is credited to."
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Row creation time."
-          },
-          "credit_minor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Credit in minor units encoded as a decimal string."
-          },
-          "deposit_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The deposit address that received the deposit, `da_…`; `null` for a quote's address."
-          },
-          "final_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "When both providers showed the transfer at or below `finalized`; `null` while the deposit\ncan still be reversed."
-          },
-          "from_address": {
-            "type": "string",
-            "description": "Canonical transfer sender address."
-          },
-          "id": {
-            "type": "string",
-            "description": "Deposit id, `dep_…`."
-          },
-          "livemode": {
-            "type": "boolean",
-            "description": "Whether the deposit is on a live route."
-          },
-          "log_index": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Block-wide transfer log index; it follows the transaction's re-inclusion.",
-            "minimum": 0
-          },
-          "price_scaled": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Eight-decimal scaled price encoded as a decimal string."
-          },
-          "price_source": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Which price valued the deposit: `lock` (the quoted price) or `spot`."
-          },
-          "quote": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The quote whose address received the deposit, `qt_…`; `null` for a deposit address."
-          },
-          "receipt_log_index": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Position of the transfer log in its transaction's receipt; with the chain and transaction,\nthe deposit's identity.",
-            "minimum": 0
-          },
-          "route": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Selected route."
-          },
-          "route_version": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Selected route version.",
-            "minimum": 0
-          },
-          "state": {
-            "type": "string",
-            "description": "Current processing state."
-          },
-          "tx_hash": {
-            "type": "string",
-            "description": "Canonical transaction hash."
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Last processing update time."
-          },
-          "valuation_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "Valuation observation time."
-          }
-        }
-      },
-      "DepositTransitionResponse": {
-        "type": "object",
-        "description": "One immutable state transition in a support timeline.",
+        "description": "One immutable state transition of a deposit.",
         "required": [
           "id",
           "from_state",
@@ -6642,6 +6581,109 @@
           }
         }
       },
+      "Forwarder": {
+        "type": "object",
+        "description": "A forwarder the account was issued (design §13): everything needed to recompute its address\nand sweep it without Phala Pay. The address is `factory`'s `CREATE2` clone of the pinned\nimplementation over `treasury` and `salt`.",
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "chain_id",
+          "address",
+          "factory",
+          "salt",
+          "treasury"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The forwarder address."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "deposit_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deposit address it is a network of, `da_…`; `null` for a quote's."
+          },
+          "factory": {
+            "type": "string",
+            "description": "The forwarder factory."
+          },
+          "id": {
+            "type": "string",
+            "description": "Forwarder id, `fwd_…`."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `forwarder`."
+          },
+          "quote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The quote it was issued for, `qt_…`; `null` for a deposit address's network."
+          },
+          "salt": {
+            "type": "string",
+            "description": "The `CREATE2` salt, 32 bytes of hex."
+          },
+          "superseded_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a treasury change replaced this deposit address network, Unix seconds; it is still\nwatched and credited, and pays its own treasury."
+          },
+          "treasury": {
+            "type": "string",
+            "description": "The treasury the forwarder pays, fixed in its address."
+          }
+        }
+      },
+      "ForwarderList": {
+        "type": "object",
+        "description": "A page of forwarders (<https://docs.stripe.com/api/pagination>), in `id` order.",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Forwarder"
+            },
+            "description": "The forwarders."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more forwarders follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/forwarders`."
+          }
+        }
+      },
       "IssueApiKeyRequest": {
         "type": "object",
         "description": "`POST /v1/admin/accounts/{account}/api_keys` body: a recovery key (design D7).",
@@ -6769,6 +6811,72 @@
           }
         }
       },
+      "Payment": {
+        "type": "object",
+        "description": "A payment observed at a quote's address or a deposit address. Display only: while `status` is\n`seen` it may still disappear in a reorg, and nothing has been credited.",
+        "required": [
+          "status",
+          "chain_id",
+          "tx_hash",
+          "amount_atomic",
+          "deposit"
+        ],
+        "properties": {
+          "amount_atomic": {
+            "type": "string",
+            "description": "Token amount in base units, as a decimal string."
+          },
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Asset code; `null` for a token without a route."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Blocks on top of and including the transfer's block at the last head scan; `seen` only.",
+            "minimum": 0
+          },
+          "deposit": {
+            "type": "string",
+            "description": "`dep_` id the deposit has, or will have once recorded."
+          },
+          "estimated_final_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only."
+          },
+          "matches_quote": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "On a quote: whether the payment is the quote's asset, in time, and within tolerance, so\nit is credited at the quoted price (otherwise at spot). `null` on a deposit address, whose\npayments are all credited at spot."
+          },
+          "status": {
+            "type": "string",
+            "description": "`seen` (in a block, not recorded as a deposit yet) or `recorded` (recorded as a deposit at\nthe route's confirmation; follow it as `deposit`). New values may be added."
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Canonical transaction hash."
+          }
+        }
+      },
       "Quote": {
         "type": "object",
         "description": "A quote: a locked price, an exact token amount, and a single-use address to pay it to.",
@@ -6825,7 +6933,7 @@
               "string",
               "null"
             ],
-            "description": "Lets the payer's browser read the quote's public view, `ClientQuote`, from\n`GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by\n`POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`\nreturns a new secret and the earlier one stops working. Give it only to the paying\ncustomer's page, and do not log it."
+            "description": "Lets the payer's browser read the quote's public view, `ClientQuote`, from\n`GET /v1/quotes/{id}?client_secret=…` without an API key. Returned only by\n`POST /v1/quotes`; a repeat with the same `Idempotency-Key` within 24 hours replays the\nfirst response, the same secret included. Give it only to the paying customer's page, and\ndo not log it."
           },
           "created": {
             "type": "integer",
@@ -6881,7 +6989,7 @@
           "payment": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/QuotePayment",
+                "$ref": "#/components/schemas/Payment",
                 "description": "The payment the checkout page should show, once one is seen on chain; display only."
               },
               {
@@ -6931,56 +7039,6 @@
           "url": {
             "type": "string",
             "description": "The list's path, `/v1/quotes`."
-          }
-        }
-      },
-      "QuotePayment": {
-        "type": "object",
-        "description": "A payment observed at a quote's address. Display only: while `status` is `seen` it is not\nfinal, may still disappear in a reorg, and nothing has been credited.",
-        "required": [
-          "status",
-          "tx_hash",
-          "amount_atomic",
-          "matches_quote",
-          "deposit"
-        ],
-        "properties": {
-          "amount_atomic": {
-            "type": "string",
-            "description": "Token amount in base units, as a decimal string."
-          },
-          "confirmations": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Blocks on top of and including the transfer's block at the last head scan; `seen` only.",
-            "minimum": 0
-          },
-          "deposit": {
-            "type": "string",
-            "description": "`dep_` id the deposit has, or will have once recorded."
-          },
-          "estimated_final_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only."
-          },
-          "matches_quote": {
-            "type": "boolean",
-            "description": "Whether the payment is the quote's asset, in time, and within tolerance, so it will be\ncredited at the quoted price; otherwise it is credited at spot once final."
-          },
-          "status": {
-            "type": "string",
-            "description": "`seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the\nroute's confirmation; it is final once its block is). New values may be added."
-          },
-          "tx_hash": {
-            "type": "string",
-            "description": "Canonical transaction hash."
           }
         }
       },
@@ -7360,70 +7418,45 @@
           }
         }
       },
-      "SupportDepositResponse": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/DepositResponse",
-            "description": "The deposit's stored facts."
-          },
-          {
-            "type": "object",
-            "required": [
-              "timeline",
-              "events"
-            ],
-            "properties": {
-              "events": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/DepositEventResponse"
-                },
-                "description": "Webhook events about the deposit in ascending creation order."
-              },
-              "timeline": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/DepositTransitionResponse"
-                },
-                "description": "Transitions in ascending creation order."
-              }
-            }
-          }
-        ],
-        "description": "Deposit facts with the full immutable transition timeline."
-      },
       "Sweep": {
         "type": "object",
-        "description": "One `factory.flush(treasury, salts, token)` call that sweeps the listed forwarders' balances\nof one token to one treasury (design D4). Send `transaction` from any wallet, or put it in a\nSafe Transaction Builder batch; the sender pays the gas.",
+        "description": "A sweep: one finalized `Flushed` event of the factory, which moved a forwarder's whole balance\nof a token to its treasury (Stripe's Payout). Anyone can send the `flush`; the merchant usually\ndoes, with the SDK's `flush_transaction` or `safe_batch`.",
         "required": [
+          "id",
           "object",
           "livemode",
           "chain_id",
+          "forwarder",
+          "address",
           "token",
           "treasury",
-          "factory",
           "amount_atomic",
-          "addresses",
-          "transaction"
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "created"
         ],
         "properties": {
-          "addresses": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SweepAddress"
-            },
-            "description": "The forwarders swept, at most 200 per sweep."
+          "address": {
+            "type": "string",
+            "description": "The forwarder's address."
           },
           "amount_atomic": {
             "type": "string",
-            "description": "The sum of `addresses[].amount_atomic`, in base units, as a decimal string."
+            "description": "Amount moved, in base units, as a decimal string."
           },
           "asset": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Asset code; `null` for a token without a route, which is swept all the same."
+            "description": "Asset code; `null` for a token without a route."
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block number of the transaction.",
+            "minimum": 0
           },
           "chain_id": {
             "type": "integer",
@@ -7431,13 +7464,28 @@
             "description": "EVM chain identifier.",
             "minimum": 0
           },
-          "factory": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the finalized event was indexed, Unix seconds."
+          },
+          "forwarder": {
             "type": "string",
-            "description": "The forwarder factory."
+            "description": "The forwarder swept, `fwd_…`."
+          },
+          "id": {
+            "type": "string",
+            "description": "Sweep id, `sw_…`."
           },
           "livemode": {
             "type": "boolean",
             "description": "The mode."
+          },
+          "log_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block-wide index of the `Flushed` log.",
+            "minimum": 0
           },
           "object": {
             "type": "string",
@@ -7447,42 +7495,19 @@
             "type": "string",
             "description": "The token contract."
           },
-          "transaction": {
-            "$ref": "#/components/schemas/SweepTransaction",
-            "description": "The call: `to` the factory, `data` the ABI-encoded `flush(treasury, salts, token)`, and\n`value` zero."
-          },
           "treasury": {
             "type": "string",
-            "description": "The treasury the forwarders pay, fixed in their addresses."
-          }
-        }
-      },
-      "SweepAddress": {
-        "type": "object",
-        "description": "A forwarder's sweepable balance of one token: its final deposits minus the finalized\n`Flushed` amounts, as the chain showed them at finality.",
-        "required": [
-          "address",
-          "salt",
-          "amount_atomic"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "The forwarder address."
+            "description": "The treasury paid, fixed in the forwarder's address."
           },
-          "amount_atomic": {
+          "tx_hash": {
             "type": "string",
-            "description": "Sweepable amount in base units, as a decimal string."
-          },
-          "salt": {
-            "type": "string",
-            "description": "Its `CREATE2` salt."
+            "description": "The flush transaction."
           }
         }
       },
       "SweepList": {
         "type": "object",
-        "description": "`GET /v1/sweeps` response.",
+        "description": "A page of sweeps, newest first (<https://docs.stripe.com/api/pagination>).",
         "required": [
           "object",
           "url",
@@ -7495,11 +7520,11 @@
             "items": {
               "$ref": "#/components/schemas/Sweep"
             },
-            "description": "The sweeps, by chain, token, and treasury."
+            "description": "The sweeps."
           },
           "has_more": {
             "type": "boolean",
-            "description": "Always `false`: every sweep is listed."
+            "description": "Whether more sweeps follow in the direction of this page."
           },
           "object": {
             "type": "string",
@@ -7508,29 +7533,6 @@
           "url": {
             "type": "string",
             "description": "The list's path, `/v1/sweeps`."
-          }
-        }
-      },
-      "SweepTransaction": {
-        "type": "object",
-        "description": "A contract call, as a wallet or the Safe Transaction Builder takes it.",
-        "required": [
-          "to",
-          "data",
-          "value"
-        ],
-        "properties": {
-          "data": {
-            "type": "string",
-            "description": "ABI-encoded call data, `0x`-prefixed hex."
-          },
-          "to": {
-            "type": "string",
-            "description": "The contract called."
-          },
-          "value": {
-            "type": "string",
-            "description": "Native value in wei, as a decimal string: always `\"0\"`."
           }
         }
       },

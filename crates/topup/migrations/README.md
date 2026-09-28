@@ -81,8 +81,9 @@ endpoint events and deleted endpoints.
 own `quotes` pause through `POST /v1/account/pause` (design §12), kept apart from the operator's
 `paused_scopes` so a merchant's resume never lifts an operator pause;
 `deposit_address_client_secrets`, the SHA-256 of the newest client secrets of each deposit address,
-which read its public view (scoped through `deposit_addresses`, never updated); and the
-`addresses.read` permission of `GET /v1/addresses`. Its down migration folds a merchant's own
+which read its public view (scoped through `deposit_addresses`, never updated); `flushed.id`, a
+generated UUID of each event's identity that is the sweep's API id; and the `forwarders.read`
+permission of `GET /v1/forwarders`. Its down migration folds a merchant's own
 pause into `paused_scopes`.
 
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials

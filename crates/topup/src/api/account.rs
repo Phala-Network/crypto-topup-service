@@ -465,7 +465,7 @@ pub(crate) async fn get_attestation(
             })
             .collect(),
         report_data: hex::encode(evidence.report_data),
-        quote: hex::encode(evidence.quote),
+        tdx_quote: hex::encode(evidence.quote),
     }))
 }
 

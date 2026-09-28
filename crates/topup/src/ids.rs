@@ -13,8 +13,10 @@ pub const WEBHOOK_ENDPOINT: &str = "we_";
 pub const QUOTE: &str = "qt_";
 /// Deposit address ids.
 pub const DEPOSIT_ADDRESS: &str = "da_";
-/// Issued forwarder address ids (`GET /v1/addresses`).
-pub const ADDRESS: &str = "addr_";
+/// Forwarder ids (`GET /v1/forwarders`): an issued address.
+pub const FORWARDER: &str = "fwd_";
+/// Sweep ids (`GET /v1/sweeps`): a finalized `Flushed` event.
+pub const SWEEP: &str = "sw_";
 /// Deposit ids; the UUID is the deterministic deposit id (architecture §0).
 pub const DEPOSIT: &str = "dep_";
 /// Refund ids.

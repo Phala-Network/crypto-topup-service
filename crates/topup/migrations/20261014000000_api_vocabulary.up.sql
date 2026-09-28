@@ -22,7 +22,17 @@ REVOKE UPDATE ON TABLE deposit_address_client_secrets FROM topup_app;
 COMMENT ON TABLE deposit_address_client_secrets IS
     'SHA-256 of the client secrets that read a deposit address''s public view; scoped through deposit_addresses.';
 
--- The address export (GET /v1/addresses) is a read of the account's own data; `sweeps.read`
+-- A sweep (GET /v1/sweeps) is a finalized Flushed event; its id is derived from the event's
+-- identity so existing rows get one too.
+ALTER TABLE flushed ADD COLUMN id uuid NOT NULL
+    GENERATED ALWAYS AS (md5(chain_id::text || ':' || tx_hash || ':' || log_index::text)::uuid)
+    STORED;
+CREATE UNIQUE INDEX flushed_id_unique ON flushed (id);
+CREATE INDEX flushed_created_idx ON flushed (created_at, id);
+COMMENT ON COLUMN flushed.id IS
+    'The sweep''s API id (sw_ and its hex): md5 of chain_id:tx_hash:log_index as a UUID.';
+
+-- The forwarder export (GET /v1/forwarders) is a read of the account's own data; `sweeps.read`
 -- exists since the base schema.
 INSERT INTO permissions (permission, principal)
-VALUES ('addresses.read', 'key:secret'), ('addresses.read', 'key:restricted');
+VALUES ('forwarders.read', 'key:secret'), ('forwarders.read', 'key:restricted');

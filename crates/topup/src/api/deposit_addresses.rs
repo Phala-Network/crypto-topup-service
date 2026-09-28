@@ -31,7 +31,7 @@ use super::metadata::{self, MetadataUpdate, Object};
 use super::models::{
     ClientDepositAddress, ClientDepositAddressNetwork, ClientDepositAddressPayment,
     CreateDepositAddressRequest, DepositAddress, DepositAddressAsset, DepositAddressList,
-    DepositAddressNetwork, DepositAddressPendingPayment, DepositAddressView, UpdateMetadataRequest,
+    DepositAddressNetwork, DepositAddressView, Payment, UpdateMetadataRequest,
 };
 use super::repository;
 
@@ -456,32 +456,22 @@ pub(crate) fn deposit_address_object(
         retired_at: address.retired_at.map(|at| at.timestamp()),
         metadata: address.metadata.clone(),
         networks,
-        pending_payments: Vec::new(),
+        payments: Vec::new(),
         client_secret: None,
     })
 }
 
-/// The merchant's view of a deposit address, with its pending payments.
+/// The merchant's view of a deposit address, with its recent payments.
 async fn deposit_address_response(
     pool: &PgPool,
     routes: &RouteSet,
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<DepositAddress> {
     let mut object = deposit_address_object(routes, address)?;
-    object.pending_payments = pending_transfers(pool, address.id)
+    object.payments = recent_payments(pool, routes, address.id, Utc::now())
         .await?
         .into_iter()
-        .filter_map(|transfer| {
-            let (asset, _) = route_asset(routes, transfer.chain_id, transfer.asset_contract)?;
-            Some(DepositAddressPendingPayment {
-                chain_id: transfer.chain_id,
-                asset,
-                amount_atomic: transfer.amount_atomic.value().to_string(),
-                tx_hash: format!("{:#x}", transfer.tx_hash),
-                confirmations: transfer.confirmations(),
-                deposit: ids::format(ids::DEPOSIT, transfer.deposit_id),
-            })
-        })
+        .map(|recent| recent.payment)
         .collect();
     Ok(object)
 }
@@ -597,68 +587,117 @@ async fn client_deposit_address(
     })
 }
 
-/// The payments the customer's page shows: transfers seen and not recorded yet, and deposits
-/// recorded within [`CLIENT_PAYMENTS_WINDOW`], newest first.
-async fn client_payments(
+/// A recent deposit: id, chain, state, token, amount, transaction, and creation time.
+type RecentDepositRow = (Uuid, i64, String, String, String, String, DateTime<Utc>);
+
+/// A payment to a deposit address with the processing state of its deposit, once recorded.
+struct RecentPayment {
+    payment: Payment,
+    decimals: Option<u8>,
+    state: Option<String>,
+    created: i64,
+}
+
+/// Transfers seen and not recorded yet, and deposits recorded within
+/// [`CLIENT_PAYMENTS_WINDOW`], newest first, at most [`CLIENT_PAYMENTS_SHOWN`].
+async fn recent_payments(
     pool: &PgPool,
     routes: &RouteSet,
     deposit_address_id: Uuid,
     now: DateTime<Utc>,
-) -> ApiResult<Vec<ClientDepositAddressPayment>> {
+) -> ApiResult<Vec<RecentPayment>> {
     let since = now
         .checked_sub_signed(CLIENT_PAYMENTS_WINDOW)
         .ok_or_else(ApiError::internal)?;
     let mut payments = Vec::new();
     for transfer in pending_transfers(pool, deposit_address_id).await? {
         let asset = route_asset(routes, transfer.chain_id, transfer.asset_contract);
-        payments.push(ClientDepositAddressPayment {
-            status: "seen".to_owned(),
-            chain_id: transfer.chain_id,
-            decimals: asset.as_ref().map(|(_, decimals)| *decimals),
-            asset: asset.map(|(asset, _)| asset),
-            amount_atomic: transfer.amount_atomic.value().to_string(),
-            tx_hash: format!("{:#x}", transfer.tx_hash),
-            confirmations: Some(transfer.confirmations()),
+        payments.push(RecentPayment {
+            payment: Payment {
+                status: "seen".to_owned(),
+                chain_id: transfer.chain_id,
+                asset: asset.as_ref().map(|(asset, _)| asset.clone()),
+                tx_hash: format!("{:#x}", transfer.tx_hash),
+                amount_atomic: transfer.amount_atomic.value().to_string(),
+                confirmations: Some(transfer.confirmations()),
+                estimated_final_at: Some(
+                    super::pending::estimated_final_at(transfer.block_time).timestamp(),
+                ),
+                matches_quote: None,
+                deposit: ids::format(ids::DEPOSIT, transfer.deposit_id),
+            },
+            decimals: asset.map(|(_, decimals)| decimals),
+            state: None,
             created: transfer.first_seen_at.timestamp(),
         });
     }
-    let deposits: Vec<(i64, String, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT deposit.chain_id, deposit.state, deposit.asset_contract, \
-                deposit.amount_atomic::text, deposit.tx_hash, deposit.created_at \
-         FROM deposits AS deposit \
-         JOIN addresses AS address ON address.id = deposit.address_id \
-         WHERE address.deposit_address_id = $1 AND deposit.created_at >= $2 \
-         ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT $3",
+    let deposits: Vec<RecentDepositRow> = sqlx::query_as(
+        "SELECT deposit.id, deposit.chain_id, deposit.state, deposit.asset_contract, \
+                    deposit.amount_atomic::text, deposit.tx_hash, deposit.created_at \
+             FROM deposits AS deposit \
+             JOIN addresses AS address ON address.id = deposit.address_id \
+             WHERE address.deposit_address_id = $1 AND deposit.created_at >= $2 \
+             ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT $3",
     )
     .bind(deposit_address_id)
     .bind(since)
     .bind(i64::try_from(CLIENT_PAYMENTS_SHOWN).map_err(|_| ApiError::internal())?)
     .fetch_all(pool)
     .await?;
-    for (chain_id, state, contract, amount, tx_hash, created) in deposits {
+    for (id, chain_id, state, contract, amount, tx_hash, created) in deposits {
         let chain_id = u64::try_from(chain_id).map_err(|_| ApiError::internal())?;
         let contract: EvmAddress = contract.parse().map_err(|_| ApiError::internal())?;
         let asset = route_asset(routes, chain_id, contract);
-        payments.push(ClientDepositAddressPayment {
-            status: match state.as_str() {
-                "credited" | "swept" => "credited",
-                "rejected" => "rejected",
-                "reversed" => "reversed",
-                _ => "confirming",
-            }
-            .to_owned(),
-            chain_id,
-            decimals: asset.as_ref().map(|(_, decimals)| *decimals),
-            asset: asset.map(|(asset, _)| asset),
-            amount_atomic: amount,
-            tx_hash,
-            confirmations: None,
+        payments.push(RecentPayment {
+            payment: Payment {
+                status: "recorded".to_owned(),
+                chain_id,
+                asset: asset.as_ref().map(|(asset, _)| asset.clone()),
+                tx_hash,
+                amount_atomic: amount,
+                confirmations: None,
+                estimated_final_at: None,
+                matches_quote: None,
+                deposit: ids::format(ids::DEPOSIT, id),
+            },
+            decimals: asset.map(|(_, decimals)| decimals),
+            state: Some(state),
             created: created.timestamp(),
         });
     }
     payments.sort_by_key(|payment| std::cmp::Reverse(payment.created));
     payments.truncate(CLIENT_PAYMENTS_SHOWN);
     Ok(payments)
+}
+
+/// The payments the customer's page shows, by their progress.
+async fn client_payments(
+    pool: &PgPool,
+    routes: &RouteSet,
+    deposit_address_id: Uuid,
+    now: DateTime<Utc>,
+) -> ApiResult<Vec<ClientDepositAddressPayment>> {
+    Ok(recent_payments(pool, routes, deposit_address_id, now)
+        .await?
+        .into_iter()
+        .map(|recent| ClientDepositAddressPayment {
+            status: match recent.state.as_deref() {
+                None => "seen",
+                Some("credited" | "swept") => "credited",
+                Some("rejected") => "rejected",
+                Some("reversed") => "reversed",
+                Some(_) => "confirming",
+            }
+            .to_owned(),
+            chain_id: recent.payment.chain_id,
+            asset: recent.payment.asset,
+            decimals: recent.decimals,
+            amount_atomic: recent.payment.amount_atomic,
+            tx_hash: recent.payment.tx_hash,
+            confirmations: recent.payment.confirmations,
+            created: recent.created,
+        })
+        .collect())
 }
 
 /// Transfers to any network of the deposit address, current or superseded, seen in a block and

@@ -1,7 +1,9 @@
-//! The sweep builder (`GET /v1/sweeps`, docs/design/multi-tenant.md D4) and the address export
-//! (`GET /v1/addresses`, §13): sweepable balances come from final deposits and finalized
-//! `Flushed` events only, a forwarder holding a sanctioned deposit is never swept, no call is
-//! built to a sanctioned treasury, and the export names every address's derivation inputs.
+//! The balance (`GET /v1/balance`), the sweeps (`GET /v1/sweeps`), and the forwarders
+//! (`GET /v1/forwarders`) of docs/design/multi-tenant.md D4 and §13: balances come from deposits
+//! not reversed minus finalized `Flushed` events, a sweep is such an event, a deposit is `swept`
+//! once a sweep after it moved its forwarder's balance, and `sweepable` never lists a forwarder
+//! holding a sanctioned deposit or paying a sanctioned treasury. The operator's deposit view is
+//! the merchant's with `admin` internals.
 
 mod support;
 
@@ -14,12 +16,11 @@ use axum::body::to_bytes;
 use axum::http::{Method, StatusCode};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
-use serde_json::Value;
+use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{self, NewDeposit};
 use topup::refunds::{DestinationScreener, DestinationScreening};
 use topup_adapters::attestation::DstackAttestor;
-use topup_adapters::chain::flush::encode_flush;
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
@@ -27,17 +28,19 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewAddress};
-use support::{TEST_ORIGIN, merchant_request, public_key_base64, with_database};
+use support::{TEST_ORIGIN, merchant_request, public_key_base64, signed_request, with_database};
+
+const ADMIN_KEY: [u8; 32] = [49; 32];
 
 #[tokio::test]
-async fn sweeps_list_final_unswept_balances_with_the_flush_call() -> Result<()> {
+async fn balance_sweeps_and_sweepable_forwarders_follow_final_deposits_and_flushes() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let token = fixture.route.asset.contract;
-            // a: 100 final, 30 flushed -> 70. b: 50 final and 20 not final yet -> 50.
-            // c: 10 final beside a sanctioned deposit -> never swept. d: reversed -> nothing.
+            let token = format!("{:#x}", fixture.route.asset.contract);
+            // a: 100 final, 30 swept. b: 50 final, 20 not final yet. c: 10 final beside a
+            // sanctioned deposit of 5. d: reversed.
             let a = fixture.address(1).await?;
             let b = fixture.address(2).await?;
             let c = fixture.address(3).await?;
@@ -69,55 +72,78 @@ async fn sweeps_list_final_unswept_balances_with_the_flush_call() -> Result<()> 
                 .deposit(&d, 6, 40, DepositState::Reversed, None, true)
                 .await?;
 
-            let (status, list) = fixture.get("/v1/sweeps", Clear).await?;
-            ensure!(status == StatusCode::OK, "{list}");
-            let sweeps = list["data"].as_array().context("data")?;
-            ensure!(sweeps.len() == 1, "{list}");
-            let sweep = &sweeps[0];
-            ensure!(sweep["object"] == "sweep" && sweep["livemode"] == true);
-            ensure!(sweep["chain_id"] == 1 && sweep["asset"] == "pha");
-            ensure!(sweep["token"] == format!("{token:#x}"));
-            ensure!(sweep["treasury"] == format!("{:#x}", seed::FIXTURE_TREASURY));
-            ensure!(sweep["amount_atomic"] == "120", "{sweep}");
-            let mut expected = [(a.address, a.salt, "70"), (b.address, b.salt, "50")];
-            expected.sort_by_key(|(address, _, _)| format!("{address:#x}"));
-            let listed = sweep["addresses"].as_array().context("addresses")?;
-            ensure!(listed.len() == 2, "{sweep}");
-            for ((address, salt, amount), listed) in expected.iter().zip(listed) {
-                ensure!(listed["address"] == format!("{address:#x}"));
-                ensure!(listed["salt"] == format!("{salt:#x}"));
-                ensure!(listed["amount_atomic"] == *amount);
-            }
-            let factory = fixture.route.chain.contracts.forwarder_factory;
-            ensure!(sweep["factory"] == format!("{factory:#x}"));
-            ensure!(sweep["transaction"]["to"] == format!("{factory:#x}"));
-            ensure!(sweep["transaction"]["value"] == "0");
-            let salts = expected.iter().map(|(_, salt, _)| *salt).collect();
+            let (status, balance) = fixture.get("/v1/balance", Clear).await?;
+            ensure!(status == StatusCode::OK, "{balance}");
             ensure!(
-                sweep["transaction"]["data"]
-                    == format!("{:#x}", encode_flush(seed::FIXTURE_TREASURY, salts, token))
+                balance
+                    == json!({
+                        "object": "balance", "livemode": true,
+                        "unswept": [{
+                            "chain_id": 1, "token": token, "asset": "pha",
+                            "amount_atomic": "155", "final_amount_atomic": "135",
+                        }],
+                    }),
+                "{balance}"
             );
-
-            // Filters, another mode, a sanctioned treasury, and unavailable screening.
-            let (_, other_chain) = fixture.get("/v1/sweeps?chain_id=10", Clear).await?;
-            ensure!(other_chain["data"] == Value::Array(Vec::new()));
-            let (_, other_token) = fixture
-                .get(
-                    &format!("/v1/sweeps?token={:#x}", Address::repeat_byte(9)),
-                    Clear,
-                )
-                .await?;
-            ensure!(other_token["data"] == Value::Array(Vec::new()));
-            let (status, _) = fixture.get("/v1/sweeps?token=nope", Clear).await?;
-            ensure!(status == StatusCode::BAD_REQUEST);
-            let (_, sanctioned) = fixture.get("/v1/sweeps", Sanctioned).await?;
-            ensure!(sanctioned["data"] == Value::Array(Vec::new()));
-            let (status, _) = fixture.get("/v1/sweeps", Unavailable).await?;
-            ensure!(status == StatusCode::SERVICE_UNAVAILABLE);
             let (_, test_mode) = fixture
-                .get_with("/v1/sweeps", Clear, &fixture.test_key)
+                .get_with("/v1/balance", Clear, &fixture.test_key)
                 .await?;
-            ensure!(test_mode["data"] == Value::Array(Vec::new()));
+            ensure!(test_mode["unswept"] == json!([]));
+
+            // The sweep is the finalized Flushed event, and it marks the deposit before it swept.
+            let (status, sweeps) = fixture.get("/v1/sweeps", Clear).await?;
+            ensure!(status == StatusCode::OK, "{sweeps}");
+            let sweep = &sweeps["data"][0];
+            ensure!(
+                sweeps["data"].as_array().map(Vec::len) == Some(1),
+                "{sweeps}"
+            );
+            ensure!(sweep["object"] == "sweep" && sweep["amount_atomic"] == "30");
+            ensure!(sweep["id"].as_str().is_some_and(|id| id.starts_with("sw_")));
+            ensure!(sweep["forwarder"] == format!("fwd_{}", a.id.simple()));
+            ensure!(sweep["address"] == format!("{:#x}", a.address));
+            ensure!(sweep["token"] == token && sweep["asset"] == "pha");
+            ensure!(sweep["treasury"] == format!("{:#x}", seed::FIXTURE_TREASURY));
+            for (path, count) in [
+                (format!("/v1/sweeps?forwarder=fwd_{}", b.id.simple()), 0),
+                ("/v1/sweeps?chain_id=10".to_owned(), 0),
+                (format!("/v1/sweeps?token={token}"), 1),
+            ] {
+                let (_, page) = fixture.get(&path, Clear).await?;
+                ensure!(
+                    page["data"].as_array().map(Vec::len) == Some(count),
+                    "{path}"
+                );
+            }
+            let (_, deposits) = fixture.get("/v1/deposits", Clear).await?;
+            for deposit in deposits["data"].as_array().context("data")? {
+                let swept = deposit["address"] == format!("{:#x}", a.address);
+                ensure!(deposit["swept"] == swept, "{deposit}");
+            }
+
+            // Sweepable forwarders: final unswept, never sanctioned, only to a clear treasury.
+            let sweepable = format!("/v1/forwarders?sweepable={token}");
+            let (status, page) = fixture.get(&sweepable, Clear).await?;
+            ensure!(status == StatusCode::OK, "{page}");
+            let mut listed: Vec<&str> = page["data"]
+                .as_array()
+                .context("data")?
+                .iter()
+                .filter_map(|forwarder| forwarder["id"].as_str())
+                .collect();
+            listed.sort_unstable();
+            let mut expected = vec![
+                format!("fwd_{}", a.id.simple()),
+                format!("fwd_{}", b.id.simple()),
+            ];
+            expected.sort();
+            ensure!(listed == expected, "{page}");
+            let (_, sanctioned) = fixture.get(&sweepable, Sanctioned).await?;
+            ensure!(sanctioned["data"] == json!([]));
+            let (status, _) = fixture.get(&sweepable, Unavailable).await?;
+            ensure!(status == StatusCode::SERVICE_UNAVAILABLE);
+            let (status, _) = fixture.get("/v1/forwarders?sweepable=nope", Clear).await?;
+            ensure!(status == StatusCode::BAD_REQUEST);
             Ok(())
         })
     })
@@ -125,7 +151,7 @@ async fn sweeps_list_final_unswept_balances_with_the_flush_call() -> Result<()> 
 }
 
 #[tokio::test]
-async fn the_address_export_names_every_address_derivation() -> Result<()> {
+async fn the_forwarder_export_names_every_derivation_and_pages() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
@@ -138,8 +164,8 @@ async fn the_address_export_names_every_address_derivation() -> Result<()> {
             let mut cursor: Option<String> = None;
             loop {
                 let path = match &cursor {
-                    Some(id) => format!("/v1/addresses?limit=2&starting_after={id}"),
-                    None => "/v1/addresses?limit=2".to_owned(),
+                    Some(id) => format!("/v1/forwarders?limit=2&starting_after={id}"),
+                    None => "/v1/forwarders?limit=2".to_owned(),
                 };
                 let (status, page) = fixture.get(&path, Clear).await?;
                 ensure!(status == StatusCode::OK, "{page}");
@@ -154,46 +180,97 @@ async fn the_address_export_names_every_address_derivation() -> Result<()> {
                 }
             }
             ensure!(seen.len() == 3, "{seen:?}");
-            let route = &fixture.route;
-            for address in &seen {
-                ensure!(address["object"] == "address" && address["livemode"] == true);
+            let factory = format!("{:#x}", fixture.route.chain.contracts.forwarder_factory);
+            for forwarder in &seen {
+                let matching = issued
+                    .iter()
+                    .find(|issued| forwarder["id"] == format!("fwd_{}", issued.id.simple()))
+                    .context("an issued forwarder")?;
                 ensure!(
-                    address["id"]
-                        .as_str()
-                        .is_some_and(|id| id.starts_with("addr_"))
+                    *forwarder
+                        == json!({
+                            "id": forwarder["id"], "object": "forwarder", "livemode": true,
+                            "chain_id": 1, "address": format!("{:#x}", matching.address),
+                            "factory": factory, "salt": format!("{:#x}", matching.salt),
+                            "treasury": format!("{:#x}", seed::FIXTURE_TREASURY),
+                            "quote": forwarder["quote"], "deposit_address": null,
+                            "superseded_at": null,
+                        }),
+                    "{forwarder}"
                 );
                 ensure!(
-                    address["factory"] == format!("{:#x}", route.chain.contracts.forwarder_factory)
-                );
-                ensure!(
-                    address["implementation"]
-                        == format!("{:#x}", route.chain.contracts.implementation)
-                );
-                ensure!(address["treasury"] == format!("{:#x}", seed::FIXTURE_TREASURY));
-                ensure!(address["client_reference_id"] == "team-42");
-                ensure!(
-                    address["quote"]
+                    forwarder["quote"]
                         .as_str()
                         .is_some_and(|id| id.starts_with("qt_"))
                 );
-                ensure!(address["deposit_address"].is_null());
-                let matching = issued
-                    .iter()
-                    .find(|issued| address["address"] == format!("{:#x}", issued.address))
-                    .context("an issued address")?;
-                ensure!(address["salt"] == format!("{:#x}", matching.salt));
             }
-            // Ids are unique and the pages do not overlap.
+            // Pages do not overlap, and a page before a cursor comes back in order.
             let mut ids: Vec<&str> = seen.iter().filter_map(|a| a["id"].as_str()).collect();
-            ids.sort_unstable();
+            let last = ids.last().copied().context("last")?.to_owned();
             ids.dedup();
             ensure!(ids.len() == 3);
-            let (_, test_mode) = fixture
-                .get_with("/v1/addresses", Clear, &fixture.test_key)
+            let (_, before) = fixture
+                .get(&format!("/v1/forwarders?ending_before={last}"), Clear)
                 .await?;
-            ensure!(test_mode["data"] == Value::Array(Vec::new()));
-            let (status, _) = fixture.get("/v1/addresses?limit=0", Clear).await?;
+            let before: Vec<&str> = before["data"]
+                .as_array()
+                .context("data")?
+                .iter()
+                .filter_map(|a| a["id"].as_str())
+                .collect();
+            ensure!(before == ids[..2], "{before:?}");
+            let (_, test_mode) = fixture
+                .get_with("/v1/forwarders", Clear, &fixture.test_key)
+                .await?;
+            ensure!(test_mode["data"] == json!([]));
+            let (status, _) = fixture.get("/v1/forwarders?limit=0", Clear).await?;
             ensure!(status == StatusCode::BAD_REQUEST);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_operator_reads_a_deposit_as_its_account_does_with_admin_internals() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let a = fixture.address(1).await?;
+            fixture
+                .deposit(&a, 1, 100, DepositState::Detected, None, false)
+                .await?;
+            let (_, deposits) = fixture.get("/v1/deposits", Clear).await?;
+            let merchant = deposits["data"][0].clone();
+            ensure!(merchant["status"] == "pending" && merchant.get("admin").is_none());
+            let id = merchant["id"].as_str().context("id")?;
+            let response = fixture
+                .app(Arc::new(Clear))?
+                .oneshot(signed_request(
+                    Method::GET,
+                    &format!("/v1/admin/deposits/{id}"),
+                    Vec::new(),
+                    "admin/v1",
+                    &SigningKey::from_bytes(&ADMIN_KEY),
+                    Utc::now().timestamp(),
+                ))
+                .await?;
+            ensure!(response.status() == StatusCode::OK);
+            let mut operator: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_048_576).await?)?;
+            let admin = operator
+                .as_object_mut()
+                .and_then(|object| object.remove("admin"))
+                .context("admin")?;
+            ensure!(operator == merchant, "{operator} != {merchant}");
+            ensure!(admin["state"] == "detected" && admin["route"] == fixture.route.route);
+            ensure!(
+                admin["account"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("acct_"))
+            );
+            ensure!(admin["transitions"] == json!([]) && admin["events"] == json!([]));
             Ok(())
         })
     })
@@ -330,7 +407,7 @@ impl Fixture {
     }
 
     fn app(&self, screening: Arc<dyn DestinationScreener>) -> Result<Router> {
-        let admin_key = SigningKey::from_bytes(&[49; 32]);
+        let admin_key = SigningKey::from_bytes(&ADMIN_KEY);
         Ok(topup::api::router(AppState {
             pool: self.pool.clone(),
             routes: Arc::new(
