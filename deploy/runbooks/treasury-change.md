@@ -1,7 +1,8 @@
 # Treasury change
 
 **Trigger:** a merchant, Phala Cloud's Finance included, moves a chain's treasury to another
-address; an unexpected `account.treasury.pending` event, a change the merchant did not request;
+address; an unexpected `treasury.created` event of a `pending` treasury, a change the merchant did not
+request;
 or the `TopupTreasurySanctioned` alert.
 
 **Impact:** treasuries are the accounts' own, set through the API per chain and mode with an
@@ -22,14 +23,15 @@ chain's first treasury apply at once.
    on that chain; ERC-6492 signatures are refused.
 2. Submit it with `POST /v1/treasuries` before the challenge's `expires_at` (10 minutes for an
    EOA, 24 hours for a Safe). A live change answers `pending` with its
-   `effective_at` and sends `account.treasury.pending` to every enabled endpoint of the mode.
-3. At `effective_at` the time-lock worker applies it and sends `account.treasury.updated`; list
+   `effective_at` and sends `treasury.created` to every enabled endpoint of the mode.
+3. At `effective_at` the time-lock worker applies it and sends `treasury.updated` for it (and for
+   the treasury it replaces); list
    the chain's treasuries with `GET /v1/treasuries?chain_id=…` (`active`, then `replaced`).
 
 ## Unrequested change (the merchant, then the operator)
 
 The merchant cancels the pending change before it applies,
-`POST /v1/treasuries/{id}/cancel` (`account.treasury.canceled`), and rolls its keys
+`POST /v1/treasuries/{id}/cancel` (`treasury.canceled`), and rolls its keys
 ([API key compromise](api-key-compromise.md)). If the key holder races it (proves the change again,
 rolls the keys), the merchant asks the operator, who verifies the request with the recorded
 contact and revokes the mode's keys with a recovery key; a pending change then stays cancellable
@@ -40,7 +42,7 @@ with the new key.
 The time-lock worker screens a treasury again when its change is due and every day while it is
 current, with the chain's sanctions oracle on both providers (design §8). A due change whose
 address a list now names is not applied: it is `canceled` with `cancellation_reason: sanctioned`
-and `account.treasury.canceled`. A current treasury a list names raises `TopupTreasurySanctioned`
+and `treasury.canceled`. A current treasury a list names raises `TopupTreasurySanctioned`
 and pauses the account's `quotes` and `settlement` (audit action `pause`, actor
 `system:treasury_screening`, and `account.updated`): no new address is issued and no deposit is
 credited; deposits wait in `confirmed`.

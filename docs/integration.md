@@ -4,7 +4,9 @@ For the Phala Cloud backend team, who connect Phala Cloud (a Phala Pay account, 
 service. Where this guide and the code disagree, the code wins. The contract is defined by:
 
 - [crates/topup/openapi.json](../crates/topup/openapi.json): every request and response shape,
-  also served at `GET /openapi.json`;
+  with an example of each, also served at `GET /openapi.json` and published as the
+  [API reference](https://phala-network.github.io/phala-pay/) (its `Errors` section is where each
+  error's `doc_url` points); the operator's admin API is the separate `openapi.admin.json`;
 - [deploy/product/reference_product](../deploy/product/reference_product): a complete Python
   product, the one staging credits today;
 - [architecture.md](architecture.md): the design, especially §11 (the fulfillment webhook), §12
@@ -44,7 +46,7 @@ example) and fail to find the package; install it with `uv` or `pip` directly, a
 **Configure.** The operator creates your account and sends your contact its first secret key,
 `ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin your
 account's webhook key for the mode from its attestation (§5.3). Set your treasury on each chain
-you accept (§1.6): payments go only there, and quotes answer `409 treasury_not_set` until it is.
+you accept (§1.6): payments go only there, and quotes answer `400 treasury_not_set` until it is.
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
 `client_secret`; repeating the call with the same `idempotency_key` within 24 hours returns the
@@ -226,7 +228,7 @@ when you sweep, and never reduces a credit.
   quote starts with a copy (§1.4).
 - `GET /v1/quotes/{id}` resumes a checkout; `POST /v1/quotes/{id}/cancel` cancels an unpaid
   quote, after which any payment to its address is credited at spot.
-- A quote above the remaining open exposure fails with `409 exposure_cap_exceeded`; its message
+- A quote above the remaining open exposure fails with `400 exposure_cap_exceeded`; its message
   states what is left.
 
 Validate the amount against `/v1/config` before creating the quote, and map a refused creation
@@ -237,15 +239,15 @@ verbatim:
 |---|---|
 | `amount_too_small` (400) | The minimum top-up is `min_amount`. |
 | `amount_too_large` (400) | The amount is above the maximum for one payment; split it. |
-| `exposure_cap_exceeded` (409) | Too many unpaid quotes are open; pay or wait for one to expire, or enter a smaller amount. |
-| `paused`, `chain_frozen` (409) | Crypto top-ups are temporarily unavailable. |
-| `unavailable` (503), `rate_limit` (429) | Try again in a minute. |
+| `exposure_cap_exceeded` (400) | Too many unpaid quotes are open; pay or wait for one to expire, or enter a smaller amount. |
+| `paused`, `chain_frozen` (400) | Crypto top-ups are temporarily unavailable. |
+| `unavailable` (503), `rate_limit`, `customer_rate_limit` (429) | Try again in a minute (`Retry-After` says how long). |
 
 Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 [architecture §9](architecture.md#9-quotes).
 
 **Recompute every address before you show it.** A quote's address salt is
-`keccak256(abi.encode(account, client_reference_id, "lock", quote_id))` with `account` your
+`keccak256(abi.encode(account, client_reference_id, "quote", quote_id))` with `account` your
 `acct_` id, and the address is the factory's `CREATE2` clone of the implementation over the
 quote's `treasury` and that salt. `PhalaPay` requires the pinned `forwarder=(factory,
 implementation)`, recomputes every quote, and raises `AddressMismatchError`, so a user never pays
@@ -315,7 +317,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Payment | Outcome visible to Phala Cloud |
 |---|---|
 | Exact quoted amount, in time (within `quote_tolerance_bps`) | Quote `complete`; `deposit.credited` with `price_source: "quote"` and exactly the quoted `amount`. |
-| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `409 quote_payment_received`. Payments are not accumulated against one quote: offer a new quote for the shortfall. |
+| Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `400 quote_payment_received`. Payments are not accumulated against one quote: offer a new quote for the shortfall. |
 | Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
@@ -416,7 +418,7 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   one, a new address on every network (for example after the address was exposed somewhere it
   should not be). **A retired address is still credited**; stop showing it, but never tell the
   customer a payment to it is lost. A customer rotates at most 10 times an hour
-  (`429 rate_limit`), and rotating a retired address is `409 deposit_address_retired`.
+  (`429 customer_rate_limit`, with `Retry-After`), and rotating a retired address is `400 deposit_address_retired`.
 - `metadata` (§1.4) on the create request is merged into the returned address's;
   `POST /v1/deposit_addresses/{id} {"metadata": {…}}` updates it on an active or retired address,
   a rotation carries it to the next address, and each deposit to the address starts with a copy,
@@ -442,11 +444,11 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
 - A network pays the treasury it was issued for, forever. When your treasury on one network
   changes, that network's address changes (the others do not); payments to the old address on
   that network are still credited and still reach the old treasury, and a refund of such a deposit
-  is paid from the old treasury, so keep control of it (you are told through `account.treasury.*`
+  is paid from the old treasury, so keep control of it (you are told through `treasury.*`
   events, §1.6). A network is issued only on a chain where you have a treasury.
 - Limits: 100 000 active addresses per account in live mode and 1 000 in test mode
-  (`409 deposit_address_cap_exceeded`; ask the operator to raise it); no new address is issued
-  while `quotes` is paused (`409 paused`), and a network frozen by reconciliation gets no new
+  (`400 deposit_address_cap_exceeded`; ask the operator to raise it); no new address is issued
+  while `quotes` is paused (`400 paused`), and a network frozen by reconciliation gets no new
   address until it is lifted.
 
 **Page copy.** "One address for all supported tokens and networks. Send only supported tokens."
@@ -484,11 +486,11 @@ curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $
   day while it is your treasury: a listed treasury pauses your account's `quotes` and
   `settlement` until the operator reviews it with you.
 - **When it applies.** A chain's first treasury, and any test-mode change, apply at once. A later
-  live change is `pending` for 48 hours, then applies; `account.treasury.pending` tells every
+  live change is `pending` for 48 hours, then applies; `treasury.created` tells every
   enabled webhook endpoint of the mode at once, whatever events it subscribes to, so a leaked key
   cannot redirect payments unseen: cancel an unrequested change with
   `POST /v1/treasuries/{id}/cancel` and roll your keys (§5.4). One change waits per chain
-  (`409 treasury_change_pending`).
+  (`400 treasury_change_pending`).
 - **What changes.** New quotes, and the chain's network of each of your deposit addresses (§1.5),
   pay the new treasury; each quote shows the `treasury` its address pays. Everything issued before
   keeps paying the old treasury for good (the address commits to it): those payments are still
@@ -625,16 +627,17 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
                      "metadata": {"order_id": "6735"}, …}}}
 ```
 
-- `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
-  first delivered and never changed afterwards; its `status` is `credited` (its `swept` is true if
-  a finalized sweep covered it before that first delivery).
+- `data.object` is the deposit as `GET /v1/deposits/{id}` returned it when it was credited: a
+  snapshot rendered in the transaction that credits it and never changed afterwards
+  ([Stripe](https://docs.stripe.com/api/events/object)). Its `status` is `credited`; a later
+  sweep, refund, or reversal does not change it: fetch the deposit for its current state.
 - `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
   otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
   valued at spot; it is `null` for a deposit address's payment, which names its
   `deposit_address` instead.
 - `metadata` is the deposit's, which starts as a copy of the quote's (§1.4). As the rest of
-  `data.object`, it is what the deposit held at the first delivery.
+  `data.object`, it is what the deposit held when it was credited.
 - `webhook-id` is the event's `id`: `evt_` and the hex of
   `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
   (`topup_sdk.credited_event_id`), so every retry, resend, and re-emission after a service
@@ -723,12 +726,24 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
                    (one space-separated entry per key while a rotation overlaps, §5.3)
 
 {"id": "<same evt_ id>", "object": "event", "account": "acct_…", "livemode": false,
- "type": "deposit.credited", "created": 1790409590, "data": {"object": {…}}}
+ "type": "deposit.credited", "created": 1790409590, "actor": "system", "request": null,
+ "data": {"object": {…}}}
 ```
 
-The body is Stripe's [Event object](https://docs.stripe.com/api/events/object) without its
-account fields; the signature is Standard Webhooks, not `Stripe-Signature`, because you hold only
-the service's public key.
+The body is Stripe's [Event object](https://docs.stripe.com/api/events/object); the signature is
+Standard Webhooks, not `Stripe-Signature`, because you hold only the service's public key.
+
+- `data.object` is the object as it was when the event happened, rendered in the same
+  transaction as the change and never re-rendered: every endpoint, retry, resend, and
+  `GET /v1/events` read gets the same body, and a later change of the object does not alter it.
+  Fetch the object for its current state.
+- `*.updated` events add `data.previous_attributes`: the fields that changed, with their values
+  before the change (a changed `metadata` holds only its changed keys; a field that was added is
+  `null`).
+- `request` is the API request that caused the event: `id`, the response's `Request-Id`, and
+  `idempotency_key`, the `Idempotency-Key` it sent; `null` when the service's own workers caused
+  it (a payment credited, a quote expired, a time-locked treasury applied). `actor` names who: the
+  key id (`key_…`), `admin` for the operator, or `system`.
 
 - Verify over the raw body bytes, never re-serialized JSON. Several space-separated signatures
   may appear during a key rotation; accept when one verifies.
@@ -755,19 +770,35 @@ the service's public key.
 | `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
 | `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Claw back its credit as for `deposit.refunded` (§2.3). | The deposit, `status: "reversed"` |
 | `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
-| `refund.failed` | The transaction attached with `mark_paid` is final but does not pay the refund (§3); one event per refund. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
+| `refund.created` | A refund was requested (`POST /v1/refunds`, §3). | The refund, `status: "pending"` |
+| `refund.updated` | A refund changed: marked paid, canceled (by you, or by the deposit's reversal), succeeded or failed at finality, or its `metadata`; `data.previous_attributes` names what changed. | The refund |
+| `refund.failed` | The transaction attached with `mark_paid` is final but does not pay the refund (§3); one event per refund, beside its `refund.updated`. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
+| `quote.canceled` | A quote was canceled (`POST /v1/quotes/{id}/cancel`); later payments to its address are credited at spot. | The quote, `status: "canceled"` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
-| `account.treasury.pending` | A live treasury change was proven and applies at `effective_at` (§1.6); sent to every enabled endpoint of the mode. Cancel it if you did not request it. | The treasury, `status: "pending"` |
-| `account.treasury.updated` | A treasury took effect (§1.6); sent to every enabled endpoint of the mode. | The treasury, `status: "active"` |
-| `account.treasury.canceled` | A pending change was canceled; sent to every enabled endpoint of the mode. | The treasury, `status: "canceled"` |
-| `account.updated` | The operator changed your account (live mode, restriction), or your account settings changed. | The account |
-| `api_key.created`, `api_key.updated`, `api_key.revoked` | A key of the mode was created, rolled, or revoked (§5.4). | The key, without its secret |
+| `treasury.created` | A treasury was proven (§1.6): `active` at once for a chain's first one and in test mode, else `pending` until `effective_at`. Cancel a change you did not request. | The treasury |
+| `treasury.updated` | A pending treasury took effect (`status: "active"`), or a newer one replaced it (`status: "replaced"`); `data.previous_attributes` has the former `status`. | The treasury |
+| `treasury.canceled` | A pending change was canceled, by you or because a sanctions list named it at its effective time. | The treasury, `status: "canceled"` |
+| `account.updated` | The operator changed your account (live mode, restriction, pauses), or your settings, pause, or webhook keys changed; `data.previous_attributes` names what changed. | The account, in the event's mode |
+| `api_key.created`, `api_key.updated`, `api_key.revoked` | A key of the mode was created, rolled (`updated`, with its former `status` and `expires_at`), or revoked (§5.4). | The key, without its secret |
 | `webhook_endpoint.created`, `webhook_endpoint.updated`, `webhook_endpoint.deleted` | An endpoint of the mode changed; `updated` carries the replaced values in `data.previous_attributes` (§5.11). | The endpoint, as it was after the change |
 | `webhook_endpoint.test` | `POST /v1/webhook_endpoints/{id}/test`; sent to that endpoint only. | The endpoint |
 
-The account events (`account.*` including `account.treasury.*`, `api_key.*`, `webhook_endpoint.*`) are your security notices:
-every enabled endpoint of the mode receives them whatever its `enabled_events`. Every event names
-its `actor`: the key id (`key_…`) that caused it, `admin` for the operator, or `system`.
+The account events (`account.*`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`) are your
+security notices: every enabled endpoint of the mode receives them whatever its `enabled_events`.
+
+#### Delivery health
+
+Deliveries are retried until delivered, so a failing endpoint shows as a backlog, never as a
+disabled endpoint. `GET /v1/webhook_endpoints/{id}` (and the list) reports, for each endpoint,
+`pending_deliveries` (not delivered yet), `oldest_pending_at` (creation time of the oldest event
+it has not received), and `last_attempt` (`at`, and the `status_code` it answered, `null` for a
+timeout or refused connection). A growing `pending_deliveries` or an old `oldest_pending_at`
+means the endpoint is failing: fix it, and its backlog is delivered at its next probe (within an
+hour). `GET /v1/events?delivery_success=false` lists every event some endpoint has not received
+(Stripe's [`delivery_success`](https://docs.stripe.com/api/events/list)); resend any with
+`POST /v1/events/{id}/resend`. Since there is no dashboard or email channel, poll these from your
+monitoring. The operator's daily report also lists endpoints failing for more than a day, and the
+operator may contact you about one.
 
 Every deposit and quote names its `client_reference_id`. Before the route's confirmation nothing
 is sent: a page shows the payment from the quote's `payment` or the deposit address's `payments`
@@ -832,10 +863,10 @@ Idempotency-Key: "…"
   fails, or is canceled.
 - The destination is screened against the route's sanctions oracle: a listed address is
   `400 destination_sanctioned`, and `503 unavailable` means screening could not answer; retry.
-- An ineligible deposit is `409 deposit_not_refundable`; a deposit that is not final yet (about
-  15 minutes after its block on Ethereum) is `409 deposit_not_final`, so nothing is paid back for
+- An ineligible deposit is `400 deposit_not_refundable`; a deposit that is not final yet (about
+  15 minutes after its block on Ethereum) is `400 deposit_not_final`, so nothing is paid back for
   a payment that could still be reversed: retry after finality. A paused `refunds` scope is
-  `409 paused`. The same `Idempotency-Key` with the same request returns the same response.
+  `400 paused`. The same `Idempotency-Key` with the same request returns the same response.
 
 Then pay it: transfer exactly `amount_atomic` of the deposit's token from `treasury` to
 `destination_address`, from your wallet or Safe, and attach the transaction:
@@ -851,14 +882,14 @@ POST /v1/refunds/re_…/mark_paid
   does not pay the refund.
 - `log_index` (optional) names the transfer's block-wide log index when one transaction pays
   several refunds; without it, any matching transfer in the transaction counts. One transfer log
-  pays one refund: naming a log another refund holds is `409 transfer_already_used`.
+  pays one refund: naming a log another refund holds is `400 transfer_already_used`.
 - Once the transaction is final on both of the service's providers (refunds need no speed), the
   refund is `succeeded`, `deposit.refunded` is sent, and the deposit's `amount_refunded_atomic`
   (and `refunded`, once whole) shows it. A final transaction that does not pay it makes the refund
   `failed` with a `failure_reason` (`transaction_failed`, `transfer_not_found`,
   `sender_mismatch`, `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`) and
   releases its reservation, and `refund.failed` is sent; create a new refund to try again. Attaching the same transaction again
-  returns the refund; another one is `409 refund_unexpected_state`.
+  returns the refund; another one is `400 refund_unexpected_state`.
 - `POST /v1/refunds/{id}/cancel` cancels a pending refund, attached or not, and releases its
   reservation; a succeeded or failed refund cannot be canceled. A deposit that is reversed cancels
   its pending refunds. `GET /v1/refunds/{id}` reads a refund.
@@ -920,7 +951,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
 - [ ] Your account's live webhook key pinned from verified attestation of production (§5.3),
       and the receiver checking your `acct_…` id and `livemode: true`.
 - [ ] Your live treasury proven on every chain you accept (§1.6), and your receiver alerting you on
-      `account.treasury.pending`.
+      `treasury.created`, and your monitoring polling your endpoints' `pending_deliveries`
+      (§2.6, Delivery health).
 - [ ] Every address recomputed before display (`PhalaPay(forwarder=…)`, optionally
       `treasuries=…`) and passed as `<Checkout expectedAddress>`; the `client_secret` handed only
       to the paying customer's page and never logged.
@@ -1041,7 +1073,7 @@ With a secret key you manage the keys of its account and mode (design D7), as St
 | `GET /v1/api_keys`, `GET /v1/api_keys/{id}` | The mode's keys (`key_…`), with `redacted` (prefix and last four), `status` (`active`, `expiring`, `expired`, `revoked`), `expires_at`, and `last_used` (to the minute); never the secret. |
 | `POST /v1/api_keys` `{name?}` | A new secret key; its `secret` is in this response only. |
 | `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once. |
-| `DELETE /v1/api_keys/{id}` | Revoke at once. The mode's last key that is neither revoked nor expiring cannot be revoked (`409 last_api_key`), so you always keep one. |
+| `DELETE /v1/api_keys/{id}` | Revoke at once. The mode's last key that is neither revoked nor expiring cannot be revoked (`400 last_api_key`), so you always keep one. |
 
 A planned rotation: roll with an overlap (`{"expires_in": 86400}`), deploy the new key, and let
 the old one expire. A leak: roll with `{"expires_in": 0}` at once. If you lost every key of a
@@ -1062,7 +1094,8 @@ Authorization: Bearer ppay_sk_test_…
 Only `Bearer` is accepted (no HTTP Basic). A missing key is `401 api_key_missing`, a malformed,
 unknown, or revoked one `401 api_key_invalid`, and a rolled key past its expiry
 `401 api_key_expired`. Requests are limited per account and mode, 100 per second live and 25 test
-(Stripe's numbers), with a platform-wide test-mode ceiling: `429 rate_limit`, retry with backoff.
+(Stripe's numbers), with a platform-wide test-mode ceiling: `429 rate_limit`, retry after the
+response's `Retry-After` seconds, with backoff.
 
 ```python
 from phala_pay import PhalaPay
@@ -1085,8 +1118,11 @@ with PhalaPay(
                               asset="pha")
 ```
 
-A failed request raises `ApiError` with `status_code`, `code`, `param`, and `request_id` (the
-response's `Request-Id`), to quote to support.
+Every response carries `Request-Id: req_…`
+([Stripe](https://docs.stripe.com/api/request_ids)); quote it to support. An event caused by one
+of your requests names it in `request.id`, with the request's `Idempotency-Key` (§2.6). A failed
+request raises `ApiError` with `status_code`, `code`, `param`, `doc_url`, `request_id`, and, on a
+`429`, `retry_after`.
 
 Your account id, `acct_…` (`GET /v1/account`), is the first input of every quote's address salt;
 the client reads it once for the address check, or takes it as `account=`.
@@ -1095,12 +1131,16 @@ the client reads it once for the address check, or takes it as `account=`.
 
 Every `POST` accepts an `Idempotency-Key` header (design §13, Stripe's idempotent requests): an
 RFC 8941 string (`"8e03…"`, as in the IETF Idempotency-Key draft) or a bare token (Stripe's form),
-up to 255 characters, kept per account and mode for 24 hours. A repeat of the same request (method,
-path, and body) returns the first response again with `Idempotent-Replayed: true`, errors
-included; the same key with another request is `400 idempotency_key_reused`
-(`type: idempotency_error`); a repeat while the first request still runs is
-`409 idempotency_key_in_use`, retry. A `429` or `5xx` is not kept, so a retry runs the request
-again. Without a key every `POST` runs. A replayed key creation or roll returns the key without
+up to 255 characters, kept per account and mode for 24 hours. As Stripe's, the result is saved once
+the request starts executing, whatever it is: a repeat of the same request (method, path, and body)
+returns the first response again with `Idempotent-Replayed: true`, a `400` or a `500` included, so
+a retry after a failure whose effects you cannot see never runs the request twice. A request that
+did not execute is not saved, and a retry with its key runs it: one that failed validation
+(`parameter_*`), was rate limited (`429`), or met `503 unavailable`. The same key with another
+request is `400 idempotency_key_reused` (`type: idempotency_error`); a repeat while the first
+request still runs is `409 idempotency_key_in_use`, retry with the same key. Without a key every
+`POST` runs. A quote is created with its `client_secret` in one transaction: a failure after it
+was created is saved and replayed, never a second quote. A replayed key creation or roll returns the key without
 its `secret`, which is never stored: roll again if the first response was lost. Canceling a
 canceled quote and revoking a revoked key return it unchanged. Updating metadata is
 idempotent by its merge: sending the same `metadata` again leaves the object unchanged.
@@ -1108,8 +1148,9 @@ idempotent by its merge: sending the same `metadata` again leaves the object unc
 `TopupClient.create_quote` and `create_refund` send a fresh key unless you pass one, and reuse it
 on every retry.
 
-`TopupClient` retries transport errors, `429`, `500`, `502`, `503`, `504`, and
-`409 idempotency_key_in_use`, up to 4 attempts with exponential backoff from 0.5 s.
+`TopupClient` retries transport errors, `429` (after its `Retry-After`), `500`, `502`, `503`,
+`504`, and `409 idempotency_key_in_use`, up to 4 attempts with exponential backoff from 0.5 s; a
+response marked `Idempotent-Replayed` is the request's saved outcome and is raised, not retried.
 
 ### 5.7 Endpoints
 
@@ -1132,7 +1173,7 @@ method.
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
 | `POST /v1/deposit_addresses` `{client_reference_id, metadata?}`, `POST /v1/deposit_addresses/{id}/rotate` | The customer's active deposit address, with a new `client_secret` (§1.5). | `create_deposit_address`, `rotate_deposit_address` |
 | `GET /v1/deposit_addresses`, `GET\|POST /v1/deposit_addresses/{id}` | Read and update deposit addresses, with their `payments`; with `?client_secret=` and no API key, the customer's `ClientDepositAddress`. | `list_deposit_addresses`, `get_deposit_address`, `update_deposit_address` |
-| `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `client_reference_id`, `quote`, `deposit_address`, `status` (`pending`, `credited`, `rejected`, `reversed`), `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
+| `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `client_reference_id`, `quote`, `deposit_address`, `status` (`pending`, `credited`, `rejected`, `reversed`), `tx_hash`, `created[gt]`, `created[gte]`, `created[lt]`, `created[lte]` (Unix seconds); `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/deposits/{id}` `{metadata}` | Update the deposit's metadata (§1.4); the quote's is unchanged. | `update_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | A `pending` refund of a final deposit (§3), paid by you from its `treasury`; `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
@@ -1144,45 +1185,53 @@ method.
 | `GET /v1/balance` | What your forwarders hold per chain and token (§1.7). | `get_balance` |
 | `GET /v1/sweeps` | Finalized sweeps of your forwarders, newest first; filters `chain_id`, `forwarder`, `token` (§1.7). | `list_sweeps` |
 | `GET /v1/forwarders` | Every forwarder with its `(factory, salt, treasury)`; `sweepable=<token>` for the ones to sweep (§1.7). | `list_forwarders` |
-| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | `list_api_keys`, `create_api_key`, `get_api_key`, `revoke_api_key`, `roll_api_key` |
+| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4); the list takes `limit`, `starting_after`, `ending_before`. | `list_api_keys`, `create_api_key`, `get_api_key`, `revoke_api_key`, `roll_api_key` |
 | `POST /v1/treasuries/challenge` `{chain_id, address}` | The EIP-4361 message proving `address` as your treasury on `chain_id` (§1.6). | `create_treasury_challenge` |
 | `POST /v1/treasuries` `{chain_id, message, signature}` | Set the chain's treasury with the signed message: `active`, or `pending` for 48 hours for a later live change (§1.6). | `create_treasury` |
-| `GET /v1/treasuries`, `GET /v1/treasuries/{id}` | Your treasuries in the key's mode, newest first; filters `chain_id`, `status`. | `list_treasuries`, `get_treasury` |
+| `GET /v1/treasuries`, `GET /v1/treasuries/{id}` | Your treasuries in the key's mode, newest first; filters `chain_id`, `status`; `limit`, `starting_after`, `ending_before`. | `list_treasuries`, `get_treasury` |
 | `POST /v1/treasuries/{id}/cancel` | Cancel a pending change. | `cancel_treasury` |
 | `GET /v1/attestation?nonce=` | Your account's webhook keys in the key's mode, with evidence (§5.3). | `attestation` |
 | `POST /v1/account/webhook_keys/roll` `{expires_in?}` | Roll the mode's webhook key (§5.3). | `roll_webhook_key` |
 | `GET\|POST /v1/webhook_endpoints`, `GET\|POST\|DELETE /v1/webhook_endpoints/{id}`, `POST /v1/webhook_endpoints/{id}/test` | Your webhook endpoints (§5.11). | `*_webhook_endpoint(s)` |
-| `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/{id}/resend` | Your events and audit log; resend one to an endpoint (§5.11). | `list_events`, `get_event`, `resend_event` |
+| `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/{id}/resend` | Your events and audit log, filters `type`, `types[]`, `delivery_success`, `created[gt\|gte\|lt\|lte]`; resend one to an endpoint (§5.11). | `list_events`, `get_event`, `resend_event` |
 
 ### 5.8 Errors
 
-Errors are Stripe's error object, `{"error": {"type", "code", "message", "param"}}`
+Errors are Stripe's error object, `{"error": {"type", "code", "message", "param", "doc_url"}}`
 ([docs.stripe.com/api/errors](https://docs.stripe.com/api/errors)): `type` is
 `invalid_request_error`, `idempotency_error`, or `api_error` (5xx); `param` names the request
-parameter when there is one. Codes are stable; messages are not.
+parameter when there is one; `doc_url` is the code's section of the
+[API reference](https://phala-network.github.io/phala-pay/#section/Errors). Codes are stable;
+messages are not. As Stripe's, the status says what kind of failure it is: `400` means the request
+cannot succeed as sent or in the objects' current state (a business rule, not a conflict between
+requests), and `409` is only an `Idempotency-Key` still in use. Every response names its request in
+`Request-Id` (§5.5), and every `429` says when to retry in `Retry-After` (seconds).
 
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | `parameter_missing`, `parameter_unknown`, `parameter_invalid` | Malformed input, with `param`. Do not retry unchanged. |
 | 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`), or above a refund's remainder (`param: "amount_atomic"`). |
+| 400 | `exposure_cap_exceeded` | Open quote exposure cap (customer, account, or platform); the message states what is left. |
+| 400 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
+| 400 | `treasury_not_set` | No treasury on the chain yet (§1.6). |
+| 400 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
+| 400 | `deposit_address_cap_exceeded`, `deposit_address_retired` | The mode's cap of active deposit addresses; a rotation of a retired address (§1.5). |
+| 400 | `deposit_not_refundable`, `deposit_not_final` | The deposit is not eligible for a refund, or could still be reversed: request the refund once it is final (§3). |
 | 400 | `destination_sanctioned` | A sanctions list names the refund's `destination_address` (§3). |
+| 400 | `refund_unexpected_state`, `transfer_already_used` | `mark_paid` or cancel refused: the refund is not pending or already carries another transaction, or the named transfer log pays another refund (§3). |
+| 400 | `treasury_proof_invalid`, `treasury_challenge_expired`, `treasury_challenge_used`, `treasury_not_deployed`, `treasury_sanctioned`, `treasury_change_pending`, `treasury_unchanged`, `treasury_unexpected_state` | A treasury proof or change refused (§1.6). |
+| 400 | `api_key_inactive`, `last_api_key` | Roll of a revoked or already rolled key; revoke of the mode's last active key (§5.4). |
+| 400 | `webhook_endpoint_cap_exceeded`, `webhook_endpoint_disabled` | The mode's 16 endpoints; a resend to a disabled endpoint (§5.11). |
 | 400 | `idempotency_key_reused` (`type: idempotency_error`) | The same `Idempotency-Key` with another request. |
 | 401 | `api_key_missing`, `api_key_invalid`, `api_key_expired` | No Bearer key; a malformed, unknown, or revoked key; a rolled key past its expiry (§5.5). |
 | 403 | `testmode_charges_only` | A live key of an account the operator has not enabled for live mode. |
 | 403 | `permission_denied` | The key's kind does not hold the permission. |
 | 404 | `resource_missing` | Unknown or foreign resource. |
-| 409 | `idempotency_key_in_use` (`type: idempotency_error`) | A request with this key still runs; retry. |
-| 409 | `api_key_inactive`, `last_api_key` | Roll of a revoked or already rolled key; revoke of the mode's last active key (§5.4). |
-| 409 | `exposure_cap_exceeded` | Open quote exposure cap (account, product, or global); the message states what is left. |
-| 409 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
-| 409 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
-| 409 | `deposit_not_refundable` | The deposit is not eligible for a refund (§3). |
-| 409 | `deposit_not_final` | The deposit could still be reversed; request the refund once it is final (§3). |
-| 409 | `refund_unexpected_state`, `transfer_already_used` | `mark_paid` or cancel refused: the refund is not pending or already carries another transaction, or the named transfer log pays another refund (§3). |
-| 409 | `conflict` | Other state conflicts. |
-| 429 | `rate_limit` | Requests per account and mode (§5.5), quote creation per customer, or reads of one quote by its `client_secret`. |
+| 409 | `idempotency_key_in_use` (`type: idempotency_error`) | A request with this key still runs; retry with the same key. |
+| 429 | `rate_limit` | Requests per account and mode (§5.5), or reads of one quote's or deposit address's public view by its `client_secret`; retry after `Retry-After`. |
+| 429 | `customer_rate_limit` | The customer's quotes per minute (the route's limit) or deposit address rotations per hour (10); retry after `Retry-After`, or tell the customer to wait. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
-| 500 | `internal_error` | Retry with backoff. |
+| 500 | `internal_error` | Retry with the same `Idempotency-Key`: it replays this failure, so the request never runs twice (§5.6). |
 
 ### 5.9 Versioning and deprecation
 
@@ -1262,15 +1311,15 @@ You manage your receivers with your secret key, per mode, as Stripe's
 
 | Method and path | Purpose |
 |---|---|
-| `POST /v1/webhook_endpoints` `{url, enabled_events, description?, metadata?}` | Register an endpoint. `url` is `https` on port 443; in test mode also `http` on port 80; no credentials or fragment. `enabled_events` lists types (§2.6), or `["*"]` for all. `409 webhook_endpoint_cap_exceeded` past 16. |
+| `POST /v1/webhook_endpoints` `{url, enabled_events, description?, metadata?}` | Register an endpoint. `url` is `https` on port 443; in test mode also `http` on port 80; no credentials or fragment. `enabled_events` lists types (§2.6), or `["*"]` for all. `400 webhook_endpoint_cap_exceeded` past 16. |
 | `GET /v1/webhook_endpoints` | Your endpoints, newest first; `limit`, `starting_after`, `ending_before` (`we_…`). |
-| `GET /v1/webhook_endpoints/{id}` | One endpoint: `url`, `enabled_events`, `status` (`enabled` or `disabled`), `disabled_reason` (`gone` after a `410 Gone`, or `null` when you disabled it; failures never disable it), `description`, `metadata`. |
+| `GET /v1/webhook_endpoints/{id}` | One endpoint: `url`, `enabled_events`, `status` (`enabled` or `disabled`), `disabled_reason` (`gone` after a `410 Gone`, or `null` when you disabled it; failures never disable it), `description`, `metadata`, and its delivery health: `pending_deliveries`, `oldest_pending_at`, `last_attempt` `{at, status_code}` (§2.6). |
 | `POST /v1/webhook_endpoints/{id}` `{url?, enabled_events?, description?, disabled?, metadata?}` | Change it; `disabled: true` stops it and its pending deliveries, `false` re-enables it. `metadata` merges as in §1.4. |
 | `DELETE /v1/webhook_endpoints/{id}` | Delete it: `{id, object: "webhook_endpoint", deleted: true}`. |
 | `POST /v1/webhook_endpoints/{id}/test` | Send it a signed `webhook_endpoint.test`, enabled or not; there is no URL challenge. |
-| `GET /v1/events` | Every event of the mode, newest first, whether or not it was delivered: `type` (a type, or a group such as `deposit.*`), `created[gt\|gte\|lt\|lte]`, `limit`, `starting_after`, `ending_before` (`evt_…`). Each event carries `actor` and `pending_webhooks`: this is your account's audit log. |
+| `GET /v1/events` | Every event of the mode, newest first, whether or not it was delivered: `type` (a type, or a group such as `deposit.*`) or `types[]` (up to 20), `delivery_success` (`false`: events an endpoint has not received), `created[gt\|gte\|lt\|lte]`, `limit`, `starting_after`, `ending_before` (`evt_…`). Each event carries `actor`, `request`, and `pending_webhooks`: this is your account's audit log. |
 | `GET /v1/events/{id}` | One event, as it was delivered. |
-| `POST /v1/events/{id}/resend` `{webhook_endpoint}` | Deliver it again to one enabled endpoint (`409 webhook_endpoint_disabled` otherwise), with the same `webhook-id` and body, as the Stripe CLI's `events resend`. |
+| `POST /v1/events/{id}/resend` `{webhook_endpoint}` | Deliver it again to one enabled endpoint (`400 webhook_endpoint_disabled` otherwise), with the same `webhook-id` and body, as the Stripe CLI's `events resend`. |
 
 - A change to an endpoint is announced as `webhook_endpoint.updated` or `.deleted` to every enabled
   endpoint, and first to the changed one, at the URL it had before the change, even when the

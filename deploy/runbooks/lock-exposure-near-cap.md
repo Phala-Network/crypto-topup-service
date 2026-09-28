@@ -2,18 +2,18 @@
 
 **Trigger:** `TopupLockExposureNearCap` (a rate-lock creation took the open `product` or `global`
 lock credit to at least 90% of the route's `limits.max_open_minor` cap; the event carries
-`scope`, `open_minor`, and `cap_minor`), or products reporting `409 exposure_cap_exceeded`.
+`scope`, `open_minor`, and `cap_minor`), or products reporting `400 exposure_cap_exceeded`.
 
-**Impact:** a creation that would exceed the `account`, `product`, or `global` cap answers `409`;
+**Impact:** a creation that would exceed the `account`, `product`, or `global` cap answers `400`;
 existing locks keep their terms until consumed, cancelled, or expired. `global` spans every
 quote route.
 
 ## First steps
 
 1. Read `exposure_minor` (the global open lock credit) and each route's
-   `open_rate_lock_exposure_atomic` in the daily report (`admin GET /v1/admin/report/daily`); the
+   `open_rate_lock_exposure_atomic` in the daily report (`admin GET /v1/admin/reports/daily`); the
    caps are in the product-signed `GET /v1/config`, and a quote refused by a cap
-   (`409 exposure_cap_exceeded`) states the room left.
+   (`400 exposure_cap_exceeded`) states the room left.
 2. A lock whose window has closed keeps its reservation until the finalized chain passes
    `expires_at`, about 15 minutes later (architecture §9). If exposure does not fall after that,
    follow [lock expiry worker failure](lock-expiry-worker-failure.md).

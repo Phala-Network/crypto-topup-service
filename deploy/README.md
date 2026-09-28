@@ -558,7 +558,7 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    set the account's Sepolia treasury through the API (the product's `treasury`, the finance
    Safe): request `POST /v1/treasuries/challenge`, sign the message as a Safe message, and submit
    it to `POST /v1/treasuries` ([Treasury change](runbooks/treasury-change.md)). Quotes need it
-   (`409 treasury_not_set` before); in test mode it applies at once.
+   (`400 treasury_not_set` before); in test mode it applies at once.
 3. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
    `.env.product` holding `PRODUCT_API_KEY=<ppay_sk_test_…>` with the two commands the summary
    prints. Until then the account API answers 503.

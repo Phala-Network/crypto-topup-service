@@ -63,8 +63,8 @@ sign-off, lift the freeze; the daily report lists it as `chain:<chain_id>`, and 
 into the audit record:
 
 ```sh
-admin GET /v1/admin/report/daily | jq '.reconciliation_blocks'
-admin POST "/v1/admin/reconciliation-blocks/chain:$CHAIN_ID/lift" '{"reason":"INC-123: factory and stored addresses agree, Security sign-off"}'
+admin GET /v1/admin/reports/daily | jq '.reconciliation_blocks'
+admin POST "/v1/admin/reconciliation_blocks/chain:$CHAIN_ID/lift" '{"reason":"INC-123: factory and stored addresses agree, Security sign-off"}'
 ```
 
 The chain resumes on the next iteration of each component, without a restart. The lift does not
