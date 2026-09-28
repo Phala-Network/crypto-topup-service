@@ -100,6 +100,23 @@ export function TopUp({ clientSecret }: { clientSecret: string }) {
 While no wallet is connected (`walletClient` is `undefined`), the tab lists the browser's wallets
 as usual. The QR code and manual tabs do not change.
 
+### A customer's deposit address
+
+For top-ups of any amount, your backend creates the customer's persistent deposit address with
+`POST /v1/deposit_addresses` (secret key) and passes its `address`, `chain_id`, `asset`, and
+`payment_uri` to the page. `<DepositAddress>` shows the network, a QR code, and the token
+contract and address to copy, with "credited at the market rate when it arrives" copy; credit the
+customer from the `deposit.credited` webhook.
+
+```tsx
+import { DepositAddress } from "@phala/pay/react";
+
+<DepositAddress depositAddress={{ address, chain_id, asset, payment_uri }} />;
+```
+
+`depositAddressTransfer(details)` reads and checks its amount-less EIP-681 `payment_uri` without
+React.
+
 ## Appearance
 
 ```tsx

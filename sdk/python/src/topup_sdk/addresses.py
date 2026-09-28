@@ -45,6 +45,51 @@ def lock_salt(product_slug: str, external_id: str, lock_ref: str) -> bytes:
     return keccak256(_abi_encode(product_slug, external_id, "lock", lock_ref))
 
 
+def deposit_address_salt(
+    account: str,
+    *,
+    livemode: bool,
+    client_reference_id: str,
+    chain_id: int,
+    asset: str,
+    version: int,
+) -> bytes:
+    """keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
+    asset, version)), with the types (string, bool, string, string, uint256, string, uint256): the
+    salt of a customer's deposit address, where `account` is your `acct_` id and `version` the
+    address's `version`."""
+    return keccak256(
+        _abi_encode(
+            account, livemode, client_reference_id, "deposit_address", chain_id, asset, version
+        )
+    )
+
+
+def deposit_address(
+    factory: str,
+    implementation: str,
+    treasury: str,
+    *,
+    account: str,
+    livemode: bool,
+    client_reference_id: str,
+    chain_id: int,
+    asset: str,
+    version: int,
+) -> str:
+    """Recomputes a deposit address offline from the pinned forwarder, the treasury it was
+    issued for, and its salt inputs; every version a customer was ever given can be derived."""
+    salt = deposit_address_salt(
+        account,
+        livemode=livemode,
+        client_reference_id=client_reference_id,
+        chain_id=chain_id,
+        asset=asset,
+        version=version,
+    )
+    return forwarder_address(factory, implementation, treasury, salt)
+
+
 def forwarder_address(factory: str, implementation: str, treasury: str, salt: bytes) -> str:
     """Predicts the forwarder `factory` deploys for `treasury` and `salt`: an EIP-1167 clone of
     `implementation` whose only immutable argument is the treasury, so the address commits to
@@ -95,13 +140,20 @@ def _hex_bytes(value: str) -> bytes:
     return bytes.fromhex(value[2:])
 
 
-def _abi_encode(*fields: str) -> bytes:
-    """ABI-encodes a tuple of `string` fields, as `abi.encode` does."""
+def _abi_encode(*fields: str | bool | int) -> bytes:
+    """ABI-encodes a tuple of `string`, `bool`, and `uint256` fields, as `abi.encode` does."""
     head = b""
     tail = b""
     offset = 32 * len(fields)
     for field in fields:
-        encoded = field.encode("utf-8")
-        head += (offset + len(tail)).to_bytes(32, "big")
-        tail += len(encoded).to_bytes(32, "big") + encoded + b"\x00" * (-len(encoded) % 32)
+        if isinstance(field, bool):
+            head += int(field).to_bytes(32, "big")
+        elif isinstance(field, int):
+            if not 0 <= field < 2**256:
+                raise ValueError("uint256 out of range")
+            head += field.to_bytes(32, "big")
+        else:
+            encoded = field.encode("utf-8")
+            head += (offset + len(tail)).to_bytes(32, "big")
+            tail += len(encoded).to_bytes(32, "big") + encoded + b"\x00" * (-len(encoded) % 32)
     return head + tail

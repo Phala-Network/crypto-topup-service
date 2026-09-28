@@ -363,10 +363,14 @@ pub(crate) async fn insert_deposit_in(
         )
         SELECT
             $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
-            quote.customer_id, $9, $10, $11, $12, $13::text::numeric, $14, $15, $16, $17, $18,
-            $19::text::numeric, CASE WHEN $20 THEN now() END, quote.metadata
+            COALESCE(quote.customer_id, deposit_address.customer_id), $9, $10, $11, $12,
+            $13::text::numeric, $14, $15, $16, $17, $18, $19::text::numeric,
+            CASE WHEN $20 THEN now() END,
+            COALESCE(quote.metadata, deposit_address.metadata)
         FROM addresses AS address
-        JOIN quotes AS quote ON quote.id = address.quote_id
+        LEFT JOIN quotes AS quote ON quote.id = address.quote_id
+        LEFT JOIN deposit_addresses AS deposit_address
+            ON deposit_address.id = address.deposit_address_id
         WHERE address.id = $8
         ON CONFLICT (chain_id, tx_hash, receipt_log_index) DO NOTHING
         "#,

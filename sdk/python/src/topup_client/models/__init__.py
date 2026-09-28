@@ -13,11 +13,15 @@ from .config_asset import ConfigAsset
 from .contact import Contact
 from .create_account_request import CreateAccountRequest
 from .create_api_key_request import CreateApiKeyRequest
+from .create_deposit_address_request import CreateDepositAddressRequest
 from .create_quote_request import CreateQuoteRequest
 from .create_refund_request import CreateRefundRequest
 from .customer_pause_request import CustomerPauseRequest
 from .daily_report_response import DailyReportResponse
 from .deposit import Deposit
+from .deposit_address import DepositAddress
+from .deposit_address_list import DepositAddressList
+from .deposit_address_metadata import DepositAddressMetadata
 from .deposit_event_response import DepositEventResponse
 from .deposit_list import DepositList
 from .deposit_metadata import DepositMetadata
@@ -68,11 +72,15 @@ __all__ = (
     "Contact",
     "CreateAccountRequest",
     "CreateApiKeyRequest",
+    "CreateDepositAddressRequest",
     "CreateQuoteRequest",
     "CreateRefundRequest",
     "CustomerPauseRequest",
     "DailyReportResponse",
     "Deposit",
+    "DepositAddress",
+    "DepositAddressList",
+    "DepositAddressMetadata",
     "DepositEventResponse",
     "DepositList",
     "DepositMetadata",

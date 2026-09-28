@@ -21,8 +21,9 @@ T = TypeVar("T", bound="Deposit")
 
 @_attrs_define
 class Deposit:
-    """A transfer to a quote's address at the route's confirmation: valued, screened, and credited,
-    or rejected; `reversed` if its transaction left the chain before finality.
+    """A transfer to a quote's address or a deposit address at the route's confirmation: valued,
+    screened, and credited, or rejected; `reversed` if its transaction left the chain before
+    finality.
 
         Attributes:
             account_id (str): Your account identifier.
@@ -48,6 +49,11 @@ class Deposit:
             tx_hash (str): Transaction hash.
             amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
             asset (None | str | Unset): Asset code; `null` for a token without a route.
+            deposit_address (None | str | Unset): The deposit address that received the transfer, `da_…`; `null` for a
+                quote's address.
+                Payments to a deposit address, active or retired, are credited at spot. This service
+                always sends it; it is optional in the schema so clients also parse responses and events
+                from servers that predate it.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
             metadata (DepositMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a
                 copy of the
@@ -79,6 +85,7 @@ class Deposit:
     tx_hash: str
     amount: int | None | Unset = UNSET
     asset: None | str | Unset = UNSET
+    deposit_address: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
     metadata: DepositMetadata | Unset = UNSET
     price_source: None | str | Unset = UNSET
@@ -134,6 +141,12 @@ class Deposit:
             asset = UNSET
         else:
             asset = self.asset
+
+        deposit_address: None | str | Unset
+        if isinstance(self.deposit_address, Unset):
+            deposit_address = UNSET
+        else:
+            deposit_address = self.deposit_address
 
         exchange_rate: None | str | Unset
         if isinstance(self.exchange_rate, Unset):
@@ -197,6 +210,8 @@ class Deposit:
             field_dict["amount"] = amount
         if asset is not UNSET:
             field_dict["asset"] = asset
+        if deposit_address is not UNSET:
+            field_dict["deposit_address"] = deposit_address
         if exchange_rate is not UNSET:
             field_dict["exchange_rate"] = exchange_rate
         if metadata is not UNSET:
@@ -267,6 +282,15 @@ class Deposit:
             return cast(None | str | Unset, data)
 
         asset = _parse_asset(d.pop("asset", UNSET))
+
+        def _parse_deposit_address(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        deposit_address = _parse_deposit_address(d.pop("deposit_address", UNSET))
 
         def _parse_exchange_rate(data: object) -> None | str | Unset:
             if data is None:
@@ -347,6 +371,7 @@ class Deposit:
             tx_hash=tx_hash,
             amount=amount,
             asset=asset,
+            deposit_address=deposit_address,
             exchange_rate=exchange_rate,
             metadata=metadata,
             price_source=price_source,

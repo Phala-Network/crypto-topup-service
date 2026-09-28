@@ -42,8 +42,11 @@ pub struct DepositResponse {
     pub final_at: Option<DateTime<Utc>>,
     /// Receiving forwarder address.
     pub address: String,
-    /// The quote whose address received the deposit, `qt_…`.
+    /// The quote whose address received the deposit, `qt_…`; `null` for a deposit address.
     pub lock_ref: Option<String>,
+    /// The deposit address that received the deposit, `da_…`; `null` for a quote's address.
+    #[schema(required = false)]
+    pub deposit_address: Option<String>,
     /// Selected route.
     pub route: Option<String>,
     /// Selected route version.
@@ -155,7 +158,8 @@ pub struct CreateQuoteRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the
+/// `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST /v1/refunds/{id}`, and
+/// `POST /v1/deposit_addresses/{id}` body: the
 /// object's updatable parameters, of which `metadata` is the one.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -343,8 +347,9 @@ pub enum ExpandableDeposit {
     Object(Box<Deposit>),
 }
 
-/// A transfer to a quote's address at the route's confirmation: valued, screened, and credited,
-/// or rejected; `reversed` if its transaction left the chain before finality.
+/// A transfer to a quote's address or a deposit address at the route's confirmation: valued,
+/// screened, and credited, or rejected; `reversed` if its transaction left the chain before
+/// finality.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Deposit {
     /// `dep_` and the hex of the deposit's deterministic UUID,
@@ -355,8 +360,14 @@ pub struct Deposit {
     pub object: String,
     /// Your account identifier.
     pub account_id: String,
-    /// The quote whose address received the transfer.
+    /// The quote whose address received the transfer; `null` for a deposit address.
     pub quote: Option<ExpandableQuote>,
+    /// The deposit address that received the transfer, `da_…`; `null` for a quote's address.
+    /// Payments to a deposit address, active or retired, are credited at spot. This service
+    /// always sends it; it is optional in the schema so clients also parse responses and events
+    /// from servers that predate it.
+    #[schema(required = false)]
+    pub deposit_address: Option<String>,
     /// `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
     /// not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
     /// added.
@@ -403,6 +414,83 @@ pub struct Deposit {
     /// Always sent; optional in the schema like the quote's.
     #[schema(required = false)]
     pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+/// `POST /v1/deposit_addresses` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateDepositAddressRequest {
+    /// Your identifier of the customer, 1 to 200 characters; the customer is created on first use.
+    pub client_reference_id: String,
+    /// EVM chain, one of `GET /v1/config` `assets[].chain_id`.
+    pub chain_id: u64,
+    /// Asset code on that chain, such as `pha`.
+    pub asset: String,
+    /// Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40
+    /// characters without square brackets, values of up to 500 characters.
+    /// Merged into the returned address's, as `POST /v1/deposit_addresses/{id}` does: a key set to
+    /// `""` is unset. Every deposit to the address starts with a copy of it, and a rotation carries
+    /// it to the next version. Phala Pay never reads it. Do not store sensitive information in it,
+    /// such as personal or payment details.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A customer's persistent deposit address for one chain and asset, like a bank-transfer virtual
+/// account: any amount sent to it is credited to the customer at the market (spot) price when it
+/// arrives. Rotation retires it and issues a new one; a retired address is still credited.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositAddress {
+    /// `da_` id.
+    pub id: String,
+    /// Always `deposit_address`.
+    pub object: String,
+    /// Whether the address is in live mode.
+    pub livemode: bool,
+    /// Your identifier of the customer.
+    pub client_reference_id: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code.
+    pub asset: String,
+    /// The forwarder address to pay.
+    pub address: String,
+    /// EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the
+    /// payer chooses it.
+    pub payment_uri: String,
+    /// The treasury the forwarder pays, fixed when the address was issued.
+    pub treasury: String,
+    /// The address's version among the customer's addresses for this chain and asset, from 1.
+    /// The salt is `keccak256(abi.encode(account, livemode, client_reference_id,
+    /// "deposit_address", chain_id, asset, version))`, with the types `(string, bool, string,
+    /// string, uint256, string, uint256)` and `account` your `acct_` id; the address is the
+    /// factory's `CREATE2` over the treasury and that salt.
+    pub version: u64,
+    /// CREATE2 salt, 32 bytes of hex.
+    pub salt: String,
+    /// `active`, or `retired` by a rotation; payments to either are credited.
+    pub status: String,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// Retirement time, Unix seconds; `null` while active.
+    pub retired_at: Option<i64>,
+    /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
+    /// Each deposit to the address starts with a copy.
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+/// A page of deposit addresses, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DepositAddressList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/deposit_addresses`.
+    pub url: String,
+    /// Whether more addresses follow in the direction of this page.
+    pub has_more: bool,
+    /// The deposit addresses.
+    pub data: Vec<DepositAddress>,
 }
 
 /// A page of a list, newest first (<https://docs.stripe.com/api/pagination>).

@@ -45,6 +45,7 @@ const DEPOSIT_STATES: [&str; 6] = [
     params(
         ("account_id" = Option<String>, Query, description = "Only this account's deposits"),
         ("quote" = Option<String>, Query, description = "Only deposits to this quote's address"),
+        ("deposit_address" = Option<String>, Query, description = "Only deposits to this deposit address, `da_…`"),
         ("status" = Option<String>, Query, description = "Only deposits in this status"),
         ("tx_hash" = Option<String>, Query, description = "Only deposits in this transaction"),
         ("created[gte]" = Option<i64>, Query, description = "Created at or after, Unix seconds"),
@@ -83,6 +84,11 @@ pub(crate) async fn list_deposits(
     }
     if let Some(quote) = filters.quote {
         builder.push(" AND address.quote_id = ").push_bind(quote);
+    }
+    if let Some(deposit_address) = filters.deposit_address {
+        builder
+            .push(" AND address.deposit_address_id = ")
+            .push_bind(deposit_address);
     }
     if let Some(status) = &filters.status {
         builder
@@ -511,7 +517,8 @@ struct RefundRow {
 struct DepositRow {
     id: Uuid,
     external_id: String,
-    quote_id: Uuid,
+    quote_id: Option<Uuid>,
+    deposit_address_id: Option<Uuid>,
     state: String,
     reason: Option<String>,
     chain_id: i64,
@@ -537,6 +544,7 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
     let mut builder = QueryBuilder::new(
         r#"
         SELECT deposit.id, customer.client_reference_id AS external_id, address.quote_id,
+               address.deposit_address_id,
                deposit.state, deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
                deposit.credit_minor::text AS credit_minor,
@@ -574,7 +582,12 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
         account_id: row.external_id,
-        quote: Some(ExpandableQuote::Id(ids::format(ids::QUOTE, row.quote_id))),
+        quote: row
+            .quote_id
+            .map(|quote| ExpandableQuote::Id(ids::format(ids::QUOTE, quote))),
+        deposit_address: row
+            .deposit_address_id
+            .map(crate::deposit_addresses::public_id),
         status: row.state,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
@@ -615,6 +628,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
 struct ListFilters {
     account_id: Option<String>,
     quote: Option<Uuid>,
+    deposit_address: Option<Uuid>,
     status: Option<String>,
     tx_hash: Option<String>,
     created_gte: Option<DateTime<Utc>>,
@@ -629,6 +643,7 @@ impl ListFilters {
         let mut filters = Self {
             account_id: None,
             quote: None,
+            deposit_address: None,
             status: None,
             tx_hash: None,
             created_gte: None,
@@ -645,6 +660,12 @@ impl ListFilters {
                         ids::parse(ids::QUOTE, value)
                             .ok_or_else(|| ApiError::invalid_param("quote", "not a qt_ id"))?,
                     );
+                }
+                "deposit_address" => {
+                    filters.deposit_address =
+                        Some(ids::parse(ids::DEPOSIT_ADDRESS, value).ok_or_else(|| {
+                            ApiError::invalid_param("deposit_address", "not a da_ id")
+                        })?);
                 }
                 "status" => {
                     if !DEPOSIT_STATES.contains(&value.as_str()) {

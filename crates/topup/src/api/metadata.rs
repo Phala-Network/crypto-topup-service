@@ -1,6 +1,8 @@
 //! Stripe's `metadata` (<https://docs.stripe.com/api/metadata>,
 //! <https://docs.stripe.com/metadata>) on quotes, deposits, and refunds: up to 50 string key/value
 //! pairs, keys of up to 40 characters without square brackets, values of up to 500 characters.
+//! Deposit addresses carry it too; a deposit starts with a copy of its quote's or its deposit
+//! address's.
 //!
 //! A request's `metadata` is merged into the object's: a key with a value sets it, a key whose
 //! value is `""` unsets it, and `metadata: ""` unsets every key. The service never reads metadata.
@@ -118,6 +120,8 @@ pub enum Object {
     Deposit,
     /// A `refunds` row.
     Refund,
+    /// A `deposit_addresses` row.
+    DepositAddress,
 }
 
 macro_rules! statements {
@@ -147,6 +151,7 @@ pub async fn update(
         Object::Quote => statements!("quotes"),
         Object::Deposit => statements!("deposits"),
         Object::Refund => statements!("refunds"),
+        Object::DepositAddress => statements!("deposit_addresses"),
     };
     let mut transaction = pool.begin().await?;
     let Some(Json(current)) = sqlx::query_scalar::<_, Json<Metadata>>(select)

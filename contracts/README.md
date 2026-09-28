@@ -63,8 +63,8 @@ transfers intact, and reentrant tokens and treasuries cannot reenter the factory
 The first flush for a salt includes the clone deployment; later flushes reuse it. Use
 `forge snapshot` after contract changes to update `.gas-snapshot`.
 
-Generate the cross-language vectors (`test-vectors/create2.json`, read by `crates/core` and the
-Python SDK) with:
+Generate the cross-language vectors (`test-vectors/create2.json`: raw salts, quote salts, and
+deposit address salts, read by `crates/core` and the Python SDK) with:
 
 ```sh
 forge script script/GenerateCreate2Vectors.s.sol:GenerateCreate2Vectors

@@ -42,6 +42,8 @@ class SupportDepositResponse:
         account (str | Unset): The merchant account the deposit belongs to, `acct_…`. Optional in the schema so clients
             also parse responses from servers that predate accounts.
         credit_minor (None | str | Unset): Credit in minor units encoded as a decimal string.
+        deposit_address (None | str | Unset): The deposit address that received the deposit, `da_…`; `null` for a
+            quote's address.
         external_id (str | Unset): The merchant's identifier of the customer the quote was issued for. This service
             always
             sends it; it is optional in the schema so clients also parse responses from servers that
@@ -50,7 +52,8 @@ class SupportDepositResponse:
             `null` while the deposit
             can still be reversed.
         livemode (bool | Unset): Whether the deposit is on a live route. Optional in the schema, like `account`.
-        lock_ref (None | str | Unset): The quote whose address received the deposit, `qt_…`.
+        lock_ref (None | str | Unset): The quote whose address received the deposit, `qt_…`; `null` for a deposit
+            address.
         price_scaled (None | str | Unset): Eight-decimal scaled price encoded as a decimal string.
         price_source (None | str | Unset): Which price valued the deposit: `lock` (the quoted price) or `spot`.
         receipt_log_index (int | Unset): Position of the transfer log in its transaction's receipt; with the chain and
@@ -82,6 +85,7 @@ class SupportDepositResponse:
     timeline: list[DepositTransitionResponse]
     account: str | Unset = UNSET
     credit_minor: None | str | Unset = UNSET
+    deposit_address: None | str | Unset = UNSET
     external_id: str | Unset = UNSET
     final_at: datetime.datetime | None | Unset = UNSET
     livemode: bool | Unset = UNSET
@@ -137,6 +141,12 @@ class SupportDepositResponse:
             credit_minor = UNSET
         else:
             credit_minor = self.credit_minor
+
+        deposit_address: None | str | Unset
+        if isinstance(self.deposit_address, Unset):
+            deposit_address = UNSET
+        else:
+            deposit_address = self.deposit_address
 
         external_id = self.external_id
 
@@ -221,6 +231,8 @@ class SupportDepositResponse:
             field_dict["account"] = account
         if credit_minor is not UNSET:
             field_dict["credit_minor"] = credit_minor
+        if deposit_address is not UNSET:
+            field_dict["deposit_address"] = deposit_address
         if external_id is not UNSET:
             field_dict["external_id"] = external_id
         if final_at is not UNSET:
@@ -295,6 +307,15 @@ class SupportDepositResponse:
             return cast(None | str | Unset, data)
 
         credit_minor = _parse_credit_minor(d.pop("credit_minor", UNSET))
+
+        def _parse_deposit_address(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        deposit_address = _parse_deposit_address(d.pop("deposit_address", UNSET))
 
         external_id = d.pop("external_id", UNSET)
 
@@ -407,6 +428,7 @@ class SupportDepositResponse:
             timeline=timeline,
             account=account,
             credit_minor=credit_minor,
+            deposit_address=deposit_address,
             external_id=external_id,
             final_at=final_at,
             livemode=livemode,

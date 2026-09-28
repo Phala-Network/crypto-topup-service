@@ -7,6 +7,27 @@ webhook receivers must ignore unknown fields. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Deposit addresses (docs/design/multi-tenant.md "Deposit addresses"), restored per the owner's
+  2026-09-21 requirement: a customer's persistent, rotatable address per chain and asset.
+  `POST /v1/deposit_addresses {client_reference_id, chain_id, asset}` returns the customer's
+  active `deposit_address` (`da_…`), issuing it the first time; `GET /v1/deposit_addresses/{id}`,
+  `GET /v1/deposit_addresses?client_reference_id&status&chain_id` (cursor pagination), and
+  `POST /v1/deposit_addresses/{id}/rotate`, which retires it and returns the next version. The
+  object carries `livemode`, `address`, an EIP-681 `payment_uri` without an amount, `treasury`,
+  `version`, `salt` (`keccak256(abi.encode(account, livemode, client_reference_id,
+  "deposit_address", chain_id, asset, version))`), `status` (`active` or `retired`), `created`, and
+  `retired_at`, and `metadata` (set on create by merging, updated by
+  `POST /v1/deposit_addresses/{id}`, carried by rotation, and copied to each deposit to the
+  address). Any transfer to an active or retired deposit address is credited at spot through
+  the quote pipeline, in about 30 seconds; its deposit has `quote: null` and the new field
+  `deposit_address`, and `GET /v1/deposits` filters by `deposit_address`. New errors:
+  `409 deposit_address_cap_exceeded` (active addresses per account and mode, default 100 000 live
+  and 1 000 test), `409 deposit_address_retired`, and `429 rate_limit` past 10 rotations per
+  customer per hour. New addresses are refused with `409 paused` while `quotes` is paused.
+  Permissions `deposit_addresses.read` and `.write` join the authorization table.
+
 ### Changed
 
 - **Breaking**: API keys replace RFC 9421 request signing for merchants

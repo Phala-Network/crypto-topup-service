@@ -18,6 +18,7 @@ def _get_kwargs(
     *,
     account_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
+    deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
     createdgte: int | Unset = UNSET,
@@ -33,6 +34,8 @@ def _get_kwargs(
     params["account_id"] = account_id
 
     params["quote"] = quote
+
+    params["deposit_address"] = deposit_address
 
     params["status"] = status
 
@@ -105,6 +108,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     account_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
+    deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
     createdgte: int | Unset = UNSET,
@@ -120,6 +124,7 @@ def sync_detailed(
     Args:
         account_id (str | Unset):
         quote (str | Unset):
+        deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
         createdgte (int | Unset):
@@ -140,6 +145,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         account_id=account_id,
         quote=quote,
+        deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
         createdgte=createdgte,
@@ -162,6 +168,7 @@ def sync(
     client: AuthenticatedClient,
     account_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
+    deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
     createdgte: int | Unset = UNSET,
@@ -177,6 +184,7 @@ def sync(
     Args:
         account_id (str | Unset):
         quote (str | Unset):
+        deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
         createdgte (int | Unset):
@@ -198,6 +206,7 @@ def sync(
         client=client,
         account_id=account_id,
         quote=quote,
+        deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
         createdgte=createdgte,
@@ -214,6 +223,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     account_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
+    deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
     createdgte: int | Unset = UNSET,
@@ -229,6 +239,7 @@ async def asyncio_detailed(
     Args:
         account_id (str | Unset):
         quote (str | Unset):
+        deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
         createdgte (int | Unset):
@@ -249,6 +260,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         account_id=account_id,
         quote=quote,
+        deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
         createdgte=createdgte,
@@ -269,6 +281,7 @@ async def asyncio(
     client: AuthenticatedClient,
     account_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
+    deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
     createdgte: int | Unset = UNSET,
@@ -284,6 +297,7 @@ async def asyncio(
     Args:
         account_id (str | Unset):
         quote (str | Unset):
+        deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
         createdgte (int | Unset):
@@ -306,6 +320,7 @@ async def asyncio(
             client=client,
             account_id=account_id,
             quote=quote,
+            deposit_address=deposit_address,
             status=status,
             tx_hash=tx_hash,
             createdgte=createdgte,

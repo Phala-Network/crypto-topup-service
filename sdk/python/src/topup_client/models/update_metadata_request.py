@@ -21,7 +21,8 @@ T = TypeVar("T", bound="UpdateMetadataRequest")
 
 @_attrs_define
 class UpdateMetadataRequest:
-    """`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the
+    """`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST /v1/refunds/{id}`, and
+    `POST /v1/deposit_addresses/{id}` body: the
     object's updatable parameters, of which `metadata` is the one.
 
         Attributes:

@@ -1358,6 +1358,422 @@
         ]
       }
     },
+    "/v1/deposit_addresses": {
+      "get": {
+        "tags": [
+          "deposit_addresses"
+        ],
+        "summary": "The account's deposit addresses in the key's mode, newest first, with Stripe's cursor\npagination.",
+        "operationId": "list_deposit_addresses",
+        "parameters": [
+          {
+            "name": "client_reference_id",
+            "in": "query",
+            "description": "Only this customer's addresses",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`active` or `retired`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain_id",
+            "in": "query",
+            "description": "Only this chain's addresses",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`da_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`da_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddressList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "deposit_addresses"
+        ],
+        "summary": "Returns the customer's active deposit address for `chain_id` and `asset`, issuing one if it\nhas none: the same request always returns the same address until it is rotated.",
+        "operationId": "create_deposit_address",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDepositAddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddress"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`deposit_address_cap_exceeded`, `paused`, `chain_frozen`, or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/deposit_addresses/{id}": {
+      "get": {
+        "tags": [
+          "deposit_addresses"
+        ],
+        "summary": "One deposit address.",
+        "operationId": "get_deposit_address",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit address id, `da_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddress"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "deposit_addresses"
+        ],
+        "summary": "Updates a deposit address's `metadata`, active or retired; parameters not sent are left\nunchanged. Deposits already recorded keep their own copy.",
+        "operationId": "update_deposit_address",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit address id, `da_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddress"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/deposit_addresses/{id}/rotate": {
+      "post": {
+        "tags": [
+          "deposit_addresses"
+        ],
+        "summary": "Retires an active deposit address and returns the customer's new one for the same chain and\nasset. Payments to the retired address are still credited at spot; stop showing it.",
+        "operationId": "rotate_deposit_address",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deposit address id, `da_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK: the new active address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositAddress"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen`, or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests: the customer's rotation limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/deposits": {
       "get": {
         "tags": [
@@ -1379,6 +1795,15 @@
             "name": "quote",
             "in": "query",
             "description": "Only deposits to this quote's address",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deposit_address",
+            "in": "query",
+            "description": "Only deposits to this deposit address, `da_…`",
             "required": false,
             "schema": {
               "type": "string"
@@ -2820,6 +3245,36 @@
         },
         "additionalProperties": false
       },
+      "CreateDepositAddressRequest": {
+        "type": "object",
+        "description": "`POST /v1/deposit_addresses` body.",
+        "required": [
+          "client_reference_id",
+          "chain_id",
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset code on that chain, such as `pha`."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain, one of `GET /v1/config` `assets[].chain_id`.",
+            "minimum": 0
+          },
+          "client_reference_id": {
+            "type": "string",
+            "description": "Your identifier of the customer, 1 to 200 characters; the customer is created on first use."
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nMerged into the returned address's, as `POST /v1/deposit_addresses/{id}` does: a key set to\n`\"\"` is unset. Every deposit to the address starts with a copy of it, and a rotation carries\nit to the next version. Phala Pay never reads it. Do not store sensitive information in it,\nsuch as personal or payment details."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateQuoteRequest": {
         "type": "object",
         "description": "`POST /v1/quotes` body.",
@@ -2962,7 +3417,7 @@
       },
       "Deposit": {
         "type": "object",
-        "description": "A transfer to a quote's address at the route's confirmation: valued, screened, and credited,\nor rejected; `reversed` if its transaction left the chain before finality.",
+        "description": "A transfer to a quote's address or a deposit address at the route's confirmation: valued,\nscreened, and credited, or rejected; `reversed` if its transaction left the chain before\nfinality.",
         "required": [
           "id",
           "object",
@@ -3039,6 +3494,13 @@
             "type": "string",
             "description": "`usd`."
           },
+          "deposit_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deposit address that received the transfer, `da_…`; `null` for a quote's address.\nPayments to a deposit address, active or retired, are credited at spot. This service\nalways sends it; it is optional in the schema so clients also parse responses and events\nfrom servers that predate it."
+          },
           "exchange_rate": {
             "type": [
               "string",
@@ -3085,7 +3547,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/ExpandableQuote",
-                "description": "The quote whose address received the transfer."
+                "description": "The quote whose address received the transfer; `null` for a deposit address."
               },
               {
                 "type": "null"
@@ -3118,6 +3580,134 @@
             ],
             "format": "int64",
             "description": "Valuation time, Unix seconds."
+          }
+        }
+      },
+      "DepositAddress": {
+        "type": "object",
+        "description": "A customer's persistent deposit address for one chain and asset, like a bank-transfer virtual\naccount: any amount sent to it is credited to the customer at the market (spot) price when it\narrives. Rotation retires it and issues a new one; a retired address is still credited.",
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "client_reference_id",
+          "chain_id",
+          "asset",
+          "address",
+          "payment_uri",
+          "treasury",
+          "version",
+          "salt",
+          "status",
+          "created",
+          "metadata"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The forwarder address to pay."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset code."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "client_reference_id": {
+            "type": "string",
+            "description": "Your identifier of the customer."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "`da_` id."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "Whether the address is in live mode."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.\nEach deposit to the address starts with a copy.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `deposit_address`."
+          },
+          "payment_uri": {
+            "type": "string",
+            "description": "EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the\npayer chooses it."
+          },
+          "retired_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Retirement time, Unix seconds; `null` while active."
+          },
+          "salt": {
+            "type": "string",
+            "description": "CREATE2 salt, 32 bytes of hex."
+          },
+          "status": {
+            "type": "string",
+            "description": "`active`, or `retired` by a rotation; payments to either are credited."
+          },
+          "treasury": {
+            "type": "string",
+            "description": "The treasury the forwarder pays, fixed when the address was issued."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The address's version among the customer's addresses for this chain and asset, from 1.\nThe salt is `keccak256(abi.encode(account, livemode, client_reference_id,\n\"deposit_address\", chain_id, asset, version))`, with the types `(string, bool, string,\nstring, uint256, string, uint256)` and `account` your `acct_` id; the address is the\nfactory's `CREATE2` over the treasury and that salt.",
+            "minimum": 0
+          }
+        }
+      },
+      "DepositAddressList": {
+        "type": "object",
+        "description": "A page of deposit addresses, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepositAddress"
+            },
+            "description": "The deposit addresses."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more addresses follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/deposit_addresses`."
           }
         }
       },
@@ -3248,6 +3838,13 @@
             ],
             "description": "Credit in minor units encoded as a decimal string."
           },
+          "deposit_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deposit address that received the deposit, `da_…`; `null` for a quote's address."
+          },
           "external_id": {
             "type": "string",
             "description": "The merchant's identifier of the customer the quote was issued for. This service always\nsends it; it is optional in the schema so clients also parse responses from servers that\npredate it."
@@ -3277,7 +3874,7 @@
               "string",
               "null"
             ],
-            "description": "The quote whose address received the deposit, `qt_…`."
+            "description": "The quote whose address received the deposit, `qt_…`; `null` for a deposit address."
           },
           "log_index": {
             "type": "integer",
@@ -4203,7 +4800,7 @@
       },
       "UpdateMetadataRequest": {
         "type": "object",
-        "description": "`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the\nobject's updatable parameters, of which `metadata` is the one.",
+        "description": "`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST /v1/refunds/{id}`, and\n`POST /v1/deposit_addresses/{id}` body: the\nobject's updatable parameters, of which `metadata` is the one.",
         "properties": {
           "metadata": {
             "$ref": "#/components/schemas/MetadataParam",

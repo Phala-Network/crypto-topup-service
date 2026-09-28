@@ -37,13 +37,14 @@ screened deposits of configured tokens into USD credit and tells the product wha
 with one signed webhook per deposit, which the product fulfills once. A deposit is credited at
 the route's confirmation (two blocks on Ethereum, about 30 seconds after paying) and watched to
 finality; the rare deposit whose transaction leaves the chain is reversed with a signed
-`deposit.reversed`, which the product handles like a refund. Quotes are the only way to
-deposit, as Stripe's PaymentIntent is the only way to pay: the user states a USD amount,
-receives a locked price, an exact token amount, a single-use address, and a countdown, then
-pays. This is the checkout model of Coinbase Commerce and BitPay. A payment that does not match
-its quote (late, wrong amount, second payment) is still credited, at the price observed when it
-is confirmed. Persistent addresses issued before quotes became the only flow stay watched
-by the finalized scanner and their payments are credited at spot, but none is issued again.
+`deposit.reversed`, which the product handles like a refund. There are two ways to deposit. A
+**quote** fixes a price: the user states a USD amount, receives a locked price, an exact token
+amount, a single-use address, and a countdown, then pays. This is the checkout model of Coinbase
+Commerce and BitPay. A payment that does not match its quote (late, wrong amount, second
+payment) is still credited, at the price observed when it is confirmed. A **deposit address**
+(§9, [design §5a](design/multi-tenant.md#5a-deposit-addresses-d16)) is the customer's
+persistent, rotatable address per chain and asset, like the stable bank-transfer details of
+Stripe's customer balance: any amount sent to it, active or retired, is credited at spot.
 
 Customer contract: *tokens are converted to non-transferable Phala Cloud USD credit at the
 published rate observed when the deposit is confirmed on Ethereum; the USD value is fixed
@@ -135,8 +136,10 @@ contract ForwarderFactory {                            // no roles, no admin, no
   refused.
 - `salt = keccak256(abi.encode(account, account_id, "lock", quote_id))`, where `account` is the
   merchant's `acct_…` id, `account_id` its customer's identifier, and `quote_id` the
-  service-assigned `qt_…` id. The merchant holds every input, including the treasury, so it
-  recomputes an address before showing it.
+  service-assigned `qt_…` id. A deposit address's salt is `keccak256(abi.encode(account,
+  livemode, client_reference_id, "deposit_address", chain_id, asset, version))`, types `(string,
+  bool, string, string, uint256, string, uint256)` (§9). The merchant holds every input,
+  including the treasury, so it recomputes an address before showing it.
 - One factory per chain, deployed by anyone through the deterministic deployment proxy with the
   fixed salt `keccak256("phala-pay.ForwarderFactory.v2")`: no constructor arguments, so the same
   factory and implementation addresses on every chain. Each route records `forwarder_factory`,
@@ -204,7 +207,8 @@ config/routes     route files (attested)   deploy/  compose + Dockerfile   tests
 ## 6. Schema
 
 Amounts are `numeric(78,0) CHECK (>= 0)` mapped to `U256`; `transitions` and `audit` are
-append-only. Physical addresses belong to a quote, and so to an account, a mode, and a chain;
+append-only. Physical addresses belong to a quote or a deposit address, and so to an account, a
+mode, and a chain;
 routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, confirmation policies, limits, idempotency keys, and
 the authorization table) are listed in [design §14](design/multi-tenant.md#14-data-model); the
 tables the service uses today:
@@ -225,7 +229,11 @@ customers     id, account_id, livemode, client_reference_id, paused_scopes text[
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
               credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
               metadata jsonb
-addresses     id, account_id, livemode, chain_id, quote_id UNIQUE, salt, treasury, address,
+deposit_addresses  id (da_ + hex), account_id, livemode, customer_id, chain_id, asset, route,
+              version, status (active|retired), created_at, retired_at, metadata jsonb
+              -- one active per (customer, chain, asset); versions count from 1 (§9)
+addresses     id, account_id, livemode, chain_id, quote_id UNIQUE | deposit_address_id UNIQUE
+              (exactly one), salt, treasury, address,
               deployed_block                      -- finalized ForwarderCreated for the pair
               UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
 cursors       chain_id PK, scanned_block, scanned_block_time,       -- finalized scanner
@@ -243,7 +251,8 @@ deposits      id, account_id, livemode, customer_id, chain_id, tx_hash, receipt_
               UNIQUE (chain_id, tx_hash, receipt_log_index)
               -- account, mode, and customer are the address's; log_index and the block columns are
               -- evidence that follows re-inclusion; tx_from and tx_nonce prove a dropped
-              -- transaction; swept requires final_at; metadata starts as the quote's
+              -- transaction; swept requires final_at; metadata starts as the quote's or the
+              -- deposit address's
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
               -- also the finality watch's `final` and `followed` records (from_state = to_state)
 flushed       chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
@@ -265,7 +274,7 @@ audit         id, account_id, actor_type (api_key|admin|system), actor_id, actio
               reason, created_at
 ```
 
-`metadata` on quotes, deposits, and refunds is Stripe's (§12, Metadata): `NOT NULL DEFAULT '{}'`
+`metadata` on quotes, deposit addresses, deposits, and refunds is Stripe's (§12, Metadata): `NOT NULL DEFAULT '{}'`
 with `CHECK (metadata_is_valid(metadata))`, the same limits the API validates.
 
 Composite foreign keys tie each tenant row to its parent's account and mode (a quote to its
@@ -398,11 +407,13 @@ the deposit (§12). While reconciliation has frozen
 a chain its head scan stops too, so the pending view stops updating.
 
 Watched addresses, read by the fast scan and the head scan: quote addresses whose quote is neither
-completed nor canceled, until one hour after `expires_at`. Open quotes are bounded by the exposure caps (each reserves at least
+completed nor canceled, until one hour after `expires_at`, and every deposit address, active or
+retired. Open quotes are bounded by the exposure caps (each reserves at least
 `min_credit_minor` against the global cap) and, for the hour after expiry, by the per-account
-creation rate limit; any number is requested in batches of 1 000. A payment to any other issued
-address (a closed quote's, or a legacy persistent one) shows no `payment` before finality and is
-not credited before it; the finalized scanner records it, and it is credited at spot.
+creation rate limit; active deposit addresses by the per-account cap and retired ones by the
+rotation limit (§9); any number is requested in batches of 1 000. A payment to any other issued
+address (a closed quote's) shows no `payment` before finality and is not credited before it; the
+finalized scanner records it, and it is credited at spot.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the confirmation
 observation and the price is always current at fetch time. Every route's pricing configuration declares
@@ -452,7 +463,21 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   `unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
   quote by amount alone is ambiguous, and the single-use address is the processor-standard
-  answer.
+  answer. A deposit address (below) carries no price.
+
+**Deposit addresses** ([design §5a](design/multi-tenant.md#5a-deposit-addresses-d16), restored
+per the owner's 2026-09-21 requirement). `POST /v1/deposit_addresses {client_reference_id,
+chain_id, asset}` returns the customer's active address for that chain and asset, issuing version
+1 the first time; `POST /v1/deposit_addresses/{id}/rotate` retires it and issues the next version.
+The forwarder is an `addresses` row owned by the deposit address, bound to the treasury effective
+at issue; every transfer to it, active or retired, is a deposit valued at spot and runs the same
+states, events, sweeps, refunds, and reconciliation as a quote payment, with `quote: null` and
+`deposit_address` set. Creation replaces an active address whose treasury is no longer the
+effective one, and a treasury change (design PR 7) rotates every active address of the account
+on the chain; retired addresses keep paying their old treasury. Active addresses are capped per
+account and mode (`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000
+test; `409 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
+(`429 rate_limit`), and none is issued while `quotes` is paused.
 
 ## 10. Signing and sweeping
 
@@ -597,7 +622,12 @@ POST   /v1/quotes {account_id, amount, currency, chain_id, asset, metadata?} sin
 GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
 POST   /v1/quotes/{id} {metadata}                                 update metadata, in any status
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
-GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
+POST   /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}  the customer's active address, issued once (§9)
+GET    /v1/deposit_addresses?client_reference_id&status&chain_id&limit&starting_after&ending_before
+GET    /v1/deposit_addresses/{id}
+POST   /v1/deposit_addresses/{id} {metadata}                      update metadata, active or retired
+POST   /v1/deposit_addresses/{id}/rotate                          retire it and return the next version
+GET    /v1/deposits?account_id&quote&deposit_address&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
 POST   /v1/deposits/{id} {metadata}                               update metadata (`deposits.write`)
 POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  rejected, or credited on the product's request; finance approves (§15)
@@ -625,8 +655,10 @@ GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, 
 ([Metadata guide](https://docs.stripe.com/metadata)): a key with a value is set, a key with `""`
 is unset, other keys are kept, and `metadata: ""` unsets every key; the 50-key limit applies to
 the result. A violation is `400 parameter_invalid` naming `metadata` or `metadata[key]`, and the
-database checks the same rules. A deposit's metadata is initialized from its quote's when the
-deposit is recorded and is independent afterwards, as Stripe Checkout's
+database checks the same rules. Deposit addresses carry metadata too
+(`POST /v1/deposit_addresses/{id}`; a create request's is merged into the returned address's, and
+rotation carries it). A deposit's metadata is initialized from its quote's, or its deposit
+address's, when the deposit is recorded and is independent afterwards, as Stripe Checkout's
 `payment_intent_data.metadata` sets the PaymentIntent's and a PaymentIntent's metadata is
 snapshotted to its Charge; this lets an order id set at checkout arrive in `deposit.credited`.
 Every API key read and webhook `data.object` returns it; the payer's `client_secret` view omits
@@ -687,8 +719,8 @@ from_address, tx_hash, log_index, block_number, amount_refunded_atomic, refunded
 `status` is the state machine (§7), including `reversed`; a refund is not a state, because it neither moves custody nor
 has to be whole: like Stripe's Charge, the deposit carries `amount_refunded_atomic` and
 `refunded`. `amount` and `exchange_rate` are set once valued; `price_source` is `quote` or `spot`;
-`asset` is `null` for a token without a route; `quote` is `null` only for a legacy persistent
-address. Routes, versions, and valuation evidence are in the admin view.
+`asset` is `null` for a token without a route; exactly one of `quote` and `deposit_address` is
+set, naming what the receiving address belongs to. Routes, versions, and valuation evidence are in the admin view.
 
 **Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, status, tx_hash,
 created}`. `amount_atomic` defaults to the unrefunded remainder. `status` is `pending` while
@@ -707,8 +739,8 @@ remainder is `400 amount_too_large`. A reversed deposit is not refundable.
 | 403 | `invalid_request_error` | `testmode_charges_only`, `permission_denied` |
 | 404 | `invalid_request_error` | `resource_missing` |
 | 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry) |
-| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_not_refundable`, `deposit_not_final`, `paused`, `chain_frozen` |
-| 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; quote creations per customer; quote reads by `client_secret`) |
+| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_address_cap_exceeded`, `deposit_address_retired`, `deposit_not_refundable`, `deposit_not_final`, `paused`, `chain_frozen` |
+| 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; quote creations and deposit address rotations per customer; quote reads by `client_secret`) |
 | 503 | `api_error` | `unavailable` (no fresh price, database unavailable) |
 | 500 | `api_error` | `internal_error` |
 
@@ -788,6 +820,10 @@ from fetched state, never from webhook order.
   and copy-amount buttons for wallets and exchanges that do not read the URI.
 - When a quote's `expires_at` has passed, hide its QR code and address and show "Payment
   window closed. A payment sent in time is still credited at the quoted price." Offer a re-quote; the quote stays `open` until chain-time expiry (§9).
+- Deposit address page: the network, the token contract, the address with a copy button, and a
+  QR of its EIP-681 URI (token, no amount), with "Send any amount of PHA on Ethereum only. It is
+  credited at the market rate when it arrives, usually in about 30 seconds." After a rotation,
+  stop showing the retired address; a payment to it is still credited.
 - Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
   are not credited." Support handles such a payment with the
   [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).
@@ -947,7 +983,7 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 
 | Topic | Rule |
 |---|---|
-| Addresses | Every address is a quote's, single-use; a later payment to it is credited at spot. Legacy persistent addresses stay monitored by the finalized scanner and are never issued again. |
+| Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's persistent address per chain and asset, rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
 | Refunds | Only a final deposit is refunded (`409 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet); finance approves and executes from the treasury Safe; the service records the transaction, emits `deposit.refunded`, and reconciles it. Refunds are in the original token net of gas, within a published processing time. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |

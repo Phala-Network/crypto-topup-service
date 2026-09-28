@@ -92,9 +92,10 @@ pub struct HeadCommit {
     pub removed: u64,
 }
 
-/// Addresses the head scan watches: quote addresses whose quote is neither completed nor
-/// canceled, until one hour after expiry. Payments to any other issued address are still found by
-/// the finalized scanner; they only show no `payment` before finality.
+/// Addresses the head and fast scans watch: quote addresses whose quote is neither completed nor
+/// canceled, until one hour after expiry, and every deposit address, active or retired, since a
+/// customer may pay one at any time. Payments to any other issued address are still found by the
+/// finalized scanner; they are only credited at finality instead of at the route's confirmation.
 pub async fn list_watched_addresses(
     pool: &PgPool,
     chain_id: u64,
@@ -109,6 +110,10 @@ pub async fn list_watched_addresses(
           AND quote.status IN ('open', 'expired')
           AND quote.consumed_by IS NULL
           AND quote.expires_at + interval '1 hour' > now()
+        UNION ALL
+        SELECT address.id, address.address
+        FROM addresses AS address
+        WHERE address.chain_id = $1 AND address.deposit_address_id IS NOT NULL
         "#,
     )
     .bind(chain_id)

@@ -5,13 +5,14 @@ mod account;
 mod attestation;
 mod auth;
 mod client_limit;
+mod deposit_addresses;
 mod deposits;
-mod error;
+pub(crate) mod error;
 mod extract;
 mod handlers;
 mod idempotency;
 mod keys;
-mod metadata;
+pub(crate) mod metadata;
 pub mod models;
 mod pending;
 mod quotes;
@@ -145,6 +146,15 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(quotes::create_quote))
         .routes(routes!(quotes::update_quote))
         .routes(routes!(quotes::cancel_quote))
+        .routes(routes!(
+            deposit_addresses::list_deposit_addresses,
+            deposit_addresses::create_deposit_address
+        ))
+        .routes(routes!(
+            deposit_addresses::get_deposit_address,
+            deposit_addresses::update_deposit_address
+        ))
+        .routes(routes!(deposit_addresses::rotate_deposit_address))
         .routes(routes!(deposits::list_deposits))
         .routes(routes!(deposits::get_deposit, deposits::update_deposit))
         .routes(routes!(deposits::create_refund))

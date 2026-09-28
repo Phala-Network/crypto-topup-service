@@ -560,7 +560,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         .execute(pool)
         .await?;
 
-        let quote = topup::ids::format(topup::ids::QUOTE, address.quote_id);
+        let quote = topup::ids::format(topup::ids::QUOTE, address.quote_id.context("quote address")?);
         let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit);
         let refund = topup::ids::format(topup::ids::REFUND, refund);
         let api_key = topup::ids::format(topup::ids::API_KEY, owner_key_id);

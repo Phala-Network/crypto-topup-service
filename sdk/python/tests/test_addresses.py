@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from topup_sdk.addresses import (
+    deposit_address,
+    deposit_address_salt,
     deposit_id,
     forwarder_address,
     lock_salt,
@@ -28,6 +30,29 @@ def test_lock_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]
     assert "0x" + salt.hex() == vector["salt"]
     address = forwarder_address(
         VECTORS["factory"], VECTORS["implementation"], vector["treasury"], salt
+    )
+    assert address == vector["predicted_address"]
+
+
+@pytest.mark.parametrize(
+    "vector",
+    VECTORS["deposit_address"],
+    ids=lambda vector: f"{vector['chain_id']}-v{vector['version']}",
+)
+def test_deposit_address_salt_and_address_match_the_contract_vectors(
+    vector: dict[str, Any],
+) -> None:
+    inputs = {
+        "account": vector["account"],
+        "livemode": vector["livemode"],
+        "client_reference_id": vector["client_reference_id"],
+        "chain_id": vector["chain_id"],
+        "asset": vector["asset"],
+        "version": vector["version"],
+    }
+    assert "0x" + deposit_address_salt(**inputs).hex() == vector["salt"]
+    address = deposit_address(
+        VECTORS["factory"], VECTORS["implementation"], vector["treasury"], **inputs
     )
     assert address == vector["predicted_address"]
 

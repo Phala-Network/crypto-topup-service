@@ -17,6 +17,7 @@ pub mod api_keys;
 pub mod audit;
 pub mod contracts;
 pub mod db;
+pub mod deposit_addresses;
 pub mod finality;
 pub mod heartbeat;
 pub mod ids;

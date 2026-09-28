@@ -4,8 +4,9 @@ A service, called by the Phala Cloud billing backend, that turns finalized ERC-2
 deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that
 can only pay the treasury; the service runs inside a dstack confidential VM and tells products what
 to credit with signed `deposit.credited` webhooks, which they fulfill once per deposit. The default flow is quote first: the user locks a
-price, receives an exact amount and a single-use address, and pays within the window; quotes are
-the only flow, as Stripe's PaymentIntent is.
+price, receives an exact amount and a single-use address, and pays within the window. Each
+customer can also have a persistent, rotatable deposit address per chain and asset, credited at
+spot for any amount, like the stable bank-transfer details of Stripe's customer balance.
 
 First route: Ethereum Mainnet PHA → Phala Cloud USD credit. Further assets, chains, and products
 are added through route configuration and adapters.

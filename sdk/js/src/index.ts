@@ -13,7 +13,14 @@ export {
 export { PhalaPay, type PhalaPayOptions } from "./client.js";
 export { knownChain, networkName, transactionUrl } from "./chains.js";
 export { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "./format.js";
-export { quoteTransfer, type TokenTransfer } from "./payment.js";
+export {
+  depositAddressTransfer,
+  parseTransferUri,
+  quoteTransfer,
+  type DepositAddressDetails,
+  type TokenTransfer,
+  type TransferRequest,
+} from "./payment.js";
 export { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./quote.js";
 export {
   INJECTED_WALLET_UUID,

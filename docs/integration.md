@@ -109,9 +109,10 @@ cloud console's billing page, at `/demo/`.
 
 ### 1.1 How it works
 
-A quote is the only way to pay, as a PaymentIntent is in Stripe: the user states an amount in
-dollars and receives a locked price, an exact token amount, and a single-use address to pay
-within the window. The service watches Ethereum for transfers to its addresses, waits for the
+A quote is the way to pay a known amount, as a PaymentIntent is in Stripe: the user states an
+amount in dollars and receives a locked price, an exact token amount, and a single-use address to
+pay within the window. For top-ups of any amount at any time, give the customer a persistent
+deposit address instead (§1.5). The service watches Ethereum for transfers to its addresses, waits for the
 route's confirmation (two blocks on Ethereum), prices each deposit, and screens it. A deposit that
 passes is credited, typically **about 30 seconds after paying**, and the service tells Phala Cloud
 with a signed `deposit.credited` webhook. It keeps watching the deposit until it is final (about
@@ -289,7 +290,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
-| Legacy persistent address (issued before quotes were the only flow), any amount | Credited at spot when confirmed. |
+| Deposit address (§1.5), active or retired, any amount | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`. |
 | Token without a route | Once confirmed, `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
@@ -316,7 +317,8 @@ record id in metadata instead.
   `{"metadata": {…}}`, in any status. The update merges: a key with a value is set, a key set to
   `""` is unset, keys you do not send are kept, and `{"metadata": ""}` unsets every key. The
   50-key limit applies to the result.
-- A deposit's metadata is initialized from its quote's when the deposit is recorded, and is
+- A deposit's metadata is initialized from its quote's (or its deposit address's, §1.5) when the
+  deposit is recorded, and is
   independent afterwards: updating one does not change the other. This is how Stripe Checkout's
   `payment_intent_data.metadata` sets the PaymentIntent's metadata, and how a PaymentIntent's
   metadata is copied to its Charge. So an order id set on the quote arrives in the
@@ -335,6 +337,65 @@ quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111, 
 pay.deposits.update(deposit.id, metadata={"fulfilled_at": str(now)})
 pay.refunds.update(refund.id, metadata={"ticket": ""})   # unsets `ticket`
 ```
+
+### 1.5 Deposit addresses
+
+A deposit address is the customer's own address for one chain and asset, like the stable
+bank-transfer details Stripe gives each customer
+([customer balance funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions)).
+It never expires: the customer sends **any amount, at any time**, and each transfer is credited at
+the market (spot) rate when it arrives, about 30 seconds after paying, through the same
+`deposit.credited` webhook as a quote payment.
+
+| Use | When |
+|---|---|
+| A quote (§1.2) | The customer buys something of a known price and must see the exact token amount and the rate before paying. |
+| A deposit address | Top-ups and balances: the amount is the customer's choice, they may pay repeatedly, or they pay from an exchange that cannot send an exact amount within a window. |
+
+```python
+address = pay.deposit_addresses.create(client_reference_id="team-42", chain_id=11155111,
+                                       asset="pha", metadata={"team_id": "team-42"})
+# {"id": "da_…", "object": "deposit_address", "livemode": false, "client_reference_id": "team-42",
+#  "chain_id": 11155111, "asset": "pha", "address": "0x…",
+#  "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…", "treasury": "0x…",
+#  "version": 1, "salt": "0x…", "status": "active", "created": 1790409600, "retired_at": null,
+#  "metadata": {"team_id": "team-42"}}
+```
+
+- `POST /v1/deposit_addresses {client_reference_id, chain_id, asset}` returns the customer's
+  **active** address for that chain and asset, issuing it the first time: call it whenever the
+  page opens; the same request returns the same address until it is rotated. Addresses are per
+  mode: a test key never sees a live address.
+- `POST /v1/deposit_addresses/{id}/rotate` retires the address and returns the customer's next
+  one (for example after the address was exposed somewhere it should not be). **A retired address
+  is still credited**; stop showing it, but never tell the customer a payment to it is lost. A
+  customer rotates at most 10 times an hour (`429 rate_limit`), and rotating a retired address is
+  `409 deposit_address_retired`.
+- `metadata` (§1.4) on the create request is merged into the returned address's;
+  `POST /v1/deposit_addresses/{id} {"metadata": {…}}` updates it on an active or retired address,
+  a rotation carries it to the next address, and each deposit to the address starts with a copy,
+  so it arrives in `deposit.credited` like a quote's.
+- `GET /v1/deposit_addresses/{id}` and `GET /v1/deposit_addresses?client_reference_id=…&status=…`
+  read them; `GET /v1/deposits?deposit_address=da_…` lists what reached one.
+- Recompute the address before showing it, as for quotes: the salt is
+  `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
+  asset, version))` with the types `(string, bool, string, string, uint256, string, uint256)`,
+  and the address is the factory's `CREATE2` for `treasury` and that salt. `PhalaPay(...,
+  forwarder=(factory, implementation, treasury))` checks every active address and raises
+  `AddressMismatchError`; `topup_sdk.deposit_address(...)` recomputes any version offline.
+- An address pays the treasury it was issued for, forever. When your treasury changes, your
+  active addresses are rotated to the new one; payments to retired addresses still reach the old
+  treasury, so keep control of it (you are told through `account.treasury.*` events).
+- Limits: 100 000 active addresses per account in live mode and 1 000 in test mode
+  (`409 deposit_address_cap_exceeded`; ask the operator to raise it); no new address is issued
+  while `quotes` is paused (`409 paused`).
+
+**Page copy.** Show the network, the token, the full address with a copy button, and a QR of
+`payment_uri` (it carries the token and address and no amount): "Send any amount of PHA on
+Sepolia only. It is credited at the market rate when it arrives, usually in about 30 seconds.
+You can reuse this address." `<DepositAddress depositAddress={…}>` from `@phala/pay/react`
+renders exactly that from the fields `address`, `chain_id`, `asset`, and `payment_uri`; pass
+only those to the browser.
 
 ## 2. Webhooks and fulfillment
 

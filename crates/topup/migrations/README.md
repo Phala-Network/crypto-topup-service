@@ -26,6 +26,12 @@ the `user` audit actor), drops `request_signing_keys` and the per-object `quotes
 and `refunds.idempotency_key`, and adds `accounts.contact`, `accounts.due_diligence`,
 `events.actor`, and `api_keys.created_by` as the creating key id or `admin`.
 
+`20261007000000_deposit_addresses` restores deposit addresses (docs/design/multi-tenant.md §5a):
+`deposit_addresses`, `addresses.deposit_address_id` with `addresses.quote_id` now nullable and
+exactly one of them set, `account_limits.max_active_deposit_addresses`, and the
+`deposit_addresses.read` and `.write` permissions. Its down migration refuses to run once a
+deposit address exists.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -58,14 +64,15 @@ list, so a new table fails it until it is listed there and, if narrowed, here.
 
 ## Tenancy
 
-Every tenant table (`customers`, `quotes`, `addresses`, `deposits`, `refunds`, `api_keys`,
-`webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`, and the account-owned
-`confirmation_policies` and `treasuries`)
+Every tenant table (`customers`, `quotes`, `deposit_addresses`, `addresses`, `deposits`,
+`refunds`, `api_keys`, `webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`, and
+the account-owned `confirmation_policies` and `treasuries`)
 carries `account_id`, and the mode-bearing ones `livemode`. Merchant queries are built from a
 server-side scope of both (`crate::tenancy::Scope`); the chain workers and the admin API act for the
 platform and read across accounts. Composite foreign keys, `(parent_id, account_id, livemode)`
 referencing a unique key of the parent, make a quote agree with its customer, an address with its
-quote, a deposit with its address and customer, and a refund with its deposit, so no write can join
+quote or deposit address, a deposit address with its customer, a deposit with its address and
+customer, and a refund with its deposit, so no write can join
 two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush_failures`,
 `refund_payment_claims`, and `webhook_deliveries` have no `account_id` and are reached only
 through their scoped parent.

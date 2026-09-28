@@ -58,6 +58,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 | D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
+| D16 | Deposit addresses | A persistent, rotatable forwarder per customer, chain, and asset; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
 
 ## 4. Fast credit and reversal (D1)
 
@@ -226,6 +227,87 @@ flowchart LR
     tre -.->|"refund transfer, then mark_paid"| payer
 ```
 
+## 5a. Deposit addresses (D16)
+
+**Status.** Restored per the owner's requirement of 2026-09-21 that each customer gets a
+**persistent, rotatable deposit address**, the EVM exchange practice. PR #163 ("quotes are the only
+flow") removed the earlier implementation without the owner's approval; this section restores the
+decision and fits it to the multi-tenant design. Quotes stay the flow for a fixed price.
+
+**Precedent.** Stripe's customer balance gives each customer stable bank-transfer details: "In
+live mode, Stripe supplies each customer with a unique set of bank transfer details", created or
+retrieved with `POST /v1/customers/{id}/funding_instructions`, and "Funds sent to any address are
+routed to the customer balance"
+([Stripe, funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions),
+checked 2026-09-28). A deposit address is that virtual account on chain: one per customer, chain,
+and asset, any amount, credited to the customer.
+
+**Resource.** `deposit_address` (`da_…`), per account and mode:
+
+```text
+POST /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}   the active address
+GET  /v1/deposit_addresses/{id}, POST /v1/deposit_addresses/{id} {metadata}
+GET  /v1/deposit_addresses?client_reference_id&status&chain_id&limit&starting_after&ending_before
+POST /v1/deposit_addresses/{id}/rotate                               retire it, return the next one
+```
+
+Fields: `id`, `object`, `livemode`, `client_reference_id`, `chain_id`, `asset`, `address`,
+`payment_uri` (EIP-681 ERC-20 transfer **without** an amount), `treasury`, `version`, `salt`,
+`status` (`active | retired`), `created`, `retired_at`, `metadata` (D15). Creation is idempotent without an
+`Idempotency-Key`: it returns the customer's active address for the chain and asset and issues one
+only when there is none, as Stripe's funding instructions "create or retrieve". Rotation retires
+the address (`retired`, `retired_at`) and issues the next version; a retired address cannot be
+rotated again (`409 deposit_address_retired`). `metadata` follows D15: the create request's is
+merged into the returned address's (as an update would, so repeating a create is harmless),
+`POST /v1/deposit_addresses/{id}` merges into an active or retired address's, a rotation carries
+it to the next version, and each deposit to the address starts with a copy, as a quote's deposit
+does.
+
+**Address.** The same v2 forwarder as a quote's, `CREATE2` over the treasury and a salt (D3):
+
+```text
+salt = keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address",
+                            chain_id, asset, version))
+       types (string, bool, string, string, uint256, string, uint256); account = acct_ id
+address = factory.addressOf(treasury, salt)
+```
+
+`version` counts the customer's addresses for the chain and asset from 1. The Foundry script writes
+vectors (`contracts/test-vectors/create2.json`, `deposit_address`) that the Rust core and the
+Python SDK reproduce; the SDKs recompute every active address against the pinned forwarder and
+fail closed, as for quotes (§8), and recompute any version offline.
+
+**Crediting.** Any transfer to an active **or retired** deposit address is credited **at spot**
+(no quote) through the one pipeline: fast credit at the route's confirmation (D1), reversal,
+screening, events, chain-sourced sweeps (D4), refunds (D5), and per-forwarder reconciliation (§13).
+The forwarder is an ordinary `addresses` row, owned by a deposit address instead of a quote, so
+every mechanism that reads `addresses` covers it. Its deposit has `quote: null` and
+`deposit_address: "da_…"`, and `deposit.credited` carries that object. The fast scan and the head
+scan watch every deposit address (they are issued addresses that can be paid at any time), not only
+open quotes; the finalized scanner covers all addresses as before. The always-on per-block scan of
+all issued addresses (the scanner performance work) includes them.
+
+**Quotes or deposit addresses.** A quote locks a price for an exact amount for a short window: use
+it for a purchase of a known amount. A deposit address takes any amount at any time and credits
+the market rate on arrival: use it for top-ups and balances, and for payers who send from an
+exchange and cannot hit an exact amount or window.
+
+**Treasury.** An address is bound to the treasury effective when it is issued, like every
+forwarder (D2). When a treasury change takes effect (D10, design PR 7), PR 7 **must rotate every
+active deposit address of the account on that chain** in the same transaction, so new payments go
+to the new treasury; creation also replaces an active address whose treasury is no longer the
+effective one, so a missed rotation is repaired on the next call (`effective_treasury` in
+`crates/topup/src/deposit_addresses.rs` is the PR 7 hook). **Retired addresses keep being
+credited, and their funds reach the old treasury**, which the forwarder's clone argument fixes for
+good: merchants learn of the change through `account.treasury.pending` and `.updated` (D10) and
+must keep control of an old treasury while customers may still pay retired addresses.
+
+**Limits.** Active deposit addresses per account and mode are capped (default 100 000 live,
+1 000 test; the operator raises it in `account_limits.max_active_deposit_addresses`):
+`409 deposit_address_cap_exceeded`. A customer may rotate 10 times per rolling hour
+(`429 rate_limit`). No new address is issued while `quotes` is paused for the account, the
+customer, or the route (§12), or while reconciliation froze the chain; reads keep working.
+
 ## 6. Tenant model and names (D6)
 
 ```mermaid
@@ -236,7 +318,9 @@ erDiagram
     ACCOUNT ||--o{ TREASURY : "per chain"
     ACCOUNT ||--o{ CUSTOMER : "client_reference_id"
     CUSTOMER ||--o{ QUOTE : creates
+    CUSTOMER ||--o{ DEPOSIT_ADDRESS : "per chain and asset, rotatable"
     QUOTE ||--o| ADDRESS : "single-use"
+    DEPOSIT_ADDRESS ||--|| ADDRESS : "persistent"
     ADDRESS ||--o{ DEPOSIT : receives
     DEPOSIT ||--o{ REFUND : "merchant-paid"
     ACCOUNT ||--o{ EVENT : emits
@@ -455,8 +539,9 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
 - **Rate limits** per account and mode: 100 requests/s live, 25 test, Stripe's numbers
   ([rate limits](https://docs.stripe.com/rate-limits)); a 500/s platform test-mode ceiling;
   per-customer limits as today. `429 rate_limit`.
-- **Caps** are per account and per mode only: open quotes (default 1 000 live, 100 test), open
-  amount per customer and per account *(policy)*, max deposit (route). There is no global cap: the
+- **Caps** are per account and per mode only: open quotes (default 1 000 live, 100 test), active
+  deposit addresses (default 100 000 live, 1 000 test; §5a), open amount per customer and per
+  account *(policy)*, max deposit (route). There is no global cap: the
   merchant, not Phala, bears price exposure. Open quotes bound the scanner's watched-address set.
 - **Pause** scopes per account (`quotes`, `settlement`, `refunds`) and per route; the operator
   uses them for abuse and incidents. A merchant pauses and resumes its own `quotes` through
@@ -514,7 +599,8 @@ accounts        id, public_id (acct_…), name, contact jsonb, due_diligence jso
 confirmation_policies account_id, chain_id, required (depth | safe | finalized)
                 PRIMARY KEY (account_id, chain_id)          -- absent: the route's value
 account_limits  account_id, livemode, max_open_quotes, max_open_minor_account,
-                max_open_minor_customer                           PRIMARY KEY (account_id, livemode)
+                max_open_minor_customer, max_active_deposit_addresses
+                                                                  PRIMARY KEY (account_id, livemode)
 permissions     permission, principal (key:secret | key:restricted)   -- the one table (§7)
 api_keys        id, account_id, livemode, kind, name, permissions jsonb, prefix, last4,
                 key_hash UNIQUE, created_by (api key id | admin), created_at, expires_at,
@@ -524,7 +610,11 @@ treasuries      id, account_id, chain_id, address, proof_message, proof_signatur
 treasury_challenges nonce PK, account_id, livemode, chain_id, address, expires_at, used_at
 customers       id, account_id, livemode, client_reference_id, paused_scopes
                 UNIQUE (account_id, livemode, client_reference_id)
-addresses       id, account_id, livemode, chain_id, quote_id, salt, treasury, address UNIQUE (chain_id, address)
+deposit_addresses id (da_…), account_id, livemode, customer_id, chain_id, asset, route, version,
+                status (active | retired), created_at, retired_at, metadata jsonb
+                UNIQUE (customer_id, chain_id, asset, version); one active per (customer, chain, asset)
+addresses       id, account_id, livemode, chain_id, quote_id | deposit_address_id (exactly one), salt,
+                treasury, address UNIQUE (chain_id, address)
 quotes          (today's rate_locks) + account_id, livemode, customer_id, metadata jsonb
 deposits        + account_id, livemode, receipt_log_index, confirmations_at, final_at, metadata jsonb;
                 state adds `reversed`; UNIQUE (chain_id, tx_hash, receipt_log_index)
@@ -569,6 +659,9 @@ POST   /v1/quotes {client_reference_id, amount, currency, chain_id, asset}
 GET    /v1/quotes/{id}                               unsigned ?client_secret= as today
 POST   /v1/quotes/{id} {metadata}                  update (D15); likewise /v1/deposits/{id}, /v1/refunds/{id}
 POST   /v1/quotes/{id}/cancel
+POST   /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}   the active address (§5a)
+GET    /v1/deposit_addresses?client_reference_id&status&chain_id, GET|POST /v1/deposit_addresses/{id}
+POST   /v1/deposit_addresses/{id}/rotate
 GET    /v1/deposits?client_reference_id&quote&status&tx_hash&created[...]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}
 GET    /v1/addresses?chain_id&…                      (chain, factory, salt, treasury) per address
@@ -594,8 +687,8 @@ POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   
   to 40 characters without `[` or `]`, values of up to 500 characters; set on create
   (`POST /v1/quotes`, `POST /v1/refunds`) and by `POST /v1/{object}/{id}`, which merges
   ([guide](https://docs.stripe.com/metadata): `""` unsets a key, `metadata: ""` unsets all).
-  Errors name `metadata[key]`. A deposit's metadata is initialized from its quote's when it is
-  recorded and is independent afterwards, as Checkout's `payment_intent_data.metadata` sets the
+  Errors name `metadata[key]`. Deposit addresses (§5a) carry it too. A deposit's metadata is
+  initialized from its quote's, or its deposit address's, when it is recorded and is independent afterwards, as Checkout's `payment_intent_data.metadata` sets the
   PaymentIntent's: the merchant's order id then arrives in `deposit.credited` without a lookup.
   It is returned in API key reads and webhook `data.object`, not in the payer's `client_secret`
   view (Stripe redacts it from publishable-key reads). Stored as `jsonb` with a `CHECK` of the
@@ -655,7 +748,8 @@ other mode; an event for A fails verification with B's key.
 **PR 7 — treasuries.** Challenge and proof endpoints; SIWE and EIP-1271 verification (both
 providers, `finalized`, ERC-6492 refused), nonce binding and expiry, 48 h time-lock with cancel
 through the API, `account.treasury.pending|updated|canceled` events, screening; quotes take the
-effective treasury. Tests: EOA, deployed Safe with an off-chain Safe message and with
+effective treasury; rotate every active deposit address of the account on the chain when a
+change takes effect (§5a). Tests: EOA, deployed Safe with an off-chain Safe message and with
 `SignMessageLib`, undeployed Safe, expired message, reused nonce, cancel during the lock.
 
 **PR 8 — webhook endpoints.** Endpoints API, `enabled_events`, test event, smokescreen sidecar
