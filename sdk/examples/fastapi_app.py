@@ -3,7 +3,8 @@ fulfillment.
 
 - `POST /topups` `{"amount": 2500}` creates a quote for the signed-in team and returns its
   `client_secret` and the `expected_address` the SDK recomputed, which the browser passes to
-  `<Checkout clientSecret apiBase expectedAddress />`.
+  `<Checkout clientSecret apiBase expectedAddress />`. The order id rides along as the quote's
+  `metadata`, so it arrives in the deposit's `metadata` in `deposit.credited`.
 - `POST /webhooks/phala-pay` verifies each delivery with `pay.webhooks.construct_event`, which
   fails closed unless it is signed by your account's key in the key's mode and names your account
   and mode, then applies every `deposit.*` event to the team's balance before answering `200`.
@@ -21,7 +22,8 @@ partial refund takes back its pro-rata share of the credit, a reversal all of it
 Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
     PHALA_PAY_API_BASE=https://pay.example.com \\
-    PHALA_PAY_SECRET_KEY=ppay_rk_test_... (a restricted key: quotes, deposits, events) \\
+    PHALA_PAY_API_KEY=ppay_rk_test_... (a restricted key with quotes.write; a secret key \\
+        stays offline for administration) \\
     PHALA_PAY_ACCOUNT=acct_... \\
     PHALA_PAY_FORWARDER=<factory>,<implementation> of the attested deployment \\
     PHALA_PAY_TREASURIES=<chain_id>:<your treasury>,... as you proved them \\
@@ -168,10 +170,12 @@ def create_app(
                 chain_id=chain_id,
                 asset=asset,
                 idempotency_key=order_id,
+                metadata={"order_id": order_id},
             )
         except ApiError as error:
             # Codes such as `amount_too_small` are stable and safe to show; messages are not.
-            status = 400 if error.status_code in (400, 409, 429) else 502
+            # `503` (`unavailable`, or `service_restoring` after a restore) is worth a retry.
+            status = error.status_code if error.status_code in (400, 409, 429, 503) else 502
             raise HTTPException(status, detail={"code": error.code}) from error
         except httpx.HTTPError as error:
             raise HTTPException(503, detail={"code": "unavailable"}) from error
@@ -208,7 +212,7 @@ def create_app(
 
 
 def app_from_env() -> FastAPI:
-    secret_key = os.environ["PHALA_PAY_SECRET_KEY"]
+    api_key = os.environ["PHALA_PAY_API_KEY"]
     factory, implementation = os.environ["PHALA_PAY_FORWARDER"].split(",")
     treasuries = {
         int(chain_id): treasury.strip()
@@ -220,7 +224,7 @@ def app_from_env() -> FastAPI:
     }
     pay = PhalaPay(
         os.environ["PHALA_PAY_API_BASE"],
-        secret_key,
+        api_key,
         forwarder=(factory.strip(), implementation.strip()),
         treasuries=treasuries,
         account=os.environ["PHALA_PAY_ACCOUNT"],
@@ -230,7 +234,7 @@ def app_from_env() -> FastAPI:
         [key.strip() for key in os.environ["PHALA_PAY_WEBHOOK_KEYS"].split(",") if key.strip()],
         os.environ.get("DATABASE", "topups.sqlite3"),
         account=os.environ["PHALA_PAY_ACCOUNT"],
-        livemode=secret_key.startswith(("ppay_sk_live_", "ppay_rk_live_")),
+        livemode=api_key.startswith(("ppay_sk_live_", "ppay_rk_live_")),
         chain_id=int(os.environ.get("PHALA_PAY_CHAIN_ID", "11155111")),
         asset=os.environ.get("PHALA_PAY_ASSET", "pha"),
     )

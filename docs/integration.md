@@ -1,16 +1,20 @@
 # Integration guide
 
-For the Phala Cloud backend team, who connect Phala Cloud (a Phala Pay account, `acct_…`) to this
-service. Where this guide and the code disagree, the code wins. The contract is defined by:
+For a merchant's backend team, who connect the merchant's Phala Pay account (`acct_…`) to the
+API. Phala Pay is API-only: the operator creates your account (§5.1), and you manage everything
+else with your API keys and the SDKs; there is no dashboard. Phala Cloud integrates exactly this
+way, as an ordinary account. Where this guide and the code disagree, the code wins. The contract
+is defined by:
 
 - [crates/topup/openapi.json](../crates/topup/openapi.json): every request and response shape,
   with an example of each, also served at `GET /openapi.json` and published as the
   [API reference](https://phala-network.github.io/phala-pay/) (its `Errors` section is where each
   error's `doc_url` points); the operator's admin API is the separate `openapi.admin.json`;
 - [deploy/product/reference_product](../deploy/product/reference_product): a complete Python
-  product, the one staging credits today;
-- [architecture.md](architecture.md): the design, especially §11 (the fulfillment webhook), §12
-  (API, events, product UI), §14 (attestation), and §15 (refunds and policies).
+  merchant backend (fulfillment, holds, refunds), run on staging;
+- [architecture.md](architecture.md): the specification, especially §11 (the fulfillment
+  webhook), §12 (API, events, customer UI), §14 (attestation, restore), and §15 (refunds and
+  policies).
 
 Phala Pay has two SDKs, both in this repository:
 
@@ -31,8 +35,9 @@ same.
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install.** `@phala/pay` is on npm (0.1.2); `phala-pay` installs from this repository until its
-first PyPI release:
+**Install.** This API's SDKs are not released yet: `@phala/pay` 0.1.2 on npm predates it (its next
+release follows `sdk/js/CHANGELOG.md`, Unreleased), and `phala-pay` installs from this repository
+until its first PyPI release ([plan](plan.md)):
 
 ```sh
 npm install @phala/pay viem
@@ -146,12 +151,12 @@ credited, at spot, for what arrived (§1.3). Treat an order as paid in full only
 `price_source` is `quote` (or its `amount` is what you expected). For top-ups of any amount at any time, give the customer a persistent
 deposit address instead (§1.5). The service watches Ethereum for transfers to its addresses, waits for the
 route's confirmation (two blocks on Ethereum), prices each deposit, and screens it. A deposit that
-passes is credited, typically **about 30 seconds after paying**, and the service tells Phala Cloud
+passes is credited, typically **about 30 seconds after paying**, and the service tells you
 with a signed `deposit.credited` webhook. It keeps watching the deposit until it is final (about
 15 minutes on Ethereum); in the rare case that the payment's transaction is dropped from the
 chain before then, the deposit is reversed and a signed `deposit.reversed`, whose deposit nets to
-zero, takes the credit back, as a refund's `deposit.refunded` takes back its share (§2.3). Phala Cloud owns the balance: it
-verifies the signature and credits the deposit once, the pattern of Stripe Checkout fulfillment
+zero, takes the credit back, as a refund's `deposit.refunded` takes back its share (§2.3). You own the balance: you
+verify the signature and credit the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
 addresses are CREATE2 forwarders that can only pay your treasury; you sweep them there when you
 choose, from your own wallet or Safe (§1.7).
@@ -181,9 +186,9 @@ sequenceDiagram
     opt Transaction dropped before finality (rare)
         PP->>BE: webhook deposit.reversed: the snapshot nets the deposit to zero
     end
-    BE->>ETH: sweep: factory flush to the treasury Safe (any wallet, pays gas)
+    BE->>ETH: sweep: factory flush to your treasury (your wallet or Safe, pays gas)
     PP-->>PP: finalized Flushed event marks the deposit swept
-    opt Refund (operator only, from your admin)
+    opt Refund (your staff, from your internal admin)
         BE->>PP: POST /v1/refunds {deposit, destination_address}
         BE->>ETH: transfer from the refund's treasury (your wallet or Safe)
         BE->>PP: POST /v1/refunds/{id}/mark_paid {transaction_hash}
@@ -195,8 +200,9 @@ sequenceDiagram
 
 Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead of hardcoding:
 the payable assets (chain, asset code, contract, decimals), the minimum `amount` in cents
-(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), the per-account cap on
-open quotes in cents (`max_open_amount_per_account`), the refund floor, the quote window, spread,
+(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), the cap on one
+customer's open quotes in cents (`max_open_amount_per_account`, which also bounds one quote), the
+refund floor, the quote window, spread,
 and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more),
 the typical credit time (`typical_credit_seconds`, 30), and the typical finality time
 (`typical_finality_seconds`, 900). Quotes are priced at
@@ -337,7 +343,7 @@ The staging deposit driver asserts these outcomes on Sepolia
 ([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
-| Payment | Outcome visible to Phala Cloud |
+| Payment | Outcome visible to you |
 |---|---|
 | Exact quoted amount, in time (within `quote_tolerance_bps`) | Quote `complete`; `deposit.credited` with `price_source: "quote"` and exactly the quoted `amount`. |
 | Underpayment beyond tolerance | Credited at spot for what arrived; quote not completed and later `quote.expired`; cancel refused with `400 quote_payment_received`. Payments are not accumulated against one quote: offer a new quote for the shortfall. |
@@ -350,7 +356,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
 | Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): its `amount_reversed` takes the whole credit back (§2.3). A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
-| You refuse the credit (for example a closed workspace) | Deposit `credited`; you hold it and request its refund (§2.4). Deposits refused under the retired settlement protocol show `rejected(product_refused)`. |
+| You refuse the credit (for example a closed customer) | Deposit `credited`; you hold it and refund it (§2.4). |
 
 User-facing copy per state and reason, including what never to show, is in
 [architecture §12, product UI](architecture.md#customer-experience-obligations-product-ui).
@@ -692,7 +698,9 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
 ### 2.2 The fulfillment function
 
 ```python
-from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
+from topup_sdk import SignatureError, verify_webhook
+
+RANK = {"pending": 0, "credited": 1, "rejected": 1, "reversed": 2}
 
 def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
     try:
@@ -702,25 +710,34 @@ def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
         )
     except SignatureError:
         return 400
-    if event.type == "deposit.credited":
-        fulfill(CreditedDeposit.from_event(event))  # commits before returning
-    store_once(event.id, event.type, event.data)     # notifications and history
-    return 204
-
-def fulfill(credit: CreditedDeposit) -> None:
     with db.transaction():
-        if orders.exists(provider_order_id=credit.fulfillment_key):  # "dep_…", unique
-            return  # already done; a differing amount only follows a service restore: report it
-        if refuses(credit):  # unknown, closed, or suspended workspace; your own caps
-            orders.insert(credit.fulfillment_key, status="held")
-            return  # support later requests a refund (§2.4)
-        orders.insert(credit.fulfillment_key, status="paid")
-        ledger.credit(credit.client_reference_id, credit.amount)
+        if event.type.startswith("deposit."):
+            apply_deposit(event.data["object"])  # every deposit.* event, the balance rule (§2.3)
+        store_once(event.id, event.type, event.data)  # notifications and history
+    return 204  # only after the commit
+
+def apply_deposit(snapshot: dict) -> None:
+    view = deposits.lock_or_insert(snapshot["id"])  # "dep_…", unique; one delivery at a time
+    if view.held or (view.new and refuses(snapshot)):  # unknown, closed, or suspended customer
+        view.hold()  # never applied; support later refunds it (§2.4)
+        return
+    if RANK[snapshot["status"]] > RANK[view.status]:
+        view.status = snapshot["status"]
+    view.amount = view.amount or snapshot["amount"] or 0
+    view.refunded = max(view.refunded, snapshot["amount_refunded"])
+    view.reversed = max(view.reversed, snapshot["amount_reversed"])
+    nets = (view.amount - view.refunded - view.reversed
+            if view.status in ("credited", "reversed") else 0)
+    ledger.credit(snapshot["client_reference_id"], nets - view.applied)  # the change only
+    view.applied = nets
 ```
 
 `phala_pay`'s `webhooks.construct_event` (Quickstart) is the same verification with a typed
-deposit. [deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
-is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/tests).
+event. [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) (`apply_deposit`) is this in
+full on SQLite; [deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
+adds holds and refunds, with its tests in [deploy/product/tests](../deploy/product/tests). A
+repeat of a deposit's credit with a different `amount` follows only a service restore: keep the
+first amount and report it (obligation 5).
 
 ### 2.3 Obligations
 
@@ -779,17 +796,17 @@ events, and the event follows the `credited` commit within a second.
 
 ### 2.4 Refusing a credit
 
-The service never asks whether you accept a deposit. To refuse one (an account you do not know, a
-closed or suspended workspace, your own caps), record it as held and answer `2xx`; when support
-has a destination address from the user, an operator refunds it from your admin (§3): you pay
-it from your treasury, attach the transaction, and `deposit.refunded` follows. To
-stop crediting an account before deposits arrive, pause its `settlement` scope
-(the operator's `POST /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause`): its
-deposits then wait `pending` until it is resumed.
+The service never asks whether you accept a deposit. To refuse one (a customer you do not know, a
+closed or suspended customer, your own caps), record it as held and answer `2xx`; once the final
+deposit is refundable and support has a destination address from the payer, your staff refund it
+from your internal admin (§3): you pay it from your treasury, attach the transaction, and
+`deposit.refunded` follows. To stop issuing new addresses, pause your `quotes` (§1.8); to hold
+crediting of one compromised treasury's forwarders, pause its crediting (§1.6). Holding one
+customer's crediting (`settlement`) is an operator action, for an incident: ask the operator.
 
 ### 2.5 Phala Cloud ledger mapping
 
-Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto-top-up'`,
+Phala Cloud's backend, as an example of a ledger: find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto-top-up'`,
 `provider_order_id` = the deposit id `dep_…`, unique per flow), the credit transaction with
 `funding_source = crypto:<asset>:<chain>`, and `complete_order_payment`, in one transaction
 ([architecture §11](architecture.md#11-fulfillment-webhook)).
@@ -918,7 +935,7 @@ for a credit you did not apply or reverse, such as a held credit (§2.4;
 
 The service never moves funds: you pay every refund from your own treasury, in two steps, as
 BTCPay Server's payouts do ([BTCPay payouts](https://docs.btcpayserver.org/Payouts/)). Refunds are
-operator actions, as in Stripe's Dashboard: your support or finance staff start one
+staff actions, as in Stripe's Dashboard: your support or finance staff start one
 from your own internal admin, whose backend holds your secret key. Never offer a refund
 as a self-service action to the paying user: a crypto refund is irreversible, and a credited
 balance may already be spent. Request it by deposit id, not through the user's account, so that a
@@ -999,18 +1016,21 @@ POST /v1/refunds/re_…/mark_paid
 
 ### 4.1 Environments
 
-| | Origin | Chain | Status |
+| | Origin | Modes and chains | Status |
 |---|---|---|---|
-| Production | `https://pay-api.phala.com` | Ethereum Mainnet (1) | Not deployed yet |
-| Staging | `https://pay-api-staging.phala.com` | Sepolia (11155111) | Live |
+| Production | `https://pay-api.phala.com` | live: Ethereum Mainnet (1); test: Sepolia (11155111) | Not deployed yet |
+| Staging | `https://pay-api-staging.phala.com` | test: Sepolia (11155111) | Internal pre-production |
 
-Staging's route, with its forwarder factory, implementation, and test PHA token
-(a `MockERC20` whose `mint(address,uint256)` is public), is
-[deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml).
-Staging's `phala-cloud` account is currently the reference product; switching staging to Phala
-Cloud's staging backend is a change of the account's webhook endpoint with its test key (§5.11),
-and the route stays as it is. Your key selects the mode: `ppay_sk_test_` keys act on test routes (Sepolia), and
-`ppay_sk_live_` keys, issued once the operator enables live mode, on live routes.
+One deployment serves both modes, and your key selects the mode (§5.2): `ppay_*_test_` keys act on
+test routes (Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live
+mode, on live routes. Integrate in test mode; until production is deployed, the operator creates
+integration accounts on staging. Staging is reset for the multi-tenant schema (a HUMAN-ONLY step,
+[deploy/README.md](../deploy/README.md#staging-reset-human-only)): accounts, keys,
+treasuries, and endpoints from before the reset do not exist, and the operator issues each account
+again. Staging's route, with its forwarder factory, implementation, and test PHA token (a
+`MockERC20` whose `mint(address,uint256)` is public), is
+[deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml);
+route files carry no treasury, so set your own on Sepolia first (§1.6).
 
 ### 4.2 Testing your receiver
 
@@ -1031,13 +1051,14 @@ your answers are `2xx`, `2xx`, `4xx`, and `4xx`. Then check your ledger: exactly
 of `--amount` cents for `--client-reference-id`. The reference product's tests
 ([deploy/product/tests](../deploy/product/tests)) are a worked example of the §2 obligations.
 
-### 4.3 Staging
+### 4.3 Test mode
 
-Staging runs on Sepolia with the test PHA token (§4.1). Until Phala Cloud's staging backend is
-registered there, the reference product receives staging's credits; it is the model for a
-complete product (fulfillment, holds, refund requests). Once your receiver is registered, pay test
-quotes with minted test PHA and Sepolia ETH for gas, and play the abnormal payments of §1.3.
-Sepolia deposits are credited about 30 seconds after paying and final about 15 minutes later.
+With a test key, your Sepolia treasury set (§1.6), and your endpoint registered (§5.11), pay test
+quotes and deposit addresses with minted test PHA and Sepolia ETH for gas, and play the abnormal
+payments of §1.3; then sweep (§1.7) and refund (§3) one of them. Sepolia deposits are credited
+about 30 seconds after paying and final about 15 minutes later. The staging reference product
+([deploy/product/reference_product](../deploy/product/reference_product)) is a complete merchant
+backend on staging, the model for fulfillment, holds, and refunds.
 
 ### 4.4 Go-live checklist
 
@@ -1078,7 +1099,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
 - [ ] Receipts, if you issue them with Stripe: one out-of-band paid invoice per deposit, and a
       credit note per refund (§2.7).
 - [ ] Optional hardening decided: caps, `GET /v1/deposits/{id}` check, own-node log verification.
-- [ ] One quote-first deposit credited end to end on staging.
+- [ ] One quote payment and one deposit address payment credited end to end in test mode, one
+      swept and one refunded.
 
 ## 5. Reference
 
@@ -1089,7 +1111,7 @@ There is no signup: the operator creates your account after due diligence done o
 The operator then:
 
 1. creates the account with the admin-signed `POST /v1/admin/accounts`
-   ([deploy/README.md](../deploy/README.md#account-credentials)), which returns its id, `acct_…`,
+   ([deploy/README.md](../deploy/README.md#operator-onboarding)), which returns its id, `acct_…`,
    and its first secret key of test mode, `ppay_sk_test_…`;
 2. sends the key to your contact through an encrypted channel. **Roll it on receipt** (§5.4), so
    no one at Phala holds a working key.
@@ -1116,7 +1138,7 @@ The service signs your webhooks with your account's own ed25519 key for each mod
 derived inside its confidential VM at `settlement/{acct}/{live|test}/v{n}`; no other account's
 events are signed with it. You hold only its public key, so nothing you store can forge a credit,
 and the key is stable across releases. Pin it only from verified attestation, fetched with a
-secret key of the mode ([architecture §14](architecture.md#14-configuration-and-deployment)):
+key of the mode (`account.read`) ([architecture §14](architecture.md#14-configuration-and-deployment)):
 
 ```sh
 export TOPUP_ORIGIN=https://pay-api-staging.phala.com
@@ -1187,9 +1209,11 @@ With a secret key you manage the keys of its account and mode (design D7), as St
 **Restricted keys.** Run production with a restricted key, Stripe's
 [restricted keys](https://docs.stripe.com/keys#limit-access): `ppay_rk_…` holds only the
 permissions it is created with, so a server compromise cannot redirect your funds or silence your
-notices. Keep secret keys offline, for administration only: keys, treasuries, webhook endpoints,
-webhook keys, and account settings (confirmation policies, pause) are managed only with a secret
-key, and no permission lets a restricted key do so (`400` when requested, `403 permission_denied`
+notices. Keep secret keys offline, for administration only: keys, treasuries (and their crediting
+pause), webhook endpoints (and resending events), webhook keys, and account settings
+(confirmation policies, pause) are managed only with a secret key, and no permission lets a
+restricted key do so (it can never hold `api_keys.write`, `treasury.write`, `endpoints.write`, or
+`account.write`) (`400` when requested, `403 permission_denied`
 when tried). A `write` permission includes its resource's `read`. A checkout server needs:
 
 ```python
@@ -1234,15 +1258,15 @@ from phala_pay import PhalaPay
 # proved it. Every quote and deposit address is recomputed from them before it is returned; in
 # live mode a missing pin fails closed.
 forwarder = (
-    "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",  # factory
-    "0x70B714508BFa441449DC09f790Ca03Baa5170360",  # implementation
+    "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",  # factory, the same on every chain
+    "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",  # implementation (deploy/CONTRACTS.md)
 )
 with PhalaPay(
     "https://pay-api-staging.phala.com",
     PHALA_PAY_API_KEY,
     account="acct_…",
     forwarder=forwarder,
-    treasuries={11155111: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"},
+    treasuries={11155111: MY_SEPOLIA_TREASURY},  # the address you proved (§1.6)
 ) as pay:
     config = pay.config.retrieve()
     quote = pay.quotes.create(client_reference_id="team-42", amount=2500, chain_id=11155111,
@@ -1393,12 +1417,13 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 
 - Anything integrators use is removed only after at least 90 days from the announcement:
   endpoints, fields, error codes, event types and fields, SDK public functions and parameters,
-  and API major versions. The one exception so far was the move from settlement requests to
-  webhook fulfillment, made before any product consumed the settlement protocol in production.
+  and API major versions. The exceptions so far were made before any integration was live: the
+  move from settlement requests to webhook fulfillment, and the multi-tenant API (design), which
+  changed the API without aliases.
 - Announcing means, in one release: `deprecated: true` in OpenAPI (and a `DeprecationWarning` from
   the SDK), a `Deprecated` changelog entry with the earliest removal date, and notice to every
-  registered product contact.
-- Removal happens in the sandbox first, in production no earlier than the announced date. Only a
+  account's recorded contact.
+- Removal happens on staging first, in production no earlier than the announced date. Only a
   security fix may shorten the window, and its changelog entry says why.
 
 #### SDK changelog rules
@@ -1424,8 +1449,8 @@ Releases are tags: `sdk-py-v<version>` publishes `phala-pay` to PyPI and
 after the SDK's tests pass on the tagged commit, with trusted publishing (no stored tokens) from the
 `npm` and `pypi` environments.
 
-Regenerate the signing vectors only after an intentional profile change, then rerun the Rust
-test:
+The SDK's RFC 9421 signer serves only the operator's admin API (merchant requests use a Bearer
+key). Regenerate its vectors only after an intentional profile change, then rerun the Rust test:
 
 ```sh
 (cd sdk/python && uv run --locked python -m tests.vectors)

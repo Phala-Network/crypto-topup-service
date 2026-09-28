@@ -135,6 +135,9 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The e2e deploys the real ForwarderFactory, which needs only OpenZeppelin to build.
+      - name: Fetch the contracts' OpenZeppelin dependency
+        run: git submodule update --init --depth 1 contracts/lib/openzeppelin-contracts
       - uses: ./.github/actions/sdk-js
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:

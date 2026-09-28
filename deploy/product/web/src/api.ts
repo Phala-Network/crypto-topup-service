@@ -1,38 +1,58 @@
 // The product's demo API (deploy/product/reference_product/demo.py). The browser only talks to the
-// product, which signs every service request itself, and to the service's public quote view,
-// which the checkout reads with the quote's client secret.
+// product, which sends every service request itself with its API key, and to the service's public
+// quote and deposit address views, which the SDK components read with a client secret.
+
+import type { DepositAddressDetails } from "@phala/pay";
 
 export interface Account {
   account_id: string;
+  /** Cents: the console's ledger, credits less their refunded and reversed shares. */
   balance: number;
+  ledger: LedgerLine[];
   presets: number[];
   min_amount: number;
   max_amount: number;
   api_base: string;
   network: { chain_id: number; name: string; explorer: string | null; testnet: boolean };
   token: { symbol: string; address: string };
-  transactions: Transaction[];
+  treasury: string;
+  factory: string;
+  deposit_address: string | null;
+  payments: PaymentRow[];
 }
 
-export interface Transaction {
-  quote: string;
-  created: number;
+export interface LedgerLine {
+  deposit: string;
   amount: number;
+  /** `deposit.credited`, or the event that adjusted the credit (`deposit.refunded`, …). */
+  reason: string;
+  at: number;
+}
+
+export interface PaymentRow {
+  kind: "quote" | "address";
+  /** The deposit's `dep_` id, or the quote's `qt_` id while it has no deposit. */
+  id: string;
+  quote: string | null;
+  created: number;
+  amount: number | null;
   amount_atomic: string;
   status: string;
-  deposit: string | null;
+  final: boolean;
+  swept: boolean;
   tx_hash: string | null;
-  paid_atomic: string | null;
-  credited: number | null;
-  refunded_atomic: string;
+  amount_refunded_atomic: string;
+  net: number | null;
 }
 
 export type StepKey =
   | "quote_created"
-  | "transfer_seen"
-  | "finalized"
+  | "sent"
+  | "received"
   | "credited"
   | "webhook_received"
+  | "final"
+  | "reversed"
   | "swept";
 
 export interface Detail {
@@ -54,6 +74,7 @@ export interface WebhookEvent {
   type: string;
   received_at: number;
   verified: boolean;
+  data: { object?: Record<string, unknown> };
 }
 
 export interface ApiExchange {
@@ -64,9 +85,61 @@ export interface ApiExchange {
   response: unknown;
 }
 
+export interface Deposit {
+  id: string;
+  status: string;
+  final: boolean;
+  swept: boolean;
+  amount: number | null;
+  amount_atomic: string;
+  amount_refunded_atomic: string;
+  amount_refunded: number;
+  amount_reversed: number;
+  from_address: string;
+  asset_contract: string;
+  tx_hash: string;
+  metadata: Record<string, string>;
+}
+
+export interface Refund {
+  id: string;
+  status: "pending" | "succeeded" | "failed" | "canceled";
+  amount_atomic: string;
+  destination_address: string;
+  treasury: string;
+  transaction_hash: string | null;
+  receipt_log_index: number | null;
+  failure_reason: string | null;
+  failure_explanation: string | null;
+  created: number;
+  /** The exact transfer that pays the refund, while it awaits one. */
+  transfer: { from: string; token: string; to: string; amount_atomic: string; data: string } | null;
+}
+
+export interface LedgerView {
+  status: string;
+  amount: number | null;
+  amount_refunded: number;
+  amount_reversed: number;
+  /** What the snapshot rule nets the deposit to, from the service's deposit. */
+  nets_to: number;
+  product: {
+    status: string | null;
+    reason: string | null;
+    credit: number | null;
+    net: number | null;
+    adjustments: { amount: number; reason: string; at: number }[];
+  } | null;
+}
+
 export interface Timeline {
-  quote: { id: string; status: string; amount: number; amount_atomic: string; expires_at: number };
+  kind: "quote" | "address";
+  quote: { id: string; status: string; metadata: Record<string, string> } | null;
+  deposit: Deposit | null;
+  sent: { tx_hash: string; block_number: number; at: number } | null;
   steps: Step[];
+  refunds: Refund[];
+  ledger: LedgerView | null;
   events: WebhookEvent[];
   api: ApiExchange[];
 }
@@ -88,8 +161,57 @@ export interface Trust {
 export interface CreatedQuote {
   quote: string;
   client_secret: string;
-  /** The quote's address as the product's SDK recomputed it. */
+  /** The quote's address as the product's SDK recomputed it from the pins. */
   expected_address: string;
+  order_id: string;
+  api: ApiExchange[];
+}
+
+export interface AddressPayment {
+  status: string;
+  tx_hash: string;
+  amount_atomic: string;
+  confirmations: number | null;
+  /** The deposit's `dep_` id, known before it is recorded. */
+  deposit: string;
+}
+
+export interface DepositAddressView extends DepositAddressDetails {
+  id: string;
+  version: number;
+  status: string;
+  metadata: Record<string, string>;
+  networks: (DepositAddressDetails["networks"][number] & { treasury: string })[];
+  payments: AddressPayment[];
+}
+
+export interface DepositAddressResponse {
+  deposit_address: DepositAddressView;
+  /** Only from `POST api/deposit_address`, for `<DepositAddress>`. */
+  client_secret?: string;
+  /** The product's SDK recomputed every network's address from the pins. */
+  verified: boolean;
+  api: ApiExchange[];
+}
+
+export interface FlushCall {
+  to: string;
+  data: string;
+  value: string;
+}
+
+export interface Sweeps {
+  chain_id: number;
+  token: string;
+  treasury: string;
+  factory: string;
+  unswept_atomic: string;
+  final_unswept_atomic: string;
+  sweepable_forwarders: number;
+  refused_forwarders: number;
+  flush: FlushCall[];
+  safe_batch: unknown;
+  sweeps: { id: string; address: string; amount_atomic: string; tx_hash: string; created: number }[];
   api: ApiExchange[];
 }
 
@@ -116,28 +238,84 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
   return body;
 }
 
+function post(path: string, body: unknown): Promise<unknown> {
+  return request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function getAccount(): Promise<Account> {
   const body = await request("account");
-  return expect<Account>(body, ["account_id", "balance", "transactions", "network", "token"]);
+  return expect<Account>(body, ["account_id", "balance", "ledger", "payments", "network", "token"]);
 }
 
 export async function createQuote(amount: number): Promise<CreatedQuote> {
-  const body = await request("quotes", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ amount }),
-  });
+  const body = await post("quotes", { amount });
   return expect<CreatedQuote>(body, ["quote", "client_secret", "expected_address", "api"]);
 }
 
-export async function getTimeline(quote: string): Promise<Timeline> {
-  const body = await request(`quotes/${encodeURIComponent(quote)}`);
-  return expect<Timeline>(body, ["quote", "steps", "events", "api"]);
+export async function createDepositAddress(): Promise<DepositAddressResponse> {
+  const body = await post("deposit_address", {});
+  return expect<DepositAddressResponse>(body, ["deposit_address", "client_secret", "verified"]);
+}
+
+export async function getDepositAddress(): Promise<DepositAddressResponse> {
+  const body = await request("deposit_address");
+  return expect<DepositAddressResponse>(body, ["deposit_address", "verified"]);
+}
+
+export async function getTimeline(selection: Selection): Promise<Timeline> {
+  const path = selection.kind === "quote" ? "quotes" : "deposits";
+  const body = await request(`${path}/${encodeURIComponent(selection.id)}`);
+  return expect<Timeline>(body, ["steps", "refunds", "events", "api"]);
+}
+
+export async function createRefund(
+  deposit: string,
+  amountAtomic: string,
+  destinationAddress: string,
+): Promise<Refund> {
+  const body = await post("refunds", {
+    deposit,
+    amount_atomic: amountAtomic,
+    destination_address: destinationAddress,
+  });
+  return expect<{ refund: Refund }>(body, ["refund"]).refund;
+}
+
+export async function markRefundPaid(
+  refund: string,
+  transactionHash: string,
+  receiptLogIndex: number | null,
+): Promise<Refund> {
+  const body = await post(`refunds/${encodeURIComponent(refund)}/mark_paid`, {
+    transaction_hash: transactionHash,
+    ...(receiptLogIndex === null ? {} : { receipt_log_index: receiptLogIndex }),
+  });
+  return expect<{ refund: Refund }>(body, ["refund"]).refund;
+}
+
+export async function cancelRefund(refund: string): Promise<Refund> {
+  const body = await post(`refunds/${encodeURIComponent(refund)}/cancel`, {});
+  return expect<{ refund: Refund }>(body, ["refund"]).refund;
+}
+
+export async function getSweeps(): Promise<Sweeps> {
+  const body = await request("sweeps");
+  return expect<Sweeps>(body, ["unswept_atomic", "flush", "sweeps"]);
 }
 
 export async function getTrust(): Promise<Trust> {
   const body = await request("trust");
   return expect<Trust>(body, ["attestation", "verify_docs"]);
+}
+
+/** What the behind-the-scenes panel follows: a quote (before and after its payment) or a deposit. */
+export interface Selection {
+  kind: "quote" | "deposit";
+  id: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

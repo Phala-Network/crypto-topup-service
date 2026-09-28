@@ -425,7 +425,7 @@ fn route_show_prints_the_resolved_route_as_json() {
         serde_json::from_slice(&output.stdout).expect("route show prints JSON");
     assert_eq!(
         resolved["chain"]["implementation"],
-        "0x70b714508bfa441449dc09f790ca03baa5170360"
+        "0x49f2f1f1a25269ea0c6ff2ab1c7b09dcbe9c5ba9"
     );
     assert_eq!(resolved["quote"]["window_s"], 900);
 

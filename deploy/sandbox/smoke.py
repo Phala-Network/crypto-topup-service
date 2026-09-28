@@ -46,7 +46,7 @@ class Integration:
     """The product's settings; the sandbox config (deploy/sandbox/README.md) carries them all."""
 
     service_url: str
-    product_slug: str
+    account: str
     api_key_file: str
     chain_id: int
     factory: str
@@ -65,12 +65,12 @@ class Integration:
         return key.startswith(("ppay_sk_live_", "ppay_rk_live_"))
 
     def client(self) -> TopupClient:
-        """A client of the product's account (`product_slug`, `acct_…`) with its secret key; with
+        """A client of the product's account (`account`, `acct_…`) with its API key; with
         the forwarder pinned, it recomputes every open quote's address before returning it."""
         return TopupClient(
             self.service_url,
             Path(self.api_key_file).read_text(encoding="ascii").strip(),
-            account=self.product_slug,
+            account=self.account,
             forwarder=(self.factory, self.implementation),
             treasuries={self.chain_id: self.treasury},
         )
@@ -92,7 +92,7 @@ def pin_webhook_keys(config: Integration, client: TopupClient) -> list[Ed25519Pu
     return verify_attestation_binding(
         evidence,
         nonce,
-        expected_account=config.product_slug,
+        expected_account=config.account,
         expected_livemode=config.livemode(),
     )
 
@@ -134,7 +134,7 @@ def receive_webhook(
         headers,
         body,
         webhook_keys,
-        expected_account=config.product_slug,
+        expected_account=config.account,
         expected_livemode=config.livemode(),
     )
     if event.type == "deposit.credited":
@@ -150,7 +150,7 @@ def main() -> int:
     config = Integration.load(args.config)
     with config.client() as client:
         keys = pin_webhook_keys(config, client)
-        print(f"pinned {len(keys)} webhook key(s) of {config.product_slug} from attestation")
+        print(f"pinned {len(keys)} webhook key(s) of {config.account} from attestation")
         account = f"example-{uuid.uuid4().hex[:12]}"
         lock = quote(config, client, account, args.amount_minor)
         print(

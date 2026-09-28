@@ -31,5 +31,5 @@ There is no runtime price override. Changing a source is a route config change a
 
 ## Done when
 
-New deposits leave `detected` with a fresh valuation (support lookup) and quotes are resumed:
+New deposits leave `detected` with a fresh valuation (the admin deposit view) and quotes are resumed:
 `admin POST "/v1/admin/routes/$ROUTE/resume" '{"scopes":["quotes"]}'`.

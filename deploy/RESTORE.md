@@ -8,7 +8,8 @@ Restoring the database does not restore the business: the changes after the rest
 lost, among them key revocations, treasury cancellations, endpoint deletions, deposit addresses
 given to customers, and events merchants received. So a restored service starts **frozen**:
 reads and `/healthz` work, merchant writes answer `503 service_restoring` with `Retry-After`, and
-nothing credits, settles, or delivers an event until the operator has reconciled and unfrozen it
+nothing credits, settles, or delivers an event until the operator has sent every merchant's
+recorded contact the restore point, re-applied what each reports, and unfrozen it
 ([Reconciliation after a restore](runbooks/restore.md)).
 
 A restore is a bootstrap from backup (the pattern of CloudNativePG's `bootstrap.recovery`): a new
@@ -75,8 +76,9 @@ one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: it r
 which freezes the service (the report's `restore_id`; the freeze is a row of the database, so it
 holds after the upgrade to the service compose), then checks migration checksums, WAL state, row
 counts, and runs a full reconciliation round on the restored ledger alone: the
-service's record is authoritative for its credits, so nothing asks the product anything and the
-restore does not depend on the product being reachable. The read-only `topup` serves the report
+service's record is authoritative for its credits, so nothing asks a merchant anything and the
+check does not depend on any merchant being reachable (what merchants did after the restore point
+is re-applied later, in the [reconciliation](runbooks/restore.md)). The read-only `topup` serves the report
 on `/healthz`:
 
 ```json
@@ -211,7 +213,9 @@ live_isolated() {
 4. **Verify the application identity** with a nonce-bound quote from `$RESTORE_URL`, exactly as in
    [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress); the verified app
    id must be the original. Otherwise stop.
-5. **Set its own origin**, so product-signed requests verify: render the variant again with
+5. **Set its own origin**, so admin-signed requests verify (the admin API checks RFC 9421
+   signatures against `TOPUP_PUBLIC_ORIGIN`, which the render derives from `TOPUP_DOMAIN`), and the
+   reconciliation's steps 2 to 5 can run here: render the variant again with
    `TOPUP_DOMAIN` set to the host of `$RESTORE_URL` and upgrade this instance only (no `-e`, so
    its env stays). It restarts on its non-empty data directory and `restore-check` runs again:
 
@@ -221,18 +225,22 @@ live_isolated() {
      --no-public-logs --no-public-sysinfo --wait
    ```
 
-   Once `/healthz` is `ok` again, product-signed deposit reads against `$RESTORE_URL` (for
-   example `TopupClient(RESTORE_URL, signer).list_deposits(tx_hash=...)`) must return known
-   deposits in their recorded state.
+   Once `/healthz` is `ok` again, the admin deposit view against `$RESTORE_URL` (the
+   [runbook environment](runbooks/README.md#environment) with `BASE_URL=$RESTORE_URL`,
+   `admin GET /v1/admin/deposits/{id}`) must return deposits known from before the loss in their
+   recorded state, and `admin GET /v1/admin/restore` must show `"frozen": true` with the
+   restore point.
 
 ### Resume
 
 Real restore only, after a human review of the report, row counts, and incident markers, and
 after steps 1 to 5 of the [reconciliation](runbooks/restore.md) (they run on this instance). Delete
-the failed instance, so only one instance holds the keys and archives into the prefix, and have
-the product hold its calls ([incident communication](runbooks/incident-communication.md)). Then
+the failed instance, so only one instance holds the keys and archives into the prefix; merchants
+were sent the restore point in the reconciliation's step 2
+([incident communication](runbooks/incident-communication.md)), and their writes answer
+`503 service_restoring` until the unfreeze. Then
 render the service variant (`deploy/render-compose.sh`, no flag) with the Environment's settings
-(its `TOPUP_DOMAIN`, the origin products call), upgrade the instance to it (`phala deploy --cvm-id
+(its `TOPUP_DOMAIN`, the origin merchants call and admin requests are signed for), upgrade the instance to it (`phala deploy --cvm-id
 "$RESTORE_CVM_ID" --compose <file>`, no `-e`), set `TOPUP_CVM_ID` to `$RESTORE_CVM_ID`, and seal
 the read-write credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the same three
 names). The domain's TXT record still names the failed instance: set
@@ -250,7 +258,9 @@ certificate; update a CAA record that pins the old ACME account. Require:
 The service comes up frozen: merchant writes answer `503 service_restoring`, and the scanner
 rescans each chain from its restored cursor while nothing is credited or delivered. Finish the
 [reconciliation](runbooks/restore.md) (steps 6 to 8): wait for the rescan, unfreeze with the
-admin API (audited), and let the product resume once health and reconciliation stay clean.
+admin API (audited); merchants write again once it is lifted. Tell every contact when the
+service is back and confirm each merchant's keys, treasuries, endpoints, and deposit addresses are
+as it left them.
 
 If the restored state is wrong, keep the instance isolated: return traffic to the prior CVM only
 if it is authoritative, otherwise restore again from an older verified backup and repeat the check.

@@ -117,7 +117,7 @@ class Fulfillment:
                 headers,
                 body,
                 pinned.keys,
-                expected_account=self.config.product_slug,
+                expected_account=self.config.account,
                 expected_livemode=pinned.livemode,
             )
         except SignatureError:

@@ -139,6 +139,15 @@ button.ghost {
   color: var(--text);
 }
 
+button.secondary {
+  padding: 8px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 button.link {
   padding: 0;
   border: 0;
@@ -357,6 +366,162 @@ button.link {
   gap: 12px;
 }
 
+.checkout p {
+  margin: 0;
+}
+
+.stack {
+  display: grid;
+  gap: 12px;
+}
+
+.stack p,
+.stack h3 {
+  margin: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.tab {
+  flex: 1;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.tab[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow), 0 0 0 1px var(--border);
+}
+
+.verified {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.input.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.inline-form {
+  display: grid;
+  gap: 6px;
+}
+
+.inline-form p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.inline {
+  display: flex;
+  gap: 8px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plain {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+pre.code {
+  max-height: 240px;
+  margin: 8px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 10px;
+  background: var(--surface-muted);
+  font: 12px/1.45 var(--mono);
+}
+
+.refund-form {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.refunds {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.refund {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.refund p {
+  margin: 6px 0 0;
+}
+
+.refund-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.instruction {
+  margin-top: 8px;
+}
+
+.ledger-lines {
+  margin-top: 12px;
+}
+
+.ledger-lines summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
 .checkout .pp-root {
   max-width: none;
   padding: 0;
@@ -554,8 +719,15 @@ button.link {
   color: var(--success);
 }
 
+.badge.succeeded {
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
+}
+
 .badge.rejected,
-.badge.expired {
+.badge.expired,
+.badge.reversed,
+.badge.failed {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }

@@ -5,8 +5,8 @@
 # deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
 # (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they
 # are attested and a change is a compose upgrade. The only env value is PRODUCT_API_KEY, the
-# product's Phala Pay secret key (ppay_sk_test_…), sealed by the owner
-# (deploy/product/staging.env.example).
+# product's Phala Pay restricted test key (ppay_rk_test_…, with the permissions listed in
+# deploy/product/staging.env.example), sealed by the owner.
 services:
   product:
     image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/phala-pay-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
@@ -37,19 +37,23 @@ services:
 volumes:
   ledger:
 
-# Addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml).
+# `account` is the product's Phala Pay account id (`acct_…`, from POST /v1/admin/accounts): commit
+# it here before the product is deployed (the zero placeholder fails the online preflight). With the
+# factory, implementation (the deterministic #202 deployment, deploy/CONTRACTS.md), and the
+# account's own Sepolia treasury (the finance Safe), it pins every address the product shows.
+# The other addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml).
 configs:
   product_config:
     content: |
       {
         "service_url": "${TOPUP_ORIGIN:-}",
-        "product_slug": "phala-cloud",
+        "account": "acct_00000000000000000000000000000000",
         "api_key_env": "PRODUCT_API_KEY",
         "route": "phala-cloud-sepolia-pha-usd",
         "chain_id": 11155111,
         "rpc_url": "${PRODUCT_RPC_URL:-}",
-        "factory": "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",
-        "implementation": "0x70B714508BFa441449DC09f790Ca03Baa5170360",
+        "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
+        "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
         "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
         "token": "0x8F40e7E99678F44c88158f049E62817580ab113B",
         "token_symbol": "PHA",

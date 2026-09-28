@@ -10,6 +10,7 @@ livemode: false
 chain:
   chain_id: 11155111
   forwarder_factory: "${FORWARDER_FACTORY}"
+  confirmations: 2
   # The sandbox deploys MockSanctionsOracle; there is no Chainalysis oracle on Sepolia.
   sanctions_oracle: "${SANCTIONS_ORACLE}"
 
@@ -19,6 +20,7 @@ asset:
   symbol: pha
   contract: "${TEST_TOKEN}"
   decimals: 18
+  backstop: token
 
 pricing:
   primary: { source: coinmetrics, asset: pha }

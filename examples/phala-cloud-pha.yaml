@@ -1,4 +1,5 @@
-# First route. Ships inside the dstack compose, so every value is part of the attested
+# First mainnet route template. No treasury: each account proves its own per chain through the
+# API (docs/design/multi-tenant.md D10). Ships inside the dstack compose, so every value is part of the attested
 # measurement (docs/architecture.md §14). Changing a value is a new version and a new approved
 # compose hash. Every value not written here is a code default, as attested as the file (the
 # image digest is in the compose hash); `topup route show` prints the resolved route. Numbers are
@@ -9,12 +10,14 @@ livemode: true                     # a mainnet; test routes (testnets) are false
 
 chain:
   chain_id: 1                      # default sanctions oracle: Chainalysis 0x40C5…aC8fb
-  forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory; the implementation is its first CREATE
+  forwarder_factory: "0x0000000000000000000000000000000000000000" # the deterministic factory once deployed on the chain (deploy/CONTRACTS.md); the implementation is its first CREATE
+  confirmations: 2                 # the floor and default (design D1): a depth, `safe` (OP-stack), or `finalized`; an account may require more
 
 asset:
   symbol: pha                      # the API's asset code
   contract: "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E"
   decimals: 18
+  backstop: token                  # `token` for few transfers per block (PHA); `addresses` for busy tokens such as USDC
 
 pricing:
   primary: { source: coinmetrics, asset: pha }

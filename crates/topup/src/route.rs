@@ -51,8 +51,13 @@ mod tests {
         let route = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
         assert!(!route.livemode, "Sepolia is a test route");
         assert_eq!(
+            route.chain.confirmations,
+            topup_core::route::Confirmations::Depth(2)
+        );
+        assert_eq!(route.asset.backstop, topup_core::route::Backstop::Token);
+        assert_eq!(
             format!("{:#x}", route.chain.contracts.implementation),
-            "0x70b714508bfa441449dc09f790ca03baa5170360"
+            "0x49f2f1f1a25269ea0c6ff2ab1c7b09dcbe9c5ba9"
         );
         assert_eq!(route.chain.rpc_providers, ["provider-a", "provider-b"]);
         let check = route

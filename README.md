@@ -1,79 +1,95 @@
 # Phala Pay
 
-A service, called by the Phala Cloud billing backend, that turns finalized ERC-20
-deposits into idempotent USD credits. Deposit addresses are CREATE2 forwarder contracts that
-can only pay the treasury; the service runs inside a dstack confidential VM and tells products what
-to credit with signed `deposit.credited` webhooks, which they fulfill once per deposit. The default flow is quote first: the user locks a
-price, receives an exact amount and a single-use address, and pays within the window. Each
-customer can also have one persistent, rotatable deposit address for every supported token on
-every chain (the same address wherever the treasury is the same), credited at spot for any amount, like the stable bank-transfer details of Stripe's customer balance.
+An API-only, multi-tenant crypto payments service in Stripe's shape. The operator onboards each
+merchant as an account (`acct_…`) through the admin API; the merchant does everything else with
+its API keys and the SDKs (there is no dashboard). Phala Cloud is an ordinary account. The service
+turns deposits of configured ERC-20 tokens into USD-valued credits and tells the merchant what to
+credit with signed `deposit.credited` webhooks, which it fulfills once per deposit. It is
+software, not custody: deposit addresses are CREATE2 forwarder contracts that can only pay the
+merchant's own treasury, the service holds no funds and sends no transactions, and the merchant
+sweeps and refunds from its own wallet or Safe. The service runs inside a dstack confidential VM,
+and each account pins its own webhook signing key from attestation.
 
-First route: Ethereum Mainnet PHA → Phala Cloud USD credit. Further assets, chains, and products
-are added through route configuration and adapters.
+A **quote** locks a price: the customer receives an exact amount and a single-use address and pays
+within the window. Each customer can also have one persistent, rotatable **deposit address** for
+every supported token on every chain (the same address wherever the treasury is the same),
+credited at spot for any amount, like the stable bank-transfer details of Stripe's customer
+balance.
+
+First route: Ethereum Mainnet PHA, for Phala Cloud's account first. Further assets and chains are
+added through route files; further merchants are accounts, not configuration.
 
 ## Flow
 
 ```mermaid
 flowchart LR
     payer(["Payer"])
-    subgraph product["Product (e.g. Phala Cloud)"]
+    subgraph merchant["Merchant (e.g. Phala Cloud)"]
         ui["Web app<br/>&lt;Checkout&gt; from @phala/pay"]
-        backend["Backend<br/>PhalaPay SDK"]
+        backend["Backend<br/>phala-pay SDK, pinned addresses"]
+        wallet["Merchant wallet or Safe"]
     end
     subgraph cvm["Phala Pay (dstack CVM, attested)"]
-        api["HTTP API<br/>/v1/quotes, deposits, refunds"]
-        worker["Scanner, pump,<br/>outbox, reconciler"]
+        api["HTTP API<br/>/v1/quotes, deposit_addresses, deposits, refunds"]
+        worker["Scanner, pump, finality watch,<br/>outbox, reconciler"]
     end
     subgraph chain["Ethereum"]
-        fwd["CREATE2 forwarders<br/>(one per quote)"]
-        safe[("Treasury Safe")]
+        fwd["CREATE2 forwarders<br/>(clone arg: treasury)"]
+        treasury[("Merchant treasury")]
     end
     payer -->|"wallet, QR, or manual transfer"| fwd
     ui -->|"client_secret: status"| api
     ui <--> backend
-    backend -->|"signed: create quote, refunds"| api
-    worker -->|"signed deposit.credited webhook"| backend
-    worker -->|"reads finalized logs (2 RPC providers)"| fwd
-    sweeper(["Merchant wallet or Safe<br/>(anyone may flush)"]) -->|"factory flush, pays gas"| fwd
-    fwd -->|"can only pay"| safe
+    backend -->|"Bearer API key: quotes, refunds, keys, treasuries"| api
+    worker -->|"deposit.credited, signed with the account's key"| backend
+    worker -->|"reads logs (2 RPC providers)"| fwd
+    wallet -->|"factory flush, pays gas (anyone may flush)"| fwd
+    fwd -->|"can only pay"| treasury
 ```
 
 ```text
-product asks for a quote; the account is created with it
-  → service locks the price and computes a CREATE2 forwarder address (no key, nothing deployed)
+merchant backend creates a quote (or the customer's deposit address) with its API key
+  → service locks the price and computes a CREATE2 forwarder address over the merchant's treasury
+  → the merchant recomputes the address from its own pins before showing it
   → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
-  → and records the transfer once its block reaches the route's confirmation (2 on Ethereum)
+  → recorded once its block reaches the confirmation (2 on Ethereum, or the account's stricter policy)
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
-  → credited: a signed deposit.credited webhook, retried until the product fulfills it once
-  → the merchant (or anyone) flushes forwarders to the treasury; the service sends no transaction
-    and marks deposits swept from the finalized Flushed events
-  → reconciliation of chain, service, and product ledger
+  → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
+  → watched to finality; a dropped transaction becomes deposit.reversed
+  → the merchant (or anyone) flushes forwarders to its treasury; the service marks deposits swept
+    from the finalized Flushed events
+  → reconciliation of chain and service ledger per forwarder
 ```
 
-There is no operator step and no failure state: anything that cannot complete retries with
-backoff and raises an alert on age. Deterministic denials are recorded with evidence and never
-credited.
+There is no operator step in a payment and no failure state: anything that cannot complete
+retries with backoff and raises an alert on age. Deterministic denials are recorded with evidence
+and never credited.
 
 ## Ownership
 
-The service owns addresses, chain evidence, finality, screening, pricing, deposit state,
-credits and their webhooks, the swept status it reads from the chain, and reconciliation. The
-merchant sweeps its forwarders and pays that gas. The product owns customer identity, spendable
-balance, debt, entitlements, and billing policy.
+The service owns addresses, chain evidence, finality, screening, pricing, deposit state, credits
+and their webhooks, the swept status it reads from the chain, and reconciliation. The operator
+creates accounts, decides live access, issues first and recovery keys, and handles incidents. The
+merchant owns its keys, treasuries, webhook endpoints, sweeps, and refunds, pays that gas, and owns
+its customers' identity, balances, entitlements, and billing policy.
 
 ## Documents
 
-- [Design](docs/architecture.md) — goal, trust model, schema, state machine, contracts, deployment, policies, acceptance
+- [Design](docs/design/multi-tenant.md) — the multi-tenant, API-only design and its decisions
+- [Architecture](docs/architecture.md) — the specification: trust model, schema, state machine, contracts, API, deployment, policies
+- [Integration guide](docs/integration.md) — for merchants: quickstart, quotes, deposit addresses, treasuries, sweeps, webhooks, refunds, keys, reference
+- [API reference](https://phala-network.github.io/phala-pay/) — built from [crates/topup/openapi.json](crates/topup/openapi.json)
 - [First route profile](examples/phala-cloud-pha.yaml)
-- [Integration guide](docs/integration.md) — quickstart, quotes, webhooks and fulfillment, refunds, testing, reference
 - [Plan to production](docs/plan.md) — what is done, what remains, and who owns it
+- [Deployment](deploy/README.md) and [runbooks](deploy/runbooks/README.md) — for the operator
 
 ## Database roles
 
 Runtime commands use `DATABASE_URL`, whose login role must be a member of the migration-created
 `topup_app` NOLOGIN role. The application role has operational CRUD privileges but no `TRUNCATE`,
-and append-only `transitions` and `audit` permit only `SELECT` and `INSERT`.
+and append-only tables (among them `transitions`, `audit`, `events`, and the finalized chain facts
+`flushed` and `flush_failures`) permit only `SELECT` and `INSERT`.
 
 `topup migrate` uses only `MIGRATE_DATABASE_URL`. It must identify the trusted database owner with
 permission to create roles and schema objects; the command never falls back to the application URL.
@@ -95,21 +111,24 @@ and deploy/README.md ("Measuring RPC usage") the call counters and a cost formul
 
 The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
 address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as
-`https://topup.example` (no path). Request signatures are verified against this origin plus the
-request path and query, so behind an ingress it must be the public URL (in a CVM, the custom
-domain of `deploy/README.md`), not the internal address; `Host` and `X-Forwarded-*` headers are
-never trusted.
+`https://topup.example` (no path). The admin API's RFC 9421 signatures are verified against this
+origin plus the request path and query, and treasury challenges (EIP-4361) name it, so behind an
+ingress it must be the public URL (in a CVM, the custom domain of `deploy/README.md`), not the
+internal address; `Host` and `X-Forwarded-*` headers are never trusted.
 
 ## Restore
 
-`topup restore-check` runs the architecture §13 post-restore reconciliation, which GETs and
-adopts the product's answer for every deposit at or beyond `cleared`. Run it only while `topup`, `heartbeat`, and `backup` are stopped; the
-[restore runbook](deploy/RESTORE.md) keeps the service stopped until the check reports `ok`.
+A database restored from backup starts in **restore mode** (docs/architecture.md §14): reads work,
+every merchant write answers `503 service_restoring`, and nothing is credited or delivered until
+the operator has reconciled the restore with each merchant's records through
+`/v1/admin/restore/…` and unfrozen it. `topup restore-check` validates the restored database
+read-only and records the restore; the [restore guide](deploy/RESTORE.md) and the
+[reconciliation runbook](deploy/runbooks/restore.md) have the steps.
 
 ## Status
 
-Staging runs on Sepolia at `https://pay-api-staging.phala.com`. Nothing is deployed to mainnet:
-[the plan to production](docs/plan.md) lists the remaining integration, inputs, and reviews.
+Nothing is deployed to mainnet, and the staging deployment (Sepolia, `https://pay-api-staging.phala.com`)
+is reset for the multi-tenant schema: [the plan to production](docs/plan.md) lists what remains.
 
 ## License
 
