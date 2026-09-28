@@ -327,7 +327,16 @@ async fn a_treasury_change_moves_the_chains_address_and_the_old_address_still_cr
             )
             .await?;
             let routes = RouteSet::new(vec![chain.route.clone()]).map_err(anyhow::Error::msg)?;
-            ensure!(topup::treasuries::apply_due(&chain.pool, &routes, Utc::now()).await? == 1);
+            ensure!(
+                topup::treasuries::apply_due(
+                    &chain.pool,
+                    &routes,
+                    &support::ClearScreener,
+                    Utc::now()
+                )
+                .await?
+                    == 1
+            );
             let after =
                 deposit_addresses::get(&chain.pool, Scope::new(account.id, false), before.id)
                     .await?

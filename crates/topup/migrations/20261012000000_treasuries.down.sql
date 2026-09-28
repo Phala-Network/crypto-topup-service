@@ -17,6 +17,7 @@ DROP INDEX addresses_deposit_address_chain_idx;
 DROP TABLE treasury_challenges;
 
 DROP INDEX treasuries_scope_idx;
+DROP INDEX treasuries_screening_idx;
 DROP INDEX treasuries_due_idx;
 DROP INDEX treasuries_current_unique;
 DROP INDEX treasuries_pending_unique;
@@ -26,6 +27,7 @@ ALTER TABLE treasuries ALTER COLUMN created_by DROP NOT NULL;
 ALTER TABLE treasuries ALTER COLUMN screened_at DROP NOT NULL;
 ALTER TABLE treasuries ALTER COLUMN effective_at DROP NOT NULL;
 ALTER TABLE treasuries ALTER COLUMN verified_at DROP NOT NULL;
+ALTER TABLE treasuries DROP COLUMN cancellation_reason;
 ALTER TABLE treasuries DROP COLUMN replaced_at;
 ALTER TABLE treasuries DROP COLUMN applied_at;
 ALTER TABLE treasuries DROP COLUMN kind;

@@ -548,15 +548,25 @@ row keeps the treasury it was issued over, so a quote created before a change ke
 `POST /v1/treasuries/challenge {chain_id, address}` issues an EIP-4361 message: `domain` is the
 authority of `TOPUP_PUBLIC_ORIGIN` and `URI` the origin, the statement names the account and mode,
 `Chain ID` is the chain, the nonce is single-use and bound to the account, mode, chain, and
-address, and the message expires after 10 minutes. `POST /v1/treasuries {chain_id, message,
+address, and the message expires after 10 minutes, or 24 hours when the address holds code at
+provider A's latest block (a Safe's owners collect signatures, or approve on chain and wait for
+`finalized`). `POST /v1/treasuries {chain_id, message,
 signature}` requires the message exactly as issued and proves the address when the signature is an
 EOA's EIP-191 `personal_sign` signature recovering to it (checked with Alloy), or when a contract
 is deployed at it at the chain's `finalized` block and `isValidSignature(eip191_hash(message),
-signature)` returns `0x1626ba7e` there on both providers (EIP-1271: a Safe's owners' signatures of
-the Safe message, or a `SignMessageLib` approval with `0x`). An ERC-6492 wrapper (magic suffix
+signature)` returns `0x1626ba7e` there on both providers (EIP-1271). On a Safe the
+CompatibilityFallbackHandler wraps that hash in the EIP-712 `SafeMessage(bytes message)` of the
+Safe's domain and checks the owners' signatures of it, or a `SignMessageLib` approval with `0x`:
+the Safe{Core} SDK's `signMessage` of the message text produces exactly those signatures, which
+the integration tests check against Safe v1.4.1 built from its tagged source (integration guide
+§1.6). An ERC-6492 wrapper (magic suffix
 `0x6492…6492`) and a contract not deployed at `finalized` are refused (`treasury_proof_invalid`,
 `treasury_not_deployed`); the providers disagreeing is `503`. The address is screened with the
-route's sanctions oracle (`400 treasury_sanctioned`). The chain's first treasury and every
+route's sanctions oracle (`400 treasury_sanctioned`), again by the time-lock worker when a pending
+change is due (a listed one is canceled, `cancellation_reason: sanctioned`, instead of applied),
+and daily while current: a listed current treasury pauses the account's `quotes` and `settlement`
+(audited, `account.updated`, alert `TopupTreasurySanctioned`) until the operator resumes them with
+`POST /v1/admin/accounts/{acct}/resume` after review. The chain's first treasury and every
 test-mode change apply at once; a later live change is `pending` for 48 hours
 (`account.treasury.pending`), cancellable with `POST /v1/treasuries/{id}/cancel`
 (`account.treasury.canceled`), and then applied by the time-lock worker

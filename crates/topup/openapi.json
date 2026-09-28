@@ -494,6 +494,140 @@
         ]
       }
     },
+    "/v1/admin/accounts/{account}/pause": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Pauses scopes of a whole account in both modes, for example `quotes` and `settlement` for an\nabusive account or a sanctioned treasury. Audited, and announced as `account.updated`.",
+        "operationId": "pause_account",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/resume": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and\nreviewed. Audited, and announced as `account.updated`.",
+        "operationId": "resume_account",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/deposits/{id}": {
       "get": {
         "tags": [
@@ -3022,7 +3156,7 @@
         "tags": [
           "treasuries"
         ],
-        "summary": "Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's\nmode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.",
+        "summary": "Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's\nmode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,\n24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it\ncan be used once.",
         "operationId": "create_treasury_challenge",
         "parameters": [
           {
@@ -3289,6 +3423,28 @@
             "description": "The keys that sign this mode's webhooks: the current one first, then any previous one\nstill signing during a rotation. Their public keys come from `GET /v1/attestation`. Always\nsent; optional in the schema so clients also parse objects from servers before it."
           }
         }
+      },
+      "AccountPauseRequest": {
+        "type": "object",
+        "description": "Administrative pause or resume of a whole account, in both modes.",
+        "required": [
+          "scopes",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why, for the audit log."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pause scopes to add or remove: `quotes`, `settlement`, `refunds`."
+          }
+        },
+        "additionalProperties": false
       },
       "AccountResponse": {
         "type": "object",
@@ -5468,6 +5624,13 @@
             "format": "int64",
             "description": "When it was canceled, Unix seconds."
           },
+          "cancellation_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named\nthe address when the change was due to apply, so it never applied)."
+          },
           "chain_id": {
             "type": "integer",
             "format": "int64",
@@ -5516,7 +5679,7 @@
       },
       "TreasuryChallenge": {
         "type": "object",
-        "description": "An EIP-4361 (Sign-In with Ethereum) message proving a treasury, valid for 10 minutes and\nusable once.",
+        "description": "An EIP-4361 (Sign-In with Ethereum) message proving a treasury, usable once: valid for 10\nminutes for an EOA, 24 hours for an address that holds code (a Safe).",
         "required": [
           "object",
           "livemode",

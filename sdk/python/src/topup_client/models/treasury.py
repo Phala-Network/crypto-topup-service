@@ -36,6 +36,9 @@ class Treasury:
                 deposit address networks pay it), `replaced` (a former treasury; addresses issued over it
                 still pay it), or `canceled`.
             canceled_at (int | None | Unset): When it was canceled, Unix seconds.
+            cancellation_reason (None | str | Unset): Why it was canceled: `requested` (you canceled it) or `sanctioned` (a
+                sanctions list named
+                the address when the change was due to apply, so it never applied).
             replaced_at (int | None | Unset): When a later treasury replaced it, Unix seconds.
     """
 
@@ -49,6 +52,7 @@ class Treasury:
     object_: str
     status: str
     canceled_at: int | None | Unset = UNSET
+    cancellation_reason: None | str | Unset = UNSET
     replaced_at: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -77,6 +81,12 @@ class Treasury:
         else:
             canceled_at = self.canceled_at
 
+        cancellation_reason: None | str | Unset
+        if isinstance(self.cancellation_reason, Unset):
+            cancellation_reason = UNSET
+        else:
+            cancellation_reason = self.cancellation_reason
+
         replaced_at: int | None | Unset
         if isinstance(self.replaced_at, Unset):
             replaced_at = UNSET
@@ -100,6 +110,8 @@ class Treasury:
         )
         if canceled_at is not UNSET:
             field_dict["canceled_at"] = canceled_at
+        if cancellation_reason is not UNSET:
+            field_dict["cancellation_reason"] = cancellation_reason
         if replaced_at is not UNSET:
             field_dict["replaced_at"] = replaced_at
 
@@ -135,6 +147,15 @@ class Treasury:
 
         canceled_at = _parse_canceled_at(d.pop("canceled_at", UNSET))
 
+        def _parse_cancellation_reason(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        cancellation_reason = _parse_cancellation_reason(d.pop("cancellation_reason", UNSET))
+
         def _parse_replaced_at(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -155,6 +176,7 @@ class Treasury:
             object_=object_,
             status=status,
             canceled_at=canceled_at,
+            cancellation_reason=cancellation_reason,
             replaced_at=replaced_at,
         )
 

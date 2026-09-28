@@ -17,10 +17,11 @@ use super::AppState;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountResponse, AdminReasonRequest, ApiKeyObject, Contact, CreateAccountRequest,
-    CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest, NudgeResponse,
-    OutboxReplayResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
-    RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
+    AccountPauseRequest, AccountResponse, AdminReasonRequest, ApiKeyObject, Contact,
+    CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
+    NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
+    ReconciliationBlockLiftResponse, RoutePauseResponse, SupportDepositResponse,
+    UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -180,6 +181,44 @@ pub(crate) async fn admin_get_deposit(
         .await?
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/pause",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = AccountPauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Pauses scopes of a whole account in both modes, for example `quotes` and `settlement` for an
+/// abusive account or a sanctioned treasury. Audited, and announced as `account.updated`.
+pub(crate) async fn pause_account(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<AccountPauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &account, request, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/resume",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = AccountPauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and
+/// reviewed. Audited, and announced as `account.updated`.
+pub(crate) async fn resume_account(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<AccountPauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &account, request, false).await
 }
 
 #[utoipa::path(
@@ -395,6 +434,35 @@ pub(super) async fn ensure_customer(
 ) -> ApiResult<Customer> {
     validate_external_id(client_reference_id)?;
     repository::ensure_customer(&state.pool, scope, client_reference_id).await
+}
+
+async fn mutate_account_scopes(
+    state: &AppState,
+    account: &str,
+    request: AccountPauseRequest,
+    pause: bool,
+) -> ApiResult<Json<PauseResponse>> {
+    let scopes = validate_scopes(request.scopes)?;
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::invalid_param("reason", "reason is required"));
+    }
+    let account_id = parse_account_id(account)?;
+    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let mut transaction = state.pool.begin().await?;
+    let updated = crate::pause::mutate_account_scopes_in(
+        &mut transaction,
+        account_id,
+        &scopes,
+        pause,
+        &admin_actor(state),
+        &request.reason,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    transaction.commit().await?;
+    Ok(Json(PauseResponse {
+        paused_scopes: updated,
+    }))
 }
 
 async fn mutate_customer_scopes(

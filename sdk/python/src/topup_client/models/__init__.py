@@ -1,6 +1,7 @@
 """Contains all the data models used in inputs/outputs"""
 
 from .account_object import AccountObject
+from .account_pause_request import AccountPauseRequest
 from .account_response import AccountResponse
 from .admin_reason_request import AdminReasonRequest
 from .api_key_list import ApiKeyList
@@ -69,6 +70,7 @@ from .webhook_key_version import WebhookKeyVersion
 
 __all__ = (
     "AccountObject",
+    "AccountPauseRequest",
     "AccountResponse",
     "AdminReasonRequest",
     "ApiKeyList",

@@ -54,7 +54,9 @@ const MAX_SIGNATURE_BYTES: usize = 8_192;
     tag = "treasuries"
 )]
 /// Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's
-/// mode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.
+/// mode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,
+/// 24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it
+/// can be used once.
 pub(crate) async fn create_treasury_challenge(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -65,6 +67,16 @@ pub(crate) async fn create_treasury_challenge(
         .await?;
     chain_route(&state, merchant.scope.livemode(), request.chain_id)?;
     let address = parse_address(&request.address)?;
+    // A contract wallet's owners need longer than an EOA to sign (design D10).
+    let ttl = if state
+        .contract_signatures
+        .has_code(request.chain_id, address)
+        .await
+    {
+        treasuries::CONTRACT_CHALLENGE_TTL
+    } else {
+        treasuries::CHALLENGE_TTL
+    };
     let challenge = treasuries::create_challenge(
         &state.pool,
         merchant.scope,
@@ -72,7 +84,7 @@ pub(crate) async fn create_treasury_challenge(
         &MessageOrigin::new(&state.public_origin),
         request.chain_id,
         address,
-        Utc::now(),
+        ttl,
     )
     .await
     .map_err(map_error)?;
@@ -333,6 +345,9 @@ pub(crate) fn treasury_object(treasury: &treasuries::Treasury) -> Treasury {
         created: treasury.created_at.timestamp(),
         replaced_at: treasury.replaced_at.map(|at| at.timestamp()),
         canceled_at: treasury.canceled_at.map(|at| at.timestamp()),
+        cancellation_reason: treasury
+            .cancellation_reason
+            .map(|reason| reason.code().to_owned()),
     }
 }
 

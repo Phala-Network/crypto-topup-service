@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, B256, Bytes, U256, eip191_hash_message};
+use alloy::sol;
+use alloy::sol_types::{Eip712Domain, SolCall as _, SolStruct as _};
+use alloy_primitives::{Address, B256, Bytes, U256, eip191_hash_message, keccak256};
 use alloy_signer::Signer as _;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, ensure};
@@ -26,7 +28,8 @@ use topup::locks::pricing::ValidatedQuote;
 use topup::refunds::{DestinationScreener, DestinationScreening};
 use topup::routes::RouteSet;
 use topup::treasuries::{
-    ContractAnswer, ContractSignatures, EvmContractSignatures, TIME_LOCK, apply_due,
+    CHALLENGE_TTL, ContractAnswer, ContractSignatures, EvmContractSignatures, RESCREEN_INTERVAL,
+    Rescreen, TIME_LOCK, apply_due, rescreen_due,
 };
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::chain::evm::EvmClient;
@@ -34,13 +37,17 @@ use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
 use tower::ServiceExt;
 
-use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
+use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create_in_profile, run_checked};
 use support::seed::{self, NewAccount};
-use support::{TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, with_database};
+use support::{
+    TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request, with_database,
+};
 
 /// A second live chain (OP Mainnet) beside Ethereum's chain 1.
 const OTHER_CHAIN: u64 = 10;
 const SEPOLIA: u64 = 11_155_111;
+/// The admin signing key of the test router.
+const ADMIN_KEY: [u8; 32] = [53; 32];
 
 #[tokio::test]
 async fn an_eoa_proves_its_first_treasury_with_siwe_and_it_applies_at_once() -> Result<()> {
@@ -279,7 +286,9 @@ async fn a_live_change_waits_48_hours_then_moves_that_chains_deposit_addresses()
             ensure!(quote["treasury"] == format!("{:#x}", first.address()));
             let now = Utc::now();
             let routes = fixture.route_set()?;
-            ensure!(apply_due(&fixture.pool, &routes, now + Duration::hours(47)).await? == 0);
+            ensure!(
+                apply_due(&fixture.pool, &routes, &Clear, now + Duration::hours(47)).await? == 0
+            );
             ensure!(fixture.deposit_address(&fixture.live_key, "team-1").await? == before);
 
             // After 48 hours it applies, and the chain's network of every deposit address moves.
@@ -287,6 +296,7 @@ async fn a_live_change_waits_48_hours_then_moves_that_chains_deposit_addresses()
                 apply_due(
                     &fixture.pool,
                     &routes,
+                    &Clear,
                     now + TIME_LOCK + Duration::minutes(1)
                 )
                 .await?
@@ -374,7 +384,7 @@ async fn a_pending_change_can_be_canceled_during_the_lock() -> Result<()> {
             ensure!(body["error"]["code"] == "treasury_unexpected_state");
             // It never applies; the current treasury stays.
             let later = Utc::now() + TIME_LOCK + Duration::hours(1);
-            ensure!(apply_due(&fixture.pool, &fixture.route_set()?, later).await? == 0);
+            ensure!(apply_due(&fixture.pool, &fixture.route_set()?, &Clear, later).await? == 0);
             let (_, quote) = fixture.quote(&fixture.live_key, 1).await?;
             ensure!(quote["treasury"] == format!("{:#x}", first.address()));
             // A new change can be requested after the cancellation.
@@ -383,6 +393,155 @@ async fn a_pending_change_can_be_canceled_during_the_lock() -> Result<()> {
                 status == StatusCode::OK && again["status"] == "pending",
                 "{again}"
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_change_to_a_treasury_sanctioned_by_its_effective_time_is_canceled_not_applied()
+-> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let fixture = Fixture::new(&database.app_pool, Contracts::None).await?;
+            let first = PrivateKeySigner::random();
+            let next = PrivateKeySigner::random();
+            fixture.prove(&fixture.live_key, 1, &first).await?;
+            let (_, pending) = fixture.prove(&fixture.live_key, 1, &next).await?;
+            ensure!(pending["status"] == "pending", "{pending}");
+            let id = pending["id"].as_str().context("id")?;
+            let routes = fixture.route_set()?;
+            let due = Utc::now() + TIME_LOCK + Duration::minutes(1);
+
+            // Screening that cannot answer leaves it pending, to be tried again.
+            ensure!(apply_due(&fixture.pool, &routes, &Unavailable, due).await? == 0);
+            let (_, still) = fixture.get(&format!("/v1/treasuries/{id}")).await?;
+            ensure!(still["status"] == "pending", "{still}");
+
+            // Listed by then: canceled with its reason, never applied.
+            let listing = Listed(vec![next.address()]);
+            ensure!(apply_due(&fixture.pool, &routes, &listing, due).await? == 0);
+            let (_, canceled) = fixture.get(&format!("/v1/treasuries/{id}")).await?;
+            ensure!(canceled["status"] == "canceled", "{canceled}");
+            ensure!(
+                canceled["cancellation_reason"] == "sanctioned",
+                "{canceled}"
+            );
+            let events = fixture.events("account.treasury.canceled").await?;
+            ensure!(events == vec![(fixture.account.id, true, "treasury".to_owned())]);
+            ensure!(fixture.deliveries("account.treasury.canceled").await? == 1);
+            let actor: String = sqlx::query_scalar(
+                "SELECT actor FROM events WHERE type = 'account.treasury.canceled'",
+            )
+            .fetch_one(&fixture.pool)
+            .await?;
+            ensure!(actor == "system");
+            // The current treasury stays; quotes keep paying it.
+            let (_, quote) = fixture.quote(&fixture.live_key, 1).await?;
+            ensure!(quote["treasury"] == format!("{:#x}", first.address()));
+            ensure!(apply_due(&fixture.pool, &routes, &Clear, due).await? == 0);
+
+            // A merchant's own cancellation says so.
+            let (_, again) = fixture.prove(&fixture.live_key, 1, &next).await?;
+            let again = again["id"].as_str().context("id")?;
+            let (_, canceled) = fixture
+                .post(
+                    &fixture.live_key,
+                    &format!("/v1/treasuries/{again}/cancel"),
+                    Value::Null,
+                )
+                .await?;
+            ensure!(canceled["cancellation_reason"] == "requested", "{canceled}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_daily_rescreen_pauses_quotes_and_settlement_of_an_account_with_a_sanctioned_treasury()
+-> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let fixture = Fixture::new(&database.app_pool, Contracts::None).await?;
+            let treasury = PrivateKeySigner::random();
+            let (_, set) = fixture.prove(&fixture.live_key, 1, &treasury).await?;
+            ensure!(set["status"] == "active", "{set}");
+            let routes = fixture.route_set()?;
+            let listing = Listed(vec![treasury.address()]);
+            let now = Utc::now();
+
+            // Screened when set: nothing is due within a day.
+            let outcome =
+                rescreen_due(&fixture.pool, &routes, &listing, now + Duration::hours(23)).await?;
+            ensure!(outcome == Rescreen::default(), "{outcome:?}");
+            // A day later it is screened again; clear, and not again for another day.
+            let day = now + RESCREEN_INTERVAL + Duration::minutes(1);
+            ensure!(
+                rescreen_due(&fixture.pool, &routes, &Clear, day)
+                    .await?
+                    .clear
+                    == 1
+            );
+            let outcome =
+                rescreen_due(&fixture.pool, &routes, &listing, day + Duration::hours(1)).await?;
+            ensure!(outcome == Rescreen::default(), "{outcome:?}");
+            // Unavailable screening changes nothing and retries.
+            let later = day + RESCREEN_INTERVAL + Duration::minutes(1);
+            ensure!(
+                rescreen_due(&fixture.pool, &routes, &Unavailable, later).await?
+                    == Rescreen::default()
+            );
+
+            // Listed: the account's quotes and settlement pause, audited and announced.
+            let outcome = rescreen_due(&fixture.pool, &routes, &listing, later).await?;
+            ensure!(outcome.sanctioned == 1, "{outcome:?}");
+            let scopes: Vec<String> =
+                sqlx::query_scalar("SELECT paused_scopes FROM accounts WHERE id = $1")
+                    .bind(fixture.account.id)
+                    .fetch_one(&fixture.pool)
+                    .await?;
+            ensure!(scopes == vec!["quotes", "settlement"], "{scopes:?}");
+            let audit: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE account_id = $1 AND action = 'pause' \
+                 AND actor_type = 'system' AND reason LIKE '%sanctions list%'",
+            )
+            .bind(fixture.account.id)
+            .fetch_one(&fixture.pool)
+            .await?;
+            ensure!(audit == 1);
+            let updated = fixture.events("account.updated").await?;
+            ensure!(updated.len() == 2, "{updated:?}");
+            let (status, body) = fixture.quote(&fixture.live_key, 1).await?;
+            ensure!(status == StatusCode::CONFLICT && body["error"]["code"] == "paused");
+
+            // The operator lifts the pause after review, through the admin API.
+            let request = |path: &str| -> Result<_> {
+                Ok(signed_request(
+                    Method::POST,
+                    path,
+                    serde_json::to_vec(&json!({
+                        "scopes": ["quotes", "settlement"],
+                        "reason": "INC-9: the treasury was replaced and reviewed",
+                    }))?,
+                    "admin/v1",
+                    &SigningKey::from_bytes(&ADMIN_KEY),
+                    Utc::now().timestamp(),
+                ))
+            };
+            let account = &fixture.account.public_id;
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(request(&format!("/v1/admin/accounts/{account}/resume"))?)
+                .await?;
+            ensure!(response.status() == StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_048_576).await?)?;
+            ensure!(body["paused_scopes"] == json!([]), "{body}");
+            let (status, body) = fixture.quote(&fixture.live_key, 1).await?;
+            ensure!(status == StatusCode::OK, "{body}");
             Ok(())
         })
     })
@@ -467,9 +626,78 @@ async fn treasuries_of_another_account_or_mode_are_not_found() -> Result<()> {
     .await
 }
 
+/// Safe v1.4.1's canonical runtime code (`safe-global/safe-deployments`, `src/assets/v1.4.1`), read
+/// from Sepolia and hashed without its Solidity metadata, which names the build's source paths:
+/// the vendored build (`contracts/lib/safe-smart-account` at tag v1.4.1, solc 0.7.6, optimizer
+/// off, as its CHANGELOG records) must deploy exactly this code.
+const CANONICAL_SAFE_CODE: [(&str, &str); 4] = [
+    (
+        "lib/safe-smart-account/contracts/Safe.sol:Safe",
+        "0xc24f07894e481e749fee29336ba775cdf2df546259e23fd349c798e62fe43a69",
+    ),
+    (
+        "lib/safe-smart-account/contracts/handler/CompatibilityFallbackHandler.sol:CompatibilityFallbackHandler",
+        "0x9d69690da03ccc191bc3518df346bcf7076d69b702df79ddaf0003bcddffa70f",
+    ),
+    (
+        "lib/safe-smart-account/contracts/proxies/SafeProxyFactory.sol:SafeProxyFactory",
+        "0x69e98bb1aa0a54c54f3795d63d4f0be955a9df4e12bbfe69b453663164f85442",
+    ),
+    (
+        "lib/safe-smart-account/contracts/libraries/SignMessageLib.sol:SignMessageLib",
+        "0x33a1b7baaccde380049110a45a710c42d7fc2b728bcd412fc05ef693d12708b3",
+    ),
+];
+
+sol! {
+    function setup(
+        address[] owners,
+        uint256 threshold,
+        address to,
+        bytes data,
+        address fallbackHandler,
+        address paymentToken,
+        uint256 payment,
+        address paymentReceiver
+    );
+    function createProxyWithNonce(address singleton, bytes initializer, uint256 saltNonce)
+        returns (address proxy);
+    function signMessage(bytes data);
+    function getTransactionHash(
+        address to,
+        uint256 value,
+        bytes data,
+        uint8 operation,
+        uint256 safeTxGas,
+        uint256 baseGas,
+        uint256 gasPrice,
+        address gasToken,
+        address refundReceiver,
+        uint256 nonce
+    ) returns (bytes32);
+    function execTransaction(
+        address to,
+        uint256 value,
+        bytes data,
+        uint8 operation,
+        uint256 safeTxGas,
+        uint256 baseGas,
+        uint256 gasPrice,
+        address gasToken,
+        address refundReceiver,
+        bytes signatures
+    ) returns (bool);
+    function getMessageHash(bytes message) returns (bytes32);
+
+    /// The EIP-712 type the Safe{Core} SDK signs a message as, and CompatibilityFallbackHandler
+    /// checks (`keccak256("SafeMessage(bytes message)")`).
+    struct SafeMessage {
+        bytes message;
+    }
+}
+
 #[tokio::test]
-async fn a_deployed_contract_proves_with_eip1271_at_finalized_and_an_undeployed_one_is_refused()
--> Result<()> {
+async fn real_safe_v1_4_1_owners_prove_a_treasury_as_the_safe_sdk_signs() -> Result<()> {
     let Some(anvil) = Anvil::start_if_available(&[]).await? else {
         return Ok(());
     };
@@ -479,92 +707,119 @@ async fn a_deployed_contract_proves_with_eip1271_at_finalized_and_an_undeployed_
     let anvil = &anvil;
     let result = async {
         let client = Arc::new(EvmClient::new(&anvil.rpc_url)?);
-        let contracts =
-            EvmContractSignatures::new(BTreeMap::from([(CHAIN_ID, [Arc::clone(&client), client])]));
+        let contracts = EvmContractSignatures::new(BTreeMap::from([(
+            CHAIN_ID,
+            [Arc::clone(&client), Arc::clone(&client)],
+        )]));
         let fixture =
             Fixture::new(&database.app_pool, Contracts::Anvil(Arc::new(contracts))).await?;
-        let owner = PrivateKeySigner::from_str(ANVIL_PRIVATE_KEY)?;
-        let deploy = || {
-            let owner = format!("{:#x}", owner.address());
-            forge_create(
-                &anvil.rpc_url,
-                "test/mocks/MockEip1271Wallet.sol:MockEip1271Wallet",
-                &[&owner],
-            )
-        };
-        let signed = deploy()?;
-        let approved = deploy()?;
-        let refusing = deploy()?;
-        // 64 blocks bring them to Anvil's `finalized`.
-        anvil.mine(70)?;
-
-        // An owner's signature of the message's EIP-191 hash (a Safe message).
-        let challenge = fixture
-            .challenge(&fixture.test_key, CHAIN_ID, signed)
+        let safe = SafeDeployment::deploy(anvil, &client).await?;
+        let owners: Vec<PrivateKeySigner> = (0..3).map(|_| PrivateKeySigner::random()).collect();
+        let [first, second, third] = [&owners[0], &owners[1], &owners[2]];
+        let solo = safe.create(anvil, &client, &[first], 1, 1).await?;
+        let shared = safe
+            .create(anvil, &client, &[first, second, third], 2, 2)
             .await?;
-        let message = challenge["message"].as_str().context("message")?;
-        let hash = eip191_hash_message(message.as_bytes());
-        let signature = format!(
-            "0x{}",
-            hex::encode(owner.sign_hash(&hash).await?.as_bytes())
-        );
-        let (status, body) = fixture
-            .submit(&fixture.test_key, CHAIN_ID, message, &signature)
+        let approved = safe
+            .create(anvil, &client, &[first, second, third], 2, 3)
             .await?;
-        ensure!(status == StatusCode::OK, "{body}");
-        ensure!(body["kind"] == "contract" && body["address"] == format!("{signed:#x}"));
+        let refused = safe.create(anvil, &client, &[first], 1, 4).await?;
+        // A Safe whose proxy is not deployed yet: its owner's signature cannot be checked.
+        let counterfactual = safe.predict(&client, &[first], 1, 5).await?;
 
-        // An on-chain approval with an empty signature (Safe's SignMessageLib).
+        // An on-chain approval: the owners execute a Safe transaction that delegatecalls
+        // SignMessageLib.signMessage(hashSafeMessage(message)), as the Safe docs show.
         let challenge = fixture
             .challenge(&fixture.test_key, CHAIN_ID, approved)
             .await?;
-        let message = challenge["message"].as_str().context("message")?;
-        let hash = eip191_hash_message(message.as_bytes());
-        approve(anvil, approved, hash)?;
+        let approved_message = challenge["message"].as_str().context("message")?.to_owned();
+        let expires_in =
+            challenge["expires_at"].as_i64().context("expires_at")? - Utc::now().timestamp();
+        ensure!(
+            expires_in > CHALLENGE_TTL.num_seconds(),
+            "a Safe's challenge lasts {expires_in} s"
+        );
+        safe.approve_message(anvil, &client, approved, &approved_message, &[first, third])
+            .await?;
+        // 64 blocks bring the Safes and the approval to Anvil's `finalized`.
         anvil.mine(70)?;
-        // Deployed above the finalized block: not yet a treasury.
-        let unfinalized = deploy()?;
+        // Deployed above `finalized`: not yet deployed as far as the proof is concerned.
+        let unfinalized = safe.create(anvil, &client, &[first], 1, 6).await?;
+
+        // 1-of-1 and 2-of-3: each owner signs the EIP-712 SafeMessage of the message's EIP-191
+        // hash (Protocol Kit `signMessage` with ETH_SIGN_TYPED_DATA_V4), and the signatures are
+        // concatenated in ascending owner order (`buildSignatureBytes`).
+        for (treasury, signers) in [(solo, vec![first]), (shared, vec![third, second])] {
+            let challenge = fixture
+                .challenge(&fixture.test_key, CHAIN_ID, treasury)
+                .await?;
+            let message = challenge["message"].as_str().context("message")?;
+            let signature = safe_signature(&client, treasury, message, &signers).await?;
+            let (status, body) = fixture
+                .submit(&fixture.test_key, CHAIN_ID, message, &signature)
+                .await?;
+            ensure!(status == StatusCode::OK, "{body}");
+            ensure!(body["kind"] == "contract" && body["address"] == format!("{treasury:#x}"));
+        }
         let (status, body) = fixture
-            .submit(&fixture.test_key, CHAIN_ID, message, "0x")
+            .submit(&fixture.test_key, CHAIN_ID, &approved_message, "0x")
             .await?;
         ensure!(
             status == StatusCode::OK && body["kind"] == "contract",
             "{body}"
         );
 
-        // A contract that does not accept the signature.
-        let challenge = fixture
-            .challenge(&fixture.test_key, CHAIN_ID, refusing)
-            .await?;
-        let message = challenge["message"].as_str().context("message")?;
+        let refused_proof = |status: StatusCode, body: &Value, code: &str| {
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
+            ensure!(body["error"]["code"] == code, "{body}");
+            Ok(())
+        };
+        // A signer that is not an owner; one owner of a 2-of-3; an owner's plain personal_sign of
+        // the message (not the SafeMessage); and an unapproved message with `0x`.
         let stranger = PrivateKeySigner::random();
-        let hash = eip191_hash_message(message.as_bytes());
-        let signature = format!(
-            "0x{}",
-            hex::encode(stranger.sign_hash(&hash).await?.as_bytes())
-        );
-        let (status, body) = fixture
-            .submit(&fixture.test_key, CHAIN_ID, message, &signature)
-            .await?;
-        ensure!(status == StatusCode::BAD_REQUEST, "{body}");
-        ensure!(body["error"]["code"] == "treasury_proof_invalid");
-
-        // A Safe not deployed yet (its owner's signature), or deployed above `finalized`.
-        for undeployed in [Address::repeat_byte(0x5a), unfinalized] {
+        for (treasury, signers, plain) in [
+            (refused, vec![&stranger], false),
+            (shared, vec![first], false),
+            (refused, vec![first], true),
+        ] {
             let challenge = fixture
-                .challenge(&fixture.test_key, CHAIN_ID, undeployed)
+                .challenge(&fixture.test_key, CHAIN_ID, treasury)
                 .await?;
             let message = challenge["message"].as_str().context("message")?;
-            let hash = eip191_hash_message(message.as_bytes());
+            let signature = if plain {
+                sign(first, message).await?
+            } else {
+                safe_signature(&client, treasury, message, &signers).await?
+            };
+            let (status, body) = fixture
+                .submit(&fixture.test_key, CHAIN_ID, message, &signature)
+                .await?;
+            refused_proof(status, &body, "treasury_proof_invalid")?;
+        }
+        let challenge = fixture
+            .challenge(&fixture.test_key, CHAIN_ID, refused)
+            .await?;
+        let message = challenge["message"].as_str().context("message")?;
+        let (status, body) = fixture
+            .submit(&fixture.test_key, CHAIN_ID, message, "0x")
+            .await?;
+        refused_proof(status, &body, "treasury_proof_invalid")?;
+
+        // Not deployed at `finalized`, counterfactual or recent: refused, whatever the owner signs.
+        for treasury in [counterfactual, unfinalized] {
+            let challenge = fixture
+                .challenge(&fixture.test_key, CHAIN_ID, treasury)
+                .await?;
+            let message = challenge["message"].as_str().context("message")?;
+            let hash = safe_message_hash(treasury, message);
             let signature = format!(
                 "0x{}",
-                hex::encode(owner.sign_hash(&hash).await?.as_bytes())
+                hex::encode(first.sign_hash(&hash).await?.as_bytes())
             );
             let (status, body) = fixture
                 .submit(&fixture.test_key, CHAIN_ID, message, &signature)
                 .await?;
-            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
-            ensure!(body["error"]["code"] == "treasury_not_deployed", "{body}");
+            refused_proof(status, &body, "treasury_not_deployed")?;
         }
         Ok(())
     }
@@ -573,7 +828,200 @@ async fn a_deployed_contract_proves_with_eip1271_at_finalized_and_an_undeployed_
     result.and(cleanup)
 }
 
-fn approve(anvil: &Anvil, wallet: Address, hash: B256) -> Result<()> {
+/// Safe v1.4.1 deployed on Anvil from the vendored sources.
+struct SafeDeployment {
+    singleton: Address,
+    factory: Address,
+    handler: Address,
+    sign_message_lib: Address,
+}
+
+impl SafeDeployment {
+    /// Deploys the singleton, proxy factory, CompatibilityFallbackHandler, and SignMessageLib,
+    /// and checks that their code is the canonical deployments' code.
+    async fn deploy(anvil: &Anvil, client: &EvmClient) -> Result<Self> {
+        let mut deployed = Vec::new();
+        for (contract, canonical) in CANONICAL_SAFE_CODE {
+            let address = forge_create_in_profile(&anvil.rpc_url, "safe", contract, &[])?;
+            let code = client.code_at(address).await?;
+            ensure!(
+                keccak256(strip_solidity_metadata(&code)) == B256::from_str(canonical)?,
+                "{contract} differs from the canonical Safe v1.4.1 deployment"
+            );
+            deployed.push(address);
+        }
+        let [singleton, handler, factory, sign_message_lib] = deployed[..] else {
+            anyhow::bail!("four contracts");
+        };
+        Ok(Self {
+            singleton,
+            factory,
+            handler,
+            sign_message_lib,
+        })
+    }
+
+    fn creation(
+        owners: &[&PrivateKeySigner],
+        threshold: u64,
+        salt: u64,
+        singleton: Address,
+        handler: Address,
+    ) -> Vec<u8> {
+        let initializer = setupCall {
+            owners: owners.iter().map(|owner| owner.address()).collect(),
+            threshold: U256::from(threshold),
+            to: Address::ZERO,
+            data: Bytes::new(),
+            fallbackHandler: handler,
+            paymentToken: Address::ZERO,
+            payment: U256::ZERO,
+            paymentReceiver: Address::ZERO,
+        }
+        .abi_encode();
+        createProxyWithNonceCall {
+            singleton,
+            initializer: initializer.into(),
+            saltNonce: U256::from(salt),
+        }
+        .abi_encode()
+    }
+
+    /// The Safe proxy `create` would deploy.
+    async fn predict(
+        &self,
+        client: &EvmClient,
+        owners: &[&PrivateKeySigner],
+        threshold: u64,
+        salt: u64,
+    ) -> Result<Address> {
+        let call = Self::creation(owners, threshold, salt, self.singleton, self.handler);
+        let output = client
+            .call("createProxyWithNonce", self.factory, call.into(), None)
+            .await?;
+        Ok(createProxyWithNonceCall::abi_decode_returns(&output)?)
+    }
+
+    /// Deploys a Safe proxy with `owners`, `threshold`, and the CompatibilityFallbackHandler, as
+    /// the Safe{Wallet} and the Safe{Core} SDK create one.
+    async fn create(
+        &self,
+        anvil: &Anvil,
+        client: &EvmClient,
+        owners: &[&PrivateKeySigner],
+        threshold: u64,
+        salt: u64,
+    ) -> Result<Address> {
+        let safe = self.predict(client, owners, threshold, salt).await?;
+        let call = Self::creation(owners, threshold, salt, self.singleton, self.handler);
+        send(anvil, self.factory, &call)?;
+        ensure!(
+            !client.code_at(safe).await?.is_empty(),
+            "the Safe was not created"
+        );
+        Ok(safe)
+    }
+
+    /// Approves `message` on chain: a Safe transaction, signed by `signers`, that delegatecalls
+    /// `SignMessageLib.signMessage(hashSafeMessage(message))`.
+    async fn approve_message(
+        &self,
+        anvil: &Anvil,
+        client: &EvmClient,
+        safe: Address,
+        message: &str,
+        signers: &[&PrivateKeySigner],
+    ) -> Result<()> {
+        let data: Bytes = signMessageCall {
+            data: eip191_hash_message(message.as_bytes()).to_vec().into(),
+        }
+        .abi_encode()
+        .into();
+        let hash_call = getTransactionHashCall {
+            to: self.sign_message_lib,
+            value: U256::ZERO,
+            data: data.clone(),
+            operation: 1,
+            safeTxGas: U256::ZERO,
+            baseGas: U256::ZERO,
+            gasPrice: U256::ZERO,
+            gasToken: Address::ZERO,
+            refundReceiver: Address::ZERO,
+            nonce: U256::ZERO,
+        };
+        let output = client
+            .call(
+                "getTransactionHash",
+                safe,
+                hash_call.abi_encode().into(),
+                None,
+            )
+            .await?;
+        let transaction_hash = getTransactionHashCall::abi_decode_returns(&output)?;
+        let signatures = concatenated_signatures(signers, transaction_hash).await?;
+        let exec = execTransactionCall {
+            to: self.sign_message_lib,
+            value: U256::ZERO,
+            data,
+            operation: 1,
+            safeTxGas: U256::ZERO,
+            baseGas: U256::ZERO,
+            gasPrice: U256::ZERO,
+            gasToken: Address::ZERO,
+            refundReceiver: Address::ZERO,
+            signatures: signatures.into(),
+        };
+        send(anvil, safe, &exec.abi_encode())
+    }
+}
+
+/// The EIP-712 hash an owner signs for `message` in the Safe{Core} SDK: `SafeMessage{message:
+/// hashSafeMessage(message)}`, where `hashSafeMessage` of a string is its EIP-191 hash, over the
+/// domain `{chainId, verifyingContract: safe}` of Safe ≥ 1.3.0.
+fn safe_message_hash(safe: Address, message: &str) -> B256 {
+    let domain = Eip712Domain::new(None, None, Some(U256::from(CHAIN_ID)), Some(safe), None);
+    SafeMessage {
+        message: eip191_hash_message(message.as_bytes()).to_vec().into(),
+    }
+    .eip712_signing_hash(&domain)
+}
+
+/// The Safe signature of `message` by `signers`, as `EthSafeMessage.encodedSignatures()` returns
+/// it; the hash is first checked against the Safe's own `getMessageHash`.
+async fn safe_signature(
+    client: &EvmClient,
+    safe: Address,
+    message: &str,
+    signers: &[&PrivateKeySigner],
+) -> Result<String> {
+    let hash = safe_message_hash(safe, message);
+    let call = getMessageHashCall {
+        message: eip191_hash_message(message.as_bytes()).to_vec().into(),
+    };
+    let output = client
+        .call("getMessageHash", safe, call.abi_encode().into(), None)
+        .await?;
+    ensure!(getMessageHashCall::abi_decode_returns(&output)? == hash);
+    Ok(format!(
+        "0x{}",
+        hex::encode(concatenated_signatures(signers, hash).await?)
+    ))
+}
+
+/// 65-byte ECDSA signatures of `hash` (`v` 27 or 28) in ascending signer order, as Safe's
+/// `checkSignatures` requires.
+async fn concatenated_signatures(signers: &[&PrivateKeySigner], hash: B256) -> Result<Vec<u8>> {
+    let mut ordered = signers.to_vec();
+    ordered.sort_by_key(|signer| signer.address());
+    let mut bytes = Vec::new();
+    for signer in ordered {
+        bytes.extend_from_slice(&signer.sign_hash(&hash).await?.as_bytes());
+    }
+    Ok(bytes)
+}
+
+/// Sends raw calldata from the Anvil deployer.
+fn send(anvil: &Anvil, to: Address, calldata: &[u8]) -> Result<()> {
     run_checked(
         "cast",
         &[
@@ -582,13 +1030,36 @@ fn approve(anvil: &Anvil, wallet: Address, hash: B256) -> Result<()> {
             &anvil.rpc_url,
             "--private-key",
             ANVIL_PRIVATE_KEY,
-            &format!("{wallet:#x}"),
-            "signMessage(bytes32)",
-            &format!("{hash:#x}"),
+            &format!("{to:#x}"),
+            &format!("0x{}", hex::encode(calldata)),
         ],
         None,
     )?;
     Ok(())
+}
+
+/// Runtime code without the CBOR metadata solc appends to it and to every creation code it embeds
+/// (`a2 64 "ipfs" 58 22 <34 bytes> 64 "solc" 43 <3 bytes> 00 33`).
+fn strip_solidity_metadata(code: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = &[0xa2, 0x64, b'i', b'p', b'f', b's', 0x58, 0x22];
+    const LENGTH: usize = 53;
+    let mut stripped = Vec::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(start) = rest
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    {
+        let end = start + LENGTH;
+        if rest.len() < end || rest[end - 2..end] != [0x00, 0x33] {
+            stripped.extend_from_slice(&rest[..start + PREFIX.len()]);
+            rest = &rest[start + PREFIX.len()..];
+            continue;
+        }
+        stripped.extend_from_slice(&rest[..start]);
+        rest = &rest[end..];
+    }
+    stripped.extend_from_slice(rest);
+    stripped
 }
 
 async fn sign(signer: &PrivateKeySigner, message: &str) -> Result<String> {
@@ -817,7 +1288,7 @@ fn app(
     screening: Arc<dyn DestinationScreener>,
     contract_signatures: Arc<dyn ContractSignatures>,
 ) -> Result<Router> {
-    let admin_key = SigningKey::from_bytes(&[53; 32]);
+    let admin_key = SigningKey::from_bytes(&ADMIN_KEY);
     Ok(topup::api::router(AppState {
         pool: pool.clone(),
         routes: Arc::new(RouteSet::new(routes).map_err(anyhow::Error::msg)?),
@@ -889,11 +1360,39 @@ impl DestinationScreener for Sanctioned {
     }
 }
 
+/// Screening that lists the given addresses.
+struct Listed(Vec<Address>);
+
+#[async_trait]
+impl DestinationScreener for Listed {
+    async fn screen(&self, _route: &RouteFile, address: Address) -> DestinationScreening {
+        if self.0.contains(&address) {
+            DestinationScreening::Sanctioned
+        } else {
+            DestinationScreening::Clear
+        }
+    }
+}
+
+/// Screening that cannot answer.
+struct Unavailable;
+
+#[async_trait]
+impl DestinationScreener for Unavailable {
+    async fn screen(&self, _route: &RouteFile, _address: Address) -> DestinationScreening {
+        DestinationScreening::Unavailable
+    }
+}
+
 /// A chain where no contract is deployed.
 struct NoContracts;
 
 #[async_trait]
 impl ContractSignatures for NoContracts {
+    async fn has_code(&self, _: u64, _: Address) -> bool {
+        false
+    }
+
     async fn verify(&self, _: u64, _: Address, _: B256, _: Bytes) -> ContractAnswer {
         ContractAnswer::NotDeployed
     }

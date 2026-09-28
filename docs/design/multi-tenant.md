@@ -505,7 +505,8 @@ flowchart TD
 - **Proof, through the API.** `POST /v1/treasuries/challenge {chain_id, address}` returns an
   EIP-4361 message ([EIP-4361](https://eips.ethereum.org/EIPS/eip-4361)): `domain` and `uri` the
   API's, `address` the treasury, `chain-id` the route's, a single-use `nonce` bound to `(account,
-  livemode, chain, address)`, 10-minute expiry, statement "Set as treasury of acct_… on Phala
+  livemode, chain, address)`, 10-minute expiry (24 hours for an address that holds code, PR 7: a
+  Safe's owners need longer to sign, and an on-chain approval must reach `finalized`), statement "Set as treasury of acct_… on Phala
   Pay". The merchant signs it and sends `POST /v1/treasuries {chain_id, message, signature}`
   (the SDK wraps both). EOAs: `ecrecover` of a `personal_sign`.
   Contracts: EIP-1271 `isValidSignature(hash, signature)` must return `0x1626ba7e`, where `hash`

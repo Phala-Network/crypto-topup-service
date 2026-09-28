@@ -804,6 +804,16 @@ pub struct AccountObject {
     pub created: i64,
 }
 
+/// Administrative pause or resume of a whole account, in both modes.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountPauseRequest {
+    /// Pause scopes to add or remove: `quotes`, `settlement`, `refunds`.
+    pub scopes: Vec<String>,
+    /// Why, for the audit log.
+    pub reason: String,
+}
+
 /// Administrative pause or resume of one customer of an account.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct CustomerPauseRequest {
@@ -885,8 +895,8 @@ pub struct CreateTreasuryChallengeRequest {
     pub address: String,
 }
 
-/// An EIP-4361 (Sign-In with Ethereum) message proving a treasury, valid for 10 minutes and
-/// usable once.
+/// An EIP-4361 (Sign-In with Ethereum) message proving a treasury, usable once: valid for 10
+/// minutes for an EOA, 24 hours for an address that holds code (a Safe).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct TreasuryChallenge {
     /// Always `treasury_challenge`.
@@ -952,6 +962,9 @@ pub struct Treasury {
     pub replaced_at: Option<i64>,
     /// When it was canceled, Unix seconds.
     pub canceled_at: Option<i64>,
+    /// Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named
+    /// the address when the change was due to apply, so it never applied).
+    pub cancellation_reason: Option<String>,
 }
 
 /// `GET /v1/treasuries` response.

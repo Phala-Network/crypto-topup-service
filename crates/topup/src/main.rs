@@ -748,6 +748,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let treasury_worker = topup::treasuries::TreasuryWorker::new(
         pool.clone(),
         Arc::clone(&routes),
+        Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
+            &routes,
+        ))),
         Duration::from_secs(30),
     );
     tasks.spawn("treasury time-lock worker", |cancellation| async move {

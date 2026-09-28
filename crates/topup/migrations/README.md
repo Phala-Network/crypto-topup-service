@@ -56,7 +56,9 @@ No secret is stored: every key is derived from dstack at `settlement/{acct}/{liv
 
 `20261012000000_treasuries` (design PR 7) puts the `treasuries` table of `20261004000000` to use
 (design D10): it adds `livemode`, `kind` (`eoa` or `contract`), and the lifecycle `applied_at` and
-`replaced_at` (with `canceled_at`: pending, current, replaced, canceled), makes the proof and
+`replaced_at` (with `canceled_at` and its `cancellation_reason`, `requested` or `sanctioned`: pending,
+current, replaced, canceled), indexes current treasuries by `screened_at` for the daily
+re-screening, makes the proof and
 `created_by` columns required, and allows one pending change and one current treasury per account,
 mode, and chain. `treasury_challenges` holds the single-use EIP-4361 nonces, bound to the account,
 mode, chain, and address, with the message issued. It indexes deposit address networks by account,

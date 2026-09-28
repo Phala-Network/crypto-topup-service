@@ -42,18 +42,28 @@ use sqlx::{FromRow, PgConnection, PgPool, Postgres, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::EvmClient;
+use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use crate::api_keys::event_actor;
 use crate::audit::{self, Actor};
 use crate::deposit_addresses::{self, ChainContracts};
+use crate::refunds::{DestinationScreener, DestinationScreening};
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 
 /// How long a later live treasury change waits before it applies.
 pub const TIME_LOCK: Duration = Duration::hours(48);
-/// How long a challenge message can be submitted.
+/// How long a challenge for an EOA can be submitted.
 pub const CHALLENGE_TTL: Duration = Duration::minutes(10);
+/// How long a challenge for an address that holds code (a Safe) can be submitted: its owners
+/// collect signatures, or approve the message on chain and wait for `finalized`, which takes
+/// longer than an EOA's signature.
+pub const CONTRACT_CHALLENGE_TTL: Duration = Duration::hours(24);
+/// How often every current treasury is screened again.
+pub const RESCREEN_INTERVAL: Duration = Duration::days(1);
+/// Treasuries screened per pass of the worker.
+const SCREEN_BATCH: i64 = 100;
 /// How long spent and expired challenges are kept before they are pruned.
 const CHALLENGE_RETENTION: Duration = Duration::days(1);
 
@@ -153,6 +163,34 @@ impl Status {
     }
 }
 
+/// Why a pending treasury change was canceled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellationReason {
+    /// The merchant canceled it (`POST /v1/treasuries/{id}/cancel`).
+    Requested,
+    /// A sanctions list named the treasury when it was due to apply.
+    Sanctioned,
+}
+
+impl CancellationReason {
+    /// The stable API and database code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Sanctioned => "sanctioned",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, TreasuryError> {
+        match value {
+            "requested" => Ok(Self::Requested),
+            "sanctioned" => Ok(Self::Sanctioned),
+            _ => Err(TreasuryError::DatabaseInvariant),
+        }
+    }
+}
+
 /// An account's treasury of one chain and mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Treasury {
@@ -174,8 +212,10 @@ pub struct Treasury {
     pub created_at: DateTime<Utc>,
     /// When a later treasury replaced it.
     pub replaced_at: Option<DateTime<Utc>>,
-    /// When the merchant canceled it.
+    /// When it was canceled.
     pub canceled_at: Option<DateTime<Utc>>,
+    /// Why it was canceled.
+    pub cancellation_reason: Option<CancellationReason>,
 }
 
 /// An issued EIP-4361 challenge.
@@ -282,27 +322,24 @@ fn timestamp(time: DateTime<Utc>) -> Result<siwe::TimeStamp, TreasuryError> {
         .map_err(|_| TreasuryError::DatabaseInvariant)
 }
 
-/// Renders the EIP-4361 message of a challenge issued at `issued_at`, expiring
-/// [`CHALLENGE_TTL`] later.
+/// Renders the EIP-4361 message of a challenge with `statement`, issued at `issued_at` and
+/// expiring at `expires_at`.
 fn render_message(
     origin: &MessageOrigin,
-    account_public_id: &str,
-    livemode: bool,
+    statement: String,
     chain_id: u64,
     address: Address,
     nonce: &str,
     issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
 ) -> Result<String, TreasuryError> {
-    let expires_at = issued_at
-        .checked_add_signed(CHALLENGE_TTL)
-        .ok_or(TreasuryError::DatabaseInvariant)?;
     let message = siwe::Message {
         domain: origin
             .domain
             .parse()
             .map_err(|_| TreasuryError::DatabaseInvariant)?,
         address: address.into_array(),
-        statement: Some(statement(account_public_id, livemode)),
+        statement: Some(statement),
         uri: origin
             .uri
             .parse()
@@ -319,7 +356,8 @@ fn render_message(
     Ok(message.to_string())
 }
 
-/// Issues a challenge to prove `address` as the scope's treasury on `chain_id`.
+/// Issues a challenge to prove `address` as the scope's treasury on `chain_id`, valid for `ttl`:
+/// [`CHALLENGE_TTL`] for an EOA, [`CONTRACT_CHALLENGE_TTL`] for an address that holds code.
 pub async fn create_challenge(
     pool: &PgPool,
     scope: Scope,
@@ -327,8 +365,9 @@ pub async fn create_challenge(
     origin: &MessageOrigin,
     chain_id: u64,
     address: Address,
-    now: DateTime<Utc>,
+    ttl: Duration,
 ) -> Result<Challenge, TreasuryError> {
+    let now = Utc::now();
     let mut random = [0_u8; 16];
     SysRng.try_fill_bytes(&mut random).map_err(|error| {
         tracing::error!(%error, "OS RNG failed; no treasury challenge issued");
@@ -337,16 +376,16 @@ pub async fn create_challenge(
     // EIP-4361 nonces are at least 8 alphanumeric characters; 128 random bits as hex.
     let nonce = hex::encode(random);
     let expires_at = now
-        .checked_add_signed(CHALLENGE_TTL)
+        .checked_add_signed(ttl)
         .ok_or(TreasuryError::DatabaseInvariant)?;
     let message = render_message(
         origin,
-        account_public_id,
-        scope.livemode(),
+        statement(account_public_id, scope.livemode()),
         chain_id,
         address,
         &nonce,
         now,
+        expires_at,
     )?;
     sqlx::query(
         r#"
@@ -445,6 +484,10 @@ pub enum ContractAnswer {
 /// EIP-1271 checks at the chain's `finalized` block.
 #[async_trait]
 pub trait ContractSignatures: Send + Sync {
+    /// Whether `account` on `chain_id` holds code at provider A's latest block, which gives its
+    /// challenge the longer [`CONTRACT_CHALLENGE_TTL`]; `false` when the read fails.
+    async fn has_code(&self, chain_id: u64, account: Address) -> bool;
+
     /// Whether the contract at `account` on `chain_id` accepts `signature` of `hash`.
     async fn verify(
         &self,
@@ -509,6 +552,19 @@ async fn provider_answer(
 
 #[async_trait]
 impl ContractSignatures for EvmContractSignatures {
+    async fn has_code(&self, chain_id: u64, account: Address) -> bool {
+        let Some([primary, _]) = self.clients.get(&chain_id) else {
+            return false;
+        };
+        match primary.code_at(account).await {
+            Ok(code) => !code.is_empty(),
+            Err(error) => {
+                tracing::warn!(chain_id, %error, "treasury challenge code read failed");
+                false
+            }
+        }
+    }
+
     async fn verify(
         &self,
         chain_id: u64,
@@ -540,6 +596,10 @@ pub struct UnavailableContractSignatures;
 
 #[async_trait]
 impl ContractSignatures for UnavailableContractSignatures {
+    async fn has_code(&self, _: u64, _: Address) -> bool {
+        false
+    }
+
     async fn verify(&self, _: u64, _: Address, _: B256, _: Bytes) -> ContractAnswer {
         ContractAnswer::Unavailable
     }
@@ -699,16 +759,12 @@ pub async fn cancel(
     if treasury.status != Status::Pending {
         return Err(TreasuryError::NotPending(treasury.status));
     }
-    sqlx::query("UPDATE treasuries SET canceled_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-    record(
+    mark_canceled(
         &mut transaction,
         scope,
         id,
+        CancellationReason::Requested,
         actor,
-        "account.treasury.canceled",
         "",
     )
     .await?;
@@ -720,30 +776,51 @@ pub async fn cancel(
 }
 
 /// Applies every pending treasury whose time-lock ended by `now`, one transaction each, and
-/// returns how many applied.
+/// returns how many applied. Each is screened again first: a treasury a sanctions list now names
+/// is canceled instead (`cancellation_reason: sanctioned`, `account.treasury.canceled`), and one
+/// that cannot be screened now, or whose chain has no current route to screen it with, stays
+/// pending until a later pass.
 pub async fn apply_due(
     pool: &PgPool,
     routes: &RouteSet,
+    screening: &dyn DestinationScreener,
     now: DateTime<Utc>,
 ) -> Result<usize, TreasuryError> {
     let actor = Actor::system("treasury_time_lock");
+    let due: Vec<(Uuid, Uuid, bool, i64, String)> = sqlx::query_as(
+        r#"
+        SELECT id, account_id, livemode, chain_id, address FROM treasuries
+        WHERE applied_at IS NULL AND canceled_at IS NULL AND effective_at <= $1
+        ORDER BY effective_at, id
+        LIMIT $2
+        "#,
+    )
+    .bind(now)
+    .bind(SCREEN_BATCH)
+    .fetch_all(pool)
+    .await?;
     let mut applied = 0_usize;
-    loop {
-        let due: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
-            r#"
-            SELECT id, account_id, livemode FROM treasuries
-            WHERE applied_at IS NULL AND canceled_at IS NULL AND effective_at <= $1
-            ORDER BY effective_at, id
-            LIMIT 1
-            "#,
-        )
-        .bind(now)
-        .fetch_optional(pool)
-        .await?;
-        let Some((id, account_id, livemode)) = due else {
-            return Ok(applied);
-        };
+    for (id, account_id, livemode, chain_id, address) in due {
         let scope = Scope::new(account_id, livemode);
+        let (chain_id, address) = parse_chain_address(chain_id, &address)?;
+        let Some(route) = chain_route(routes, livemode, chain_id) else {
+            tracing::warn!(
+                chain_id,
+                "a due treasury's chain has no current route to screen it"
+            );
+            continue;
+        };
+        let sanctioned = match screening.screen(route, address).await {
+            DestinationScreening::Clear => false,
+            DestinationScreening::Sanctioned => true,
+            DestinationScreening::Unavailable => {
+                tracing::warn!(
+                    chain_id,
+                    "screening a due treasury is unavailable; retrying"
+                );
+                continue;
+            }
+        };
         let mut transaction = pool.begin().await?;
         // The scope lock first, as submissions and cancellations take it, then the row.
         lock(&mut transaction, scope, true).await?;
@@ -755,12 +832,133 @@ pub async fn apply_due(
         .bind(now)
         .fetch_one(&mut *transaction)
         .await?;
-        if still_due {
+        if still_due && sanctioned {
+            tracing::error!(
+                tags.alert = "TopupTreasurySanctioned",
+                treasury = %public_id(id),
+                chain_id,
+                "a pending treasury is on a sanctions list; its change was canceled"
+            );
+            mark_canceled(
+                &mut transaction,
+                scope,
+                id,
+                CancellationReason::Sanctioned,
+                &actor,
+                "the treasury is on a sanctions list at its effective time",
+            )
+            .await?;
+        } else if still_due {
+            sqlx::query("UPDATE treasuries SET screened_at = $2 WHERE id = $1")
+                .bind(id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await?;
             apply(&mut transaction, routes, scope, id, now, &actor).await?;
             applied = applied.saturating_add(1);
         }
         transaction.commit().await?;
     }
+    Ok(applied)
+}
+
+/// What one pass of [`rescreen_due`] did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Rescreen {
+    /// Current treasuries screened clear.
+    pub clear: usize,
+    /// Current treasuries a sanctions list names; their accounts' `quotes` and `settlement` are
+    /// paused.
+    pub sanctioned: usize,
+}
+
+/// Screens again every current treasury last screened [`RESCREEN_INTERVAL`] or more before `now`
+/// (design §8: "screened when set and daily"), up to a batch per pass. A treasury a sanctions list
+/// now names pauses its account's `quotes` and `settlement` (audited, `account.updated`, and the
+/// `TopupTreasurySanctioned` alert); the operator lifts the pause after review. A treasury that
+/// cannot be screened now is tried again on a later pass.
+pub async fn rescreen_due(
+    pool: &PgPool,
+    routes: &RouteSet,
+    screening: &dyn DestinationScreener,
+    now: DateTime<Utc>,
+) -> Result<Rescreen, TreasuryError> {
+    let before = now
+        .checked_sub_signed(RESCREEN_INTERVAL)
+        .ok_or(TreasuryError::DatabaseInvariant)?;
+    let current: Vec<(Uuid, Uuid, bool, i64, String)> = sqlx::query_as(
+        r#"
+        SELECT id, account_id, livemode, chain_id, address FROM treasuries
+        WHERE applied_at IS NOT NULL AND replaced_at IS NULL AND screened_at <= $1
+        ORDER BY screened_at, id
+        LIMIT $2
+        "#,
+    )
+    .bind(before)
+    .bind(SCREEN_BATCH)
+    .fetch_all(pool)
+    .await?;
+    let actor = Actor::system("treasury_screening");
+    let mut outcome = Rescreen::default();
+    for (id, account_id, livemode, chain_id, address) in current {
+        let (chain_id, address) = parse_chain_address(chain_id, &address)?;
+        let Some(route) = chain_route(routes, livemode, chain_id) else {
+            continue;
+        };
+        let answer = screening.screen(route, address).await;
+        if answer == DestinationScreening::Unavailable {
+            tracing::warn!(chain_id, "re-screening a treasury is unavailable; retrying");
+            continue;
+        }
+        let mut transaction = pool.begin().await?;
+        match answer {
+            DestinationScreening::Unavailable => {}
+            DestinationScreening::Clear => outcome.clear = outcome.clear.saturating_add(1),
+            DestinationScreening::Sanctioned => {
+                outcome.sanctioned = outcome.sanctioned.saturating_add(1);
+                tracing::error!(
+                    tags.alert = "TopupTreasurySanctioned",
+                    treasury = %public_id(id),
+                    chain_id,
+                    "a current treasury is on a sanctions list; the account's quotes and \
+                     settlement are paused"
+                );
+                crate::pause::mutate_account_scopes_in(
+                    &mut transaction,
+                    account_id,
+                    &["quotes", "settlement"],
+                    true,
+                    &actor,
+                    &format!(
+                        "treasury {} on chain {chain_id} is on a sanctions list",
+                        public_id(id)
+                    ),
+                )
+                .await?;
+            }
+        }
+        sqlx::query("UPDATE treasuries SET screened_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+    }
+    Ok(outcome)
+}
+
+/// A current route of the mode on `chain_id`, whose sanctions oracle screens its treasuries.
+fn chain_route(routes: &RouteSet, livemode: bool, chain_id: u64) -> Option<&RouteFile> {
+    routes
+        .current_in(livemode)
+        .find(|route| route.chain.chain_id == chain_id)
+}
+
+fn parse_chain_address(chain_id: i64, address: &str) -> Result<(u64, Address), TreasuryError> {
+    Ok((
+        u64::try_from(chain_id).map_err(|_| TreasuryError::DatabaseInvariant)?,
+        Address::from_str(address).map_err(|_| TreasuryError::DatabaseInvariant)?,
+    ))
 }
 
 /// Makes treasury `id` its chain's current one: the former one is replaced, the chain's network of
@@ -831,6 +1029,33 @@ async fn apply(
         actor,
         "account.treasury.updated",
         &reason,
+    )
+    .await
+}
+
+/// Cancels pending treasury `id` for `reason`, with its audit row and `account.treasury.canceled`.
+async fn mark_canceled(
+    transaction: &mut Transaction<'_, Postgres>,
+    scope: Scope,
+    id: Uuid,
+    reason: CancellationReason,
+    actor: &Actor,
+    note: &str,
+) -> Result<(), TreasuryError> {
+    sqlx::query(
+        "UPDATE treasuries SET canceled_at = now(), cancellation_reason = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(reason.code())
+    .execute(&mut **transaction)
+    .await?;
+    record(
+        transaction,
+        scope,
+        id,
+        actor,
+        "account.treasury.canceled",
+        note,
     )
     .await
 }
@@ -925,7 +1150,7 @@ pub async fn current_on(
 /// The columns of [`TreasuryRow`]; callers append the `WHERE` clause.
 const SELECT: &str = r#"
     SELECT id, livemode, chain_id, address, kind, effective_at, created_at, applied_at,
-           replaced_at, canceled_at
+           replaced_at, canceled_at, cancellation_reason
     FROM treasuries
     WHERE account_id = $1 AND livemode = $2
 "#;
@@ -1009,6 +1234,7 @@ struct TreasuryRow {
     applied_at: Option<DateTime<Utc>>,
     replaced_at: Option<DateTime<Utc>>,
     canceled_at: Option<DateTime<Utc>>,
+    cancellation_reason: Option<String>,
 }
 
 impl TreasuryRow {
@@ -1031,24 +1257,37 @@ impl TreasuryRow {
             created_at: self.created_at,
             replaced_at: self.replaced_at,
             canceled_at: self.canceled_at,
+            cancellation_reason: self
+                .cancellation_reason
+                .as_deref()
+                .map(CancellationReason::parse)
+                .transpose()?,
         })
     }
 }
 
-/// Applies treasury changes whose time-lock ended, and prunes old challenges.
+/// Applies treasury changes whose time-lock ended, screens current treasuries again daily, and
+/// prunes old challenges.
 pub struct TreasuryWorker {
     pool: PgPool,
     routes: Arc<RouteSet>,
+    screening: Arc<dyn DestinationScreener>,
     interval: StdDuration,
 }
 
 impl TreasuryWorker {
-    /// Checks every `interval`.
+    /// Checks every `interval`, screening with `screening`.
     #[must_use]
-    pub const fn new(pool: PgPool, routes: Arc<RouteSet>, interval: StdDuration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        routes: Arc<RouteSet>,
+        screening: Arc<dyn DestinationScreener>,
+        interval: StdDuration,
+    ) -> Self {
         Self {
             pool,
             routes,
+            screening,
             interval,
         }
     }
@@ -1062,8 +1301,12 @@ impl TreasuryWorker {
                 () = cancellation.cancelled() => return,
                 _ = ticker.tick() => {
                     let now = Utc::now();
-                    if let Err(error) = apply_due(&self.pool, &self.routes, now).await {
+                    let screening = &*self.screening;
+                    if let Err(error) = apply_due(&self.pool, &self.routes, screening, now).await {
                         tracing::error!(%error, "applying due treasury changes failed");
+                    }
+                    if let Err(error) = rescreen_due(&self.pool, &self.routes, screening, now).await {
+                        tracing::error!(%error, "re-screening treasuries failed");
                     }
                     if let Err(error) = prune_challenges(&self.pool, now).await {
                         tracing::warn!(%error, "pruning treasury challenges failed");
@@ -1101,12 +1344,12 @@ mod tests {
             .with_timezone(&Utc);
         let message = render_message(
             &origin(),
-            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
-            true,
+            statement("acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", true),
             1,
             address!("0x6Da01670d8fc844e736095918bbE11fE8D564163"),
             "0123456789abcdef0123456789abcdef",
             issued,
+            issued + CHALLENGE_TTL,
         )
         .expect("message");
         assert_eq!(

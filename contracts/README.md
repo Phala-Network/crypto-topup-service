@@ -69,3 +69,18 @@ deposit address salts, read by `crates/core` and the Python SDK) with:
 ```sh
 forge script script/GenerateCreate2Vectors.s.sol:GenerateCreate2Vectors
 ```
+
+### Safe v1.4.1 (test-only)
+
+`lib/safe-smart-account` is `safe-global/safe-smart-account` at tag `v1.4.1` (commit `bf943f8`),
+LGPL-3.0, used only by the service's integration tests (`crates/topup/tests/treasuries.rs`): none
+of it is compiled into the service or into the contracts deployed here. The `safe` profile of
+`foundry.toml` builds it as Safe released it (solc 0.7.6, optimizer off, per its CHANGELOG); the
+tests deploy the singleton, `SafeProxyFactory`, `CompatibilityFallbackHandler`, and
+`SignMessageLib` on Anvil, check that their code equals the canonical v1.4.1 deployments' (without
+the Solidity metadata, which names source paths), and prove treasuries with Safe owners' EIP-712
+`SafeMessage` signatures and `SignMessageLib` approvals, as the Safe{Core} SDK produces them.
+
+```sh
+FOUNDRY_PROFILE=safe forge build lib/safe-smart-account/contracts/Safe.sol
+```

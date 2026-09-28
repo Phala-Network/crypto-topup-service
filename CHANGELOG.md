@@ -11,14 +11,19 @@ webhook receivers must ignore unknown fields. The format follows
 
 - Treasuries through the API (docs/design/multi-tenant.md D10, §16 PR 7).
   `POST /v1/treasuries/challenge {chain_id, address}` returns an EIP-4361 `treasury_challenge`
-  (`message`, `nonce`, `expires_at`; single-use, 10 minutes); `POST /v1/treasuries {chain_id,
+  (`message`, `nonce`, `expires_at`; single-use, 10 minutes, or 24 hours for an address that holds
+  code); `POST /v1/treasuries {chain_id,
   message, signature}` sets the chain's treasury in the key's mode when the signature is the
   address's EIP-191 signature, or a contract deployed at the address returns `0x1626ba7e` from
   EIP-1271 `isValidSignature` at `finalized` on both providers (ERC-6492 and undeployed contracts
   are refused; the address is screened for sanctions). `GET /v1/treasuries`,
   `GET /v1/treasuries/{id}`, and `POST /v1/treasuries/{id}/cancel`. A `treasury` (`trs_…`) has
   `chain_id`, `address`, `kind` (`eoa` or `contract`), `status` (`pending`, `active`, `replaced`,
-  `canceled`), `effective_at`, `replaced_at`, and `canceled_at`. A chain's first treasury and
+  `canceled`), `effective_at`, `replaced_at`, `canceled_at`, and `cancellation_reason`
+  (`requested`, or `sanctioned` when a sanctions list named it at its effective time). Current
+  treasuries are screened again daily; a listed one pauses the account's `quotes` and
+  `settlement`. Safe owners sign the challenge as a Safe message (EIP-712 `SafeMessage`, the
+  Safe{Core} SDK's `signMessage`), or approve it with `SignMessageLib`. A chain's first treasury and
   test-mode changes apply at once; a later live change applies after 48 hours unless canceled.
   New events `account.treasury.pending`, `account.treasury.updated`, and
   `account.treasury.canceled` go to every enabled endpoint of the mode whatever its
@@ -28,6 +33,8 @@ webhook receivers must ignore unknown fields. The format follows
   `treasury_not_deployed`, `treasury_sanctioned`, `treasury_change_pending`,
   `treasury_unchanged`, `treasury_unexpected_state`, and `treasury_not_set`.
 - Quotes carry `treasury`, the treasury their address pays.
+- Admin `POST /v1/admin/accounts/{account}/pause` and `/resume` `{scopes, reason}`: pause or resume
+  scopes of a whole account in both modes, audited and announced as `account.updated`.
 - Deposit addresses (docs/design/multi-tenant.md "Deposit addresses"), restored per the owner's
   2026-09-21 requirement, with one address per customer for every supported token on every chain
   (the owner's 2026-09-28 decision, exchange practice). `POST /v1/deposit_addresses

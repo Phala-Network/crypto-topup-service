@@ -20,6 +20,8 @@ ALTER TABLE treasuries ADD COLUMN livemode boolean NOT NULL;
 ALTER TABLE treasuries ADD COLUMN kind text NOT NULL CHECK (kind IN ('eoa', 'contract'));
 ALTER TABLE treasuries ADD COLUMN applied_at timestamptz;
 ALTER TABLE treasuries ADD COLUMN replaced_at timestamptz;
+ALTER TABLE treasuries ADD COLUMN cancellation_reason text
+    CHECK (cancellation_reason IN ('requested', 'sanctioned'));
 ALTER TABLE treasuries ALTER COLUMN verified_at SET NOT NULL;
 ALTER TABLE treasuries ALTER COLUMN effective_at SET NOT NULL;
 ALTER TABLE treasuries ALTER COLUMN screened_at SET NOT NULL;
@@ -28,6 +30,7 @@ ALTER TABLE treasuries ADD CONSTRAINT treasuries_proof_signature_check
     CHECK (proof_signature ~ '^0x([0-9a-f]{2})*$');
 ALTER TABLE treasuries ADD CONSTRAINT treasuries_lifecycle_check CHECK (
     (canceled_at IS NULL OR applied_at IS NULL) AND (replaced_at IS NULL OR applied_at IS NOT NULL)
+    AND (canceled_at IS NULL) = (cancellation_reason IS NULL)
 );
 -- At most one change waits per chain, and one treasury is current per chain.
 CREATE UNIQUE INDEX treasuries_pending_unique ON treasuries (account_id, livemode, chain_id)
@@ -36,12 +39,18 @@ CREATE UNIQUE INDEX treasuries_current_unique ON treasuries (account_id, livemod
     WHERE applied_at IS NOT NULL AND replaced_at IS NULL;
 CREATE INDEX treasuries_due_idx ON treasuries (effective_at)
     WHERE applied_at IS NULL AND canceled_at IS NULL;
+CREATE INDEX treasuries_screening_idx ON treasuries (screened_at)
+    WHERE applied_at IS NOT NULL AND replaced_at IS NULL;
 CREATE INDEX treasuries_scope_idx ON treasuries (account_id, livemode, created_at DESC, id DESC);
 
 COMMENT ON TABLE treasuries IS
     'An account''s treasury of one chain and mode, proven with an EIP-4361 message: pending until effective_at, then current (applied_at) until replaced by the next (replaced_at), or canceled while pending.';
 COMMENT ON COLUMN treasuries.kind IS
     'eoa: the message''s EIP-191 signature recovers to the address; contract: a contract deployed at the address returned the EIP-1271 magic value on both providers at finalized.';
+COMMENT ON COLUMN treasuries.cancellation_reason IS
+    'requested: the merchant canceled the pending change; sanctioned: a sanctions list named the treasury when it was due to apply.';
+COMMENT ON COLUMN treasuries.screened_at IS
+    'Last sanctions screening: when proven, when applied, and again daily while current.';
 COMMENT ON COLUMN treasuries.effective_at IS
     'When the treasury applies: at once for the first treasury of a chain and in test mode, 48 hours after the proof for a later live change.';
 

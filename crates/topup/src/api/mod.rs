@@ -208,6 +208,8 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::update_account))
         .routes(routes!(handlers::issue_api_key))
         .routes(routes!(handlers::admin_get_deposit))
+        .routes(routes!(handlers::pause_account))
+        .routes(routes!(handlers::resume_account))
         .routes(routes!(handlers::pause_customer))
         .routes(routes!(handlers::resume_customer))
         .routes(routes!(handlers::pause_route))

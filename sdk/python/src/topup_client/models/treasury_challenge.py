@@ -14,8 +14,8 @@ T = TypeVar("T", bound="TreasuryChallenge")
 
 @_attrs_define
 class TreasuryChallenge:
-    """An EIP-4361 (Sign-In with Ethereum) message proving a treasury, valid for 10 minutes and
-    usable once.
+    """An EIP-4361 (Sign-In with Ethereum) message proving a treasury, usable once: valid for 10
+    minutes for an EOA, 24 hours for an address that holds code (a Safe).
 
         Attributes:
             address (str): The treasury address, as sent.

@@ -432,7 +432,7 @@ Ethereum) message, which proves you control it and that it exists on the chain; 
 sets it.
 
 ```sh
-# 1. The message to sign, valid 10 minutes and usable once.
+# 1. The message to sign, usable once: 10 minutes for an EOA, 24 hours for a Safe.
 curl -sS https://api.phala-pay.example/v1/treasuries/challenge -H "Authorization: Bearer $KEY" \
   -H 'content-type: application/json' -d '{"chain_id": 11155111, "address": "0x…"}'
 # 2. Sign `message` exactly as returned, then submit it.
@@ -442,14 +442,10 @@ curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $
 
 - **EOA:** sign with `personal_sign` (EIP-191), for example `cast wallet sign "$MESSAGE"`;
   `deploy/sandbox/set-treasury.sh` does both steps from a test key.
-- **Safe:** the owners sign the message as a Safe message (Safe{Core} SDK: Protocol Kit
-  `createMessage` and `signMessage`, API Kit `addMessage` and `addMessageSignature`) and you submit
-  the combined signature; or a Safe transaction through `SignMessageLib` approves it on chain and
-  you submit `"0x"`. The service calls the Safe's EIP-1271 `isValidSignature` for the message's
-  EIP-191 hash at the chain's `finalized` block on two RPC providers, so submit once the Safe (and
-  a `SignMessageLib` approval) is about 15 minutes old on Ethereum. A Safe not deployed on the
-  chain is refused (`treasury_not_deployed`), as are ERC-6492 signatures of a counterfactual one.
-- The address is screened for sanctions (`400 treasury_sanctioned`).
+- The address is screened for sanctions (`400 treasury_sanctioned`), again when a pending change
+  is due to apply (a listed one is `canceled` with `cancellation_reason: "sanctioned"`), and every
+  day while it is your treasury: a listed treasury pauses your account's `quotes` and
+  `settlement` until the operator reviews it with you.
 - **When it applies.** A chain's first treasury, and any test-mode change, apply at once. A later
   live change is `pending` for 48 hours, then applies; `account.treasury.pending` tells every
   enabled webhook endpoint of the mode at once, whatever events it subscribes to, so a leaked key
@@ -460,6 +456,54 @@ curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $
   pay the new treasury; each quote shows the `treasury` its address pays. Everything issued before
   keeps paying the old treasury for good (the address commits to it): those payments are still
   credited, and their refunds are paid from the old treasury (§3), so keep control of it.
+
+**Safe treasuries.** The Safe must be deployed on the chain, at its `finalized` block (about 15
+minutes on Ethereum): a counterfactual Safe is refused (`treasury_not_deployed`), and so are
+ERC-6492 signatures. The service calls the Safe's EIP-1271 `isValidSignature(bytes32 hash, bytes
+signature)` with `hash` the message's EIP-191 hash, on two RPC providers at `finalized`, and
+requires `0x1626ba7e`. On a Safe (v1.3.0 and later, with the default CompatibilityFallbackHandler)
+that call does not check the owners' signatures of `hash` itself: the handler wraps it in the
+EIP-712 `SafeMessage(bytes message)` of the Safe's domain `{chainId, verifyingContract: <Safe>}`,
+with `message = hash`, and checks the owners' signatures of that, as the Safe executes a
+transaction. So the owners never `personal_sign` the challenge (that is refused); they sign it as a
+**Safe message**, which is what Safe{Core} SDK's Protocol Kit does for a string message
+([Safe docs, message signatures](https://docs.safe.global/sdk/protocol-kit/guides/signatures/messages);
+[`CompatibilityFallbackHandler` v1.4.1](https://github.com/safe-global/safe-smart-account/blob/v1.4.1/contracts/handler/CompatibilityFallbackHandler.sol);
+[Protocol Kit `generateTypedData`](https://github.com/safe-global/safe-core-sdk/blob/0cc12cbb18128c5e1c1067ac3917f08ab9b4fd21/packages/protocol-kit/src/utils/eip-712/index.ts)):
+
+```typescript
+import Safe, { hashSafeMessage, SigningMethod } from '@safe-global/protocol-kit'
+
+const challenge = await createChallenge({ chain_id, address: SAFE_ADDRESS }) // POST /v1/treasuries/challenge
+let protocolKit = await Safe.init({ provider: RPC_URL, signer: OWNER_1_KEY, safeAddress: SAFE_ADDRESS })
+let safeMessage = protocolKit.createMessage(challenge.message) // the EIP-4361 text, unchanged
+safeMessage = await protocolKit.signMessage(safeMessage, SigningMethod.ETH_SIGN_TYPED_DATA_V4)
+// Up to the threshold, each further owner signs the same object:
+protocolKit = await protocolKit.connect({ provider: RPC_URL, signer: OWNER_2_KEY })
+safeMessage = await protocolKit.signMessage(safeMessage, SigningMethod.ETH_SIGN_TYPED_DATA_V4)
+
+const signature = safeMessage.encodedSignatures() // 65 bytes per owner, in ascending owner order
+// Optional: the same check the service makes (at the latest block instead of `finalized`).
+await protocolKit.isValidSignature(hashSafeMessage(challenge.message), signature) // true
+await submitTreasury({ chain_id, message: challenge.message, signature }) // POST /v1/treasuries
+```
+
+- **Owners in different places.** One owner proposes the message to the Safe Transaction Service
+  with API Kit, `apiKit.addMessage(SAFE_ADDRESS, {message: challenge.message, signature:
+  buildSignatureBytes([ownSignature])})`; the others add theirs with
+  `apiKit.addMessageSignature(safeMessageHash, …)`, where `safeMessageHash =
+  await protocolKit.getSafeMessageHash(hashSafeMessage(challenge.message))`; Safe{Wallet} lists the
+  message at `https://app.safe.global/transactions/messages?safe=<prefix>:<Safe>`. Once the
+  threshold is reached, `(await apiKit.getMessage(safeMessageHash)).preparedSignature` is the
+  signature to submit. A Safe's challenge lasts 24 hours for this.
+- **On chain instead.** A Safe transaction, executed by the owners like any other, with
+  `operation: DelegateCall` to the Safe's `SignMessageLib`, calling
+  `signMessage(hashSafeMessage(challenge.message))`, records the approval in the Safe; submit
+  `"signature": "0x"` once that transaction is at `finalized`, within the challenge's 24 hours.
+- The service's tests run exactly these three flows (1-of-1, 2-of-3, and `SignMessageLib`) against
+  Safe v1.4.1 built from `safe-global/safe-smart-account` at tag v1.4.1, whose code equals the
+  canonical deployment's, and refuse a non-owner's signature, too few signatures, and an owner's
+  `personal_sign` of the message.
 
 ## 2. Webhooks and fulfillment
 

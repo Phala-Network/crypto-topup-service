@@ -84,7 +84,9 @@ def sync_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | TreasuryChallenge]:
     """Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's
-    mode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.
+    mode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,
+    24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it
+    can be used once.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -117,7 +119,9 @@ def sync(
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | TreasuryChallenge | None:
     """Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's
-    mode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.
+    mode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,
+    24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it
+    can be used once.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -145,7 +149,9 @@ async def asyncio_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | TreasuryChallenge]:
     """Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's
-    mode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.
+    mode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,
+    24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it
+    can be used once.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -176,7 +182,9 @@ async def asyncio(
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | TreasuryChallenge | None:
     """Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's
-    mode. Sign it and send it to `POST /v1/treasuries` within 10 minutes; it can be used once.
+    mode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,
+    24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it
+    can be used once.
 
     Args:
         idempotency_key (None | str | Unset):
