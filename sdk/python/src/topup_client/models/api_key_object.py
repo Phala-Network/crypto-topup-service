@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.api_key_object_object import ApiKeyObjectObject
+from ..models.api_key_object_object import check_api_key_object_object
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -19,12 +21,17 @@ T = TypeVar("T", bound="ApiKeyObject")
 class ApiKeyObject:
     """An API key (design D7). `secret` is present only in the response that created it.
 
+    Example:
+        {'created': 1790467200, 'expires_at': None, 'id': 'key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1', 'last_used':
+            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'redacted':
+            'ppay_sk_test_…Yz4x', 'secret': None, 'status': 'active', 'type': 'secret'}
+
     Attributes:
         created (int): Creation time, Unix seconds.
         id (str): Key id, `key_…`.
         livemode (bool): The key's mode.
         name (str): The key's label.
-        object_ (str): Always `api_key`.
+        object_ (ApiKeyObjectObject): Always `api_key`.
         redacted (str): The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.
         status (str): `active`; `expiring` for a rolled key that still works until `expires_at`; `expired`;
             `revoked`.
@@ -38,7 +45,7 @@ class ApiKeyObject:
     id: str
     livemode: bool
     name: str
-    object_: str
+    object_: ApiKeyObjectObject
     redacted: str
     status: str
     type_: str
@@ -56,7 +63,7 @@ class ApiKeyObject:
 
         name = self.name
 
-        object_ = self.object_
+        object_: str = self.object_
 
         redacted = self.redacted
 
@@ -116,7 +123,7 @@ class ApiKeyObject:
 
         name = d.pop("name")
 
-        object_ = d.pop("object")
+        object_ = check_api_key_object_object(d.pop("object"))
 
         redacted = d.pop("redacted")
 

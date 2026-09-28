@@ -18,6 +18,9 @@ T = TypeVar("T", bound="RollApiKeyRequest")
 class RollApiKeyRequest:
     """`POST /v1/api_keys/{id}/roll` body.
 
+    Example:
+        {'expires_in': 86400}
+
     Attributes:
         expires_in (int | Unset): Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it
             at

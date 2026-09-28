@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal, TypeVar
 
@@ -159,6 +159,8 @@ from .signing import sf_string
 
 T = TypeVar("T")
 
+# A `POST` retried with its `Idempotency-Key` after a `500` gets the saved `500` back, marked
+# `Idempotent-Replayed`, which is not retried again.
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 SECRET_KEY_PREFIXES = ("ppay_sk_test_", "ppay_sk_live_")
@@ -378,7 +380,9 @@ class TopupClient:
         deposit_address: str | None = None,
         status: str | None = None,
         tx_hash: str | None = None,
+        created_gt: int | None = None,
         created_gte: int | None = None,
+        created_lt: int | None = None,
         created_lte: int | None = None,
         expand: list[str] | None = None,
         page_size: int = 100,
@@ -397,7 +401,9 @@ class TopupClient:
                     deposit_address=_unset(deposit_address),
                     status=_unset(status),
                     tx_hash=_unset(tx_hash),
+                    createdgt=_unset(created_gt),
                     createdgte=_unset(created_gte),
+                    createdlt=_unset(created_lt),
                     createdlte=_unset(created_lte),
                     limit=page_size,
                     starting_after=_unset(starting_after),
@@ -615,9 +621,20 @@ class TopupClient:
         verify_attestation_binding(response, nonce)
         return response
 
-    def list_api_keys(self) -> list[ApiKeyObject]:
-        """The secret keys of this key's account and mode, newest first, without their secrets."""
-        return self._call(lambda: list_api_keys.sync_detailed(client=self._client), ApiKeyList).data
+    def list_api_keys(self, *, page_size: int = 100) -> list[ApiKeyObject]:
+        """The secret keys of this key's account and mode, newest first, without their secrets,
+        from every page."""
+        return list(
+            self._paginate(
+                lambda starting_after: partial(
+                    list_api_keys.sync_detailed,
+                    client=self._client,
+                    limit=page_size,
+                    starting_after=_unset(starting_after),
+                ),
+                ApiKeyList,
+            )
+        )
 
     def create_api_key(self, *, name: str = "") -> ApiKeyObject:
         """Creates a secret key of this mode; its `secret` is in this response only."""
@@ -742,15 +759,32 @@ class TopupClient:
         )
 
     def list_events(
-        self, *, type: str | None = None, page_size: int = 100
+        self,
+        *,
+        type: str | None = None,
+        types: Sequence[str] | None = None,
+        delivery_success: bool | None = None,
+        created_gt: int | None = None,
+        created_gte: int | None = None,
+        created_lt: int | None = None,
+        created_lte: int | None = None,
+        page_size: int = 100,
     ) -> Iterator[EventObjectResponse]:
         """Yields the events of this mode, newest first: the account's audit log and every
-        webhook ever sent. `type` filters by event type, such as `deposit.credited`."""
+        webhook ever sent. `type` filters by one event type, such as `deposit.credited`, or a
+        group, `deposit.*`; `types` by up to 20. `delivery_success=False` yields the events a
+        webhook endpoint has not received yet: resend them once it is fixed."""
         return self._paginate(
             lambda starting_after: partial(
                 list_events.sync_detailed,
                 client=self._client,
                 type_=_unset(type),
+                types=UNSET if types is None else list(types),
+                delivery_success=_unset(delivery_success),
+                createdgt=_unset(created_gt),
+                createdgte=_unset(created_gte),
+                createdlt=_unset(created_lt),
+                createdlte=_unset(created_lte),
                 limit=page_size,
                 starting_after=_unset(starting_after),
             ),
@@ -788,8 +822,9 @@ class TopupClient:
         )
 
     def create_treasury(self, chain_id: int, message: str, signature: str) -> Treasury:
-        """Submits a signed challenge. The chain's first treasury applies at once; a later live
-        change applies after 48 hours (`pending`), announced as `account.treasury.pending`."""
+        """Submits a signed challenge, announced as `treasury.created`. The chain's first treasury
+        applies at once; a later live change is `pending` for 48 hours, then applies
+        (`treasury.updated`) unless canceled (`treasury.canceled`)."""
         key = _idempotency_key(None)
         body = CreateTreasuryRequest(chain_id=chain_id, message=message, signature=signature)
         return self._call(
@@ -800,18 +835,22 @@ class TopupClient:
         )
 
     def list_treasuries(
-        self, *, chain_id: int | None = None, status: str | None = None
+        self, *, chain_id: int | None = None, status: str | None = None, page_size: int = 100
     ) -> list[Treasury]:
-        """The treasuries of this mode, newest first."""
-        return self._call(
-            lambda: list_treasuries.sync_detailed(
-                client=self._client,
-                chain_id=_unset(chain_id),
-                status=_unset(status),
-                limit=100,
-            ),
-            TreasuryList,
-        ).data
+        """The treasuries of this mode, newest first, from every page."""
+        return list(
+            self._paginate(
+                lambda starting_after: partial(
+                    list_treasuries.sync_detailed,
+                    client=self._client,
+                    chain_id=_unset(chain_id),
+                    status=_unset(status),
+                    limit=page_size,
+                    starting_after=_unset(starting_after),
+                ),
+                TreasuryList,
+            )
+        )
 
     def get_treasury(self, treasury_id: str) -> Treasury:
         """One treasury."""
@@ -956,8 +995,14 @@ class TopupClient:
                 retryable = response.status_code in RETRYABLE_STATUSES or (
                     error.code == "idempotency_key_in_use"
                 )
-                if not retryable or attempt >= self._max_attempts:
+                # A saved response is the request's outcome; asking again replays it.
+                replayed = response.headers.get("idempotent-replayed") == "true"
+                if not retryable or replayed or attempt >= self._max_attempts:
                     raise error
+                if error.retry_after is not None:
+                    self._sleep(max(error.retry_after, self._initial_backoff))
+                    attempt += 1
+                    continue
             self._sleep(self._initial_backoff * 2 ** (attempt - 1))
             attempt += 1
 
@@ -978,13 +1023,13 @@ def _metadata(metadata: Metadata | None) -> MetadataParamType0 | MetadataClear |
     if isinstance(metadata, str):
         if metadata:
             raise ValueError('metadata is a mapping of strings, or "" to unset every key')
-        return MetadataClear.VALUE_0
+        return ""
     return MetadataParamType0.from_dict(dict(metadata))
 
 
 def _api_error(response: Response[Any]) -> ApiError:
-    # `Request-Id` is Stripe's name; the service sent `X-Request-Id` before it.
-    request_id = response.headers.get("request-id") or response.headers.get("x-request-id")
+    request_id = response.headers.get("request-id")
+    retry_after = _seconds(response.headers.get("retry-after"))
     parsed = response.parsed
     if isinstance(parsed, ErrorResponse):
         error = parsed.error
@@ -992,13 +1037,23 @@ def _api_error(response: Response[Any]) -> ApiError:
             response.status_code,
             error.code,
             error.message,
-            error_type=error.type_.value,
+            error_type=error.type_,
             param=error.param if isinstance(error.param, str) else None,
+            doc_url=error.doc_url,
             request_id=request_id,
+            retry_after=retry_after,
         )
     return ApiError(
         response.status_code,
         "unexpected_response",
         "undocumented response",
         request_id=request_id,
+        retry_after=retry_after,
     )
+
+
+def _seconds(value: str | None) -> float | None:
+    """A `Retry-After` of delay seconds; `None` when absent or not a number of seconds."""
+    if value is None or not value.isdigit():
+        return None
+    return float(value)

@@ -63,6 +63,16 @@ def _parse_response(
 
         return response_404
 
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -97,7 +107,7 @@ def sync_detailed(
         id (str):
         idempotency_key (None | str | Unset):
         body (UpdateWebhookEndpointRequest): `POST /v1/webhook_endpoints/{id}` body; parameters
-            not sent are left unchanged.
+            not sent are left unchanged. Example: {'disabled': False, 'enabled_events': ['*']}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -137,7 +147,7 @@ def sync(
         id (str):
         idempotency_key (None | str | Unset):
         body (UpdateWebhookEndpointRequest): `POST /v1/webhook_endpoints/{id}` body; parameters
-            not sent are left unchanged.
+            not sent are left unchanged. Example: {'disabled': False, 'enabled_events': ['*']}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -172,7 +182,7 @@ async def asyncio_detailed(
         id (str):
         idempotency_key (None | str | Unset):
         body (UpdateWebhookEndpointRequest): `POST /v1/webhook_endpoints/{id}` body; parameters
-            not sent are left unchanged.
+            not sent are left unchanged. Example: {'disabled': False, 'enabled_events': ['*']}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -210,7 +220,7 @@ async def asyncio(
         id (str):
         idempotency_key (None | str | Unset):
         body (UpdateWebhookEndpointRequest): `POST /v1/webhook_endpoints/{id}` body; parameters
-            not sent are left unchanged.
+            not sent are left unchanged. Example: {'disabled': False, 'enabled_events': ['*']}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

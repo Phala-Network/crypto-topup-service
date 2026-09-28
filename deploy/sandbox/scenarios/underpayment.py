@@ -2,7 +2,7 @@
 
 Expect: the deposit is credited at spot for what arrived, below the quoted credit, and the lock
 is not completed. Once the address has received funds the quote can no longer be canceled:
-`409 quote_payment_received` while the payment window is open, or `409` once the window has
+`400 quote_payment_received` while the payment window is open, or `400` once the window has
 closed (on Sepolia finality outlasts the quote window).
 """
 
@@ -28,7 +28,7 @@ def run(ctx: Context) -> None:
     except ApiError as error:
         expected = "quote_payment_received" if still_open else error.code
         check(
-            error.status_code == 409 and error.code == expected,
+            error.status_code == 400 and error.code == expected,
             f"cancel failed with {error.status_code} {error.code}",
         )
     else:

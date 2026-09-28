@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.config_object import check_config_object
+from ..models.config_object import ConfigObject
 from typing import cast
 
 if TYPE_CHECKING:
@@ -21,20 +23,27 @@ T = TypeVar("T", bound="Config")
 class Config:
     """What a product's UI reads instead of hardcoding: assets, limits, and quote terms.
 
+    Example:
+        {'assets': [{'asset': 'PHA', 'chain_id': 1, 'confirmations': '2', 'contract':
+            '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'max_deposit_atomic': '1000000000000000000000000',
+            'min_amount': 100, 'min_refund_atomic': '1000000000000000000', 'pricing': 'spot', 'quote_spread_bps': 50,
+            'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900, 'typical_credit_seconds': 24, 'typical_finality_seconds':
+            900}], 'currency': 'usd', 'livemode': False, 'max_open_amount_per_account': 1000000, 'object': 'config'}
+
     Attributes:
         assets (list[ConfigAsset]): One entry per payable asset.
         currency (str): Credit currency, `usd`.
         livemode (bool): The mode of the key that reads it: `assets` lists that mode's routes.
         max_open_amount_per_account (int): Per-account cap on the credit of open quotes, in cents; no single quote can
             exceed it.
-        object_ (str): Always `config`.
+        object_ (ConfigObject): Always `config`.
     """
 
     assets: list[ConfigAsset]
     currency: str
     livemode: bool
     max_open_amount_per_account: int
-    object_: str
+    object_: ConfigObject
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -51,7 +60,7 @@ class Config:
 
         max_open_amount_per_account = self.max_open_amount_per_account
 
-        object_ = self.object_
+        object_: str = self.object_
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -85,7 +94,7 @@ class Config:
 
         max_open_amount_per_account = d.pop("max_open_amount_per_account")
 
-        object_ = d.pop("object")
+        object_ = check_config_object(d.pop("object"))
 
         config = cls(
             assets=assets,

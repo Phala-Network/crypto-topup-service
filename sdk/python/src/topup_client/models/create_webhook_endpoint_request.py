@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,6 +23,10 @@ T = TypeVar("T", bound="CreateWebhookEndpointRequest")
 @_attrs_define
 class CreateWebhookEndpointRequest:
     """`POST /v1/webhook_endpoints` body.
+
+    Example:
+        {'description': 'Order fulfillment', 'enabled_events': ['deposit.credited', 'deposit.reversed',
+            'refund.failed'], 'metadata': {'team': 'payments'}, 'url': 'https://example.com/phala-pay/webhooks'}
 
     Attributes:
         enabled_events (list[str]): The event types to deliver, such as `deposit.credited`, or `["*"]` for all.
@@ -57,7 +62,7 @@ class CreateWebhookEndpointRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         field_dict: dict[str, Any] = {}
 
@@ -105,7 +110,7 @@ class CreateWebhookEndpointRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

@@ -4,6 +4,7 @@ export {
   createCheckout,
   retrieveQuote,
   type CheckoutErrorCode,
+  type CheckoutErrorOptions,
   type CheckoutOptions,
   type CheckoutSession,
   type CheckoutState,

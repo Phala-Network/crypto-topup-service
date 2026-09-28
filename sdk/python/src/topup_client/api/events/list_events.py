@@ -17,6 +17,8 @@ from typing import cast
 def _get_kwargs(
     *,
     type_: str | Unset = UNSET,
+    types: list[str] | Unset = UNSET,
+    delivery_success: bool | Unset = UNSET,
     createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
     createdlt: int | Unset = UNSET,
@@ -29,6 +31,14 @@ def _get_kwargs(
     params: dict[str, Any] = {}
 
     params["type"] = type_
+
+    json_types: list[str] | Unset = UNSET
+    if not isinstance(types, Unset):
+        json_types = types
+
+    params["types[]"] = json_types
+
+    params["delivery_success"] = delivery_success
 
     params["created[gt]"] = createdgt
 
@@ -73,6 +83,11 @@ def _parse_response(
 
         return response_401
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -94,6 +109,8 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
     type_: str | Unset = UNSET,
+    types: list[str] | Unset = UNSET,
+    delivery_success: bool | Unset = UNSET,
     createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
     createdlt: int | Unset = UNSET,
@@ -108,6 +125,8 @@ def sync_detailed(
 
     Args:
         type_ (str | Unset):
+        types (list[str] | Unset):
+        delivery_success (bool | Unset):
         createdgt (int | Unset):
         createdgte (int | Unset):
         createdlt (int | Unset):
@@ -126,6 +145,8 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         type_=type_,
+        types=types,
+        delivery_success=delivery_success,
         createdgt=createdgt,
         createdgte=createdgte,
         createdlt=createdlt,
@@ -146,6 +167,8 @@ def sync(
     *,
     client: AuthenticatedClient,
     type_: str | Unset = UNSET,
+    types: list[str] | Unset = UNSET,
+    delivery_success: bool | Unset = UNSET,
     createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
     createdlt: int | Unset = UNSET,
@@ -160,6 +183,8 @@ def sync(
 
     Args:
         type_ (str | Unset):
+        types (list[str] | Unset):
+        delivery_success (bool | Unset):
         createdgt (int | Unset):
         createdgte (int | Unset):
         createdlt (int | Unset):
@@ -179,6 +204,8 @@ def sync(
     return sync_detailed(
         client=client,
         type_=type_,
+        types=types,
+        delivery_success=delivery_success,
         createdgt=createdgt,
         createdgte=createdgte,
         createdlt=createdlt,
@@ -193,6 +220,8 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
     type_: str | Unset = UNSET,
+    types: list[str] | Unset = UNSET,
+    delivery_success: bool | Unset = UNSET,
     createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
     createdlt: int | Unset = UNSET,
@@ -207,6 +236,8 @@ async def asyncio_detailed(
 
     Args:
         type_ (str | Unset):
+        types (list[str] | Unset):
+        delivery_success (bool | Unset):
         createdgt (int | Unset):
         createdgte (int | Unset):
         createdlt (int | Unset):
@@ -225,6 +256,8 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         type_=type_,
+        types=types,
+        delivery_success=delivery_success,
         createdgt=createdgt,
         createdgte=createdgte,
         createdlt=createdlt,
@@ -243,6 +276,8 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
     type_: str | Unset = UNSET,
+    types: list[str] | Unset = UNSET,
+    delivery_success: bool | Unset = UNSET,
     createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
     createdlt: int | Unset = UNSET,
@@ -257,6 +292,8 @@ async def asyncio(
 
     Args:
         type_ (str | Unset):
+        types (list[str] | Unset):
+        delivery_success (bool | Unset):
         createdgt (int | Unset):
         createdgte (int | Unset):
         createdlt (int | Unset):
@@ -277,6 +314,8 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             type_=type_,
+            types=types,
+            delivery_success=delivery_success,
             createdgt=createdgt,
             createdgte=createdgte,
             createdlt=createdlt,

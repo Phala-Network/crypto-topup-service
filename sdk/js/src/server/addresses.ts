@@ -36,12 +36,12 @@ export function forwarderAddress(
   });
 }
 
-/** `keccak256(abi.encode(account, client_reference_id, "lock", quote_id))`: a quote's salt. */
-export function lockSalt(account: string, clientReferenceId: string, quoteId: string): Hex {
+/** `keccak256(abi.encode(account, client_reference_id, "quote", quote_id))`: a quote's salt. */
+export function quoteSalt(account: string, clientReferenceId: string, quoteId: string): Hex {
   return keccak256(
     encodeAbiParameters(
       [{ type: "string" }, { type: "string" }, { type: "string" }, { type: "string" }],
-      [account, clientReferenceId, "lock", quoteId],
+      [account, clientReferenceId, "quote", quoteId],
     ),
   );
 }
@@ -85,7 +85,7 @@ export function quoteAddress(
     forwarder.factory,
     forwarder.implementation,
     quote.treasury,
-    lockSalt(account, quote.client_reference_id, quote.id),
+    quoteSalt(account, quote.client_reference_id, quote.id),
   );
 }
 

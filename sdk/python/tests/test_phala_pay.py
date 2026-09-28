@@ -14,6 +14,7 @@ from phala_pay import (
     AddressMismatchError,
     Deposit,
     Event,
+    EventRequest,
     PhalaPay,
     Quote,
     Refund,
@@ -395,7 +396,9 @@ def _delivery(
     key: Ed25519PrivateKey | list[Ed25519PrivateKey] = SERVICE_KEY,
     account: str = ACCOUNT,
     livemode: bool = False,
+    extra: dict[str, object] | None = None,
 ) -> tuple[bytes, dict[str, str]]:
+    data: dict[str, object] = {"object": _deposit() if obj is None else obj}
     body = json.dumps(
         {
             "id": event_id,
@@ -404,7 +407,9 @@ def _delivery(
             "livemode": livemode,
             "type": event_type,
             "created": 1_790_000_321,
-            "data": {"object": _deposit() if obj is None else obj},
+            "request": None,
+            "data": data,
+            **(extra or {}),
         }
     ).encode()
     stamp = int(time.time()) if timestamp is None else timestamp
@@ -475,6 +480,23 @@ def test_construct_event_parses_a_failed_refund() -> None:
     assert event.refund.failure_reason == "sender_mismatch"
     with pytest.raises(TypeError):
         _ = event.deposit
+
+
+def test_construct_event_carries_the_request_and_previous_attributes() -> None:
+    body, headers = _delivery()
+    assert _construct(body, headers).request is None
+    endpoint = {"id": "we_" + "0a" * 16, "object": "webhook_endpoint", "url": "https://b.example"}
+    body, headers = _delivery(
+        "webhook_endpoint.updated",
+        extra={
+            "request": {"id": "req_" + "0b" * 16, "idempotency_key": "update-1"},
+            "data": {"object": endpoint, "previous_attributes": {"url": "https://a.example"}},
+        },
+    )
+    event = _construct(body, headers)
+    assert event.request == EventRequest("req_" + "0b" * 16, "update-1")
+    assert event.data.object == endpoint
+    assert event.data.previous_attributes == {"url": "https://a.example"}
 
 
 def test_construct_event_keeps_unknown_types_raw() -> None:

@@ -19,6 +19,9 @@ T = TypeVar("T", bound="MarkRefundPaidRequest")
 class MarkRefundPaidRequest:
     """`POST /v1/refunds/{id}/mark_paid` body: the merchant's refund transaction.
 
+    Example:
+        {'log_index': 41, 'transaction_hash': '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}
+
     Attributes:
         transaction_hash (str): Hash of the transaction that pays the refund from the treasury of the deposit's address.
         log_index (int | None | Unset): Block-wide index of the `Transfer` log that pays the refund; any matching log

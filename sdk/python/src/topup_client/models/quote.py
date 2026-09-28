@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.quote_object import check_quote_object
+from ..models.quote_object import QuoteObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -24,6 +26,19 @@ T = TypeVar("T", bound="Quote")
 class Quote:
     """A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 
+    Example:
+        {'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount': 2500, 'amount_atomic':
+            '202510000000000000000', 'asset': 'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'client_secret':
+            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a49382', 'created':
+            1790553600, 'currency': 'usd', 'deposit': None, 'exchange_rate': '0.12345679', 'expires_at': 1790554500, 'id':
+            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'livemode': False, 'metadata': {'order_id': 'ord_1001'}, 'object':
+            'quote', 'payment': {'amount_atomic': '202510000000000000000', 'asset': 'PHA', 'chain_id': 1, 'confirmations':
+            1, 'deposit': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'estimated_final_at': 1790554572, 'matches_quote': True,
+            'status': 'seen', 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e'},
+            'payment_uri': 'ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711
+            f85f5359661062a91&uint256=202510000000000000000', 'status': 'open', 'treasury':
+            '0x936c1991f8da9a919fa11b557a3514719f5a4504'}
+
     Attributes:
         address (str): Single-use forwarder address to pay.
         amount (int): Credit in the currency's minor unit.
@@ -36,12 +51,12 @@ class Quote:
         exchange_rate (str): The locked price in USD per token, a decimal string with 8 decimal places.
         expires_at (int): End of the payment window, Unix seconds.
         id (str): `qt_` id. The quote's address salt is `keccak256(abi.encode(account,
-            client_reference_id, "lock", id))` with the types `(string, string, string, string)`,
+            client_reference_id, "quote", id))` with the types `(string, string, string, string)`,
             where `account` is your `acct_` id.
         livemode (bool): Whether the quote was created with a live key.
         metadata (QuoteMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when
             none.
-        object_ (str): Always `quote`.
+        object_ (QuoteObject): Always `quote`.
         payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
         status (str): `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
             `open` after `expires_at` until the finalized chain passes it, so a payment mined in time
@@ -70,7 +85,7 @@ class Quote:
     id: str
     livemode: bool
     metadata: QuoteMetadata
-    object_: str
+    object_: QuoteObject
     payment_uri: str
     status: str
     treasury: str
@@ -110,7 +125,7 @@ class Quote:
 
         metadata = self.metadata.to_dict()
 
-        object_ = self.object_
+        object_: str = self.object_
 
         payment_uri = self.payment_uri
 
@@ -205,7 +220,7 @@ class Quote:
 
         metadata = QuoteMetadata.from_dict(d.pop("metadata"))
 
-        object_ = d.pop("object")
+        object_ = check_quote_object(d.pop("object"))
 
         payment_uri = d.pop("payment_uri")
 

@@ -68,6 +68,11 @@ def _parse_response(
 
         return response_409
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -103,7 +108,8 @@ def sync_detailed(
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction.
+            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -144,7 +150,8 @@ def sync(
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction.
+            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -180,7 +187,8 @@ async def asyncio_detailed(
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction.
+            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -219,7 +227,8 @@ async def asyncio(
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction.
+            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

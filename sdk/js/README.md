@@ -236,7 +236,7 @@ const calls = flushTransactions(forwarders, PHA);
 const batchFile = safeBatch(1, TREASURY_SAFE, calls); // Safe Transaction Builder JSON
 ```
 
-`quoteAddress`, `depositAddress`, `forwarderAddress`, `lockSalt`, and `depositAddressSalt`
+`quoteAddress`, `depositAddress`, `forwarderAddress`, `quoteSalt`, and `depositAddressSalt`
 recompute addresses from the pinned `(factory, implementation)`, as the Python SDK does.
 
 ## Development

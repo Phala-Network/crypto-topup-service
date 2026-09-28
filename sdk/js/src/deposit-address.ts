@@ -1,4 +1,4 @@
-import { CheckoutError } from "./checkout.js";
+import { CheckoutError, responseError } from "./checkout.js";
 
 /** A payment to a deposit address as the customer's page sees it. Display only. */
 export interface DepositAddressPayment {
@@ -64,14 +64,8 @@ export async function retrieveDepositAddress(
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   // A simple GET with no custom headers, so the browser sends no CORS preflight.
   const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
-  if (response.status === 404) {
-    throw new CheckoutError("invalid_client_secret", "the address or its client secret is unknown");
-  }
-  if (response.status === 429) {
-    throw new CheckoutError("rate_limited", "too many status requests");
-  }
   if (!response.ok) {
-    throw new CheckoutError("api_error", `the payment service answered ${response.status}`);
+    throw responseError(response, "the address or its client secret is unknown");
   }
   try {
     return parseClientDepositAddress(await response.json());

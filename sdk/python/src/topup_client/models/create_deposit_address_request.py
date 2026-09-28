@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,6 +23,9 @@ T = TypeVar("T", bound="CreateDepositAddressRequest")
 @_attrs_define
 class CreateDepositAddressRequest:
     """`POST /v1/deposit_addresses` body.
+
+    Example:
+        {'client_reference_id': 'team-42', 'metadata': {'plan': 'pro'}}
 
     Attributes:
         client_reference_id (str): Your identifier of the customer, 1 to 200 characters; the customer is created on
@@ -45,7 +49,7 @@ class CreateDepositAddressRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         field_dict: dict[str, Any] = {}
 
@@ -79,7 +83,7 @@ class CreateDepositAddressRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

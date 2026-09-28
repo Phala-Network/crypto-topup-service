@@ -18,6 +18,9 @@ T = TypeVar("T", bound="RollWebhookKeyRequest")
 class RollWebhookKeyRequest:
     """`POST /v1/account/webhook_keys/roll` body.
 
+    Example:
+        {'expires_in': 86400}
+
     Attributes:
         expires_in (int | Unset): Seconds the current key keeps signing beside the new one, up to 604800 (7 days); 0,
             the

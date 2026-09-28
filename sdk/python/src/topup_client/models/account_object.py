@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.account_object_object import AccountObjectObject
+from ..models.account_object_object import check_account_object_object
 from typing import cast
 
 if TYPE_CHECKING:
@@ -22,6 +24,12 @@ T = TypeVar("T", bound="AccountObject")
 class AccountObject:
     """The account of the request's API key (`GET /v1/account`), in the key's mode.
 
+    Example:
+        {'charges_enabled': True, 'confirmation_policies': [{'chain_id': 1, 'confirmations': 'finalized'}], 'created':
+            1787961600, 'id': 'acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10', 'livemode': False, 'name': 'Example Cloud', 'object':
+            'account', 'paused_scopes': [], 'webhook_keys': [{'expires_at': None, 'version': 2}, {'expires_at': 1790640000,
+            'version': 1}]}
+
     Attributes:
         charges_enabled (bool): Whether the operator enabled live mode.
         confirmation_policies (list[ConfirmationPolicy]): The confirmations you require on chains of this mode, stricter
@@ -31,7 +39,7 @@ class AccountObject:
         id (str): Account id, `acct_…`.
         livemode (bool): The mode of the key that reads it.
         name (str): Display name.
-        object_ (str): Always `account`.
+        object_ (AccountObjectObject): Always `account`.
         paused_scopes (list[str]): Active account-level pause scopes, the operator's and your own (`POST
             /v1/account/pause`):
             while `quotes` is listed, no quote, deposit address, or network is issued. Your resume
@@ -47,7 +55,7 @@ class AccountObject:
     id: str
     livemode: bool
     name: str
-    object_: str
+    object_: AccountObjectObject
     paused_scopes: list[str]
     webhook_keys: list[WebhookKeyVersion]
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -71,7 +79,7 @@ class AccountObject:
 
         name = self.name
 
-        object_ = self.object_
+        object_: str = self.object_
 
         paused_scopes = self.paused_scopes
 
@@ -123,7 +131,7 @@ class AccountObject:
 
         name = d.pop("name")
 
-        object_ = d.pop("object")
+        object_ = check_account_object_object(d.pop("object"))
 
         paused_scopes = cast(list[str], d.pop("paused_scopes"))
 

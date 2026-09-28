@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.forwarder_object import check_forwarder_object
+from ..models.forwarder_object import ForwarderObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -27,7 +29,7 @@ class Forwarder:
             factory (str): The forwarder factory.
             id (str): Forwarder id, `fwd_…`.
             livemode (bool): The mode.
-            object_ (str): Always `forwarder`.
+            object_ (ForwarderObject): Always `forwarder`.
             salt (str): The `CREATE2` salt, 32 bytes of hex.
             treasury (str): The treasury the forwarder pays, fixed in its address.
             deposit_address (None | str | Unset): The deposit address it is a network of, `da_…`; `null` for a quote's.
@@ -42,7 +44,7 @@ class Forwarder:
     factory: str
     id: str
     livemode: bool
-    object_: str
+    object_: ForwarderObject
     salt: str
     treasury: str
     deposit_address: None | str | Unset = UNSET
@@ -61,7 +63,7 @@ class Forwarder:
 
         livemode = self.livemode
 
-        object_ = self.object_
+        object_: str = self.object_
 
         salt = self.salt
 
@@ -121,7 +123,7 @@ class Forwarder:
 
         livemode = d.pop("livemode")
 
-        object_ = d.pop("object")
+        object_ = check_forwarder_object(d.pop("object"))
 
         salt = d.pop("salt")
 

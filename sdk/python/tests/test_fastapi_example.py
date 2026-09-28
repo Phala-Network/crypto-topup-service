@@ -51,6 +51,7 @@ def app(tmp_path: Path) -> tuple[TestClient, list[httpx.Request], Path]:
                         "code": "amount_too_small",
                         "message": "internal detail",
                         "param": "amount",
+                        "doc_url": "https://phala-network.github.io/phala-pay/#section/Errors/amount_too_small",
                     }
                 },
             )

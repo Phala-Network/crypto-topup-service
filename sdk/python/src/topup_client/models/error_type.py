@@ -1,10 +1,15 @@
-from enum import StrEnum
+from typing import Literal
+
+ErrorType = Literal["api_error", "idempotency_error", "invalid_request_error"]
+
+ERROR_TYPE_VALUES: set[ErrorType] = {
+    "api_error",
+    "idempotency_error",
+    "invalid_request_error",
+}
 
 
-class ErrorType(StrEnum):
-    API_ERROR = "api_error"
-    IDEMPOTENCY_ERROR = "idempotency_error"
-    INVALID_REQUEST_ERROR = "invalid_request_error"
-
-    def __str__(self) -> str:
-        return str(self.value)
+def check_error_type(value: str) -> ErrorType:
+    if value in ERROR_TYPE_VALUES:
+        return value
+    raise TypeError(f"Unexpected value {value!r}. Expected one of {ERROR_TYPE_VALUES!r}")

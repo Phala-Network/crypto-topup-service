@@ -142,6 +142,29 @@ describe("expectedAddress", () => {
     ).toThrow(TypeError);
   });
 
+  it("waits as long as a rate limit asks, and names the request", async () => {
+    const limited = () =>
+      new Response("{}", {
+        status: 429,
+        headers: { "retry-after": "30", "request-id": "req_0123456789abcdef0123456789abcdef" },
+      });
+    const { fetch, calls } = fakeFetch(limited, quote());
+    const { checkout } = start(fetch);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkout.getState().error).toMatchObject({
+      code: "rate_limited",
+      retryAfter: 30,
+      requestId: "req_0123456789abcdef0123456789abcdef",
+    });
+    // The backoff alone would read again after 2 s; Retry-After holds it for 30.
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toHaveLength(2);
+    expect(checkout.getState()).toMatchObject({ status: "waiting", error: null });
+    checkout.destroy();
+  });
+
   it("reports a reversed payment and stops polling", async () => {
     expect(checkoutStatus(quote({ payment_status: "reversed" }), NOW / 1000)).toBe("reversed");
     const { fetch, calls } = fakeFetch(quote({ payment_status: "reversed" }));

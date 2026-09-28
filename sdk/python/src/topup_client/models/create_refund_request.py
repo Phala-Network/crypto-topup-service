@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,6 +23,10 @@ T = TypeVar("T", bound="CreateRefundRequest")
 @_attrs_define
 class CreateRefundRequest:
     """`POST /v1/refunds` body.
+
+    Example:
+        {'amount_atomic': '202510000000000000000', 'deposit': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516',
+            'destination_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'metadata': {'ticket': 'support-311'}}
 
     Attributes:
         deposit (str): `dep_` id of the deposit to refund.
@@ -58,7 +63,7 @@ class CreateRefundRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         field_dict: dict[str, Any] = {}
 
@@ -106,7 +111,7 @@ class CreateRefundRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

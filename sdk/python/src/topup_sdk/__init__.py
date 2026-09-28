@@ -9,8 +9,8 @@ from .addresses import (
     deposit_address_salt,
     deposit_id,
     forwarder_address,
-    lock_salt,
     quote_address,
+    quote_salt,
 )
 from .attestation import attestation_report_data, verify_attestation_binding
 from .client import TopupClient
@@ -58,8 +58,8 @@ __all__ = [
     "flush_transactions",
     "forwarder_address",
     "load_public_key",
-    "lock_salt",
     "quote_address",
+    "quote_salt",
     "safe_batch",
     "sign_treasury_challenge",
     "sign_webhook",

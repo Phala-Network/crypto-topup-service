@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,6 +23,10 @@ T = TypeVar("T", bound="CreateQuoteRequest")
 @_attrs_define
 class CreateQuoteRequest:
     """`POST /v1/quotes` body.
+
+    Example:
+        {'amount': 2500, 'asset': 'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'currency': 'usd', 'metadata':
+            {'order_id': 'ord_1001'}}
 
     Attributes:
         amount (int): The credit to quote, a positive integer in the currency's minor unit (US cents).
@@ -61,7 +66,7 @@ class CreateQuoteRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         field_dict: dict[str, Any] = {}
 
@@ -107,7 +112,7 @@ class CreateQuoteRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

@@ -16,6 +16,9 @@ T = TypeVar("T", bound="ResendEventRequest")
 class ResendEventRequest:
     """`POST /v1/events/{id}/resend` body.
 
+    Example:
+        {'webhook_endpoint': 'we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1'}
+
     Attributes:
         webhook_endpoint (str): The enabled endpoint to deliver the event to again, `we_…`.
     """

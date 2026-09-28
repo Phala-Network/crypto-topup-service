@@ -18,6 +18,9 @@ T = TypeVar("T", bound="CreateApiKeyRequest")
 class CreateApiKeyRequest:
     """`POST /v1/api_keys` body.
 
+    Example:
+        {'name': 'fulfillment worker'}
+
     Attributes:
         name (str | Unset): The key's label, at most 200 characters.
     """

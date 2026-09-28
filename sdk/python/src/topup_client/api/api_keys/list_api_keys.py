@@ -10,14 +10,31 @@ from ... import errors
 
 from ...models.api_key_list import ApiKeyList
 from ...models.error_response import ErrorResponse
+from ...types import UNSET, Unset
 from typing import cast
 
 
-def _get_kwargs() -> dict[str, Any]:
+def _get_kwargs(
+    *,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
+) -> dict[str, Any]:
+
+    params: dict[str, Any] = {}
+
+    params["limit"] = limit
+
+    params["starting_after"] = starting_after
+
+    params["ending_before"] = ending_before
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/v1/api_keys",
+        "params": params,
     }
 
     return _kwargs
@@ -31,6 +48,11 @@ def _parse_response(
 
         return response_200
 
+    if response.status_code == 400:
+        response_400 = ErrorResponse.from_dict(response.json())
+
+        return response_400
+
     if response.status_code == 401:
         response_401 = ErrorResponse.from_dict(response.json())
 
@@ -40,6 +62,11 @@ def _parse_response(
         response_403 = ErrorResponse.from_dict(response.json())
 
         return response_403
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -61,8 +88,17 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> Response[ApiKeyList | ErrorResponse]:
-    """The keys of the requesting key's account and mode, newest first, without their secrets.
+    """The keys of the requesting key's account and mode, newest first, without their secrets, with
+    Stripe's cursor pagination.
+
+    Args:
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -72,7 +108,11 @@ def sync_detailed(
         Response[ApiKeyList | ErrorResponse]
     """
 
-    kwargs = _get_kwargs()
+    kwargs = _get_kwargs(
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
+    )
 
     response = client.get_httpx_client().request(
         **kwargs,
@@ -84,8 +124,17 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> ApiKeyList | ErrorResponse | None:
-    """The keys of the requesting key's account and mode, newest first, without their secrets.
+    """The keys of the requesting key's account and mode, newest first, without their secrets, with
+    Stripe's cursor pagination.
+
+    Args:
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -97,14 +146,26 @@ def sync(
 
     return sync_detailed(
         client=client,
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
     ).parsed
 
 
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> Response[ApiKeyList | ErrorResponse]:
-    """The keys of the requesting key's account and mode, newest first, without their secrets.
+    """The keys of the requesting key's account and mode, newest first, without their secrets, with
+    Stripe's cursor pagination.
+
+    Args:
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -114,7 +175,11 @@ async def asyncio_detailed(
         Response[ApiKeyList | ErrorResponse]
     """
 
-    kwargs = _get_kwargs()
+    kwargs = _get_kwargs(
+        limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
+    )
 
     response = await client.get_async_httpx_client().request(**kwargs)
 
@@ -124,8 +189,17 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient,
+    limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> ApiKeyList | ErrorResponse | None:
-    """The keys of the requesting key's account and mode, newest first, without their secrets.
+    """The keys of the requesting key's account and mode, newest first, without their secrets, with
+    Stripe's cursor pagination.
+
+    Args:
+        limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -138,5 +212,8 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
+            limit=limit,
+            starting_after=starting_after,
+            ending_before=ending_before,
         )
     ).parsed

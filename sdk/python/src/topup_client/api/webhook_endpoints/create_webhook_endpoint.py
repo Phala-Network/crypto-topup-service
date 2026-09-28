@@ -60,6 +60,11 @@ def _parse_response(
 
         return response_409
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -90,7 +95,10 @@ def sync_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body.
+        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body. Example:
+            {'description': 'Order fulfillment', 'enabled_events': ['deposit.credited',
+            'deposit.reversed', 'refund.failed'], 'metadata': {'team': 'payments'}, 'url':
+            'https://example.com/phala-pay/webhooks'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -125,7 +133,10 @@ def sync(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body.
+        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body. Example:
+            {'description': 'Order fulfillment', 'enabled_events': ['deposit.credited',
+            'deposit.reversed', 'refund.failed'], 'metadata': {'team': 'payments'}, 'url':
+            'https://example.com/phala-pay/webhooks'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -155,7 +166,10 @@ async def asyncio_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body.
+        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body. Example:
+            {'description': 'Order fulfillment', 'enabled_events': ['deposit.credited',
+            'deposit.reversed', 'refund.failed'], 'metadata': {'team': 'payments'}, 'url':
+            'https://example.com/phala-pay/webhooks'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -188,7 +202,10 @@ async def asyncio(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body.
+        body (CreateWebhookEndpointRequest): `POST /v1/webhook_endpoints` body. Example:
+            {'description': 'Order fulfillment', 'enabled_events': ['deposit.credited',
+            'deposit.reversed', 'refund.failed'], 'metadata': {'team': 'payments'}, 'url':
+            'https://example.com/phala-pay/webhooks'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

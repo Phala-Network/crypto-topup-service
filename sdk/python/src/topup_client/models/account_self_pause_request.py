@@ -18,6 +18,9 @@ T = TypeVar("T", bound="AccountSelfPauseRequest")
 class AccountSelfPauseRequest:
     """`POST /v1/account/pause` and `POST /v1/account/resume` body.
 
+    Example:
+        {'scopes': ['quotes']}
+
     Attributes:
         scopes (list[str]): `["quotes"]`, the one scope a merchant pauses itself: no quote, deposit address, or
             network is issued while it is paused. Existing addresses keep being credited.

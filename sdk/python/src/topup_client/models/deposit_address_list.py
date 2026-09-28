@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.deposit_address_list_object import check_deposit_address_list_object
+from ..models.deposit_address_list_object import DepositAddressListObject
 from typing import cast
 
 if TYPE_CHECKING:
@@ -21,16 +23,27 @@ T = TypeVar("T", bound="DepositAddressList")
 class DepositAddressList:
     """A page of deposit addresses, newest first (<https://docs.stripe.com/api/pagination>).
 
+    Example:
+        {'data': [{'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'client_reference_id': 'team-42',
+            'client_secret': 'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071',
+            'created': 1790553600, 'id': 'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3', 'livemode': False, 'metadata': {'plan':
+            'pro'}, 'networks': [{'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'assets': [{'asset': 'PHA',
+            'contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'payment_uri': 'ethereum:0x6c5ba91642f
+            10282b576d91922ae6448c9d52f4e@1/transfer?address=0x0f45147a02e4c9d91aff20024e22095536fd5053'}], 'chain_id': 1,
+            'treasury': '0x936c1991f8da9a919fa11b557a3514719f5a4504'}], 'object': 'deposit_address', 'payments': [],
+            'retired_at': None, 'salt': '0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52', 'status':
+            'active', 'version': 1}], 'has_more': False, 'object': 'list', 'url': '/v1/deposit_addresses'}
+
     Attributes:
         data (list[DepositAddress]): The deposit addresses.
         has_more (bool): Whether more addresses follow in the direction of this page.
-        object_ (str): Always `list`.
+        object_ (DepositAddressListObject): Always `list`.
         url (str): The list's path, `/v1/deposit_addresses`.
     """
 
     data: list[DepositAddress]
     has_more: bool
-    object_: str
+    object_: DepositAddressListObject
     url: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -44,7 +57,7 @@ class DepositAddressList:
 
         has_more = self.has_more
 
-        object_ = self.object_
+        object_: str = self.object_
 
         url = self.url
 
@@ -75,7 +88,7 @@ class DepositAddressList:
 
         has_more = d.pop("has_more")
 
-        object_ = d.pop("object")
+        object_ = check_deposit_address_list_object(d.pop("object"))
 
         url = d.pop("url")
 

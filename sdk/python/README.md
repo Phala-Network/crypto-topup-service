@@ -74,8 +74,11 @@ elif event.type in ("deposit.reversed", "deposit.refunded"):
 `construct_event` fails closed: it checks the Standard Webhooks signature, the timestamp (five
 minutes' tolerance), that the body's id is the `webhook-id`, and that the event's `account` and
 `livemode` are the expected ones;
-`event.data.object` is the `Deposit` (or, for `quote.expired`, the `Quote`) as it was when the
-event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with both routes.
+`event.data.object` is the `Deposit` (a `Quote` for `quote.*`, a `Refund` for `refund.*`) as it
+was when the event happened: it is rendered with the change and never re-rendered, so read the
+object again for its current state. `*.updated` events carry `event.data.previous_attributes`, and
+an event your own request caused names it in `event.request` (`id`, `idempotency_key`).
+`sdk/examples/fastapi_app.py` is a complete FastAPI backend with both routes.
 
 ## Reference
 
@@ -87,7 +90,7 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 | `pay.quotes.update(id, metadata=)` | `POST /v1/quotes/{id}` |
 | `pay.deposit_addresses.create(client_reference_id=, metadata=)` | `POST /v1/deposit_addresses`: the customer's active address, one for every supported token and network (`networks`), its recent `payments`, and a `client_secret` for `<DepositAddress>` |
 | `pay.deposit_addresses.retrieve(id)` / `.list(client_reference_id=, status=)` / `.rotate(id)` / `.update(id, metadata=)` | `GET /v1/deposit_addresses[/{id}]`, `POST /v1/deposit_addresses/{id}/rotate`, `POST /v1/deposit_addresses/{id}` |
-| `pay.deposits.list(client_reference_id=, quote=, deposit_address=, status=, tx_hash=, created_gte=, created_lte=)` | `GET /v1/deposits`, every page; `status` is `pending`, `credited`, `rejected`, or `reversed` |
+| `pay.deposits.list(client_reference_id=, quote=, deposit_address=, status=, tx_hash=, created_gt=, created_gte=, created_lt=, created_lte=)` | `GET /v1/deposits`, every page; `status` is `pending`, `credited`, `rejected`, or `reversed` |
 | `pay.deposits.retrieve(id)` / `.update(id, metadata=)` | `GET /v1/deposits/{id}`, `POST /v1/deposits/{id}` |
 | `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.mark_paid(id, transaction_hash=, log_index=)` / `.cancel(id)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `POST /v1/refunds/{id}/mark_paid`, `POST /v1/refunds/{id}/cancel`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
 | `pay.refunds.list(deposit=, status=)` | `GET /v1/refunds`, every page |
@@ -96,14 +99,20 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 | `pay.treasuries.challenge(chain_id=, address=)` / `.create(chain_id=, message=, signature=)` / `.set_eoa(chain_id=, address=, private_key=)` / `.list()` / `.retrieve(id)` / `.cancel(id)` | `POST /v1/treasuries/challenge`, `GET\|POST /v1/treasuries`, `POST /v1/treasuries/{id}/cancel` |
 | `pay.api_keys.create(name=)` / `.list()` / `.retrieve(id)` / `.roll(id, expires_in=)` / `.revoke(id)` | `/v1/api_keys` |
 | `pay.webhook_endpoints.create(url=, enabled_events=)` / `.list()` / `.retrieve(id)` / `.update(id, …)` / `.delete(id)` / `.test(id)` | `/v1/webhook_endpoints` |
-| `pay.events.list(type=)` / `.retrieve(id)` / `.resend(id, webhook_endpoint=)` | `/v1/events` |
+| `pay.events.list(type=, types=, delivery_success=, created_gt=, …)` / `.retrieve(id)` / `.resend(id, webhook_endpoint=)` | `/v1/events` |
 | `pay.export_account(directory)` | every list, written as JSON files |
 | `pay.webhooks.construct_event(payload, headers, public_key, expected_account, expected_livemode=)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 
-Every request sends the secret key as `Authorization: Bearer ppay_sk_…`. Transport errors, `429`,
-`5xx`, and `409 idempotency_key_in_use` are retried with backoff, reusing one `Idempotency-Key`
-per `POST`. Failures raise `ApiError` with the
-service's stable `code`, `error_type`, `param`, and `request_id` (the response's `Request-Id`).
+Every request sends the secret key as `Authorization: Bearer ppay_sk_…`. Transport errors, `429`
+(after its `Retry-After`), `5xx`, and `409 idempotency_key_in_use` are retried with backoff,
+reusing one `Idempotency-Key` per `POST`; a response the service saved for the key, even a `500`,
+comes back marked `Idempotent-Replayed` and is raised as it is, since the request already ran.
+Failures raise `ApiError` with the service's stable `code`, `error_type`, `param`, `doc_url`,
+`request_id` (the response's `Request-Id`), and `retry_after`. Business-state failures, such as
+`deposit_not_final` or `quote_unexpected_state`, are `400`; only `idempotency_key_in_use` is
+`409`. Status arguments have `Literal` hints, and `EventType` names every event (`phala_pay.QuoteStatus`,
+`DepositStatus`, `RefundStatus`, `TreasuryStatus`, `EventType`, …); the generated models keep
+statuses as `str`, so a value added later still parses.
 `forwarder=(factory, implementation)`, pinned from the attested deployment, is required: every
 open quote is recomputed over its `treasury`, and every network of an active deposit address over
 its own, from your account id (read once from `GET /v1/account`, or passed as `account=`); a

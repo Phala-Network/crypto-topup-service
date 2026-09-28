@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.deposit_address_object import check_deposit_address_object
+from ..models.deposit_address_object import DepositAddressObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -27,6 +29,16 @@ class DepositAddress:
     is credited to the customer at the market (spot) price when it arrives. Rotation retires it and
     issues a new one on every network; a retired address is still credited.
 
+        Example:
+            {'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'client_reference_id': 'team-42', 'client_secret':
+                'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071', 'created':
+                1790553600, 'id': 'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3', 'livemode': False, 'metadata': {'plan': 'pro'},
+                'networks': [{'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'assets': [{'asset': 'PHA', 'contract':
+                '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'payment_uri': 'ethereum:0x6c5ba91642f10282b576d91
+                922ae6448c9d52f4e@1/transfer?address=0x0f45147a02e4c9d91aff20024e22095536fd5053'}], 'chain_id': 1, 'treasury':
+                '0x936c1991f8da9a919fa11b557a3514719f5a4504'}], 'object': 'deposit_address', 'payments': [], 'retired_at': None,
+                'salt': '0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52', 'status': 'active', 'version': 1}
+
         Attributes:
             client_reference_id (str): Your identifier of the customer.
             created (int): Creation time, Unix seconds.
@@ -38,7 +50,7 @@ class DepositAddress:
             networks (list[DepositAddressNetwork]): The address on each supported network of the mode it was issued on, by
                 `chain_id`, with
                 the tokens it takes there.
-            object_ (str): Always `deposit_address`.
+            object_ (DepositAddressObject): Always `deposit_address`.
             payments (list[Payment]): Payments to the address in the last 24 hours, newest first, at most 10, as a quote's
                 `payment`: `seen` in a block within about a block time of arriving, then `recorded` as a
                 deposit. Display only; credit from `deposit.credited`.
@@ -68,7 +80,7 @@ class DepositAddress:
     livemode: bool
     metadata: DepositAddressMetadata
     networks: list[DepositAddressNetwork]
-    object_: str
+    object_: DepositAddressObject
     payments: list[Payment]
     salt: str
     status: str
@@ -98,7 +110,7 @@ class DepositAddress:
             networks_item = networks_item_data.to_dict()
             networks.append(networks_item)
 
-        object_ = self.object_
+        object_: str = self.object_
 
         payments = []
         for payments_item_data in self.payments:
@@ -179,7 +191,7 @@ class DepositAddress:
 
             networks.append(networks_item)
 
-        object_ = d.pop("object")
+        object_ = check_deposit_address_object(d.pop("object"))
 
         payments = []
         _payments = d.pop("payments")

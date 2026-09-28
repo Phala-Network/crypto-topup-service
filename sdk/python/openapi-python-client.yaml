@@ -5,3 +5,5 @@ project_name_override: topup-client
 post_hooks:
   - "ruff check . --fix-only --quiet"
   - "ruff format . --quiet"
+# Enums (the single-value `object` of each object, the error `type`) are `Literal` types.
+literal_enums: true
