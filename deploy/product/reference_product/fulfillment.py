@@ -3,8 +3,8 @@
 The service credits a deposit once it is final, priced, and screened, and tells the product with a
 signed `deposit.credited` webhook. `Fulfillment` does what Phala Cloud's backend does with it:
 
-1. verify the Standard Webhooks `v1a` signature against the settlement key pinned from
-   attestation, over the raw body;
+1. verify the Standard Webhooks `v1a` signature against the account's webhook keys pinned from
+   attestation, over the raw body, and that the event names the product's account and mode;
 2. credit once per deposit: the order row keyed by `provider_order_id`, the deposit's `dep_` id,
    is found-or-created under a unique index, and the credit transaction and
    `complete_order_payment` commit in the same transaction;
@@ -21,7 +21,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
@@ -30,13 +30,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from topup_sdk import (
     CREDITED_EVENT,
+    AttestationError,
     CreditedDeposit,
     FulfillmentError,
     SignatureError,
     verify_webhook,
 )
 
-from .config import ProductConfig
+from .config import MissingProductKeyError, ProductConfig
 from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, ProductLedger
 
 LOG = logging.getLogger(__name__)
@@ -44,6 +45,14 @@ LOG = logging.getLogger(__name__)
 
 class TransientError(Exception):
     """A dependency is unavailable; the operation can be retried."""
+
+
+@dataclass(frozen=True)
+class PinnedKeys:
+    """The account's webhook keys in one mode, current first."""
+
+    livemode: bool
+    keys: Sequence[Ed25519PublicKey]
 
 
 @dataclass
@@ -62,22 +71,38 @@ class Fulfillment:
     """Verifies deliveries, stores every event once, and credits `deposit.credited` once."""
 
     def __init__(
-        self, config: ProductConfig, ledger: ProductLedger, settlement_key: Ed25519PublicKey
+        self,
+        config: ProductConfig,
+        ledger: ProductLedger,
+        webhook_keys: Callable[[], PinnedKeys],
     ) -> None:
+        """`webhook_keys` returns the pinned keys, pinning them on first use; it raises
+        `TransientError` or `MissingProductKeyError` while they cannot be pinned yet."""
         self.config = config
         self.ledger = ledger
-        self.settlement_key = settlement_key
+        self.webhook_keys = webhook_keys
 
     def handle(self, headers: Mapping[str, str], body: bytes) -> Answer:
         try:
-            event = verify_webhook(headers, body, self.settlement_key)
+            pinned = self.webhook_keys()
+        except (TransientError, MissingProductKeyError, AttestationError) as error:
+            # The service retries: the keys are pinned once the product key is configured.
+            LOG.warning("webhook keys are not pinned yet: %s", type(error).__name__)
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            event = verify_webhook(
+                headers,
+                body,
+                pinned.keys,
+                expected_account=self.config.product_slug,
+                expected_livemode=pinned.livemode,
+            )
         except SignatureError:
             return Answer(HTTPStatus.BAD_REQUEST)
         if event.type == CREDITED_EVENT:
             try:
                 credit = CreditedDeposit.from_event(event)
             except FulfillmentError as error:
-                # A replay of a credit delivered in the old envelope was fulfilled back then.
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
             else:
                 self.fulfill(credit)

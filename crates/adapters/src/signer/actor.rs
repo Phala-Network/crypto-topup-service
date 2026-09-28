@@ -9,7 +9,7 @@ use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
 use tokio::time::timeout;
-use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer, SignerError};
+use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer, SignerError, WebhookKeyId};
 
 /// Cloneable signer proxy backed by a dedicated thread-local actor.
 #[derive(Clone)]
@@ -69,24 +69,39 @@ impl SignerHandle {
 }
 
 impl Signer for SignerHandle {
-    async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
+    async fn sign_webhook(
+        &self,
+        key: &WebhookKeyId,
+        payload: &[u8],
+    ) -> Result<Ed25519Signature, SignerError> {
+        let key = key.clone();
         let payload = payload.to_vec();
-        self.request(|reply| Request::SignSettlement { payload, reply })
-            .await
+        self.request(|reply| Request::SignWebhook {
+            key,
+            payload,
+            reply,
+        })
+        .await
     }
 
-    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
-        self.request(|reply| Request::SettlementPublicKey { reply })
+    async fn webhook_public_key(
+        &self,
+        key: &WebhookKeyId,
+    ) -> Result<Ed25519PublicKey, SignerError> {
+        let key = key.clone();
+        self.request(|reply| Request::WebhookPublicKey { key, reply })
             .await
     }
 }
 
 enum Request {
-    SignSettlement {
+    SignWebhook {
+        key: WebhookKeyId,
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<Ed25519Signature, SignerError>>,
     },
-    SettlementPublicKey {
+    WebhookPublicKey {
+        key: WebhookKeyId,
         reply: oneshot::Sender<Result<Ed25519PublicKey, SignerError>>,
     },
 }
@@ -97,11 +112,15 @@ where
 {
     while let Some(request) = receiver.recv().await {
         match request {
-            Request::SignSettlement { payload, reply } => {
-                let _ = reply.send(signer.sign_settlement(&payload).await);
+            Request::SignWebhook {
+                key,
+                payload,
+                reply,
+            } => {
+                let _ = reply.send(signer.sign_webhook(&key, &payload).await);
             }
-            Request::SettlementPublicKey { reply } => {
-                let _ = reply.send(signer.settlement_public_key().await);
+            Request::WebhookPublicKey { key, reply } => {
+                let _ = reply.send(signer.webhook_public_key(&key).await);
             }
         }
     }
@@ -113,27 +132,33 @@ mod tests {
     use std::time::Duration;
 
     use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-    use topup_core::{Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError};
+    use topup_core::{
+        Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError, WebhookKeyId,
+    };
 
     use super::SignerHandle;
     use crate::signer::dev::DevSigner;
 
+    fn key() -> WebhookKeyId {
+        WebhookKeyId::new("acct_a", false, 1).expect("valid key id")
+    }
+
     #[tokio::test]
-    async fn round_trips_a_settlement_signature() {
-        let signer = DevSigner::new(SecretKey32::new([2; 32]));
+    async fn round_trips_a_webhook_signature() {
+        let signer = DevSigner::derive(&SecretKey32::new([2; 32]));
         let handle = SignerHandle::spawn(
             signer,
             NonZeroUsize::new(4).expect("queue capacity is non-zero"),
             Duration::from_secs(1),
         )
         .expect("signer actor should start");
-        let payload = b"actor settlement payload";
+        let payload = b"actor webhook payload";
         let public_key = handle
-            .settlement_public_key()
+            .webhook_public_key(&key())
             .await
             .expect("public key request should succeed");
         let signature = handle
-            .sign_settlement(payload)
+            .sign_webhook(&key(), payload)
             .await
             .expect("signature request should succeed");
         let verifying_key =
@@ -151,12 +176,19 @@ mod tests {
     }
 
     impl Signer for FailingSigner {
-        async fn sign_settlement(&self, _payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
+        async fn sign_webhook(
+            &self,
+            _key: &WebhookKeyId,
+            _payload: &[u8],
+        ) -> Result<Ed25519Signature, SignerError> {
             tokio::time::sleep(self.delay).await;
             Err(SignerError::SigningFailed)
         }
 
-        async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
+        async fn webhook_public_key(
+            &self,
+            _key: &WebhookKeyId,
+        ) -> Result<Ed25519PublicKey, SignerError> {
             Err(SignerError::SigningFailed)
         }
     }
@@ -173,7 +205,7 @@ mod tests {
         )
         .expect("signer actor should start");
         assert_eq!(
-            failing.sign_settlement(b"payload").await,
+            failing.sign_webhook(&key(), b"payload").await,
             Err(SignerError::SigningFailed)
         );
 
@@ -186,7 +218,7 @@ mod tests {
         )
         .expect("signer actor should start");
         assert_eq!(
-            slow.sign_settlement(b"payload").await,
+            slow.sign_webhook(&key(), b"payload").await,
             Err(SignerError::KeyUnavailable)
         );
     }

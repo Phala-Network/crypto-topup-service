@@ -4,9 +4,10 @@
 integrator, and only the printed public key and key id are sent to the service operator.
 
 `send-test-event` exercises a product's webhook receiver the way `stripe trigger` does: it signs a
-synthetic `deposit.credited` with a test seed the receiver's test instance pins in place of the
-service key, delivers it, delivers it again, and delivers it once more with a foreign signature.
-It passes when the first two answers are `2xx` and the third is `4xx`; the product then checks
+synthetic test-mode `deposit.credited` of `--account` with a test seed the receiver's test
+instance pins in place of the account's webhook key, delivers it, delivers it again, delivers it
+once more with a foreign signature, and once as another account's event signed with the pinned
+key. It passes when the first two answers are `2xx` and the others `4xx`; the product then checks
 its ledger holds exactly one credit of `--amount` cents for `--account-id`.
 """
 
@@ -44,9 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     test.add_argument("--url", required=True, help="the receiver's webhook URL")
     test.add_argument(
-        "--seed-file", required=True, type=Path, help="test seed the receiver pins as service key"
+        "--seed-file",
+        required=True,
+        type=Path,
+        help="test seed the receiver pins as its webhook key",
     )
-    test.add_argument("--account-id", required=True, help="a test account of the receiver")
+    test.add_argument("--account", required=True, help="the receiver's account, acct_…")
+    test.add_argument("--account-id", required=True, help="a test customer of the receiver")
     test.add_argument("--amount", type=int, default=100, help="credit in cents")
     args = parser.parse_args(argv)
 
@@ -55,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         report = send_test_event(
             args.url,
             Ed25519PrivateKey.from_private_bytes(seed),
+            account=args.account,
             account_id=args.account_id,
             amount=args.amount,
         )
@@ -80,60 +86,67 @@ def send_test_event(
     url: str,
     key: Ed25519PrivateKey,
     *,
+    account: str,
     account_id: str,
     amount: int,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
-    """Delivers one synthetic `deposit.credited` three times and reports the answers."""
+    """Delivers one synthetic test-mode `deposit.credited` of `account` four times and reports
+    the answers."""
     tx_hash = "0x" + secrets.token_hex(32)
     deposit = deposit_id(31337, tx_hash, 0)
     event_id = credited_event_id(deposit)
     now = int(time.time())
-    body = json.dumps(
-        {
-            "id": event_id,
-            "object": "event",
-            "type": CREDITED_EVENT,
-            "created": now,
-            "data": {
-                "object": {
-                    "id": deposit,
-                    "object": "deposit",
-                    "account_id": account_id,
-                    "quote": None,
-                    "status": "credited",
-                    "rejection_reason": None,
-                    "chain_id": 31337,
-                    "asset": "test",
-                    "asset_contract": "0x" + "00" * 20,
-                    "amount_atomic": str(amount),
-                    "amount": amount,
-                    "currency": "usd",
-                    "exchange_rate": "0.10000000",
-                    "price_source": "spot",
-                    "valued_at": now,
-                    "address": "0x" + "00" * 20,
-                    "from_address": "0x" + "00" * 20,
-                    "tx_hash": tx_hash,
-                    "log_index": 0,
-                    "block_number": 1,
-                    "amount_refunded_atomic": "0",
-                    "refunded": False,
-                    "created": now,
-                }
-            },
+    envelope = {
+        "id": event_id,
+        "object": "event",
+        "account": account,
+        "livemode": False,
+        "type": CREDITED_EVENT,
+        "created": now,
+        "data": {
+            "object": {
+                "id": deposit,
+                "object": "deposit",
+                "livemode": False,
+                "account_id": account_id,
+                "quote": None,
+                "status": "credited",
+                "rejection_reason": None,
+                "chain_id": 31337,
+                "asset": "test",
+                "asset_contract": "0x" + "00" * 20,
+                "amount_atomic": str(amount),
+                "amount": amount,
+                "currency": "usd",
+                "exchange_rate": "0.10000000",
+                "price_source": "spot",
+                "valued_at": now,
+                "address": "0x" + "00" * 20,
+                "from_address": "0x" + "00" * 20,
+                "tx_hash": tx_hash,
+                "log_index": 0,
+                "block_number": 1,
+                "amount_refunded_atomic": "0",
+                "refunded": False,
+                "created": now,
+            }
         },
-        separators=(",", ":"),
+    }
+    body = json.dumps(envelope, separators=(",", ":")).encode()
+    other_account = json.dumps(
+        {**envelope, "account": "acct_" + "0" * 32}, separators=(",", ":")
     ).encode()
-    cases = [("first", key, True), ("duplicate", key, True)]
-    cases.append(("foreign_signature", Ed25519PrivateKey.generate(), False))
+    cases = [("first", key, body, True), ("duplicate", key, body, True)]
+    cases.append(("foreign_signature", Ed25519PrivateKey.generate(), body, False))
+    cases.append(("other_account", key, other_account, False))
     results = []
     with httpx.Client(timeout=20, follow_redirects=False, transport=transport) as client:
-        for case, signing_key, accept in cases:
-            headers = sign_webhook(signing_key, event_id, int(time.time()), body)
+        for case, signing_key, content, accept in cases:
+            headers = sign_webhook(signing_key, event_id, int(time.time()), content)
             headers["content-type"] = "application/json"
             try:
-                status: int | None = client.post(url, content=body, headers=headers).status_code
+                status: int | None = client.post(url, content=content, headers=headers).status_code
             except httpx.HTTPError:
                 status = None
             ok = status is not None and (200 <= status < 300 if accept else 400 <= status < 500)

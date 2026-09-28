@@ -16,7 +16,7 @@ const TREASURY = "0x936c1991f8dA9a919fa11b557a3514719f5A4504";
 /**
  * Runs the whole demo locally: Anvil as Sepolia with the test token, the fake top-up service
  * (e2e/fake_service.py), and the reference product serving the built page at `/demo/`, pinned to
- * the fake service's settlement key. Tests read DEMO_URL, ANVIL_URL, PAYER_ADDRESS,
+ * the fake service's webhook key. Tests read DEMO_URL, ANVIL_URL, PAYER_ADDRESS,
  * TOKEN_ADDRESS, and TREASURY. Service logs go to test-results/services.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
@@ -68,7 +68,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       throw new Error("token deployment failed");
     }
 
-    const settlementSeed = randomBytes(32);
+    const webhookSeed = randomBytes(32);
     // The stand-in service does not check the key; the SDK needs a secret key's form.
     writeFileSync(join(work, "product.key"), `ppay_sk_test_${"A".repeat(43)}000000`, { mode: 0o600 });
     const product = `http://127.0.0.1:${productPort}`;
@@ -83,7 +83,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           join(web, "e2e/fake_service.py"),
           ...["--port", String(servicePort), "--rpc", anvil, "--token", token],
           ...["--product-webhook", `${product}/webhooks`],
-          ...["--settlement-seed", settlementSeed.toString("hex")],
+          ...["--webhook-seed", webhookSeed.toString("hex")],
           ...["--factory", FACTORY, "--implementation", IMPLEMENTATION],
           ...["--product", "acme", "--treasury", TREASURY],
         ],
@@ -107,7 +107,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       listen_port: productPort,
       ledger_path: join(work, "ledger.sqlite3"),
       driver_public_key: rawPublicKey(generateKeyPairSync("ed25519").publicKey.export({ format: "der", type: "spki" })),
-      settlement_public_key: rawPublicKey(publicKeyOf(settlementSeed)),
+      webhook_public_keys: [rawPublicKey(publicKeyOf(webhookSeed))],
       demo_dir: join(web, "dist"),
     };
     writeFileSync(join(work, "product.json"), JSON.stringify(config));

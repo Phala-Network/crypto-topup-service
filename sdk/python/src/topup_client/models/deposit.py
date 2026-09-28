@@ -56,6 +56,9 @@ class Deposit:
                 always sends it; it is optional in the schema so clients also parse responses and events
                 from servers that predate it.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
+            livemode (bool | Unset): Whether the deposit is on a live-mode route. Always sent; optional in the schema like
+                the
+                quote's.
             metadata (DepositMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a
                 copy of the
                 quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
@@ -88,6 +91,7 @@ class Deposit:
     asset: None | str | Unset = UNSET
     deposit_address: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
+    livemode: bool | Unset = UNSET
     metadata: DepositMetadata | Unset = UNSET
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
@@ -155,6 +159,8 @@ class Deposit:
         else:
             exchange_rate = self.exchange_rate
 
+        livemode = self.livemode
+
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
@@ -215,6 +221,8 @@ class Deposit:
             field_dict["deposit_address"] = deposit_address
         if exchange_rate is not UNSET:
             field_dict["exchange_rate"] = exchange_rate
+        if livemode is not UNSET:
+            field_dict["livemode"] = livemode
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if price_source is not UNSET:
@@ -302,6 +310,8 @@ class Deposit:
 
         exchange_rate = _parse_exchange_rate(d.pop("exchange_rate", UNSET))
 
+        livemode = d.pop("livemode", UNSET)
+
         _metadata = d.pop("metadata", UNSET)
         metadata: DepositMetadata | Unset
         if isinstance(_metadata, Unset):
@@ -374,6 +384,7 @@ class Deposit:
             asset=asset,
             deposit_address=deposit_address,
             exchange_rate=exchange_rate,
+            livemode=livemode,
             metadata=metadata,
             price_source=price_source,
             quote=quote,

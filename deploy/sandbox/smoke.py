@@ -2,7 +2,8 @@
 
 These are the calls a product such as Phala Cloud makes, and the checks it adds to each:
 
-1. pin the service's settlement key from attestation evidence bound to a fresh nonce;
+1. pin the account's webhook keys from attestation evidence bound to a fresh nonce, fetched with
+   the account's API key;
 2. create a quote (the account is created with it); the client recomputes its single-use address
    from the pinned forwarder;
 3. list the account's deposits;
@@ -24,7 +25,7 @@ import argparse
 import json
 import secrets
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -32,15 +33,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from topup_client.models import Quote
 from topup_sdk import (
-    AttestationError,
     CreditedDeposit,
     TopupClient,
     WebhookEvent,
-    load_public_key,
+    verify_attestation_binding,
     verify_webhook,
 )
-
-SETTLEMENT_KEYID = "settlement/v1"
 
 
 @dataclass(frozen=True)
@@ -61,6 +59,10 @@ class Integration:
         values = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls(**{field.name: values[field.name] for field in fields(cls)})
 
+    def livemode(self) -> bool:
+        """The mode of the product's API key, and so of its webhooks."""
+        return Path(self.api_key_file).read_text(encoding="ascii").startswith("ppay_sk_live_")
+
     def client(self) -> TopupClient:
         """A client of the product's account (`product_slug`, `acct_…`) with its secret key; with
         the forwarder pinned, it recomputes every open quote's address before returning it."""
@@ -72,20 +74,25 @@ class Integration:
         )
 
 
-# 1. The settlement key ---------------------------------------------------------------------------
+# 1. The webhook keys ----------------------------------------------------------------------------
 
 
-def pin_settlement_key(client: TopupClient) -> Ed25519PublicKey:
-    """Returns the settlement key from attestation evidence bound to a fresh nonce.
+def pin_webhook_keys(config: Integration, client: TopupClient) -> list[Ed25519PublicKey]:
+    """Returns the account's webhook keys in the API key's mode, current first, from attestation
+    evidence bound to a fresh nonce.
 
-    `TopupClient.attestation` checks that the report data binds the nonce and the key. In
-    production, also verify the TDX quote with the dstack verifier
-    (deploy/dstack-verifier.sh), then pin `(keyid, public key)` in configuration.
+    The report data binds the nonce, the account, the mode, and the keys. In production, also
+    verify the TDX quote with the dstack verifier (deploy/dstack-verifier.sh), then pin the keys
+    in configuration.
     """
-    evidence = client.attestation(secrets.token_bytes(32))
-    if evidence.keyid != SETTLEMENT_KEYID:
-        raise AttestationError("attestation names an unexpected settlement key id")
-    return load_public_key(evidence.settlement_pubkey)
+    nonce = secrets.token_bytes(32)
+    evidence = client.attestation(nonce)
+    return verify_attestation_binding(
+        evidence,
+        nonce,
+        expected_account=config.product_slug,
+        expected_livemode=config.livemode(),
+    )
 
 
 # 2-3. Quotes and deposits --------------------------------------------------------------------
@@ -106,19 +113,27 @@ def quote(config: Integration, client: TopupClient, account: str, amount_minor: 
 
 
 def receive_webhook(
-    settlement_key: Ed25519PublicKey,
+    config: Integration,
+    webhook_keys: Sequence[Ed25519PublicKey],
     headers: Mapping[str, str],
     body: bytes,
     fulfill: Callable[[CreditedDeposit], None],
 ) -> WebhookEvent:
-    """Verifies a delivery and fulfills it when it is `deposit.credited`.
+    """Verifies a delivery, fail-closed, as the account's event in the key's mode, and fulfills
+    it when it is `deposit.credited`.
 
     `SignatureError` means answer `400`. `fulfill` must credit `credit.amount` cents to
     `credit.account_id` at most once per `credit.fulfillment_key` (the `dep_` id), committing
     before this returns, and treat a repeat as done; answer `2xx` only after it returns. Every
     other event type is informational: notify the user and refresh history.
     """
-    event = verify_webhook(headers, body, settlement_key)
+    event = verify_webhook(
+        headers,
+        body,
+        webhook_keys,
+        expected_account=config.product_slug,
+        expected_livemode=config.livemode(),
+    )
     if event.type == "deposit.credited":
         fulfill(CreditedDeposit.from_event(event))
     return event
@@ -131,8 +146,8 @@ def main() -> int:
     args = parser.parse_args()
     config = Integration.load(args.config)
     with config.client() as client:
-        pin_settlement_key(client)
-        print("pinned the settlement key from attestation")
+        keys = pin_webhook_keys(config, client)
+        print(f"pinned {len(keys)} webhook key(s) of {config.product_slug} from attestation")
         account = f"example-{uuid.uuid4().hex[:12]}"
         lock = quote(config, client, account, args.amount_minor)
         print(

@@ -1,6 +1,6 @@
 """The product service: webhook receiver with fulfillment, and the product's account API.
 
-It pins the service's settlement key from attestation, keeps its ledger in SQLite, and serves its
+It pins its account's webhook keys from attestation, keeps its ledger in SQLite, and serves its
 own account API, through which a user registers a workspace, gets a quote-first single-use
 address, and reads its deposits, credits, and webhook events. It holds the product key and calls
 the service on the user's behalf, as Phala Cloud's backend does.
@@ -28,7 +28,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from topup_client.models import AttestationResponse, Quote
 from topup_sdk import (
     ApiError,
-    AttestationError,
     SignatureError,
     TopupClient,
     load_public_key,
@@ -41,12 +40,11 @@ from topup_sdk.ids import DEPOSIT, object_id, parse_id
 from .config import (
     DRIVER_KEYID,
     EVM_ADDRESS,
-    SETTLEMENT_KEYID,
     MissingProductKeyError,
     ProductConfig,
 )
 from .demo import DemoConsole, Response
-from .fulfillment import Answer, Fulfillment, TransientError, parse_decimal
+from .fulfillment import Answer, Fulfillment, PinnedKeys, TransientError, parse_decimal
 from .ledger import ProductLedger
 
 LOG = logging.getLogger(__name__)
@@ -291,17 +289,20 @@ def _json_object(body: bytes) -> dict[str, Any]:
     return value
 
 
-def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519PublicKey:
-    """Returns the settlement key from attestation evidence bound to a fresh nonce.
+def pin_webhook_keys(config: ProductConfig, *, wait_s: float = 0) -> PinnedKeys:
+    """Returns the account's webhook keys in the API key's mode, from attestation evidence bound
+    to a fresh nonce and fetched with the product's API key.
 
-    `verify_attestation_binding` checks that the report data binds the nonce and the key.
-    Production integrators must also verify the TDX quote with the dstack
-    verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin `(keyid, public key)` in
-    configuration; a configured `settlement_public_key` skips the fetch. While the service is
-    unreachable this retries for up to `wait_s` seconds.
+    `verify_attestation_binding` checks that the report data binds the nonce, the account, the
+    mode, and the keys. Production integrators must also verify the TDX quote with the dstack
+    verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin the keys in
+    configuration; configured `webhook_public_keys` skip the fetch. While the service is
+    unreachable this retries for up to `wait_s` seconds; without the API key it raises
+    `MissingProductKeyError`.
     """
-    if config.settlement_public_key is not None:
-        return load_public_key(config.settlement_public_key)
+    livemode = config.livemode()
+    if config.webhook_public_keys:
+        return PinnedKeys(livemode, [load_public_key(key) for key in config.webhook_public_keys])
     deadline = time.monotonic() + wait_s
     while True:
         nonce = secrets.token_bytes(32)
@@ -309,6 +310,7 @@ def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519Pu
             response = httpx.get(
                 config.service_url.rstrip("/") + "/v1/attestation",
                 params={"nonce": nonce.hex()},
+                headers={"Authorization": f"Bearer {config.api_key()}"},
                 timeout=30,
             )
             response.raise_for_status()
@@ -321,11 +323,27 @@ def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519Pu
                 "waiting for %s/v1/attestation: %s", config.service_url, type(error).__name__
             )
             time.sleep(5)
-    verify_attestation_binding(evidence, nonce)
-    if evidence.keyid != SETTLEMENT_KEYID:
-        raise AttestationError("attestation names an unexpected settlement key id")
-    LOG.warning("pinned settlement key from attestation; verify the quote before production")
-    return load_public_key(evidence.settlement_pubkey)
+    keys = verify_attestation_binding(
+        evidence, nonce, expected_account=config.product_slug, expected_livemode=livemode
+    )
+    LOG.warning("pinned webhook keys from attestation; verify the quote before production")
+    return PinnedKeys(livemode, keys)
+
+
+class WebhookKeys:
+    """Pins the account's webhook keys once, on first use, so the product starts before its API
+    key is configured (a CVM before its secrets are sealed)."""
+
+    def __init__(self, config: ProductConfig) -> None:
+        self._config = config
+        self._lock = threading.Lock()
+        self._pinned: PinnedKeys | None = None
+
+    def __call__(self, *, wait_s: float = 0) -> PinnedKeys:
+        with self._lock:
+            if self._pinned is None:
+                self._pinned = pin_webhook_keys(self._config, wait_s=wait_s)
+            return self._pinned
 
 
 def register_team(ledger: ProductLedger, team: str, *, suspended: bool = False) -> None:
@@ -367,9 +385,13 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
     """Runs the product: webhook receiver with fulfillment, account API, and demo checkout."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
-    settlement_key = pin_settlement_key(config, wait_s=pin_wait_s)
+    webhook_keys = WebhookKeys(config)
+    try:
+        webhook_keys(wait_s=pin_wait_s)
+    except MissingProductKeyError:
+        LOG.warning("the product key is not configured; webhook keys are pinned once it is")
     ledger = ProductLedger(config.ledger_path)
-    fulfillment = Fulfillment(config, ledger, settlement_key)
+    fulfillment = Fulfillment(config, ledger, webhook_keys)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
     demo = None if config.demo_dir is None else DemoConsole(config, ledger, config.demo_dir)
     try:

@@ -581,7 +581,7 @@ function TrustStrip({ trust, account }: { trust: Trust | null; account: Account 
           ) : attestation.binding_verified ? (
             <p className="small">
               <span className="success">Verified</span> for a fresh nonce: the TDX quote's report
-              data binds the settlement key <code title={attestation.settlement_pubkey}>{short(attestation.settlement_pubkey ?? "")}</code>{" "}
+              data binds this account's webhook key <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code>{" "}
               that signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
             </p>
           ) : (

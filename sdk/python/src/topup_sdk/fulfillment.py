@@ -5,7 +5,9 @@ service owes the product `amount` cents for `account_id`. A product credits each
 keyed by `fulfillment_key`, the deposit's `dep_` id, under a unique index, and answers `2xx`
 after that commit:
 
-    event = verify_webhook(headers, raw_body, settlement_key)
+    event = verify_webhook(
+        headers, raw_body, webhook_keys, expected_account="acct_…", expected_livemode=True
+    )
     if event.type == CREDITED_EVENT:
         fulfill(CreditedDeposit.from_event(event))
 
@@ -70,12 +72,7 @@ class CreditedDeposit:
 
     @classmethod
     def from_event(cls, event: WebhookEvent) -> CreditedDeposit:
-        """Parses a verified event; raises `FulfillmentError` for any other shape.
-
-        A `deposit.credited` in the old envelope (an operator replay of an event delivered before
-        prefixed ids) is refused here: it was fulfilled when first delivered, so acknowledge it
-        without crediting.
-        """
+        """Parses a verified event; raises `FulfillmentError` for any other shape."""
         if event.type != CREDITED_EVENT:
             raise FulfillmentError(f"expected {CREDITED_EVENT}, got {event.type}")
         deposit = event.object

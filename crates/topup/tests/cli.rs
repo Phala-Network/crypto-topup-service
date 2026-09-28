@@ -232,30 +232,50 @@ fn run_requires_a_valid_public_origin() {
     }
 }
 
+const ACCOUNT: &str = "acct_0123456789abcdef0123456789abcdef";
+
 #[test]
-fn attest_requires_a_hex_nonce() {
-    let missing = topup(&["attest"]);
+fn attest_requires_a_hex_nonce_and_an_account() {
+    let missing = topup(&["attest", "--account", ACCOUNT]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--nonce"));
 
-    let invalid = topup(&["attest", "--nonce", "not-hex"]);
+    let no_account = topup(&["attest", "--nonce", "00"]);
+    assert!(!no_account.status.success());
+    assert!(String::from_utf8_lossy(&no_account.stderr).contains("--account"));
+
+    let invalid = topup(&["attest", "--account", ACCOUNT, "--nonce", "not-hex"]);
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("valid hexadecimal"));
 
-    let empty = topup(&["attest", "--nonce", ""]);
+    let empty = topup(&["attest", "--account", ACCOUNT, "--nonce", ""]);
     assert!(!empty.status.success());
     assert!(String::from_utf8_lossy(&empty.stderr).contains("non-empty hexadecimal"));
 
     let oversized = "ab".repeat(33);
-    let oversized = topup(&["attest", "--nonce", &oversized]);
+    let oversized = topup(&["attest", "--account", ACCOUNT, "--nonce", &oversized]);
     assert!(!oversized.status.success());
     assert!(String::from_utf8_lossy(&oversized.stderr).contains("at most 32 bytes"));
+
+    for (account, version) in [("cus_1", "1"), (ACCOUNT, "0")] {
+        let output = topup(&[
+            "attest",
+            "--account",
+            account,
+            "--version",
+            version,
+            "--nonce",
+            "00",
+        ]);
+        assert!(!output.status.success(), "{account} v{version}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("acct_ id"));
+    }
 }
 
 #[cfg(not(feature = "dev-signer"))]
 #[test]
 fn dev_attestation_is_not_available_without_the_feature() {
-    let output = topup(&["attest", "--nonce", "00", "--dev"]);
+    let output = topup(&["attest", "--account", ACCOUNT, "--nonce", "00", "--dev"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--dev'"));
 }
@@ -264,15 +284,23 @@ fn dev_attestation_is_not_available_without_the_feature() {
 #[test]
 fn dev_attestation_prints_the_required_json_shape() {
     let nonce = "ab".repeat(32);
-    let output = topup(&["attest", "--nonce", &nonce, "--dev"]);
+    let output = topup(&["attest", "--account", ACCOUNT, "--nonce", &nonce, "--dev"]);
     assert!(output.status.success());
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
     let object = value.as_object().expect("attestation should be an object");
 
-    assert_eq!(object.len(), 6);
-    assert_eq!(value["keyid"], "settlement/v1");
-    assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
+    assert_eq!(object.len(), 8);
+    assert_eq!(value["object"], "attestation");
+    assert_eq!(value["account"], ACCOUNT);
+    assert_eq!(value["livemode"], false);
+    assert_eq!(value["webhook_keys"][0]["version"], 1);
+    assert_eq!(
+        value["webhook_keys"][0]["public_key"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
     assert_eq!(value["app_id"], "");
@@ -281,27 +309,55 @@ fn dev_attestation_prints_the_required_json_shape() {
 
 #[cfg(feature = "dev-signer")]
 #[test]
-fn dev_attestation_binds_the_nonce_and_settlement_key_like_the_api() {
-    use topup_adapters::attestation::report_data;
+fn dev_attestation_binds_the_nonce_account_mode_and_keys_like_the_api() {
+    use topup_adapters::attestation::{AttestedWebhookKey, report_data};
 
-    let output = topup(&["attest", "--nonce", "00010203", "--dev"]);
+    let output = topup(&[
+        "attest",
+        "--account",
+        ACCOUNT,
+        "--live",
+        "--version",
+        "2",
+        "--version",
+        "1",
+        "--nonce",
+        "00010203",
+        "--dev",
+    ]);
     assert!(output.status.success());
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
-    let settlement = topup_core::Ed25519PublicKey(
-        hex::decode(value["settlement_pubkey"].as_str().expect("settlement key"))
-            .expect("hex settlement key")
-            .try_into()
-            .expect("32-byte settlement key"),
+    let keys: Vec<AttestedWebhookKey> = value["webhook_keys"]
+        .as_array()
+        .expect("webhook keys")
+        .iter()
+        .map(|key| AttestedWebhookKey {
+            version: u32::try_from(key["version"].as_u64().expect("version")).expect("u32"),
+            public_key: topup_core::Ed25519PublicKey(
+                hex::decode(key["public_key"].as_str().expect("public key"))
+                    .expect("hex public key")
+                    .try_into()
+                    .expect("32-byte public key"),
+            ),
+        })
+        .collect();
+    assert_eq!(
+        keys.iter().map(|key| key.version).collect::<Vec<_>>(),
+        [2, 1]
     );
+    assert_ne!(keys[0].public_key, keys[1].public_key);
+    assert_eq!(value["livemode"], true);
     assert_eq!(
         value["report_data"],
-        hex::encode(report_data(&[0, 1, 2, 3], &settlement))
+        hex::encode(report_data(&[0, 1, 2, 3], ACCOUNT, true, &keys).expect("report data"))
     );
 
     // The operator key is gone with the flusher; its options are no longer accepted.
     let removed = topup(&[
         "attest",
+        "--account",
+        ACCOUNT,
         "--nonce",
         "00",
         "--dev",

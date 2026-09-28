@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
-use topup_core::Signer as _;
+use topup_core::{Signer as _, WebhookKeyId};
 
 type Requests = Arc<Mutex<Vec<String>>>;
 
@@ -76,7 +76,7 @@ async fn get_key(State(requests): State<Requests>, Json(body): Json<Value>) -> J
 }
 
 #[tokio::test]
-async fn signer_requests_only_its_fixed_domains() -> Result<()> {
+async fn signer_requests_only_its_per_account_webhook_and_fixed_domains() -> Result<()> {
     let agent = GuestAgent::start().await?;
     let signer = DstackSigner::with_endpoint(agent.endpoint.clone());
     let handle = SignerHandle::spawn(
@@ -85,12 +85,18 @@ async fn signer_requests_only_its_fixed_domains() -> Result<()> {
         Duration::from_secs(5),
     )?;
 
-    handle.settlement_public_key().await?;
-    handle.sign_settlement(b"payload").await?;
+    let live = WebhookKeyId::new("acct_0123", true, 1).context("valid key id")?;
+    let test = WebhookKeyId::new("acct_0123", false, 2).context("valid key id")?;
+    handle.webhook_public_key(&live).await?;
+    handle.sign_webhook(&test, b"payload").await?;
     signer.derive_backup_key().await?;
     assert_eq!(
         agent.take_requests(),
-        vec!["settlement/v1", "settlement/v1", "backup/v1"]
+        vec![
+            "settlement/acct_0123/live/v1",
+            "settlement/acct_0123/test/v2",
+            "backup/v1"
+        ]
     );
     Ok(())
 }

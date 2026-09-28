@@ -20,8 +20,8 @@ name: Deploy
 # `upgrade` (deploy/README.md, "Attested settings"). topup's public origin is its custom domain,
 # https://vars.TOPUP_DOMAIN, served by dstack-ingress in the CVM (deploy/README.md, "Custom domain");
 # the summary lists the DNS records the owner creates for it. The product's TOPUP_ORIGIN is that
-# origin: it calls topup's API there and, at startup, pins from there the settlement/v1 key that
-# verifies topup's webhooks.
+# origin: it calls topup's API there and pins from there, with its API key, its account's webhook
+# key that verifies topup's webhooks.
 #
 # Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by
 # deploy/phala-cvm.sh:

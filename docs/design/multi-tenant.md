@@ -551,14 +551,18 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   Each account has one ed25519 `v1a` key per mode, derived from dstack KMS at
   `settlement/{acct}/{live|test}/v1`. The service stores no secret; the merchant holds a public
   key. Rotation bumps the version and sends both signatures during the overlap (the spec's
-  multi-signature rotation).
+  multi-signature rotation): the merchant rolls with `POST /v1/account/webhook_keys/roll
+  {expires_in}` (at most 7 days, as an API key roll), and the previous version is kept in
+  `retiring_webhook_keys` until it expires.
 - **Attestation.** `GET /v1/attestation?nonce=…`, authenticated with the account's key, returns
-  the TDX quote with `report_data = sha256(nonce ‖ account_id ‖ livemode ‖ account public key)`.
+  the TDX quote with `report_data = sha256(nonce ‖ account_id ‖ livemode ‖ account public key)`,
+  length-prefixed and listing every signing version (architecture §14 has the exact bytes).
   The merchant verifies it once with the dstack verifier and pins the **public key**, which is
   stable across releases because the KMS derives it from the app id and path; merchants do not
   track each release's compose hash.
-- **SDK.** `construct_event(payload, headers, public_key, expected_account)` fails closed unless
-  the signature, `event.account`, and `event.livemode` all match.
+- **SDK.** `construct_event(payload, headers, public_key, expected_account, *,
+  expected_livemode)` fails closed unless the signature, `event.account`, and `event.livemode`
+  all match.
 - **Endpoints.** Stripe-style: up to 16 per account and mode, `url`, `enabled_events`, status,
   managed through `/v1/webhook_endpoints`. No URL challenge (Stripe has none);
   `POST /v1/webhook_endpoints/{id}/test` sends a test event instead. `https` required in live
@@ -721,6 +725,7 @@ GET    /v1/sweeps?chain_id&token                     unswept balances and the fl
 GET    /v1/events?type&created[...], GET /v1/events/{id}, POST /v1/events/{id}/resend
 GET|POST /v1/webhook_endpoints, GET|POST|DELETE /v1/webhook_endpoints/{id}, POST …/{id}/test
 GET    /v1/attestation?nonce=…                       authenticated; binds the account's key
+POST   /v1/account/webhook_keys/roll {expires_in}   next key version; the old one signs ≤ 7 days
 
 POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason}   + first keys
 POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, reason}

@@ -2,63 +2,76 @@
 
 use sha2::{Digest as _, Sha256};
 use topup_core::{
-    Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32, Signer, SignerError,
+    Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError, WebhookKeyId,
 };
 
-use super::{settlement_public_key, sign_settlement};
+use super::{ed25519_public_key, sign_ed25519};
 
-/// A signer backed by a process-memory settlement key.
+/// A signer deriving every webhook key from a process-memory seed.
 pub struct DevSigner {
-    settlement_key: SecretKey32,
+    seed: SecretKey32,
 }
 
 impl DevSigner {
-    /// Creates a development signer from an explicit settlement key.
-    #[must_use]
-    pub const fn new(settlement_key: SecretKey32) -> Self {
-        Self { settlement_key }
-    }
-
-    /// Derives the development settlement key from `seed` with the dstack signer's domain.
+    /// Creates a development signer whose keys derive from `seed` with the dstack signer's
+    /// domains.
     ///
-    /// The key is `SHA-256(seed || "settlement/v1")`. This mirrors the domain separation only; it
-    /// is not dstack's key derivation.
+    /// A key is `SHA-256(seed || domain)`, for example `settlement/acct_…/test/v1`. This mirrors
+    /// the domain separation only; it is not dstack's key derivation.
     #[must_use]
     pub fn derive(seed: &SecretKey32) -> Self {
+        Self {
+            seed: SecretKey32::new(*seed.expose_secret()),
+        }
+    }
+
+    fn key(&self, key: &WebhookKeyId) -> SecretKey32 {
         let mut hasher = Sha256::new();
-        hasher.update(seed.expose_secret());
-        hasher.update(SETTLEMENT_KEY_DOMAIN.as_bytes());
-        Self::new(SecretKey32::new(hasher.finalize().into()))
+        hasher.update(self.seed.expose_secret());
+        hasher.update(key.domain().as_bytes());
+        SecretKey32::new(hasher.finalize().into())
     }
 }
 
 impl Signer for DevSigner {
-    async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
-        Ok(sign_settlement(&self.settlement_key, payload))
+    async fn sign_webhook(
+        &self,
+        key: &WebhookKeyId,
+        payload: &[u8],
+    ) -> Result<Ed25519Signature, SignerError> {
+        Ok(sign_ed25519(&self.key(key), payload))
     }
 
-    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
-        Ok(settlement_public_key(&self.settlement_key))
+    async fn webhook_public_key(
+        &self,
+        key: &WebhookKeyId,
+    ) -> Result<Ed25519PublicKey, SignerError> {
+        Ok(ed25519_public_key(&self.key(key)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-    use topup_core::{SecretKey32, Signer as _};
+    use topup_core::{SecretKey32, Signer as _, WebhookKeyId};
 
     use super::DevSigner;
 
+    fn key(account: &str, livemode: bool, version: u32) -> WebhookKeyId {
+        WebhookKeyId::new(account, livemode, version).expect("valid key id")
+    }
+
     #[tokio::test]
-    async fn signs_and_verifies_settlement_payloads() {
-        let signer = DevSigner::new(SecretKey32::new([2; 32]));
-        let payload = b"settlement payload";
+    async fn signs_and_verifies_webhook_payloads() {
+        let signer = DevSigner::derive(&SecretKey32::new([2; 32]));
+        let id = key("acct_a", false, 1);
+        let payload = b"webhook payload";
         let public_key = signer
-            .settlement_public_key()
+            .webhook_public_key(&id)
             .await
             .expect("development key should be valid");
         let signature = signer
-            .sign_settlement(payload)
+            .sign_webhook(&id, payload)
             .await
             .expect("development signing should succeed");
         let verifying_key = VerifyingKey::from_bytes(&public_key.0)
@@ -72,14 +85,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derived_key_is_deterministic_per_seed() {
-        let key = |seed| async move {
+    async fn keys_are_deterministic_and_distinct_per_account_mode_and_version() {
+        let public = |seed, id: WebhookKeyId| async move {
             DevSigner::derive(&SecretKey32::new([seed; 32]))
-                .settlement_public_key()
+                .webhook_public_key(&id)
                 .await
                 .expect("derived key is valid")
         };
-        assert_eq!(key(5).await, key(5).await);
-        assert_ne!(key(5).await, key(6).await);
+        let base = public(5, key("acct_a", true, 1)).await;
+        assert_eq!(base, public(5, key("acct_a", true, 1)).await);
+        for other in [
+            public(6, key("acct_a", true, 1)).await,
+            public(5, key("acct_b", true, 1)).await,
+            public(5, key("acct_a", false, 1)).await,
+            public(5, key("acct_a", true, 2)).await,
+        ] {
+            assert_ne!(base, other);
+        }
     }
 }

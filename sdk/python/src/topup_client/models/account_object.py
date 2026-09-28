@@ -8,7 +8,11 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
 from typing import cast
+
+if TYPE_CHECKING:
+    from ..models.webhook_key_version import WebhookKeyVersion
 
 
 T = TypeVar("T", bound="AccountObject")
@@ -26,6 +30,10 @@ class AccountObject:
         name (str): Display name.
         object_ (str): Always `account`.
         paused_scopes (list[str]): Active account-level pause scopes.
+        webhook_keys (list[WebhookKeyVersion] | Unset): The keys that sign this mode's webhooks: the current one first,
+            then any previous one
+            still signing during a rotation. Their public keys come from `GET /v1/attestation`. Always
+            sent; optional in the schema so clients also parse objects from servers before it.
     """
 
     charges_enabled: bool
@@ -35,9 +43,12 @@ class AccountObject:
     name: str
     object_: str
     paused_scopes: list[str]
+    webhook_keys: list[WebhookKeyVersion] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.webhook_key_version import WebhookKeyVersion  # noqa: PLC0415
+
         charges_enabled = self.charges_enabled
 
         created = self.created
@@ -52,6 +63,13 @@ class AccountObject:
 
         paused_scopes = self.paused_scopes
 
+        webhook_keys: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.webhook_keys, Unset):
+            webhook_keys = []
+            for webhook_keys_item_data in self.webhook_keys:
+                webhook_keys_item = webhook_keys_item_data.to_dict()
+                webhook_keys.append(webhook_keys_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -65,11 +83,15 @@ class AccountObject:
                 "paused_scopes": paused_scopes,
             }
         )
+        if webhook_keys is not UNSET:
+            field_dict["webhook_keys"] = webhook_keys
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.webhook_key_version import WebhookKeyVersion  # noqa: PLC0415
+
         d = dict(src_dict)
         charges_enabled = d.pop("charges_enabled")
 
@@ -85,6 +107,15 @@ class AccountObject:
 
         paused_scopes = cast(list[str], d.pop("paused_scopes"))
 
+        _webhook_keys = d.pop("webhook_keys", UNSET)
+        webhook_keys: list[WebhookKeyVersion] | Unset = UNSET
+        if _webhook_keys is not UNSET:
+            webhook_keys = []
+            for webhook_keys_item_data in _webhook_keys:
+                webhook_keys_item = WebhookKeyVersion.from_dict(webhook_keys_item_data)
+
+                webhook_keys.append(webhook_keys_item)
+
         account_object = cls(
             charges_enabled=charges_enabled,
             created=created,
@@ -93,6 +124,7 @@ class AccountObject:
             name=name,
             object_=object_,
             paused_scopes=paused_scopes,
+            webhook_keys=webhook_keys,
         )
 
         account_object.additional_properties = d

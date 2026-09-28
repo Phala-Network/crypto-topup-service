@@ -50,6 +50,7 @@ from .reconciliation_round_report import ReconciliationRoundReport
 from .refund import Refund
 from .refund_metadata import RefundMetadata
 from .roll_api_key_request import RollApiKeyRequest
+from .roll_webhook_key_request import RollWebhookKeyRequest
 from .route_daily_report import RouteDailyReport
 from .route_daily_report_age_in_state_max_seconds import RouteDailyReportAgeInStateMaxSeconds
 from .route_daily_report_deposits_by_state import RouteDailyReportDepositsByState
@@ -58,6 +59,8 @@ from .route_pause_response import RoutePauseResponse
 from .support_deposit_response import SupportDepositResponse
 from .update_account_request import UpdateAccountRequest
 from .update_metadata_request import UpdateMetadataRequest
+from .webhook_key_object import WebhookKeyObject
+from .webhook_key_version import WebhookKeyVersion
 
 __all__ = (
     "AccountObject",
@@ -110,6 +113,7 @@ __all__ = (
     "Refund",
     "RefundMetadata",
     "RollApiKeyRequest",
+    "RollWebhookKeyRequest",
     "RouteDailyReport",
     "RouteDailyReportAgeInStateMaxSeconds",
     "RouteDailyReportDepositsByState",
@@ -118,4 +122,6 @@ __all__ = (
     "SupportDepositResponse",
     "UpdateAccountRequest",
     "UpdateMetadataRequest",
+    "WebhookKeyObject",
+    "WebhookKeyVersion",
 )

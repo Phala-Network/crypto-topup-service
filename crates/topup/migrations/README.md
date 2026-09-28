@@ -49,6 +49,11 @@ refund per transfer log (`refunds_transfer_unique`, over pending and succeeded r
 and `refund_payment_claims`. Existing rows map `confirmed` to `succeeded` and every other status to
 `pending`.
 
+`20261011000000_webhook_keys` (design PR 6) adds per-account, per-mode webhook keys (design D11):
+`retiring_webhook_keys` keeps a rolled key version signing beside the new one until its
+`expires_at`, and `accounts.webhook_key_version` is checked to hold a positive integer per mode.
+No secret is stored: every key is derived from dstack at `settlement/{acct}/{live|test}/v{n}`.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -82,8 +87,8 @@ list, so a new table fails it until it is listed there and, if narrowed, here.
 ## Tenancy
 
 Every tenant table (`customers`, `quotes`, `deposit_addresses`, `addresses`, `deposits`,
-`refunds`, `api_keys`, `webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`, and
-the account-owned `confirmation_policies` and `treasuries`)
+`refunds`, `api_keys`, `webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`,
+`retiring_webhook_keys`, and the account-owned `confirmation_policies` and `treasuries`)
 carries `account_id`, and the mode-bearing ones `livemode`. Merchant queries are built from a
 server-side scope of both (`crate::tenancy::Scope`); the chain workers and the admin API act for the
 platform and read across accounts. Composite foreign keys, `(parent_id, account_id, livemode)`

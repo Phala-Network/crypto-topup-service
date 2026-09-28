@@ -90,12 +90,14 @@ product owns (identity, balance, debt, entitlements, billing policy, welcome pro
 ## 3. Trust model
 
 The service runs in a dstack confidential VM. The host and cloud provider cannot read keys or
-alter code without changing the attested measurement; products verify by attestation which
-code holds the settlement key; the database is inside the boundary.
+alter code without changing the attested measurement; merchants verify by attestation which
+code holds their account's webhook keys; the database is inside the boundary.
 
 Deposit addresses are forwarders with an immutable treasury, so **a full compromise of the
 service cannot redirect deposited funds**. A credit exists only as a `deposit.credited` event
-signed by the attested service's key, which the product pins from attestation. A compromised
+signed with the account's webhook key in the event's mode, derived inside the attested service,
+which the merchant pins from attestation (design D11). A key is per account and mode, so an
+event signed for one account never verifies at another. A compromised
 service could still sign a credit no deposit backs; as with a card processor, the product
 trusts the processor's signed event, and it may bound or check that trust with its own
 per-deposit and per-period caps and by verifying the cited log on its own node (§11). The service
@@ -217,8 +219,11 @@ tables the service uses today:
 
 ```text
 accounts      id, public_id (acct_ + hex, generated), name, contact, due_diligence, charges_enabled,
-              restricted, paused_scopes text[], …   -- the tenant, created by the operator
+              restricted, paused_scopes text[], webhook_key_version jsonb ({"live": n, "test": n}),
+              …   -- the tenant, created by the operator
               -- scopes: quotes | settlement | refunds; empty = active
+retiring_webhook_keys  account_id, livemode, version, expires_at
+              -- a rolled webhook key version, still signing until expires_at (§10)
 api_keys      id (key_ + hex), account_id, livemode, kind (secret|restricted), name, prefix, last4,
               key_hash UNIQUE (SHA-256), created_by (key_… | admin), expires_at, last_used_at,
               revoked_at                                              -- design D7
@@ -535,13 +540,18 @@ network.
 
 ```rust
 pub trait Signer {
-    async fn sign_settlement(&self, payload: &[u8]) -> Result<Signature>;
-    async fn settlement_public_key(&self) -> Result<PublicKey>;
+    async fn sign_webhook(&self, key: &WebhookKeyId, payload: &[u8]) -> Result<Signature>;
+    async fn webhook_public_key(&self, key: &WebhookKeyId) -> Result<PublicKey>;
 }
 ```
 
-`signer::dstack` derives `settlement/v1` (ed25519) on demand and zeroizes it (dstack 0.5 derives a
-key from its domain alone; each domain has one algorithm). The service holds no transaction key:
+Each account has one ed25519 webhook key per mode and version (design D11): `signer::dstack`
+derives `settlement/{acct}/{live|test}/v{n}` on demand and zeroizes it (dstack 0.5 derives a key
+from its domain alone; each domain has one algorithm), so the service stores no secret and the
+key is stable across releases. `accounts.webhook_key_version` holds each mode's current version;
+`POST /v1/account/webhook_keys/roll {expires_in}` bumps it and keeps the previous version signing
+beside it for at most 7 days (`retiring_webhook_keys`), the Standard Webhooks multi-signature
+rotation. The service holds no transaction key:
 it sends no transactions and pays no gas (design D2, D4).
 
 **Sweeping** is the merchant's transaction. Anyone may call the permissionless factory's
@@ -563,10 +573,13 @@ on the product's answer; delivery is tracked on the outbox row.
 POST {webhook_url}
 webhook-id: evt_<hex of uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)>
 webhook-timestamp: <Unix seconds of this attempt>
-webhook-signature: v1a,<base64 ed25519 by settlement/v1 over "{id}.{timestamp}.{raw body}">
+webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
+                   "{id}.{timestamp}.{raw body}">, one entry per key during a rotation
 
-{ "id": "<webhook-id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
-  "data": { "object": { "id": "dep_…", "object": "deposit", "account_id": "<account>",
+{ "id": "<webhook-id>", "object": "event", "account": "acct_…", "livemode": true,
+  "type": "deposit.credited", "created": 1790409590,
+  "data": { "object": { "id": "dep_…", "object": "deposit", "livemode": true,
+                        "account_id": "<account>",
                         "quote": "qt_…", "status": "credited", "amount": 1234,
                         "currency": "usd", "price_source": "quote", … } } }
 ```
@@ -584,11 +597,12 @@ webhook-signature: v1a,<base64 ed25519 by settlement/v1 over "{id}.{timestamp}.{
 - Delivery is the outbox (§12): at least once, in no order, `2xx` acknowledges, anything else or
   no answer within 20 s is retried with full-jitter backoff (ceiling 30 s doubling to 1 h),
   forever; an undelivered event raises the outbox age warning after 24 hours and the operator
-  can replay it. The daily report counts undelivered `deposit.credited` per route.
+  can replay it. Test and live events have separate delivery workers (`topup-outbox-test`,
+  `topup-outbox-live`), so test traffic cannot delay live deliveries (design §9). The daily
+  report counts undelivered `deposit.credited` per route.
 - The event id is derived from the deposit id, so every retry, replay, and re-emission after a
-  restore carries the same `webhook-id`, and the outbox stores one row per deposit. Rows written
-  before prefixed ids (outbox `format` 1) keep their flat payload and old envelope
-  (`event_id`, `created_at`, `data`) and bare-UUID `webhook-id`, so their replay is byte-identical.
+  restore carries the same `webhook-id`, and the outbox stores one row per deposit. Every
+  delivery, including a replay, is signed at send time with the account's current keys.
 
 Product obligations:
 
@@ -640,8 +654,8 @@ knows it. Where it departs, the last column says why.
 | Updates | `POST /v1/{object}/{id}` with the updatable parameters | Same, for `metadata` only |
 | Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | Same, per account and mode; a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
-| Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
-| Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; `livemode` in objects comes with design PR 10 |
+| Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", account, livemode, type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures by the account's key per mode, asymmetric, so the merchant holds only a public key |
+| Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; every object and event carries `livemode` |
 | Onboarding | Connect accounts created through the API, `stripe_dashboard.type = none` | The operator creates every account after offline due diligence; there is no dashboard (design D8) |
 
 Every merchant request carries a secret key, `Authorization: Bearer ppay_sk_{test,live}_…`
@@ -687,7 +701,8 @@ POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}  verified at fi
 POST   /v1/refunds/{id}/cancel                                    a pending refund
 GET    /v1/refunds/{id}
 POST   /v1/refunds/{id} {metadata}                                update metadata
-GET    /v1/attestation?nonce=…                                    settlement key (§14)
+GET    /v1/attestation?nonce=…                                    the key's account's webhook keys (§14)
+POST   /v1/account/webhook_keys/roll {expires_in}                 next webhook key version (§10)
 
 POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason, webhook_url?}   + first keys
 POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, webhook_url?, reason}   enabling live → first live key
@@ -730,8 +745,8 @@ route's `confirmations` (a depth such as `"2"`, `"safe"`, or `"finalized"`), the
 time (`typical_credit_seconds`: 30 at depth 2), and the typical finality time; plus `max_open_amount_per_account`, the per-account open exposure cap,
 which also bounds any single quote. The remaining exposure is not served: a quote above it fails
 with `409 exposure_cap_exceeded`, whose message states the remaining amount. The forwarder factory
-and implementation are not served: the product pins them from the attested deployment, like the
-settlement key, because the service cannot vouch for its own addresses.
+and implementation are not served: the product pins them from the attested deployment, like its
+webhook keys, because the service cannot vouch for its own addresses.
 
 **Quote.** `{id, object: "quote", account_id, amount, currency, chain_id, asset, amount_atomic,
 exchange_rate, address, payment_uri, status, expires_at, created, payment, deposit,
@@ -806,8 +821,10 @@ destination is `400 destination_sanctioned`. A reversed deposit is not refundabl
 The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, with the same
 `Idempotency-Key`.
 
-**Events** (Standard Webhooks, signed with the settlement key) are Stripe's Event object,
-`{id: "evt_…", object: "event", type, created, data: {object}}`: `deposit.credited`,
+**Events** (Standard Webhooks, signed with the account's webhook key in the event's mode) are
+Stripe's Event object, `{id: "evt_…", object: "event", account, livemode, type, created, data:
+{object}}`; every object carries `livemode`. The SDK's `construct_event` fails closed unless a
+signature verifies with a pinned key and `account` and `livemode` are the receiver's: `deposit.credited`,
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
 refund) carry the deposit, `refund.failed` (the attached transaction is final but does not pay the
@@ -1043,13 +1060,18 @@ KMS, with no on-chain compose-hash allow-list: funds go only to the immutable tr
 malicious upgrade could cause downtime, read service data, or sign credits no deposit backs, up
 to whatever caps the product keeps (§3, §11), but not move funds; the attested compose hash makes
 it detectable.
-`GET /v1/attestation?nonce=` returns the dstack attestation (TDX quote and event log) of
-`/Attest` with `report_data = sha256(nonce ‖ settlement_pubkey)`; the service holds no
-transaction key, so nothing else is bound. Verifiers
+`GET /v1/attestation?nonce=`, authenticated with an API key, returns the key's account's webhook
+keys in the key's mode (current first, then any rolled key still signing) and the dstack
+attestation (TDX quote and event log) of `/Attest` with `report_data = sha256(len(nonce) ‖ nonce
+‖ len(account) ‖ account ‖ livemode ‖ (version ‖ public_key)*)` (one-byte lengths, the UTF-8
+`acct_` id, one byte `1` live or `0` test, each version as 4 big-endian bytes; the vector is
+`report_data_matches_the_published_vector` in `crates/adapters/src/attestation.rs`); the service
+holds no transaction key, so nothing else is bound. Verifiers
 run the official dstack verifier of the pinned release on it (`deploy/dstack-verifier.sh`: quote
 and TCB, RTMR3 event-log replay, OS image; then the app id and deployed compose hash), check that
-the verified report data is this hash zero-padded to 64 bytes, and then pin
-`(keyid, public key)`; a production CVM exposes no logs or shell.
+the verified report data is this hash zero-padded to 64 bytes, and then pin the public keys,
+which are stable across releases; a production CVM exposes no logs or shell. `topup attest
+--account acct_… [--live] [--version N]` prints the same evidence inside the CVM.
 
 ## 15. Operating policies
 
@@ -1061,7 +1083,7 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | The merchant pays its own sweep gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sweep, and open quote exposure up to the caps. |
-| Rotation | Settlement key: add `settlement/v2`; products accept both for 30 days. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Webhook key: the merchant rolls it (`POST /v1/account/webhook_keys/roll`); both keys sign every delivery for up to 7 days while the merchant pins the new one from attestation. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `refunds`) at account, customer, or route level; no pause stops a sweep, since anyone can flush a forwarder to its own treasury. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | API key compromise and key recovery, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, rejected funds at treasury, deposit reversed. |

@@ -10,7 +10,6 @@ from pathlib import Path
 
 from topup_sdk import TopupClient
 
-SETTLEMENT_KEYID = "settlement/v1"
 # The deposit driver signs its account API requests with this key id (see `AccountApi`).
 DRIVER_KEYID = "driver/v1"
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -51,7 +50,9 @@ class ProductConfig:
     payer: str | None = None
     payer_account: str | None = None
     unsupported_token: str | None = None
-    settlement_public_key: str | None = None
+    # The account's webhook public keys (hex) in the API key's mode, current first; unset, the
+    # product pins them from `GET /v1/attestation` with its API key.
+    webhook_public_keys: list[str] | None = None
     per_deposit_cap_minor: int = 100_000
     per_period_cap_minor: int = 500_000
     period_seconds: int = 24 * 60 * 60
@@ -71,6 +72,10 @@ class ProductConfig:
         if not key:
             raise MissingProductKeyError("no api_key_file, and api_key_env is unset")
         return key
+
+    def livemode(self) -> bool:
+        """The mode of the product's API key, and so of its webhooks."""
+        return self.api_key().startswith("ppay_sk_live_")
 
     def client(self) -> TopupClient:
         # The forwarder is pinned, so every open quote's address is recomputed before it is used.

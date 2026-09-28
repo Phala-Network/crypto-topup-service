@@ -23,6 +23,7 @@ use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
 use topup::routes::RouteSet;
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::ScreenStep;
+use topup_adapters::attestation::AttestedWebhookKey;
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
@@ -32,9 +33,9 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
+use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN};
 #[cfg(feature = "dev-signer")]
-use topup_core::Signer as _;
-use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, SETTLEMENT_KEY_DOMAIN};
+use topup_core::{Signer as _, WebhookKeyId};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
@@ -59,6 +60,8 @@ enum TopupCommand {
     },
     /// Run one reconciliation pass and exit.
     Reconcile(ReconcileArgs),
+    /// Print attestation evidence binding a nonce to an account's webhook keys in one mode, as
+    /// `GET /v1/attestation` returns it to that account.
     Attest(AttestArgs),
     /// Derive the backup key and database credentials from dstack into a shared tmpfs.
     Keys(KeysArgs),
@@ -116,6 +119,15 @@ struct ReconcileArgs {
 struct AttestArgs {
     #[arg(long, value_name = "HEX")]
     nonce: String,
+    /// The account, `acct_…`.
+    #[arg(long, value_name = "ACCOUNT")]
+    account: String,
+    /// Attest the live-mode keys instead of the test-mode keys.
+    #[arg(long)]
+    live: bool,
+    /// Key versions to attest, current first; repeat during a rotation.
+    #[arg(long = "version", value_name = "N", default_value = "1")]
+    versions: Vec<u32>,
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
@@ -459,29 +471,42 @@ fn write_restore_report(path: &Path, report: &serde_json::Value) -> std::io::Res
 
 async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
     let nonce = parse_nonce(&args.nonce)?;
+    if args.versions.is_empty()
+        || args.versions.iter().any(|&version| {
+            topup_core::WebhookKeyId::new(&args.account, args.live, version).is_none()
+        })
+    {
+        return Err("account must be an acct_ id and every version at least 1");
+    }
 
     #[cfg(feature = "dev-signer")]
     if args.dev {
         let signer = DevSigner::derive(&SecretKey32::new([1; 32]));
-        let public_key = signer
-            .settlement_public_key()
-            .await
-            .map_err(|_| "development settlement key is invalid")?;
-        return print_attestation(
-            &public_key.0,
-            &report_data(&nonce, &public_key),
-            &[],
-            &[],
-            &[],
-        );
+        let mut keys = Vec::with_capacity(args.versions.len());
+        for &version in &args.versions {
+            let id = WebhookKeyId::new(&args.account, args.live, version)
+                .ok_or("account must be an acct_ id")?;
+            let public_key = signer
+                .webhook_public_key(&id)
+                .await
+                .map_err(|_| "development webhook key is invalid")?;
+            keys.push(AttestedWebhookKey {
+                version,
+                public_key,
+            });
+        }
+        let report_data = report_data(&nonce, &args.account, args.live, &keys)
+            .ok_or("nonce or account is too long")?;
+        return print_attestation(args, &keys, &report_data, &[], &[], &[]);
     }
 
     let evidence = DstackAttestor::new()
-        .attest(&nonce)
+        .attest(&nonce, &args.account, args.live, &args.versions)
         .await
         .map_err(|_| "failed to collect dstack attestation")?;
     print_attestation(
-        &evidence.settlement_public_key.0,
+        args,
+        &evidence.webhook_keys,
         &evidence.report_data,
         &evidence.quote,
         &evidence.info.app_id,
@@ -500,15 +525,22 @@ fn parse_nonce(value: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 fn print_attestation(
-    settlement_public_key: &[u8; 32],
+    args: &AttestArgs,
+    keys: &[AttestedWebhookKey],
     report_data: &[u8; 32],
     quote: &[u8],
     app_id: &[u8],
     compose_hash: &[u8],
 ) -> Result<(), &'static str> {
+    let webhook_keys: Vec<_> = keys
+        .iter()
+        .map(|key| json!({"version": key.version, "public_key": hex::encode(key.public_key.0)}))
+        .collect();
     let output = json!({
-        "keyid": SETTLEMENT_KEY_DOMAIN,
-        "settlement_pubkey": hex::encode(settlement_public_key),
+        "object": "attestation",
+        "account": args.account,
+        "livemode": args.live,
+        "webhook_keys": webhook_keys,
         "report_data": hex::encode(report_data),
         "quote": hex::encode(quote),
         "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
@@ -574,8 +606,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .ok()
         .zip(u32::try_from(scanner_count).ok())
         .and_then(|(pumps, scanners)| pumps.checked_add(scanners))
-        // The outbox renders an event's object on a second connection while it holds the claim.
-        .and_then(|count| count.checked_add(4))
+        // Each mode's outbox worker renders an event's object on a second connection while it
+        // holds the claim.
+        .and_then(|count| count.checked_add(6))
         .context("route count is too large")?;
     let pool = connect("DATABASE_URL", "run", connection_count)
         .await
@@ -583,14 +616,20 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let signer = spawn_signer().context("failed to start signer actor")?;
-    let delivery_worker = topup::outbox::DeliveryWorker::new(
-        pool.clone(),
-        Arc::clone(&routes),
-        Arc::new(signer.clone()),
-        topup::outbox::DeliveryConfig::default(),
-    )
-    .context("failed to configure webhook delivery")?;
+    let signer = Arc::new(spawn_signer().context("failed to start signer actor")?);
+    // Test and live events have separate workers, so test traffic cannot delay live deliveries.
+    let delivery_workers = [false, true].map(|livemode| {
+        topup::outbox::DeliveryWorker::new(
+            pool.clone(),
+            Arc::clone(&routes),
+            Arc::clone(&signer),
+            livemode,
+            topup::outbox::DeliveryConfig::default(),
+        )
+    });
+    let [test_delivery, live_delivery] = delivery_workers;
+    let test_delivery = test_delivery.context("failed to configure webhook delivery")?;
+    let live_delivery = live_delivery.context("failed to configure webhook delivery")?;
     let frozen = topup::reconciler::frozen_chains(&pool, &routes)
         .await
         .context("failed to load reconciliation blocks")?;
@@ -700,8 +739,11 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     tasks.spawn("rate-lock expiry worker", |cancellation| async move {
         expiry_worker.run(cancellation).await;
     });
-    tasks.spawn("webhook delivery worker", |cancellation| async move {
-        delivery_worker.run(cancellation).await;
+    tasks.spawn("test webhook delivery worker", |cancellation| async move {
+        test_delivery.run(cancellation).await;
+    });
+    tasks.spawn("live webhook delivery worker", |cancellation| async move {
+        live_delivery.run(cancellation).await;
     });
     let reconcile_interval = Duration::from_secs(args.reconcile_interval_s);
     tasks.spawn("reconciler", |cancellation| async move {
@@ -1027,7 +1069,7 @@ const SIGNER_QUEUE: NonZeroUsize =
 /// Maximum duration of one dstack signing request.
 const SIGNER_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Starts the dstack settlement signer actor.
+/// Starts the dstack webhook signer actor.
 fn spawn_signer() -> std::io::Result<SignerHandle> {
     SignerHandle::spawn(DstackSigner::new(), SIGNER_QUEUE, SIGNER_TIMEOUT)
 }

@@ -16,6 +16,7 @@ from phala_pay import PhalaPay
 from topup_sdk import sign_webhook
 
 from .test_phala_pay import (
+    ACCOUNT,
     API_KEY,
     EVENT_ID,
     QUOTE_ID,
@@ -55,7 +56,15 @@ def app(tmp_path: Path) -> tuple[TestClient, list[httpx.Request], Path]:
 
     client = PhalaPay("http://service.test", API_KEY, transport=httpx.MockTransport(service))
     database = tmp_path / "product.sqlite3"
-    api = create_app(client, SERVICE_PUBLIC_KEY, str(database), chain_id=11155111, asset="pha")
+    api = create_app(
+        client,
+        [SERVICE_PUBLIC_KEY],
+        str(database),
+        account=ACCOUNT,
+        livemode=False,
+        chain_id=11155111,
+        asset="pha",
+    )
     return TestClient(api), requests, database
 
 
@@ -82,11 +91,13 @@ def test_topup_passes_on_only_the_error_code(
     assert http.post("/topups", json={"amount": 100}).status_code == 422
 
 
-def _credited(body_amount: int = 2500) -> tuple[bytes, dict[str, str]]:
+def _credited(body_amount: int = 2500, account: str = ACCOUNT) -> tuple[bytes, dict[str, str]]:
     body = json.dumps(
         {
             "id": EVENT_ID,
             "object": "event",
+            "account": account,
+            "livemode": False,
             "type": "deposit.credited",
             "created": 1_790_000_321,
             "data": {"object": _deposit() | {"amount": body_amount}},
@@ -116,5 +127,9 @@ def test_webhook_refuses_a_forged_delivery(
     forged = body.replace(b'"amount": 2500', b'"amount": 999999')
     assert http.post("/webhooks/phala-pay", content=forged, headers=headers).status_code == 400
     assert http.post("/webhooks/phala-pay", content=body).status_code == 400
+    # Signed with the pinned key, but another account's event: refused.
+    other_body, other_headers = _credited(account="acct_" + "b2" * 16)
+    response = http.post("/webhooks/phala-pay", content=other_body, headers=other_headers)
+    assert response.status_code == 400
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT count(*) FROM balances").fetchone() == (0,)

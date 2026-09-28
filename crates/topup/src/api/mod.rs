@@ -39,7 +39,9 @@ use utoipa::openapi::{Info, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-pub use attestation::{AttestationError, AttestationFuture, Attestor};
+pub use attestation::{
+    AttestationError, AttestationEvidence, AttestationFuture, AttestationRequest, Attestor,
+};
 pub use auth::VerificationKey;
 pub use client_limit::ClientReadLimiter;
 pub use rate_limit::{ApiRateLimiter, RateLimits};
@@ -168,6 +170,8 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(deposits::mark_refund_paid))
         .routes(routes!(deposits::cancel_refund))
         .routes(routes!(account::get_account))
+        .routes(routes!(account::roll_webhook_key))
+        .routes(routes!(account::get_attestation))
         .routes(routes!(keys::list_api_keys, keys::create_api_key))
         .routes(routes!(keys::get_api_key, keys::revoke_api_key))
         .routes(routes!(keys::roll_api_key))
@@ -211,8 +215,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let mut documented = OpenApiRouter::new()
         .merge(merchant)
         .merge(quote)
-        .merge(admin)
-        .routes(routes!(handlers::get_attestation));
+        .merge(admin);
     let mut info = Info::new("Phala Pay API", env!("CARGO_PKG_VERSION"));
     info.description = Some(
         "Authenticated merchant and administrative API for Phala Pay crypto payments.".to_owned(),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,12 +29,14 @@ class EventData:
 
 @dataclass(frozen=True)
 class Event:
-    """A verified event: `deposit.credited`, `deposit.rejected`, `deposit.reversed`,
-    `deposit.refunded`, `refund.failed`, or `quote.expired`. Its `id` is stable across retries
-    and replays; process each id once. Claw back the credit of a `deposit.reversed` deposit as
-    for `deposit.refunded`."""
+    """A verified event of `account` in one mode: `deposit.credited`, `deposit.rejected`,
+    `deposit.reversed`, `deposit.refunded`, `refund.failed`, `quote.expired`, or
+    `account.updated`. Its `id` is stable across retries and replays; process each id once. Claw
+    back the credit of a `deposit.reversed` deposit as for `deposit.refunded`."""
 
     id: str
+    account: str
+    livemode: bool
     type: str
     created: int
     data: EventData
@@ -66,25 +68,32 @@ class Webhook:
     def construct_event(
         payload: bytes | str,
         headers: Mapping[str, str],
-        public_key: str | Ed25519PublicKey,
+        public_key: str | Ed25519PublicKey | Sequence[str | Ed25519PublicKey],
+        expected_account: str,
         *,
+        expected_livemode: bool,
         tolerance: int = DEFAULT_TOLERANCE,
     ) -> Event:
-        """Verifies a delivery and returns its event.
+        """Verifies a delivery and returns its event, failing closed.
 
         `payload` is the raw request body, before any JSON parsing; `headers` are the request
-        headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`); `public_key` is the
-        service's settlement key (hex or base64), pinned from attestation. Raises
-        `SignatureVerificationError` when the signature does not verify, the timestamp is more
-        than `tolerance` seconds away, or the body's id differs from `webhook-id`, and
-        `ValueError` when a verified body is not an event. That includes an operator replay of
-        an event written before `evt_` ids (a UUID `webhook-id` and a flat body): those predate
-        this SDK and were fulfilled when first delivered; `topup_sdk.verify_webhook` reads them.
+        headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`); `public_key` is your
+        account's webhook key in the mode you receive (hex or base64), pinned from
+        `GET /v1/attestation`, or a list of keys while a rotation overlaps. `expected_account` is
+        your `acct_…` id and `expected_livemode` the mode of the endpoint.
+
+        Raises `SignatureVerificationError` when no signature verifies with a given key, the
+        timestamp is more than `tolerance` seconds away, the body's id differs from `webhook-id`,
+        or the event's `account` or `livemode` is not the expected one; and `ValueError` when a
+        verified body is not an event.
         """
+        if not expected_account:
+            raise ValueError("expected_account is required")
         body = payload.encode() if isinstance(payload, str) else payload
-        key = load_public_key(public_key) if isinstance(public_key, str) else public_key
+        candidates = [public_key] if isinstance(public_key, str | Ed25519PublicKey) else public_key
+        keys = [load_public_key(key) if isinstance(key, str) else key for key in candidates]
         try:
-            webhook_id = verify_webhook_signature(headers, body, key, tolerance_seconds=tolerance)
+            webhook_id = verify_webhook_signature(headers, body, keys, tolerance_seconds=tolerance)
         except SignatureError as error:
             raise SignatureVerificationError(str(error)) from error
 
@@ -96,19 +105,31 @@ class Webhook:
             envelope.get("type"),
             envelope.get("created"),
         )
+        account, livemode = envelope.get("account"), envelope.get("livemode")
         data = envelope.get("data")
         if (
             not isinstance(event_id, str)
             or not isinstance(event_type, str)
             or type(created) is not int
+            or not isinstance(account, str)
+            or type(livemode) is not bool
             or not isinstance(data, dict)
             or not isinstance(data.get("object"), dict)
         ):
             raise ValueError("webhook body is not an event")
         if event_id != webhook_id:
             raise SignatureVerificationError("webhook id does not match the event")
+        if account != expected_account:
+            raise SignatureVerificationError("webhook event is for another account")
+        if livemode != expected_livemode:
+            raise SignatureVerificationError("webhook event is for the other mode")
         return Event(
-            event_id, event_type, created, EventData(_resource(event_type, data["object"]))
+            event_id,
+            account,
+            livemode,
+            event_type,
+            created,
+            EventData(_resource(event_type, data["object"])),
         )
 
 

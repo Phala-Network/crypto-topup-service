@@ -74,8 +74,9 @@ export interface Timeline {
 export interface Trust {
   attestation: {
     binding_verified: boolean;
-    keyid?: string;
-    settlement_pubkey?: string;
+    account?: string;
+    livemode?: boolean;
+    webhook_public_key?: string;
     report_data?: string;
     quote_bytes?: number;
   };

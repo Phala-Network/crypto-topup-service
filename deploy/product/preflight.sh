@@ -159,14 +159,24 @@ if ! chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>"$tmp/cast.err"); then
     chain_id="error: ${error//"$rpc"/PRODUCT_RPC_URL}"
 fi
 [[ "$chain_id" == 11155111 ]] || fail "PRODUCT_RPC_URL reports chain id $chain_id, not Sepolia"
-# The product pins the settlement key from this endpoint at startup and checks its binding.
+# The product pins its account's webhook keys from this endpoint, fetched with its API key, and
+# checks their binding. Without the key sealed yet, the endpoint must refuse anonymous calls.
 nonce=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-if curl -fsS --max-time 30 "${setting[TOPUP_ORIGIN]}/v1/attestation?nonce=$nonce" >"$tmp/attestation.json" &&
-    jq -e '.keyid == "settlement/v1" and (.settlement_pubkey | test("^[0-9a-f]{64}$"))' \
-        "$tmp/attestation.json" >/dev/null; then
-    ok "TOPUP_ORIGIN serves /v1/attestation with a settlement/v1 key"
+attestation_url="${setting[TOPUP_ORIGIN]}/v1/attestation?nonce=$nonce"
+if [[ -n "$api_key" ]]; then
+    if curl -fsS --max-time 30 -H @- "$attestation_url" >"$tmp/attestation.json" \
+        <<<"Authorization: Bearer $api_key" &&
+        jq -e '.livemode == false and (.account | startswith("acct_"))
+            and (.webhook_keys[0].public_key | test("^[0-9a-f]{64}$"))' \
+            "$tmp/attestation.json" >/dev/null; then
+        ok "TOPUP_ORIGIN attests the product account's test-mode webhook key"
+    else
+        fail "TOPUP_ORIGIN does not attest the product account's webhook key"
+    fi
+elif [[ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$attestation_url")" == 401 ]]; then
+    ok "TOPUP_ORIGIN serves /v1/attestation to API keys only (PRODUCT_API_KEY not sealed yet)"
 else
-    fail "TOPUP_ORIGIN does not serve a settlement/v1 attestation"
+    fail "TOPUP_ORIGIN does not serve an authenticated /v1/attestation"
 fi
 
 check_phala_cloud "$workspace" "$os_image"

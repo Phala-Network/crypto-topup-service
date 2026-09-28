@@ -23,8 +23,9 @@ from the public endpoints, the admin API, Sentry, and the chain.
 
 Every CVM uses Phala Cloud's KMS (`--kms phala`, owner decision): no `DstackApp` contract and no
 on-chain compose-hash approval. Fund safety does not depend on upgrade governance (forwarders pay
-only the immutable treasury). Credits are what the attested service signs, and products pin its
-key from attestation and may cap or verify credits on their own node. A malicious upgrade could
+only the immutable treasury). Credits are what the attested service signs with each account's
+webhook key, and merchants pin their keys from attestation and may cap or verify credits on their
+own node. A malicious upgrade could
 cause downtime, read service data, or sign false credits up to the product's caps; the compose
 hash in the attestation, verified after every deploy, makes it detectable.
 
@@ -34,7 +35,7 @@ The approved OS image is `dstack-0.5.9`, non-dev: the latest dstack release a Ph
 offers. [preflight.sh](preflight.sh) accepts only that name and, online, requires a node of the
 workspace to offer it. The service speaks the dstack 0.5 guest API (`dstack-sdk = "=0.1.3"`); the
 local simulator is built from the same release. dstack 0.6 derives different keys for the same
-domain, so moving to it changes the operator address, settlement key, backup key, and database
+domain, so moving to it changes every account's webhook keys, the backup key, and the database
 passwords: that is a key migration, not an image bump.
 
 ## One-time setup (HUMAN-ONLY, repository owner)
@@ -266,7 +267,7 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
   | Monitor | Checks in | Margin |
   |---|---|---|
   | `topup-scanner-<chain_id>` | after each head poll (every block time), `error` while the finalized backstop fails | 5 min |
-  | `topup-pump-<n>`, `topup-outbox-<n>` | each iteration or poll, every minute | 5 min |
+  | `topup-pump-<n>`, `topup-outbox-test`, `topup-outbox-live` | each iteration or poll, every minute | 5 min |
   | `topup-lock-expiry` | after each successful expiry scan, every minute | 5 min |
   | `topup-finality-watch` | after each `finalized` advance's passes, and every minute | 5 min |
   | `topup-reconciler` | `ok` after a complete round or one skipped because nothing newly finalized, `error` after failed checks, every 10 min | 10 min |
@@ -356,11 +357,13 @@ the restore-check variant `topup` on 8081 and no ingress. Never treat a hash fro
 [render-app-compose.sh](render-app-compose.sh) as the deployed one; the Phala CLI builds the
 app-compose itself.
 
-The settlement key comes only from the public, nonce-bound attestation:
+An account's webhook keys come only from the nonce-bound attestation, fetched with a secret key of
+that account and mode (merchants run the same check, docs/integration.md §5.3):
 
 ```sh
 export NONCE="$(openssl rand -hex 32)"
-curl -fsS "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
+curl -fsS -H "Authorization: Bearer $SECRET_KEY" \
+  "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
 jq '{quote: null, attestation: .quote}' public-attestation.json |
   deploy/dstack-verifier.sh > public-verification.json
 jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" \
@@ -371,8 +374,10 @@ jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" 
   and .details.report_data == $report_data + ("0" * 64)' public-verification.json
 ```
 
-Then check that `report_data` binds the nonce and the `settlement/v1` key with the Python SDK's `topup_sdk.verify_attestation_binding(response, nonce)` (architecture §14
-defines the construction; `TopupClient.attestation` runs it on every fetch).
+Then check that `report_data` binds the nonce, the account, the mode, and the listed webhook keys
+with the Python SDK's `topup_sdk.verify_attestation_binding(response, nonce, expected_account=…,
+expected_livemode=…)` (architecture §14 defines the construction; `TopupClient.attestation` runs
+it on every fetch).
 
 **Ingress**: the attested compose must publish only `dstack-ingress` on 443; confirm `/openapi.json`
 at `TOPUP_PUBLIC_ORIGIN` with a valid certificate, its [certificate
@@ -471,8 +476,10 @@ with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_API
 Phala Pay test key
 ([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`,
 for its API calls), `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and
-`PRODUCT_DRIVER_PUBLIC_KEY` are attested. At startup it pins topup's `settlement/v1` key, which
-verifies the webhooks, from a verified attestation at `TOPUP_ORIGIN`. Its preflight
+`PRODUCT_DRIVER_PUBLIC_KEY` are attested. It pins its account's webhook keys for its key's mode,
+which verify the webhooks, from an attestation at `TOPUP_ORIGIN` fetched with `PRODUCT_API_KEY`:
+at startup, or on the first webhook when the key is sealed later (until then it answers `503`,
+and topup retries). Its preflight
 ([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a keyless Sepolia
 RPC (it is published and the product seals no RPC key); the deposit driver pays through it.
 Switching staging to Phala Cloud's backend is a `POST /v1/admin/accounts/{account}` with its

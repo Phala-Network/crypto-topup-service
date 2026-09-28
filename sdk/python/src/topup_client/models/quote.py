@@ -48,6 +48,8 @@ class Quote:
             returns a new secret and the earlier one stops working. Give it only to the paying
             customer's page, and do not log it.
         deposit (Deposit | None | str | Unset):
+        livemode (bool | Unset): Whether the quote was created with a live key. Always sent; optional in the schema so
+            clients also parse objects from servers, and events rendered, before it.
         metadata (QuoteMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
             when none.
             Always sent; optional in the schema so clients also parse objects from servers, and
@@ -71,6 +73,7 @@ class Quote:
     status: str
     client_secret: None | str | Unset = UNSET
     deposit: Deposit | None | str | Unset = UNSET
+    livemode: bool | Unset = UNSET
     metadata: QuoteMetadata | Unset = UNSET
     payment: None | QuotePayment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -122,6 +125,8 @@ class Quote:
         else:
             deposit = self.deposit
 
+        livemode = self.livemode
+
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
@@ -158,6 +163,8 @@ class Quote:
             field_dict["client_secret"] = client_secret
         if deposit is not UNSET:
             field_dict["deposit"] = deposit
+        if livemode is not UNSET:
+            field_dict["livemode"] = livemode
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if payment is not UNSET:
@@ -226,6 +233,8 @@ class Quote:
 
         deposit = _parse_deposit(d.pop("deposit", UNSET))
 
+        livemode = d.pop("livemode", UNSET)
+
         _metadata = d.pop("metadata", UNSET)
         metadata: QuoteMetadata | Unset
         if isinstance(_metadata, Unset):
@@ -267,6 +276,7 @@ class Quote:
             status=status,
             client_secret=client_secret,
             deposit=deposit,
+            livemode=livemode,
             metadata=metadata,
             payment=payment,
         )

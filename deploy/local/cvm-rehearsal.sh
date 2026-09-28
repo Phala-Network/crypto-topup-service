@@ -18,8 +18,8 @@
 #    recreated. Then it seals the secrets (the owner's `envs update`), and PostgreSQL initializes
 #    from the provably empty prefix.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
-#    attestation endpoint answers through the simulator and binds the settlement key (matching
-#    `topup attest`), Sentry reporting is off with the empty DSN, and WAL
+#    attestation endpoint answers an account's API key through the simulator and binds the account's
+#    webhook key (matching `topup attest`), Sentry reporting is off with the empty DSN, and WAL
 #    archiving writes a fresh backup marker; the derived key and database credentials are mode 0600
 #    files owned by PostgreSQL and in no container environment.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
@@ -366,28 +366,6 @@ dc logs --no-color topup 2>&1 | grep -F '"error reporting configured"' |
     grep -qF '"sentry_enabled":false' || die "topup did not start with Sentry reporting off"
 echo "ok: topup runs with Sentry reporting off (empty SENTRY_DSN)"
 
-# The owner learns the settlement key only from /v1/attestation: production has no logs or SSH.
-nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
-attestation=$(product_python - "$nonce" <<'PY'
-import json, sys, httpx
-from topup_client.models import AttestationResponse
-from topup_sdk import verify_attestation_binding
-nonce = bytes.fromhex(sys.argv[1])
-body = httpx.get("http://topup:8080/v1/attestation", params={"nonce": nonce.hex()}, timeout=30).raise_for_status().json()
-verify_attestation_binding(AttestationResponse.from_dict(body), nonce)
-assert body["keyid"] == "settlement/v1", body["keyid"]
-assert len(body["quote"]) > 0, "empty quote"
-assert "operators" not in body, "the service sends no transactions, so it attests no operator"
-print(json.dumps({key: body[key] for key in ("settlement_pubkey", "report_data")}))
-PY
-)
-echo "ok: GET /v1/attestation binds the nonce and settlement key (simulator quote)"
-cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" |
-    jq -c '{settlement_pubkey, report_data}')
-[[ "$(jq -S . <<<"$cli_attestation")" == "$(jq -S . <<<"$attestation")" ]] ||
-    die "topup attest and GET /v1/attestation disagree"
-echo "ok: topup attest reports the same settlement key and report_data"
-
 marker_fresh() {
     local marker
     marker=$(dc exec -T backup cat /run/topup-observability/last-backup-unix-seconds) || return 1
@@ -420,6 +398,36 @@ print(account["id"])
 PY
 ) || die "POST /v1/admin/accounts did not create the account"
 echo "ok: POST /v1/admin/accounts created $account with its first test key"
+
+# The merchant learns its webhook key only from /v1/attestation, with its API key: production has
+# no logs or SSH.
+nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+attestation=$(product_python - "$nonce" "$account" <<'PY'
+import json, sys, httpx
+from topup_client.models import AttestationResponse
+from topup_sdk import verify_attestation_binding
+nonce, account = bytes.fromhex(sys.argv[1]), sys.argv[2]
+url = "http://topup:8080/v1/attestation"
+anonymous = httpx.get(url, params={"nonce": nonce.hex()}, timeout=30)
+assert anonymous.status_code == 401, anonymous.status_code
+with open("/opt/product.key", encoding="ascii") as key:
+    headers = {"Authorization": f"Bearer {key.read().strip()}"}
+body = httpx.get(url, params={"nonce": nonce.hex()}, headers=headers, timeout=30).raise_for_status().json()
+verify_attestation_binding(
+    AttestationResponse.from_dict(body), nonce, expected_account=account, expected_livemode=False
+)
+assert len(body["quote"]) > 0, "empty quote"
+assert "operators" not in body, "the service sends no transactions, so it attests no operator"
+keys = [{"version": key["version"], "public_key": key["public_key"]} for key in body["webhook_keys"]]
+print(json.dumps({"webhook_keys": keys, "report_data": body["report_data"]}))
+PY
+)
+echo "ok: GET /v1/attestation needs an API key and binds the nonce and the account's webhook key"
+cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" --account "$account" |
+    jq -c '{webhook_keys, report_data}')
+[[ "$(jq -S . <<<"$cli_attestation")" == "$(jq -S . <<<"$attestation")" ]] ||
+    die "topup attest and GET /v1/attestation disagree"
+echo "ok: topup attest reports the same webhook key and report_data"
 
 echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed key"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
@@ -458,7 +466,7 @@ product_healthy() {
     [[ "$(http_status http://product:8089/healthz)" == 200 ]]
 }
 wait_for "the product's /healthz" 90 product_healthy
-echo "ok: the unsealed product pinned the settlement key and serves /healthz"
+echo "ok: the unsealed product serves /healthz; it pins its webhook key once the key is sealed"
 # Like the provisioning run's public-URL upgrade: a compose that differs only in the config content
 # must recreate the container with the new config.
 provisional=$(pc ps -q product)

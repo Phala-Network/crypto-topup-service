@@ -71,6 +71,7 @@ struct ClaimedEvent {
     endpoint_id: Uuid,
     url: String,
     scope: Scope,
+    account: String,
     event_type: String,
     data: Value,
     object: Option<EventObject>,
@@ -90,12 +91,17 @@ enum ClaimResult {
     Ready(Box<ClaimedDelivery>),
 }
 
-/// PostgreSQL-backed Standard Webhooks sender.
+/// PostgreSQL-backed Standard Webhooks sender of one mode's events.
+///
+/// Test and live events have separate workers (design §9), so test traffic cannot delay live
+/// deliveries. Each delivery is signed with the event's account key in the event's mode, once per
+/// key version still signing during a rotation (design D11).
 pub struct DeliveryWorker<S> {
     pool: PgPool,
     routes: Arc<RouteSet>,
     client: Client,
     signer: Arc<S>,
+    livemode: bool,
     config: DeliveryConfig,
     entropy: Arc<dyn JitterSource>,
 }
@@ -104,11 +110,13 @@ impl<S> DeliveryWorker<S>
 where
     S: Signer,
 {
-    /// Builds a worker with redirects disabled and a bounded request timeout.
+    /// Builds a worker of the `livemode` events with redirects disabled and a bounded request
+    /// timeout.
     pub fn new(
         pool: PgPool,
         routes: Arc<RouteSet>,
         signer: Arc<S>,
+        livemode: bool,
         config: DeliveryConfig,
     ) -> Result<Self, DeliveryError> {
         validate_config(&config)?;
@@ -122,14 +130,17 @@ where
             routes,
             client,
             signer,
+            livemode,
             config,
             entropy: Arc::new(OsJitter),
         })
     }
 
-    /// Polls until shutdown, retaining failed deliveries for unlimited retries.
+    /// Polls until shutdown, retaining failed deliveries for unlimited retries. The worker's
+    /// monitor is `topup-outbox-live` or `topup-outbox-test`.
     pub async fn run(&self, shutdown: CancellationToken) {
-        self.run_with_instance("0".to_owned(), shutdown).await;
+        let mode = if self.livemode { "live" } else { "test" };
+        self.run_with_instance(mode.to_owned(), shutdown).await;
     }
 
     /// Polls one named delivery worker until shutdown.
@@ -162,7 +173,7 @@ where
     pub async fn run_once(&self) -> Result<usize, DeliveryError> {
         let mut claimed = 0_usize;
         for _ in 0..self.config.batch_size {
-            match claim_next(&self.pool, &self.config).await? {
+            match claim_next(&self.pool, self.livemode, &self.config).await? {
                 ClaimResult::Empty => break,
                 ClaimResult::Deferred => {
                     claimed = claimed.saturating_add(1);
@@ -223,8 +234,17 @@ where
                 return Ok(());
             }
         };
+        let keys = crate::webhook_keys::active(connection, event.scope)
+            .await?
+            .and_then(|keys| keys.ids());
+        let Some(keys) = keys else {
+            self.record_failure(connection, event, None, None, "signing_failed")
+                .await?;
+            return Ok(());
+        };
         let signed = match SignedWebhook::new(
             self.signer.as_ref(),
+            &keys,
             &webhook_id,
             Utc::now().timestamp(),
             &body,
@@ -317,6 +337,8 @@ where
         let envelope = Event {
             id: id.clone(),
             object: "event",
+            account: event.account.clone(),
+            livemode: event.scope.livemode(),
             event_type: event.event_type.clone(),
             created: event.created_at.timestamp(),
             data,
@@ -370,7 +392,11 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
     Ok(())
 }
 
-async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResult, sqlx::Error> {
+async fn claim_next(
+    pool: &PgPool,
+    livemode: bool,
+    config: &DeliveryConfig,
+) -> Result<ClaimResult, sqlx::Error> {
     let lease_seconds = i32::try_from(config.claim_lease.as_secs()).unwrap_or(i32::MAX);
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
@@ -379,26 +405,30 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
             SELECT delivery.event_id, delivery.endpoint_id
             FROM webhook_deliveries AS delivery
             JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
+            JOIN events AS event ON event.id = delivery.event_id
             WHERE delivery.delivered_at IS NULL
               AND delivery.next_attempt_at <= now()
               AND endpoint.status = 'enabled'
+              AND event.livemode = $2
             ORDER BY delivery.next_attempt_at, delivery.event_id, delivery.endpoint_id
             FOR UPDATE OF delivery SKIP LOCKED
             LIMIT 1
         )
         UPDATE webhook_deliveries AS delivery
         SET next_attempt_at = now() + make_interval(secs => $1)
-        FROM candidates, events AS event, webhook_endpoints AS endpoint
+        FROM candidates, events AS event, webhook_endpoints AS endpoint, accounts AS account
         WHERE delivery.event_id = candidates.event_id
           AND delivery.endpoint_id = candidates.endpoint_id
           AND event.id = delivery.event_id
           AND endpoint.id = delivery.endpoint_id
+          AND account.id = event.account_id
         RETURNING delivery.event_id, delivery.endpoint_id, endpoint.url, event.account_id,
-                  event.livemode, event.type, event.data, event.object_type, event.object_id,
+                  account.public_id, event.livemode, event.type, event.data, event.object_type, event.object_id,
                   delivery.attempts, event.created, delivery.next_attempt_at
         "#,
     )
     .bind(lease_seconds)
+    .bind(livemode)
     .fetch_optional(&mut *transaction)
     .await?;
     let Some(row) = row else {
@@ -411,6 +441,7 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
         endpoint_id: row.try_get("endpoint_id")?,
         url: row.try_get("url")?,
         scope: Scope::new(row.try_get("account_id")?, row.try_get("livemode")?),
+        account: row.try_get("public_id")?,
         event_type: row.try_get("type")?,
         data: row.try_get("data")?,
         object: EventObject::from_parts(&object_type, row.try_get("object_id")?),

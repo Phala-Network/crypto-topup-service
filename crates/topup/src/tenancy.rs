@@ -53,6 +53,8 @@ impl Scope {
 pub enum Permission {
     /// Read the account and its configuration.
     AccountRead,
+    /// Change the account's own settings, such as rolling its webhook key.
+    AccountWrite,
     /// Read quotes.
     QuotesRead,
     /// Create and cancel quotes.
@@ -81,6 +83,7 @@ impl Permission {
     pub const fn code(self) -> &'static str {
         match self {
             Self::AccountRead => "account.read",
+            Self::AccountWrite => "account.write",
             Self::QuotesRead => "quotes.read",
             Self::QuotesWrite => "quotes.write",
             Self::DepositsRead => "deposits.read",

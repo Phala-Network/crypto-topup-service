@@ -26,7 +26,7 @@ import unsupported_asset
 from reference_product.config import ProductConfig
 from reference_product.driver import Payer
 from reference_product.ledger import ProductLedger
-from reference_product.server import ProductServer, pin_settlement_key
+from reference_product.server import ProductServer, pin_webhook_keys
 
 SCENARIOS: dict[str, ModuleType] = {
     "happy_path": happy_path,
@@ -59,8 +59,8 @@ def main() -> int:
     ledger = ProductLedger()
     results: list[tuple[str, str, float, str]] = []
     with config.client() as client:
-        key = pin_settlement_key(config)
-        fulfillment = harness.ScenarioFulfillment(config, ledger, key)
+        pinned = pin_webhook_keys(config)
+        fulfillment = harness.ScenarioFulfillment(config, ledger, lambda: pinned)
         with ProductServer(fulfillment):
             context = harness.Context(config, client, ledger, fulfillment, Payer(config))
             for name in [name for name in args.names or SCENARIOS if name not in args.skip]:

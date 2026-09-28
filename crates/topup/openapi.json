@@ -42,6 +42,86 @@
         ]
       }
     },
+    "/v1/account/webhook_keys/roll": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Rolls the webhook signing key of the key's mode: the next version signs every delivery from\nnow on, and the current one keeps signing beside it for `expires_in` seconds (at most 7 days),\nso every delivery carries one `v1a` signature per key until then; `0`, the default, stops it\nat once. Fetch and verify the new public key with `GET /v1/attestation`, pin it next to the\nold one, and drop the old one when it expires. Announced as `account.updated`.",
+        "operationId": "roll_webhook_key",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters. A retry with the same key and request within 24 hours returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollWebhookKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: the account with its new webhook key version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/admin/accounts": {
       "post": {
         "tags": [
@@ -1169,6 +1249,7 @@
         "tags": [
           "attestation"
         ],
+        "summary": "TDX evidence binding a fresh `nonce` to the webhook public keys of the key's account and mode\n(design D11). Verify the quote once with the dstack verifier, check that its report data is\n`report_data` zero-padded to 64 bytes and that `report_data` binds your nonce, account, mode,\nand the listed keys, then pin the public keys: they are stable across releases.",
         "operationId": "get_attestation",
         "parameters": [
           {
@@ -1202,6 +1283,16 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Service Unavailable",
             "content": {
@@ -1212,7 +1303,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
       }
     },
     "/v1/config": {
@@ -2791,6 +2887,13 @@
               "type": "string"
             },
             "description": "Active account-level pause scopes."
+          },
+          "webhook_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookKeyVersion"
+            },
+            "description": "The keys that sign this mode's webhooks: the current one first, then any previous one\nstill signing during a rotation. Their public keys come from `GET /v1/attestation`. Always\nsent; optional in the schema so clients also parse objects from servers before it."
           }
         }
       },
@@ -2977,17 +3080,27 @@
       },
       "AttestationResponse": {
         "type": "object",
-        "description": "TDX evidence binding a nonce to the settlement public key.",
+        "description": "TDX evidence binding a nonce to the webhook public keys of the caller's account in the\ncaller's mode (design D11).",
         "required": [
-          "keyid",
-          "settlement_pubkey",
+          "object",
+          "account",
+          "livemode",
+          "webhook_keys",
           "report_data",
           "quote"
         ],
         "properties": {
-          "keyid": {
+          "account": {
             "type": "string",
-            "description": "Settlement key identifier."
+            "description": "The caller's account, `acct_…`."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The caller's mode; each mode has its own key."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `attestation`."
           },
           "quote": {
             "type": "string",
@@ -2995,11 +3108,14 @@
           },
           "report_data": {
             "type": "string",
-            "description": "`sha256(nonce ‖ settlement_pubkey)` as lowercase hexadecimal."
+            "description": "`sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖\npublic_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,\n`livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is\nits version as 4 big-endian bytes and its 32 raw public-key bytes."
           },
-          "settlement_pubkey": {
-            "type": "string",
-            "description": "Raw ed25519 settlement public key as lowercase hexadecimal."
+          "webhook_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookKeyObject"
+            },
+            "description": "The keys that sign the account's deliveries in this mode: the current one first, then any\nprevious one still signing during a rotation."
           }
         }
       },
@@ -3112,6 +3228,10 @@
           "currency": {
             "type": "string",
             "description": "Credit currency, `usd`."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode of the key that reads it: `assets` lists that mode's routes. Always sent;\noptional in the schema like the quote's."
           },
           "max_open_amount_per_account": {
             "type": "integer",
@@ -3545,6 +3665,10 @@
           "id": {
             "type": "string",
             "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "Whether the deposit is on a live-mode route. Always sent; optional in the schema like the\nquote's."
           },
           "log_index": {
             "type": "integer",
@@ -4424,6 +4548,10 @@
             "type": "string",
             "description": "`qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, \"lock\",\nid))`, where `account` is your `acct_` id."
           },
+          "livemode": {
+            "type": "boolean",
+            "description": "Whether the quote was created with a live key. Always sent; optional in the schema so\nclients also parse objects from servers, and events rendered, before it."
+          },
           "metadata": {
             "type": "object",
             "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.\nAlways sent; optional in the schema so clients also parse objects from servers, and\nevents rendered, before metadata.",
@@ -4654,6 +4782,10 @@
             "type": "string",
             "description": "`re_` id."
           },
+          "livemode": {
+            "type": "boolean",
+            "description": "Whether the refund was requested with a live key. Always sent; optional in the schema like\nthe quote's."
+          },
           "log_index": {
             "type": [
               "integer",
@@ -4702,6 +4834,19 @@
             "type": "integer",
             "format": "int32",
             "description": "Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at\nonce.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "RollWebhookKeyRequest": {
+        "type": "object",
+        "description": "`POST /v1/account/webhook_keys/roll` body.",
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds the current key keeps signing beside the new one, up to 604800 (7 days); 0, the\ndefault, stops it at once.",
             "minimum": 0
           }
         },
@@ -4920,6 +5065,57 @@
           }
         },
         "additionalProperties": false
+      },
+      "WebhookKeyObject": {
+        "type": "object",
+        "description": "One version of an account's webhook signing key, with its public key.",
+        "required": [
+          "version",
+          "public_key"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a rolled key stops signing, Unix seconds; `null` for the current key."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:\nevery delivery carries a `v1a` signature by it."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Key version, from 1; it grows by one per roll.",
+            "minimum": 0
+          }
+        }
+      },
+      "WebhookKeyVersion": {
+        "type": "object",
+        "description": "One version of an account's webhook signing key; its public key comes from\n`GET /v1/attestation`.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a rolled key stops signing, Unix seconds; `null` for the current key."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Key version, from 1.",
+            "minimum": 0
+          }
+        }
       }
     },
     "securitySchemes": {

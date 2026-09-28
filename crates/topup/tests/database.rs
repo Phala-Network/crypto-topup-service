@@ -615,6 +615,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("events", OPERATIONAL),
     ("webhook_deliveries", OPERATIONAL),
     ("idempotency_keys", OPERATIONAL),
+    ("retiring_webhook_keys", OPERATIONAL),
 ];
 const OPERATIONAL: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE"];
 

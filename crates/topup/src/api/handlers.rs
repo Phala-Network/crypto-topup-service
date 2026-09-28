@@ -16,43 +16,17 @@ use crate::routes::{ProviderError, RouteSet};
 use crate::tenancy::Scope;
 
 use super::AppState;
-use super::attestation::AttestationError;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, ApiPath, ApiQuery};
+use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountResponse, AdminReasonRequest, ApiKeyObject, AttestationQuery, AttestationResponse,
-    Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
-    NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
-    ReconciliationBlockLiftResponse, RoutePauseResponse, SupportDepositResponse,
-    UpdateAccountRequest,
+    AccountResponse, AdminReasonRequest, ApiKeyObject, Contact, CreateAccountRequest,
+    CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest, NudgeResponse,
+    OutboxReplayResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
+    RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
 type ApiResult<T> = Result<T, ApiError>;
-
-#[utoipa::path(
-    get,
-    path = "/v1/attestation",
-    params(AttestationQuery),
-    responses(
-        (status = 200, description = "OK", body = AttestationResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 503, description = "Service Unavailable", body = ErrorResponse)
-    ),
-    tag = "attestation"
-)]
-pub(crate) async fn get_attestation(
-    State(state): State<AppState>,
-    ApiQuery(query): ApiQuery<AttestationQuery>,
-) -> ApiResult<Json<AttestationResponse>> {
-    let nonce = decode_nonce(&query.nonce)?;
-    match state.attestor.attest(&nonce).await {
-        Ok(response) => Ok(Json(response)),
-        Err(AttestationError::Unavailable) => {
-            Err(ApiError::service_unavailable("attestation is unavailable"))
-        }
-    }
-}
 
 #[utoipa::path(
     post,
@@ -600,15 +574,6 @@ fn validate_scopes(scopes: Vec<String>) -> ApiResult<Vec<String>> {
     validated.sort();
     validated.dedup();
     Ok(validated)
-}
-
-fn decode_nonce(value: &str) -> ApiResult<Vec<u8>> {
-    if value.is_empty() || value.len() > 64 {
-        return Err(ApiError::bad_request(
-            "nonce must be 1 to 32 bytes of hexadecimal",
-        ));
-    }
-    hex::decode(value).map_err(|_| ApiError::bad_request("nonce must be valid hexadecimal"))
 }
 
 fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {

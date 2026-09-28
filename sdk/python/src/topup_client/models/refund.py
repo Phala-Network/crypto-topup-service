@@ -40,6 +40,9 @@ class Refund:
                 `sender_mismatch`,
                 `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
                 added.
+            livemode (bool | Unset): Whether the refund was requested with a live key. Always sent; optional in the schema
+                like
+                the quote's.
             log_index (int | None | Unset): Block-wide index of the paying `Transfer` log: as named when marked paid, or
                 found at
                 verification.
@@ -59,6 +62,7 @@ class Refund:
     status: str
     treasury: str
     failure_reason: None | str | Unset = UNSET
+    livemode: bool | Unset = UNSET
     log_index: int | None | Unset = UNSET
     metadata: RefundMetadata | Unset = UNSET
     transaction_hash: None | str | Unset = UNSET
@@ -94,6 +98,8 @@ class Refund:
         else:
             failure_reason = self.failure_reason
 
+        livemode = self.livemode
+
         log_index: int | None | Unset
         if isinstance(self.log_index, Unset):
             log_index = UNSET
@@ -126,6 +132,8 @@ class Refund:
         )
         if failure_reason is not UNSET:
             field_dict["failure_reason"] = failure_reason
+        if livemode is not UNSET:
+            field_dict["livemode"] = livemode
         if log_index is not UNSET:
             field_dict["log_index"] = log_index
         if metadata is not UNSET:
@@ -177,6 +185,8 @@ class Refund:
 
         failure_reason = _parse_failure_reason(d.pop("failure_reason", UNSET))
 
+        livemode = d.pop("livemode", UNSET)
+
         def _parse_log_index(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -212,6 +222,7 @@ class Refund:
             status=status,
             treasury=treasury,
             failure_reason=failure_reason,
+            livemode=livemode,
             log_index=log_index,
             metadata=metadata,
             transaction_hash=transaction_hash,

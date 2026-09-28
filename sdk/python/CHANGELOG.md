@@ -25,8 +25,24 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   from a network's treasury; `Deposits.list` and `TopupClient.list_deposits` take
   `deposit_address`, and `Deposit.deposit_address` names the address a deposit reached.
 
+- `TopupClient.roll_webhook_key(expires_in=)` rolls the mode's webhook key (one
+  `Idempotency-Key` across retries). `sign_webhook` accepts several keys, as a rotation signs.
+
 ### Changed
 
+- **Breaking**: webhooks are signed with your account's key per mode (design D11).
+  `Webhook.construct_event(payload, headers, public_key, expected_account, *, expected_livemode)`
+  and `verify_webhook(headers, body, public_keys, *, expected_account, expected_livemode)` fail
+  closed unless a signature verifies with a pinned key (one key, or a list while a rotation
+  overlaps) and the event's `account` and `livemode` match; `Event` and `WebhookEvent` carry
+  `account` and `livemode`. Events in the envelope before `evt_` ids are refused.
+  `attestation_report_data(nonce, account, livemode, keys)` computes the new binding and
+  `verify_attestation_binding(response, nonce, *, expected_account=, expected_livemode=)` returns
+  the attested public keys; `AttestationResponse` has `account`, `livemode`, and `webhook_keys`
+  instead of `keyid` and `settlement_pubkey`, and `TopupClient.attestation` sends the API key.
+  `topup-sdk send-test-event` takes `--account` and also checks that another account's event is
+  refused. `Quote`, `Deposit`, `Refund`, `Config`, and `AccountObject` gain `livemode` or
+  `webhook_keys`.
 - **Breaking**: refunds are paid by the merchant from the refund's `treasury` and attached with
   `TopupClient.mark_refund_paid(refund_id, transaction_hash, log_index=)` (`pay.refunds.mark_paid`);
   `cancel_refund` (`pay.refunds.cancel`) cancels a pending one. `Refund` gains `treasury`,

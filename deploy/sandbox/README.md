@@ -69,8 +69,8 @@ Credential issuance is a human step on both sides.
 2. The operator creates your sandbox account (`acct_…`) and returns, to your contact through an
    encrypted channel, its first secret key (`ppay_sk_test_…`), the sandbox service URL, your
    route name, the chain id, the forwarder factory and implementation addresses, the test token
-   and unsupported-token addresses, and the attestation instructions for pinning the settlement
-   key (`keyid = settlement/v1`). Roll the key at once (`POST /v1/api_keys/{id}/roll`) and keep
+   and unsupported-token addresses, and the attestation instructions for pinning your account's
+   test-mode webhook key (docs/integration.md §5.3). Roll the key at once (`POST /v1/api_keys/{id}/roll`) and keep
    the new one in a mode-0600 file; use it only for the sandbox.
 
 Test tokens are free: `MockERC20.mint(address,uint256)` is public. You also need Sepolia ETH for
@@ -160,8 +160,9 @@ Write a configuration file; the fields are those of `ProductConfig` in
 - Without a mode the reference product runs the product (`serve`) and one deposit (`deposit`) in
   one process; the two modes also run separately, as for staging (deploy/README.md, "Staging
   reference product").
-- Set `settlement_public_key` (hex) after verifying the attestation quote; otherwise the product
-  checks only the attestation's nonce binding and warns.
+- Set `webhook_public_keys` (hex, current first) after verifying the attestation quote; otherwise
+  the product fetches `GET /v1/attestation` with its API key, checks only its binding to the
+  nonce, account, mode, and keys, and warns.
 
 Then run:
 

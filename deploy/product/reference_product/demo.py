@@ -722,11 +722,12 @@ def _quote_view(quote: Quote) -> dict[str, Any]:
 
 def _attestation_view(evidence: AttestationResponse) -> dict[str, Any]:
     return {
-        # TopupClient.attestation raises unless report_data binds the fresh nonce and the
-        # settlement key.
+        # TopupClient.attestation raises unless report_data binds the fresh nonce, the account,
+        # the mode, and the account's webhook keys.
         "binding_verified": True,
-        "keyid": evidence.keyid,
-        "settlement_pubkey": evidence.settlement_pubkey,
+        "account": evidence.account,
+        "livemode": evidence.livemode,
+        "webhook_public_key": evidence.webhook_keys[0].public_key,
         "report_data": evidence.report_data,
         "quote_bytes": len(evidence.quote) // 2,
     }
