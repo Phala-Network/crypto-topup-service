@@ -30,7 +30,8 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   `TopupClient.mark_refund_paid(refund_id, transaction_hash, log_index=)` (`pay.refunds.mark_paid`);
   `cancel_refund` (`pay.refunds.cancel`) cancels a pending one. `Refund` gains `treasury`,
   `failure_reason`, and `log_index`, renames `tx_hash` to `transaction_hash`, and its `status` may
-  also be `failed` or `canceled`. The regenerated admin client drops `approve_refund`,
+  also be `failed` or `canceled`. A failed refund is announced by the `refund.failed` webhook,
+  whose `data.object` is the refund. The regenerated admin client drops `approve_refund`,
   `record_refund`, `AdminRefundResponse`, and `RecordRefundRequest`.
 
 - **Breaking**: the service sends no transactions, so attestation binds no flusher operators.

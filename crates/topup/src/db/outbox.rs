@@ -14,6 +14,8 @@ pub enum EventObject {
     ApiKey(Uuid),
     /// The account itself.
     Account(Uuid),
+    /// A refund, by its UUID.
+    Refund(Uuid),
 }
 
 impl EventObject {
@@ -25,6 +27,7 @@ impl EventObject {
             Self::Quote(_) => "quote",
             Self::ApiKey(_) => "api_key",
             Self::Account(_) => "account",
+            Self::Refund(_) => "refund",
         }
     }
 
@@ -36,6 +39,7 @@ impl EventObject {
             "quote" => Some(Self::Quote(id)),
             "api_key" => Some(Self::ApiKey(id)),
             "account" => Some(Self::Account(id)),
+            "refund" => Some(Self::Refund(id)),
             _ => None,
         }
     }
@@ -44,7 +48,11 @@ impl EventObject {
     #[must_use]
     pub const fn id(self) -> Uuid {
         match self {
-            Self::Deposit(id) | Self::Quote(id) | Self::ApiKey(id) | Self::Account(id) => id,
+            Self::Deposit(id)
+            | Self::Quote(id)
+            | Self::ApiKey(id)
+            | Self::Account(id)
+            | Self::Refund(id) => id,
         }
     }
 }

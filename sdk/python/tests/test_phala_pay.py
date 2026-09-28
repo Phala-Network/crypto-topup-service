@@ -14,6 +14,7 @@ from phala_pay import (
     Deposit,
     PhalaPay,
     Quote,
+    Refund,
     SignatureVerificationError,
     Webhook,
 )
@@ -115,8 +116,11 @@ def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
         "deposit": f"dep_{1:032x}",
         "amount_atomic": "100",
         "destination_address": ADDRESS,
+        "treasury": "0x" + "7e" * 20,
         "status": "pending",
-        "tx_hash": None,
+        "failure_reason": None,
+        "transaction_hash": None,
+        "log_index": None,
         "created": 1_790_000_400,
         "metadata": {},
     }
@@ -345,6 +349,29 @@ def test_construct_event_parses_quote_events_and_accepts_text_and_any_header_cas
     )
     assert isinstance(event.data.object, Quote)
     assert event.quote.status == "expired"
+
+
+def test_construct_event_parses_a_failed_refund() -> None:
+    refund: dict[str, object] = {
+        "id": "re_" + "0e" * 16,
+        "object": "refund",
+        "deposit": f"dep_{1:032x}",
+        "amount_atomic": "100",
+        "destination_address": "0x" + "44" * 20,
+        "treasury": "0x" + "7e" * 20,
+        "status": "failed",
+        "failure_reason": "sender_mismatch",
+        "transaction_hash": "0x" + "dd" * 32,
+        "log_index": None,
+        "created": 1_790_000_000,
+    }
+    body, headers = _delivery("refund.failed", refund)
+    event = Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)
+    assert isinstance(event.data.object, Refund)
+    assert event.refund.status == "failed"
+    assert event.refund.failure_reason == "sender_mismatch"
+    with pytest.raises(TypeError):
+        _ = event.deposit
 
 
 def test_construct_event_keeps_unknown_types_raw() -> None:

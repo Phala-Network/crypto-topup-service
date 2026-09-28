@@ -2,7 +2,8 @@
 -- from the treasury of the deposit's own address and attaches the transaction; the service
 -- verifies it at finality. The operator approve-and-record workflow goes: its statuses, the
 -- `requested_by`/`approved_by` actors, the per-refund route, the hash versioning, and the
--- partial-claim table, which one refund per transfer log replaces.
+-- partial-claim table, which one refund per transfer log replaces. A failed verification sends
+-- `refund.failed`, an event about the refund.
 
 DROP TRIGGER refund_payment_claim_capacity ON refund_payment_claims;
 DROP FUNCTION enforce_refund_payment_claim_capacity();
@@ -87,3 +88,8 @@ COMMENT ON COLUMN refunds.confirmation_evidence IS
     'Most recent finalized verification evidence of the attached transaction, including mismatches.';
 COMMENT ON COLUMN refunds.next_check_at IS
     'Earliest time the verification worker reads the attached transaction again.';
+
+-- `refund.failed` events are about the refund (Stripe's event for a failed refund).
+ALTER TABLE events DROP CONSTRAINT events_object_type_check;
+ALTER TABLE events ADD CONSTRAINT events_object_type_check
+    CHECK (object_type IN ('deposit', 'quote', 'api_key', 'account', 'refund'));

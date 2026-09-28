@@ -350,7 +350,7 @@ pub(crate) async fn create_refund(
         },
     )
     .await?;
-    let refund = find_refund(&state, merchant.scope, refund_id)
+    let refund = find_refund(&state.pool, merchant.scope, refund_id)
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
@@ -383,7 +383,7 @@ pub(crate) async fn get_refund(
         .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["deposit"])?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
-    let mut refund = find_refund(&state, merchant.scope, id)
+    let mut refund = find_refund(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     if expand.contains(&"deposit")
@@ -443,7 +443,7 @@ pub(crate) async fn update_refund(
     {
         return Err(ApiError::not_found());
     }
-    find_refund(&state, scope, id)
+    find_refund(&state.pool, scope, id)
         .await?
         .ok_or_else(ApiError::not_found)
         .map(Json)
@@ -511,7 +511,7 @@ pub(crate) async fn mark_refund_paid(
         &merchant.actor(),
     )
     .await?;
-    let refund = find_refund(&state, merchant.scope, id)
+    let refund = find_refund(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
@@ -555,7 +555,7 @@ pub(crate) async fn cancel_refund(
         .await?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
     repository::cancel_refund(&state.pool, merchant.scope, id, &merchant.actor()).await?;
-    let refund = find_refund(&state, merchant.scope, id)
+    let refund = find_refund(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
@@ -595,7 +595,12 @@ async fn expanded_quote(
     Ok(Some(ExpandableQuote::Object(Box::new(quote))))
 }
 
-async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Option<Refund>> {
+/// The scope's refund `id`, if it exists.
+pub(crate) async fn find_refund(
+    pool: &PgPool,
+    scope: Scope,
+    id: Uuid,
+) -> ApiResult<Option<Refund>> {
     let row = sqlx::query_as::<_, RefundRow>(
         r#"
         SELECT refund.id, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
@@ -611,7 +616,7 @@ async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Opti
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await?;
     row.map(|row| {
         Ok(Refund {

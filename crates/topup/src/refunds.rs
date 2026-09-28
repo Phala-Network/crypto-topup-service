@@ -6,7 +6,7 @@
 //! deposit's token from that treasury to the destination for exactly the amount, in a log no other
 //! refund uses. Then the refund is `succeeded` and `deposit.refunded` is sent; a finalized
 //! transaction that does not pay it makes it `failed` with a `failure_reason`, which releases its
-//! reservation of the deposit.
+//! reservation of the deposit, and sends `refund.failed`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
@@ -592,13 +592,17 @@ async fn succeed(
     Ok(true)
 }
 
+/// Marks the refund `failed` and sends `refund.failed` (Stripe's event for a failed refund), whose
+/// object is the refund with its `failure_reason`; the id is derived from the refund, one event per
+/// refund. Nothing is sent when the refund is no longer pending.
 async fn fail(
     pool: &PgPool,
     check: &RefundCheck,
     reason: &str,
     evidence: &Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let mut transaction = pool.begin().await?;
+    let updated = sqlx::query(
         r#"
         UPDATE refunds
         SET status = 'failed', failure_reason = $3, confirmation_evidence = $4, updated_at = now()
@@ -609,8 +613,24 @@ async fn fail(
     .bind(format!("{:#x}", check.tx_hash))
     .bind(reason)
     .bind(evidence)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    if updated.rows_affected() == 1 {
+        crate::db::enqueue_in(
+            &mut transaction,
+            &crate::db::NewOutboxEvent {
+                id: topup_core::identity::event_id("refund.failed", check.refund_id),
+                event_type: "refund.failed".to_owned(),
+                account_id: check.account_id,
+                livemode: check.livemode,
+                object: crate::db::EventObject::Refund(check.refund_id),
+                next_attempt_at: chrono::Utc::now(),
+                actor: crate::db::SYSTEM_ACTOR.to_owned(),
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 

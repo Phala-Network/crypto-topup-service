@@ -1,6 +1,14 @@
 -- Restores the operator refund workflow's columns and claim table as
 -- 20261004000000_multi_tenant created them. Failed and canceled refunds have no equivalent and
--- are discarded; succeeded refunds become `confirmed` with their transfer log as the claim.
+-- are discarded with their `refund.failed` events; succeeded refunds become `confirmed` with
+-- their transfer log as the claim.
+
+DELETE FROM webhook_deliveries
+WHERE event_id IN (SELECT id FROM events WHERE object_type = 'refund');
+DELETE FROM events WHERE object_type = 'refund';
+ALTER TABLE events DROP CONSTRAINT events_object_type_check;
+ALTER TABLE events ADD CONSTRAINT events_object_type_check
+    CHECK (object_type IN ('deposit', 'quote', 'api_key', 'account'));
 
 DELETE FROM refunds WHERE status IN ('failed', 'canceled');
 

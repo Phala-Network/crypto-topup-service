@@ -100,8 +100,8 @@ impl AppState {
 }
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
-/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/api_keys/{id}`,
-/// or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`,
+/// `GET /v1/api_keys/{id}`, or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
 /// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
@@ -116,6 +116,9 @@ pub(crate) async fn event_data(
         crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, scope, id)
             .await
             .map(|quote| quote.map(serde_json::to_value)),
+        crate::db::EventObject::Refund(id) => deposits::find_refund(pool, scope, id)
+            .await
+            .map(|refund| refund.map(serde_json::to_value)),
         crate::db::EventObject::ApiKey(id) => crate::api_keys::get(pool, scope, id)
             .await
             .map(|key| key.map(|key| serde_json::to_value(keys::api_key_object(&key, None))))

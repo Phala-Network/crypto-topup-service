@@ -546,6 +546,7 @@ the service's public key.
 | `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
 | `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Claw back its credit as for `deposit.refunded` (§2.3). | The deposit, `status: "reversed"` |
 | `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
+| `refund.failed` | The transaction attached with `mark_paid` is final but does not pay the refund (§3); one event per refund. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
 
 Every object names its `account_id`. Before the route's confirmation nothing is sent: a checkout
@@ -636,7 +637,7 @@ POST /v1/refunds/re_…/mark_paid
   (and `refunded`, once whole) shows it. A final transaction that does not pay it makes the refund
   `failed` with a `failure_reason` (`transaction_failed`, `transfer_not_found`,
   `sender_mismatch`, `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`) and
-  releases its reservation; create a new refund to try again. Attaching the same transaction again
+  releases its reservation, and `refund.failed` is sent; create a new refund to try again. Attaching the same transaction again
   returns the refund; another one is `409 refund_unexpected_state`.
 - `POST /v1/refunds/{id}/cancel` cancels a pending refund, attached or not, and releases its
   reservation; a succeeded or failed refund cannot be canceled. A deposit that is reversed cancels

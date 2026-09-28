@@ -103,7 +103,8 @@ webhook receivers must ignore unknown fields. The format follows
   {transaction_hash, log_index?}`**. At finality on both providers, a `Transfer` of the deposit's
   token from that treasury to the destination for exactly the amount, in a log no other refund
   holds, makes the refund `succeeded` and sends `deposit.refunded`; anything else makes it `failed`
-  with a `failure_reason` and releases the reservation. **`POST /v1/refunds/{id}/cancel`** cancels
+  with a `failure_reason`, releases the reservation, and sends **`refund.failed`** (Stripe's
+  event; event id `uuid_v5(NS, "refund.failed:" + refund UUID)`, `data.object` the refund). **`POST /v1/refunds/{id}/cancel`** cancels
   a pending refund; a reversed deposit cancels its pending refunds. The Refund object gains
   `treasury`, `failure_reason`, and `log_index`, renames `tx_hash` to `transaction_hash`, and its
   `status` is Stripe's `pending`, `succeeded`, `failed`, or `canceled`. New `409` codes:

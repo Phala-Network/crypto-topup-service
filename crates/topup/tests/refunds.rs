@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{Account, NewDeposit};
+use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::refunds::{
     DestinationScreener, DestinationScreening, EvmRefundChainReader, RefundChainReader,
     RefundReadError, RefundReceipt, RefundVerificationConfig, RefundVerificationWorker,
@@ -321,6 +322,7 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
                 "transaction_failed",
             ),
         ];
+        let mut failed = Vec::new();
         for (index, (name, receipt, reason)) in cases.into_iter().enumerate() {
             let deposit =
                 seed_rejected_deposit(pool, merchant.account.id, &format!("case-{index}"), 100)
@@ -340,15 +342,47 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
                 .await?;
             ensure!(refund["status"] == "failed", "{name}: {refund}");
             ensure!(refund["failure_reason"] == reason, "{name}: {refund}");
+            failed.push((id.clone(), reason));
             // The failed refund no longer holds the deposit: the whole amount can be refunded.
             merchant.refund(deposit, "100").await?;
         }
-        ensure!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
-                .fetch_one(pool)
-                .await?
-                == 0
-        );
+
+        // Each failure sends one `refund.failed` about its refund, and nothing else is sent.
+        let events: Vec<(Uuid, String, String, Uuid)> = sqlx::query_as(
+            "SELECT id, type, object_type, object_id FROM events ORDER BY created, id",
+        )
+        .fetch_all(pool)
+        .await?;
+        ensure!(events.len() == failed.len(), "{events:?}");
+        for (id, _) in &failed {
+            let refund_id = topup::ids::parse(topup::ids::REFUND, id).context("re_ id")?;
+            ensure!(
+                events.contains(&(
+                    topup_core::identity::event_id("refund.failed", refund_id),
+                    "refund.failed".to_owned(),
+                    "refund".to_owned(),
+                    refund_id,
+                )),
+                "{id}: {events:?}"
+            );
+        }
+        // Delivered through the outbox, `data.object` is the failed refund with its reason.
+        let bodies = deliver_events(pool, merchant.account.id).await?;
+        ensure!(bodies.len() == failed.len(), "{bodies:?}");
+        for (id, reason) in &failed {
+            let body = bodies
+                .iter()
+                .find(|body| body["data"]["object"]["id"] == id.as_str())
+                .with_context(|| format!("no refund.failed for {id}"))?;
+            ensure!(body["type"] == "refund.failed", "{body}");
+            let refund = &body["data"]["object"];
+            ensure!(
+                refund["object"] == "refund" && refund["status"] == "failed",
+                "{body}"
+            );
+            ensure!(refund["failure_reason"] == *reason, "{body}");
+            ensure!(refund["transaction_hash"] == REFUND_TX, "{body}");
+        }
         Ok(())
     }
     .await;
@@ -1347,6 +1381,74 @@ fn test_router_with(
         refund_screening,
     };
     topup::api::router(state).0
+}
+
+/// Delivers every pending event of `account_id` to a local receiver and returns the bodies.
+async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Value>> {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/", listener.local_addr()?);
+    let receiver = Router::new().route(
+        "/",
+        post(move |Json(body): Json<Value>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().expect("receiver lock").push(body);
+                StatusCode::OK
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, receiver).await });
+    sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
+        .bind(account_id)
+        .bind(&url)
+        .execute(pool)
+        .await?;
+    let worker = DeliveryWorker::new(
+        pool.clone(),
+        Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).map_err(anyhow::Error::msg)?),
+        Arc::new(WebhookSigner(SigningKey::from_bytes(&[11; 32]))),
+        DeliveryConfig {
+            batch_size: 10,
+            request_timeout: StdDuration::from_secs(2),
+            claim_lease: StdDuration::from_secs(30),
+            poll_interval: StdDuration::from_millis(10),
+            response_body_limit: 16,
+            age_alert_threshold: StdDuration::from_secs(60),
+        },
+    )?;
+    for _ in 0..20 {
+        if worker.run_once().await? == 0 {
+            break;
+        }
+    }
+    server.abort();
+    let _ = server.await;
+    let bodies = received.lock().expect("receiver lock").clone();
+    Ok(bodies)
+}
+
+struct WebhookSigner(SigningKey);
+
+impl topup_core::Signer for WebhookSigner {
+    async fn sign_settlement(
+        &self,
+        content: &[u8],
+    ) -> Result<topup_core::Ed25519Signature, topup_core::SignerError> {
+        use ed25519_dalek::Signer as _;
+        Ok(topup_core::Ed25519Signature(
+            self.0.sign(content).to_bytes(),
+        ))
+    }
+
+    async fn settlement_public_key(
+        &self,
+    ) -> Result<topup_core::Ed25519PublicKey, topup_core::SignerError> {
+        Ok(topup_core::Ed25519PublicKey(
+            self.0.verifying_key().to_bytes(),
+        ))
+    }
 }
 
 async fn seed_refund_row(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> Result<()> {

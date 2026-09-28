@@ -266,7 +266,7 @@ refunds       id, account_id, livemode, chain_id, deposit_id, amount_atomic, des
               metadata jsonb, created_at   -- paid by the merchant from the address's treasury
               UNIQUE (chain_id, tx_hash, log_index) among pending and succeeded refunds
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
-events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account),
+events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account|refund),
               object_id, actor (key_… | admin | system), data jsonb, created
               -- data: the object, rendered at the first delivery attempt
 webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
@@ -758,9 +758,11 @@ The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, wi
 `{id: "evt_…", object: "event", type, created, data: {object}}`: `deposit.credited`,
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
-refund) carry the deposit, and `quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
+refund) carry the deposit, `refund.failed` (the attached transaction is final but does not pay the
+refund; one per refund) the refund with its `failure_reason`, and `quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
 delivery attempt and stored, so every retry and replay sends the same body. Every event id is
-`uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded`, so a
+`uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded` and
+`refund.failed`, so a
 re-emission after a restore deduplicates for every type. `deposit.credited` is the fulfillment
 event (§11) and `deposit.reversed` claws it back like `deposit.refunded`; the others are
 informational and never change balances. Nothing is sent before the route's confirmation: the
