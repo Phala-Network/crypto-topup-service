@@ -54,9 +54,6 @@ pub enum RejectReason {
     Sanctioned,
     /// The deposited amount is outside the configured bounds.
     OutOfBounds,
-    /// The product refused the credit under the retired settlement protocol. Kept so historical
-    /// rows stay readable; no step produces it any more.
-    ProductRefused,
 }
 
 impl RejectReason {
@@ -69,7 +66,6 @@ impl RejectReason {
             Self::OutOfRange => "out_of_range",
             Self::Sanctioned => "sanctioned",
             Self::OutOfBounds => "out_of_bounds",
-            Self::ProductRefused => "product_refused",
         }
     }
 }
@@ -410,7 +406,6 @@ mod tests {
             (RejectReason::OutOfRange, "out_of_range"),
             (RejectReason::Sanctioned, "sanctioned"),
             (RejectReason::OutOfBounds, "out_of_bounds"),
-            (RejectReason::ProductRefused, "product_refused"),
         ];
 
         for (state, encoded) in states {

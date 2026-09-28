@@ -34,15 +34,18 @@ class DepositResponse:
         state (str): Current processing state.
         tx_hash (str): Canonical transaction hash.
         updated_at (datetime.datetime): Last processing update time.
-        credit_minor (None | str | Unset): Product credit in minor units encoded as a decimal string.
-        external_id (str | Unset): Product-owned identifier of the account the receiving address belongs to. This
-            service
-            always sends it; it is optional in the schema so clients also parse responses from servers
-            that predate it.
+        account (str | Unset): The merchant account the deposit belongs to, `acct_…`. Optional in the schema so clients
+            also parse responses from servers that predate accounts.
+        credit_minor (None | str | Unset): Credit in minor units encoded as a decimal string.
+        external_id (str | Unset): The merchant's identifier of the customer the quote was issued for. This service
+            always
+            sends it; it is optional in the schema so clients also parse responses from servers that
+            predate it.
         final_at (datetime.datetime | None | Unset): When both providers showed the transfer at or below `finalized`;
             `null` while the deposit
             can still be reversed.
-        lock_ref (None | str | Unset): Rate-lock reference, when applicable.
+        livemode (bool | Unset): Whether the deposit is on a live route. Optional in the schema, like `account`.
+        lock_ref (None | str | Unset): The quote whose address received the deposit, `qt_…`.
         price_scaled (None | str | Unset): Eight-decimal scaled price encoded as a decimal string.
         price_source (None | str | Unset): Which price valued the deposit: `lock` (the quoted price) or `spot`.
         receipt_log_index (int | Unset): Position of the transfer log in its transaction's receipt; with the chain and
@@ -67,9 +70,11 @@ class DepositResponse:
     state: str
     tx_hash: str
     updated_at: datetime.datetime
+    account: str | Unset = UNSET
     credit_minor: None | str | Unset = UNSET
     external_id: str | Unset = UNSET
     final_at: datetime.datetime | None | Unset = UNSET
+    livemode: bool | Unset = UNSET
     lock_ref: None | str | Unset = UNSET
     price_scaled: None | str | Unset = UNSET
     price_source: None | str | Unset = UNSET
@@ -106,6 +111,8 @@ class DepositResponse:
 
         updated_at = self.updated_at.isoformat()
 
+        account = self.account
+
         credit_minor: None | str | Unset
         if isinstance(self.credit_minor, Unset):
             credit_minor = UNSET
@@ -121,6 +128,8 @@ class DepositResponse:
             final_at = self.final_at.isoformat()
         else:
             final_at = self.final_at
+
+        livemode = self.livemode
 
         lock_ref: None | str | Unset
         if isinstance(self.lock_ref, Unset):
@@ -181,12 +190,16 @@ class DepositResponse:
                 "updated_at": updated_at,
             }
         )
+        if account is not UNSET:
+            field_dict["account"] = account
         if credit_minor is not UNSET:
             field_dict["credit_minor"] = credit_minor
         if external_id is not UNSET:
             field_dict["external_id"] = external_id
         if final_at is not UNSET:
             field_dict["final_at"] = final_at
+        if livemode is not UNSET:
+            field_dict["livemode"] = livemode
         if lock_ref is not UNSET:
             field_dict["lock_ref"] = lock_ref
         if price_scaled is not UNSET:
@@ -233,6 +246,8 @@ class DepositResponse:
 
         updated_at = datetime.datetime.fromisoformat(d.pop("updated_at"))
 
+        account = d.pop("account", UNSET)
+
         def _parse_credit_minor(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -260,6 +275,8 @@ class DepositResponse:
             return cast(datetime.datetime | None | Unset, data)
 
         final_at = _parse_final_at(d.pop("final_at", UNSET))
+
+        livemode = d.pop("livemode", UNSET)
 
         def _parse_lock_ref(data: object) -> None | str | Unset:
             if data is None:
@@ -339,9 +356,11 @@ class DepositResponse:
             state=state,
             tx_hash=tx_hash,
             updated_at=updated_at,
+            account=account,
             credit_minor=credit_minor,
             external_id=external_id,
             final_at=final_at,
+            livemode=livemode,
             lock_ref=lock_ref,
             price_scaled=price_scaled,
             price_source=price_source,

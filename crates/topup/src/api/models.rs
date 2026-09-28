@@ -10,9 +10,16 @@ use uuid::Uuid;
 pub struct DepositResponse {
     /// Deposit id, `dep_…`.
     pub id: String,
-    /// Product-owned identifier of the account the receiving address belongs to. This service
-    /// always sends it; it is optional in the schema so clients also parse responses from servers
-    /// that predate it.
+    /// The merchant account the deposit belongs to, `acct_…`. Optional in the schema so clients
+    /// also parse responses from servers that predate accounts.
+    #[schema(required = false)]
+    pub account: String,
+    /// Whether the deposit is on a live route. Optional in the schema, like `account`.
+    #[schema(required = false)]
+    pub livemode: bool,
+    /// The merchant's identifier of the customer the quote was issued for. This service always
+    /// sends it; it is optional in the schema so clients also parse responses from servers that
+    /// predate it.
     #[schema(required = false)]
     pub external_id: String,
     /// EVM chain identifier.
@@ -35,7 +42,7 @@ pub struct DepositResponse {
     pub final_at: Option<DateTime<Utc>>,
     /// Receiving forwarder address.
     pub address: String,
-    /// Rate-lock reference, when applicable.
+    /// The quote whose address received the deposit, `qt_…`.
     pub lock_ref: Option<String>,
     /// Selected route.
     pub route: Option<String>,
@@ -55,7 +62,7 @@ pub struct DepositResponse {
     pub price_scaled: Option<String>,
     /// Which price valued the deposit: `lock` (the quoted price) or `spot`.
     pub price_source: Option<String>,
-    /// Product credit in minor units encoded as a decimal string.
+    /// Credit in minor units encoded as a decimal string.
     pub credit_minor: Option<String>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
@@ -83,7 +90,7 @@ pub struct DepositTransitionResponse {
 /// Deposit facts with the full immutable transition timeline.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SupportDepositResponse {
-    /// Product-visible deposit facts.
+    /// The deposit's stored facts.
     #[serde(flatten)]
     pub deposit: DepositResponse,
     /// Transitions in ascending creation order.
@@ -98,14 +105,14 @@ pub struct SupportDepositResponse {
 /// One webhook event about a deposit and its delivery state.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DepositEventResponse {
-    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
-    /// older event.
+    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`.
     pub id: String,
     /// Event type, such as `deposit.credited`.
     pub event_type: String,
     /// Event creation time.
     pub created_at: DateTime<Utc>,
-    /// When the receiver accepted the event, or `null` while it is undelivered.
+    /// When the last of the account's webhook endpoints accepted the event, or `null` while one
+    /// has not or the account has none.
     pub delivered_at: Option<DateTime<Utc>>,
 }
 
@@ -127,8 +134,8 @@ pub struct PauseResponse {
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateQuoteRequest {
-    /// Your identifier of the customer account to credit, 1 to 255 bytes; the account is created
-    /// on its first quote.
+    /// Your identifier of the customer account to credit, 1 to 200 characters; the account is
+    /// created on its first quote.
     pub account_id: String,
     /// The credit to quote, a positive integer in the currency's minor unit (US cents).
     pub amount: u64,
@@ -143,8 +150,8 @@ pub struct CreateQuoteRequest {
 /// A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Quote {
-    /// `qt_` id. New quotes' address salt is `keccak256(abi.encode(product_slug, account_id,
-    /// "lock", id))`.
+    /// `qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, "lock",
+    /// id))`, where `account` is your `acct_` id.
     pub id: String,
     /// Always `quote`.
     pub object: String,
@@ -291,14 +298,14 @@ pub struct Deposit {
     pub object: String,
     /// Your account identifier.
     pub account_id: String,
-    /// The quote whose address received the transfer; `null` for a persistent address.
+    /// The quote whose address received the transfer.
     pub quote: Option<ExpandableQuote>,
     /// `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
     /// not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
     /// added.
     pub status: String,
     /// Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,
-    /// `out_of_range`, `sanctioned`, or `product_refused` (historical).
+    /// `out_of_range`, or `sanctioned`.
     pub rejection_reason: Option<String>,
     /// EVM chain identifier.
     pub chain_id: u64,
@@ -440,45 +447,51 @@ pub struct RecordRefundRequest {
     pub tx_hash: String,
 }
 
-/// Administrative product registration body. The product's key id is not part of it: the
-/// attested route is its only source.
+/// Administrative account issuance body, until self-serve signup (design PR 5) and API keys
+/// (design PR 6) replace it.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct RegisterProductRequest {
-    /// Product slug named by a loaded route's `destination.product`; matches
-    /// `^[a-z0-9][a-z0-9-]{0,62}$`.
-    pub slug: String,
-    /// Standard base64 of the product's 32-byte ed25519 request-verification public key.
+pub struct CreateAccountRequest {
+    /// Display name, 1 to 200 characters.
+    pub name: String,
+    /// The mode the account's signing key acts in: `true` for live routes, `false` for test
+    /// routes.
+    pub livemode: bool,
+    /// Standard base64 of the account's 32-byte ed25519 request-verification public key.
     pub public_key: String,
-    /// Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+    /// Absolute `https` URL of the account's webhook receiver; `http` only when the service's
     /// own public origin uses `http` (local stacks).
     pub webhook_url: String,
 }
 
-/// Administrative replacement of an issued product's verification key and webhook URL. The key id
-/// stays the route's `destination.product_kid`.
+/// Administrative replacement of an account's verification key and webhook URL. The key id and
+/// mode stay.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct UpdateProductRequest {
-    /// Standard base64 of the product's new 32-byte ed25519 request-verification public key.
+pub struct UpdateAccountRequest {
+    /// Standard base64 of the account's new 32-byte ed25519 request-verification public key.
     pub public_key: String,
-    /// Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+    /// Absolute `https` URL of the account's webhook receiver; `http` only when the service's
     /// own public origin uses `http` (local stacks).
     pub webhook_url: String,
     /// Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
     pub reason: String,
 }
 
-/// Registered product.
+/// An issued account and its request signing credential.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct ProductResponse {
-    /// Service product identifier.
-    pub id: Uuid,
-    /// Product slug.
-    pub slug: String,
-    /// Standard base64 of the product's ed25519 public key.
+pub struct AccountResponse {
+    /// Account id, `acct_…`.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// The mode the account's signing key acts in.
+    pub livemode: bool,
+    /// The key id the account signs its requests with, `{id}/v1`.
+    pub key_id: String,
+    /// Standard base64 of the account's ed25519 public key.
     pub public_key: String,
     /// Webhook receiver URL.
     pub webhook_url: String,
-    /// Active product-level pause scopes.
+    /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
 }
 
@@ -523,13 +536,13 @@ pub struct ReconciliationBlockLiftResponse {
 /// A webhook event queued for delivery again.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct OutboxReplayResponse {
-    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
-    /// older event.
+    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`.
     pub event_id: String,
     /// Event type, such as `deposit.credited`.
     pub event_type: String,
-    /// When the delivery worker next attempts the event.
-    pub next_attempt_at: DateTime<Utc>,
+    /// When the delivery worker next attempts the event, or `null` when the account has no
+    /// webhook endpoint to deliver it to.
+    pub next_attempt_at: Option<DateTime<Utc>>,
 }
 
 /// Per-route daily finance report produced by C12.
@@ -553,7 +566,7 @@ pub struct RouteDailyReport {
     pub rejected_holds_atomic: String,
     /// Deposit counts keyed by state.
     pub deposits_by_state: std::collections::BTreeMap<String, u64>,
-    /// Credited deposits whose `deposit.credited` webhook the product has not acknowledged yet.
+    /// Credited deposits whose `deposit.credited` webhook an endpoint has not acknowledged yet.
     pub credited_undelivered: u64,
     /// Age in seconds of the oldest of those events; zero when every one was delivered.
     pub credited_undelivered_max_age_seconds: u64,
@@ -645,7 +658,7 @@ impl From<crate::observability::ReconciliationStatus> for ReconciliationRoundRep
 pub struct DailyReportResponse {
     /// Report snapshot time.
     pub generated_at: DateTime<Utc>,
-    /// Open rate-lock credit across all products in destination minor units: the sum the global
+    /// Open rate-lock credit across all accounts in destination minor units: the sum the global
     /// exposure cap is enforced against. This service always sends it; it is optional in the
     /// schema so clients also parse reports from servers that predate it.
     pub exposure_minor: Option<String>,

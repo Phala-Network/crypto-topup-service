@@ -25,7 +25,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use topup::db::{self, AddressKind, EventObject, NewDeposit, NewOutboxEvent};
+use topup::db::{self, EventObject, NewDeposit, NewOutboxEvent};
 use topup::outbox::{DeliveryConfig, DeliveryWorker, SignedWebhook};
 use topup::routes::RouteSet;
 use topup_core::deposit::DepositState;
@@ -37,7 +37,7 @@ use topup_core::{
 use uuid::Uuid;
 
 use support::TestDatabase;
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
@@ -358,31 +358,44 @@ fn worker_with_timeout(
     .map_err(Into::into)
 }
 
-async fn seed_product(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
-    let product_id = Uuid::new_v4();
-    seed::create_product(
-        pool,
-        &NewProduct {
-            id: product_id,
-            slug: format!("product-{product_id}"),
-            webhook_url: webhook_url.to_owned(),
-            pubkey: "product-public-key".to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
-    Ok(product_id)
-}
-
-/// Enqueues `deposit.credited` about a new deposit of `product_id`, due now; returns the deposit id.
-async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> Result<Uuid> {
-    let unique = alloy_primitives::keccak256(event_id.as_bytes());
+/// Seeds a live account whose one webhook endpoint is `webhook_url`; returns the account id.
+async fn seed_account(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
     let account = seed::create_account(
         pool,
         &NewAccount {
+            webhook_url: webhook_url.to_owned(),
+            ..NewAccount::named("webhook-test")
+        },
+    )
+    .await?;
+    Ok(account.id)
+}
+
+/// Adds a webhook endpoint to `account_id` in the given mode.
+async fn add_endpoint(pool: &PgPool, account_id: Uuid, livemode: bool, url: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO webhook_endpoints (id, account_id, livemode, url) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(livemode)
+    .bind(url)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Enqueues `deposit.credited` about a new live deposit of `account_id`, due now; returns the
+/// deposit id.
+async fn seed_account_event(pool: &PgPool, account_id: Uuid, event_id: Uuid) -> Result<Uuid> {
+    let unique = alloy_primitives::keccak256(event_id.as_bytes());
+    let customer = seed::create_customer(
+        pool,
+        &NewCustomer {
             id: Uuid::new_v4(),
-            product_id,
-            external_id: format!("account-{event_id}"),
+            account_id,
+            livemode: true,
+            client_reference_id: format!("account-{event_id}"),
             paused_scopes: Vec::new(),
         },
     )
@@ -391,14 +404,11 @@ async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> 
         pool,
         &NewAddress {
             id: Uuid::new_v4(),
-            account_id: account.id,
+            customer_id: customer.id,
             chain_id: 1,
-            kind: AddressKind::Lock,
-            version: 1,
-            lock_ref: Some(format!("lock-{event_id}")),
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: unique,
             address: alloy_primitives::Address::from_word(unique),
-            retired_at: None,
         },
     )
     .await?;
@@ -414,7 +424,6 @@ async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> 
         block_hash: unique,
         block_time: Utc::now(),
         address_id: address.id,
-        account_id: account.id,
         route: None,
         route_version: None,
         asset_contract: alloy_primitives::Address::repeat_byte(0x42),
@@ -426,12 +435,14 @@ async fn seed_product_event(pool: &PgPool, product_id: Uuid, event_id: Uuid) -> 
     };
     let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     ensure!(db::insert_deposit(pool, &deposit).await?);
+    let mut connection = pool.acquire().await?;
     db::enqueue_in(
-        pool,
+        &mut connection,
         &NewOutboxEvent {
             id: event_id,
             event_type: "deposit.credited".to_owned(),
-            product_id,
+            account_id,
+            livemode: true,
             object: EventObject::Deposit(deposit_id),
             next_attempt_at: Utc::now() - Duration::seconds(1),
         },
@@ -446,9 +457,9 @@ fn evt(event_id: Uuid) -> String {
 }
 
 async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<Uuid> {
-    let product_id = seed_product(pool, webhook_url).await?;
-    seed_product_event(pool, product_id, event_id).await?;
-    Ok(product_id)
+    let account_id = seed_account(pool, webhook_url).await?;
+    seed_account_event(pool, account_id, event_id).await?;
+    Ok(account_id)
 }
 
 #[tokio::test]
@@ -499,10 +510,12 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
     seed_event(&context.app_pool, &receiver.url, event_id).await?;
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
-    let row = sqlx::query("SELECT delivered_at, attempts, response FROM outbox WHERE id = $1")
-        .bind(event_id)
-        .fetch_one(&context.app_pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT delivered_at, attempts, response FROM webhook_deliveries WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&context.app_pool)
+    .await?;
     ensure!(
         row.try_get::<Option<chrono::DateTime<Utc>>, _>("delivered_at")?
             .is_some()
@@ -530,7 +543,7 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
             .is_some_and(|id| id.starts_with("dep_"))
     );
     // The rendered data is stored, so every retry and replay sends it unchanged.
-    let stored: Value = sqlx::query_scalar("SELECT payload FROM outbox WHERE id = $1")
+    let stored: Value = sqlx::query_scalar("SELECT data FROM events WHERE id = $1")
         .bind(event_id)
         .fetch_one(&context.app_pool)
         .await?;
@@ -540,43 +553,41 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
     context.cleanup().await
 }
 
-/// An event written before Stripe-style events is delivered, and replayed, byte for byte in the
-/// old envelope under its bare UUID.
+/// An event reaches every enabled endpoint of its own account and mode, with one body, and no
+/// endpoint of another account or of the other mode.
 #[tokio::test]
-async fn format_one_events_keep_the_old_envelope() -> Result<()> {
+async fn events_reach_only_their_accounts_endpoints_in_their_mode() -> Result<()> {
     let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
-    let receiver =
-        ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO).await?;
-    let product_id = seed_product(&context.app_pool, &receiver.url).await?;
+    let start =
+        || ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO);
+    let (first, second, test_mode, other_account) = (
+        start().await?,
+        start().await?,
+        start().await?,
+        start().await?,
+    );
+    let account_id = seed_account(&context.app_pool, &first.url).await?;
+    add_endpoint(&context.app_pool, account_id, true, &second.url).await?;
+    add_endpoint(&context.app_pool, account_id, false, &test_mode.url).await?;
+    seed_account(&context.app_pool, &other_account.url).await?;
     let event_id = Uuid::new_v4();
-    let payload = serde_json::json!({"product_id": product_id, "deposit_id": Uuid::new_v4()});
-    let created_at: chrono::DateTime<Utc> = sqlx::query_scalar(
-        r#"
-        INSERT INTO outbox (id, event_type, payload, next_attempt_at, format, product_id)
-        VALUES ($1, 'deposit.credited', $2, now() - interval '1 second', 1, $3)
-        RETURNING created_at
-        "#,
-    )
-    .bind(event_id)
-    .bind(&payload)
-    .bind(product_id)
-    .fetch_one(&context.app_pool)
-    .await?;
+    seed_account_event(&context.app_pool, account_id, event_id).await?;
 
-    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
-    ensure!(receiver.ids().await == vec![event_id.to_string()]);
-    let expected = serde_json::to_vec(&topup::outbox::EventEnvelope {
-        event_id,
-        event_type: "deposit.credited".to_owned(),
-        created_at,
-        data: payload,
-    })?;
-    ensure!(receiver.bodies().await == vec![expected]);
+    let delivery = worker(&context.app_pool, signer)?;
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(delivery.run_once().await? == 0);
+    ensure!(first.ids().await == vec![evt(event_id)]);
+    ensure!(second.ids().await == vec![evt(event_id)]);
+    ensure!(first.bodies().await == second.bodies().await);
+    ensure!(test_mode.count().await == 0 && other_account.count().await == 0);
 
-    receiver.stop().await;
+    for receiver in [first, second, test_mode, other_account] {
+        receiver.stop().await;
+    }
     context.cleanup().await
 }
 
@@ -599,7 +610,7 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
     let after = Utc::now();
     let row = sqlx::query(
-        "SELECT delivered_at, attempts, next_attempt_at, response FROM outbox WHERE id = $1",
+        "SELECT delivered_at, attempts, next_attempt_at, response FROM webhook_deliveries WHERE event_id = $1",
     )
     .bind(event_id)
     .fetch_one(&context.app_pool)
@@ -646,7 +657,7 @@ async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
+async fn cancelled_delivery_releases_the_endpoint_lock() -> Result<()> {
     let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -676,7 +687,7 @@ async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
     ensure!(claimed == 1);
     receiver.wait_for_count(2).await?;
     let delivered_at: Option<chrono::DateTime<Utc>> =
-        sqlx::query_scalar("SELECT delivered_at FROM outbox WHERE id = $1")
+        sqlx::query_scalar("SELECT delivered_at FROM webhook_deliveries WHERE event_id = $1")
             .bind(event_id)
             .fetch_one(&context.app_pool)
             .await?;
@@ -687,7 +698,7 @@ async fn cancelled_delivery_releases_the_product_lock() -> Result<()> {
 }
 
 #[tokio::test]
-async fn different_events_for_one_product_are_delivered_sequentially() -> Result<()> {
+async fn different_events_for_one_endpoint_are_delivered_sequentially() -> Result<()> {
     let Some(context) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -698,18 +709,19 @@ async fn different_events_for_one_product_are_delivered_sequentially() -> Result
         StdDuration::from_millis(150),
     )
     .await?;
-    let product_id = seed_product(&context.app_pool, &receiver.url).await?;
+    let account_id = seed_account(&context.app_pool, &receiver.url).await?;
     let first_event = Uuid::new_v4();
     let second_event = Uuid::new_v4();
-    seed_product_event(&context.app_pool, product_id, first_event).await?;
-    seed_product_event(&context.app_pool, product_id, second_event).await?;
+    seed_account_event(&context.app_pool, account_id, first_event).await?;
+    seed_account_event(&context.app_pool, account_id, second_event).await?;
     let first = worker(&context.app_pool, Arc::clone(&signer))?;
     let second = worker(&context.app_pool, Arc::clone(&signer))?;
 
     let (first_count, second_count) = tokio::join!(first.run_once(), second.run_once());
     ensure!(first_count? + second_count? == 2);
     sqlx::query(
-        "UPDATE outbox SET next_attempt_at = now() - interval '1 second' WHERE delivered_at IS NULL",
+        "UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second' \
+         WHERE delivered_at IS NULL",
     )
     .execute(&context.app_pool)
     .await?;
@@ -738,10 +750,12 @@ async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
 
     let delivery = worker_with_timeout(&context.app_pool, signer, StdDuration::from_millis(50))?;
     ensure!(delivery.run_once().await? == 1);
-    let row = sqlx::query("SELECT delivered_at, attempts, response FROM outbox WHERE id = $1")
-        .bind(event_id)
-        .fetch_one(&context.app_pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT delivered_at, attempts, response FROM webhook_deliveries WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&context.app_pool)
+    .await?;
     ensure!(
         row.try_get::<Option<chrono::DateTime<Utc>>, _>("delivered_at")?
             .is_none()
@@ -770,7 +784,7 @@ async fn redirect_is_not_followed_and_is_recorded() -> Result<()> {
     seed_event(&context.app_pool, &receiver.url, event_id).await?;
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
-    let row = sqlx::query("SELECT attempts, response FROM outbox WHERE id = $1")
+    let row = sqlx::query("SELECT attempts, response FROM webhook_deliveries WHERE event_id = $1")
         .bind(event_id)
         .fetch_one(&context.app_pool)
         .await?;
@@ -803,10 +817,13 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
     let delivery = worker(&context.app_pool, signer)?;
 
     ensure!(delivery.run_once().await? == 1);
-    sqlx::query("UPDATE outbox SET next_attempt_at = now() - interval '1 second' WHERE id = $1")
-        .bind(event_id)
-        .execute(&context.app_pool)
-        .await?;
+    sqlx::query(
+        "UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second' \
+         WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .execute(&context.app_pool)
+    .await?;
     ensure!(delivery.run_once().await? == 1);
     ensure!(receiver.ids().await == vec![evt(event_id), evt(event_id)]);
     let mut bodies = receiver.bodies().await.into_iter();
@@ -814,10 +831,11 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
     let second_body = bodies.next().context("missing successful retry body")?;
     ensure!(first_body == second_body);
     ensure!(bodies.next().is_none());
-    let row = sqlx::query("SELECT delivered_at, attempts FROM outbox WHERE id = $1")
-        .bind(event_id)
-        .fetch_one(&context.app_pool)
-        .await?;
+    let row =
+        sqlx::query("SELECT delivered_at, attempts FROM webhook_deliveries WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&context.app_pool)
+            .await?;
     ensure!(
         row.try_get::<Option<chrono::DateTime<Utc>>, _>("delivered_at")?
             .is_some()

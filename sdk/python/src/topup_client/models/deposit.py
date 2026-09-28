@@ -52,7 +52,7 @@ class Deposit:
             quote (None | Quote | str | Unset):
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
                 `out_of_bounds`,
-                `out_of_range`, `sanctioned`, or `product_refused` (historical).
+                `out_of_range`, or `sanctioned`.
             valued_at (int | None | Unset): Valuation time, Unix seconds.
     """
 

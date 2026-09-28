@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
-use topup::db::{self, AddressKind, NewDeposit};
+use topup::db::{self, NewDeposit};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup_adapters::chain::evm::EvmClient;
@@ -24,7 +24,7 @@ use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, forge_create};
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress};
 use support::with_database;
 
 struct MockSanctionsSource {
@@ -77,8 +77,8 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
                         reason: WaitReason::Paused,
                     }
             );
+            ensure!(route_wait.evidence["pause_scopes"]["customer"] == serde_json::json!([]));
             ensure!(route_wait.evidence["pause_scopes"]["account"] == serde_json::json!([]));
-            ensure!(route_wait.evidence["pause_scopes"]["product"] == serde_json::json!([]));
             ensure!(
                 route_wait.evidence["pause_scopes"]["route"] == serde_json::json!(["settlement"])
             );
@@ -130,7 +130,7 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             ensure!(rejected_evidence["provider_a"] == "sanctioned");
             ensure!(rejected_evidence["oracle"] == format!("{:#x}", Address::repeat_byte(9)));
 
-            // Each event names its product and deposit; its data, the deposit's API
+            // Each event names its account, mode, and deposit; its data, the deposit's API
             // representation, is rendered when it is first delivered.
             for (deposit, event_type, id) in [
                 (
@@ -141,15 +141,16 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
                 (clear_id, "deposit.credited", credited_event_id(clear_id)),
             ] {
                 let event = sqlx::query(
-                    "SELECT id, event_type, product_id, object_type, payload FROM outbox \
-                     WHERE object_id = $1",
+                    "SELECT id, type AS event_type, account_id, livemode, object_type, \
+                     data AS payload FROM events WHERE object_id = $1",
                 )
                 .bind(deposit)
                 .fetch_one(&context.app_pool)
                 .await?;
                 ensure!(event.try_get::<Uuid, _>("id")? == id);
                 ensure!(event.try_get::<String, _>("event_type")? == event_type);
-                ensure!(event.try_get::<Option<Uuid>, _>("product_id")? == Some(seed.product_id));
+                ensure!(event.try_get::<Uuid, _>("account_id")? == seed.account_id);
+                ensure!(event.try_get::<bool, _>("livemode")?);
                 ensure!(
                     event
                         .try_get::<Option<String>, _>("object_type")?
@@ -277,41 +278,30 @@ fn bounds() -> Bounds {
 
 #[derive(Clone, Copy)]
 struct Seed {
-    product_id: Uuid,
     account_id: Uuid,
     address_id: Uuid,
 }
 
 async fn seed_account(pool: &PgPool) -> Result<Seed> {
-    let product = NewProduct {
-        id: Uuid::new_v4(),
-        slug: "product-c5".to_owned(),
-        webhook_url: "https://product.test/webhooks".to_owned(),
-        pubkey: "public-key-c5".to_owned(),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_product(pool, &product).await?;
-    let account = NewAccount {
-        id: Uuid::new_v4(),
-        product_id: product.id,
-        external_id: "workspace-c5".to_owned(),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_account(pool, &account).await?;
+    let (account, customer) = seed::create_account_and_customer(
+        pool,
+        &NewAccount {
+            webhook_url: "https://product.test/webhooks".to_owned(),
+            ..NewAccount::named("product-c5")
+        },
+        "workspace-c5",
+    )
+    .await?;
     let address = NewAddress {
         id: Uuid::new_v4(),
-        account_id: account.id,
+        customer_id: customer.id,
         chain_id: 31_337,
-        kind: AddressKind::Persistent,
-        version: 1,
-        lock_ref: None,
+        route: "screen".to_owned(),
         salt: B256::repeat_byte(0x33),
         address: Address::repeat_byte(0x44),
-        retired_at: None,
     };
     seed::insert_address(pool, &address).await?;
     Ok(Seed {
-        product_id: product.id,
         account_id: account.id,
         address_id: address.id,
     })
@@ -336,7 +326,6 @@ async fn insert_confirmed(
         block_hash: B256::repeat_byte(number.wrapping_add(1)),
         block_time: Utc::now(),
         address_id: seed.address_id,
-        account_id: seed.account_id,
         route: Some("screen".to_owned()),
         route_version: Some(1),
         asset_contract: Address::repeat_byte(0x55),

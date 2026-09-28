@@ -17,8 +17,8 @@ class CreateQuoteRequest:
     """`POST /v1/quotes` body.
 
     Attributes:
-        account_id (str): Your identifier of the customer account to credit, 1 to 255 bytes; the account is created
-            on its first quote.
+        account_id (str): Your identifier of the customer account to credit, 1 to 200 characters; the account is
+            created on its first quote.
         amount (int): The credit to quote, a positive integer in the currency's minor unit (US cents).
         asset (str): Asset code of the payment on that chain, such as `pha`.
         chain_id (int): EVM chain of the payment, one of `GET /v1/config` `assets[].chain_id`.

@@ -1,4 +1,8 @@
-//! API-specific PostgreSQL queries with tenant predicates at the database boundary.
+//! API-specific PostgreSQL queries.
+//!
+//! Merchant queries take the request's [`Scope`] and filter every tenant table on its account and
+//! mode, so another tenant's row answers like a missing one. The admin functions below them act
+//! for the operator across accounts and are reachable only through the admin-key router.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -13,7 +17,9 @@ use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
-use crate::db::{Account, Address, AddressKind, Product};
+use crate::audit::{self, Actor};
+use crate::db::{Account, Customer};
+use crate::tenancy::Scope;
 
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
@@ -23,6 +29,21 @@ use super::models::{
     ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
     SupportDepositResponse,
 };
+
+/// The columns of [`IssuedAccount`] for account `$1`.
+macro_rules! issued_account_select {
+    () => {
+        r#"
+        SELECT account.id, account.public_id, account.name, account.paused_scopes,
+               signing_key.livemode, signing_key.public_key,
+               (SELECT endpoint.url FROM webhook_endpoints AS endpoint
+                WHERE endpoint.account_id = account.id AND endpoint.livemode = signing_key.livemode
+                ORDER BY endpoint.created_at, endpoint.id LIMIT 1) AS webhook_url
+        FROM accounts AS account
+        JOIN request_signing_keys AS signing_key ON signing_key.account_id = account.id
+        WHERE account.id = $1"#
+    };
+}
 
 /// Records a verified request signature exactly once within the acceptance window.
 pub async fn record_signature(
@@ -52,181 +73,240 @@ pub async fn record_signature(
     Ok(())
 }
 
-/// Finds the unique product selected by an external API slug.
-pub async fn find_product_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Product>, ApiError> {
-    let row = sqlx::query_as::<_, ProductRow>(
+/// An account's request signing key and the mode it selects.
+pub struct SigningKey {
+    /// The account the key belongs to.
+    pub account: Account,
+    /// The mode the key acts in.
+    pub livemode: bool,
+    /// Standard base64 of the ed25519 public key.
+    pub public_key: String,
+}
+
+/// Finds the request signing key of `account_id`.
+pub async fn find_signing_key(
+    pool: &PgPool,
+    account_id: Uuid,
+) -> Result<Option<SigningKey>, ApiError> {
+    let row = sqlx::query(
         r#"
-        SELECT id, slug, webhook_url, pubkey, paused_scopes
-        FROM products
-        WHERE slug = $1
+        SELECT account.id, account.public_id, account.name, account.paused_scopes,
+               signing_key.livemode, signing_key.public_key
+        FROM request_signing_keys AS signing_key
+        JOIN accounts AS account ON account.id = signing_key.account_id
+        WHERE account.id = $1
         "#,
     )
-    .bind(slug)
+    .bind(account_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(Into::into))
+    row.map(|row| {
+        Ok(SigningKey {
+            account: account_from_row(&row)?,
+            livemode: row.try_get("livemode")?,
+            public_key: row.try_get("public_key")?,
+        })
+    })
+    .transpose()
 }
 
-/// Registers a product with an audit row, or returns the existing product when every value
-/// matches. A slug registered with a different key or webhook URL is a conflict.
-pub async fn register_product(
+/// An account as the admin API shows it: with its signing key and webhook endpoint.
+pub struct IssuedAccount {
+    /// The account.
+    pub account: Account,
+    /// The mode its signing key acts in.
+    pub livemode: bool,
+    /// Standard base64 of its ed25519 public key.
+    pub public_key: String,
+    /// Its webhook endpoint's URL.
+    pub webhook_url: String,
+}
+
+/// Issues an account with its request signing key and one webhook endpoint in the key's mode,
+/// and appends an audit row, in one transaction. Transitional until self-serve signup and API
+/// keys (design PRs 5 and 6).
+pub async fn create_account(
     pool: &PgPool,
-    slug: &str,
-    pubkey: &str,
+    name: &str,
+    livemode: bool,
+    public_key: &str,
     webhook_url: &str,
-    actor: &str,
-) -> Result<Product, ApiError> {
+    actor: &Actor,
+) -> Result<IssuedAccount, ApiError> {
     let mut transaction = pool.begin().await?;
-    let inserted = sqlx::query_as::<_, ProductRow>(
+    let row = sqlx::query(
         r#"
-        INSERT INTO products (id, slug, webhook_url, pubkey)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (slug) DO NOTHING
-        RETURNING id, slug, webhook_url, pubkey, paused_scopes
+        INSERT INTO accounts (id, name)
+        VALUES ($1, $2)
+        RETURNING id, public_id, name, paused_scopes
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind(slug)
-    .bind(webhook_url)
-    .bind(pubkey)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let product = match inserted {
-        Some(row) => {
-            insert_audit_tx(
-                &mut transaction,
-                actor,
-                "product.issue",
-                &format!("product:{slug}"),
-            )
-            .await?;
-            row
-        }
-        None => {
-            let existing = sqlx::query_as::<_, ProductRow>(
-                "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE slug = $1",
-            )
-            .bind(slug)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or_else(ApiError::internal)?;
-            if existing.pubkey != pubkey || existing.webhook_url != webhook_url {
-                return Err(ApiError::conflict(
-                    "product slug is already registered with a different public key or webhook \
-                     URL; replace them with PUT /v1/admin/products/{slug}",
-                ));
-            }
-            existing
-        }
-    };
-    transaction.commit().await?;
-    Ok(product.into())
-}
-
-/// Replaces an issued product's verification key and webhook URL and appends an audit row,
-/// carrying the reason and the replaced values, in the same transaction.
-///
-/// Product requests read the key on every request, so the replaced key stops verifying when this
-/// commits: a hard cut, with no overlap (the attested route names one key id per product).
-/// Repeating the request with the stored values changes nothing and writes no audit row.
-pub async fn update_product(
-    pool: &PgPool,
-    slug: &str,
-    pubkey: &str,
-    webhook_url: &str,
-    actor: &str,
-    reason: &str,
-) -> Result<Product, ApiError> {
-    let mut transaction = pool.begin().await?;
-    let existing = sqlx::query_as::<_, ProductRow>(
-        "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE slug = $1 FOR UPDATE",
-    )
-    .bind(slug)
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    if existing.pubkey == pubkey && existing.webhook_url == webhook_url {
-        transaction.commit().await?;
-        return Ok(existing.into());
-    }
-    let updated = sqlx::query_as::<_, ProductRow>(
-        r#"
-        UPDATE products SET pubkey = $2, webhook_url = $3
-        WHERE id = $1
-        RETURNING id, slug, webhook_url, pubkey, paused_scopes
-        "#,
-    )
-    .bind(existing.id)
-    .bind(pubkey)
-    .bind(webhook_url)
+    .bind(name)
     .fetch_one(&mut *transaction)
     .await?;
-    let evidence = serde_json::json!({
-        "reason": reason,
-        "replaced": {"public_key": existing.pubkey, "webhook_url": existing.webhook_url},
-    });
-    insert_audit_tx_with_reason(
-        &mut transaction,
-        actor,
-        "product.update",
-        &format!("product:{slug}"),
-        &evidence.to_string(),
+    let account = account_from_row(&row)?;
+    sqlx::query(
+        "INSERT INTO request_signing_keys (account_id, livemode, public_key) VALUES ($1, $2, $3)",
+    )
+    .bind(account.id)
+    .bind(livemode)
+    .bind(public_key)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO webhook_endpoints (id, account_id, livemode, url) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account.id)
+    .bind(livemode)
+    .bind(webhook_url)
+    .execute(&mut *transaction)
+    .await?;
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(account.id),
+            actor,
+            action: "account.issue",
+            subject: &format!("account:{}", account.public_id),
+            reason: "signed API request",
+        },
     )
     .await?;
     transaction.commit().await?;
-    Ok(updated.into())
+    Ok(IssuedAccount {
+        account,
+        livemode,
+        public_key: public_key.to_owned(),
+        webhook_url: webhook_url.to_owned(),
+    })
 }
 
-/// Registers an account or returns the existing account with the same product identifier.
-pub async fn register_account(
+/// Replaces an issued account's verification key and the URL of its webhook endpoints in the
+/// key's mode, and appends an audit row carrying the reason and the replaced values, in the same
+/// transaction.
+///
+/// Merchant requests read the key on every request, so the replaced key stops verifying when this
+/// commits: a hard cut, with no overlap. Repeating the request with the stored values changes
+/// nothing and writes no audit row.
+pub async fn update_account(
     pool: &PgPool,
-    product_id: Uuid,
-    external_id: &str,
-) -> Result<Account, ApiError> {
+    account_id: Uuid,
+    public_key: &str,
+    webhook_url: &str,
+    actor: &Actor,
+    reason: &str,
+) -> Result<IssuedAccount, ApiError> {
     let mut transaction = pool.begin().await?;
+    let existing = issued_account(&mut transaction, account_id, true)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if existing.public_key == public_key && existing.webhook_url == webhook_url {
+        transaction.commit().await?;
+        return Ok(existing);
+    }
+    sqlx::query("UPDATE request_signing_keys SET public_key = $2 WHERE account_id = $1")
+        .bind(account_id)
+        .bind(public_key)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE webhook_endpoints SET url = $3 WHERE account_id = $1 AND livemode = $2")
+        .bind(account_id)
+        .bind(existing.livemode)
+        .bind(webhook_url)
+        .execute(&mut *transaction)
+        .await?;
+    let evidence = serde_json::json!({
+        "reason": reason,
+        "replaced": {"public_key": existing.public_key, "webhook_url": existing.webhook_url},
+    });
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(account_id),
+            actor,
+            action: "account.update",
+            subject: &format!("account:{}", existing.account.public_id),
+            reason: &evidence.to_string(),
+        },
+    )
+    .await?;
+    let updated = issued_account(&mut transaction, account_id, false)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    transaction.commit().await?;
+    Ok(updated)
+}
+
+async fn issued_account(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    account_id: Uuid,
+    lock: bool,
+) -> Result<Option<IssuedAccount>, ApiError> {
+    let query = if lock {
+        concat!(
+            issued_account_select!(),
+            " FOR UPDATE OF account, signing_key"
+        )
+    } else {
+        issued_account_select!()
+    };
+    let row = sqlx::query(query)
+        .bind(account_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.map(|row| {
+        Ok(IssuedAccount {
+            account: account_from_row(&row)?,
+            livemode: row.try_get("livemode")?,
+            public_key: row.try_get("public_key")?,
+            webhook_url: row.try_get("webhook_url")?,
+        })
+    })
+    .transpose()
+}
+
+/// Finds or creates the customer `client_reference_id` of `scope`.
+pub async fn ensure_customer(
+    pool: &PgPool,
+    scope: Scope,
+    client_reference_id: &str,
+) -> Result<Customer, ApiError> {
     sqlx::query(
         r#"
-        INSERT INTO accounts (id, product_id, external_id, paused_scopes)
-        VALUES ($1, $2, $3, '{}')
-        ON CONFLICT (product_id, external_id) DO NOTHING
+        INSERT INTO customers (id, account_id, livemode, client_reference_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (account_id, livemode, client_reference_id) DO NOTHING
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind(product_id)
-    .bind(external_id)
-    .execute(&mut *transaction)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(client_reference_id)
+    .execute(pool)
     .await?;
-    let account = sqlx::query_as::<_, AccountRow>(
-        r#"
-        SELECT id, product_id, external_id, status, paused_scopes
-        FROM accounts
-        WHERE product_id = $1 AND external_id = $2
-        "#,
-    )
-    .bind(product_id)
-    .bind(external_id)
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or_else(ApiError::internal)?;
-    transaction.commit().await?;
-    Ok(account.into())
+    find_customer(pool, scope, client_reference_id)
+        .await?
+        .ok_or_else(ApiError::internal)
 }
 
-/// Finds an account only when it belongs to the requested product.
-pub async fn find_account(
+/// Finds the customer `client_reference_id` of `scope`.
+pub async fn find_customer(
     pool: &PgPool,
-    product_id: Uuid,
-    external_id: &str,
-) -> Result<Option<Account>, ApiError> {
-    let row = sqlx::query_as::<_, AccountRow>(
+    scope: Scope,
+    client_reference_id: &str,
+) -> Result<Option<Customer>, ApiError> {
+    let row = sqlx::query_as::<_, CustomerRow>(
         r#"
-        SELECT id, product_id, external_id, status, paused_scopes
-        FROM accounts
-        WHERE product_id = $1 AND external_id = $2
+        SELECT id, account_id, livemode, client_reference_id, paused_scopes
+        FROM customers
+        WHERE account_id = $1 AND livemode = $2 AND client_reference_id = $3
         "#,
     )
-    .bind(product_id)
-    .bind(external_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(client_reference_id)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(Into::into))
@@ -234,8 +314,8 @@ pub async fn find_account(
 
 /// A refund request: the deposit, destination, and amount (the unrefunded remainder when absent).
 pub struct NewRefund<'a> {
-    /// Authenticated product.
-    pub product_id: Uuid,
+    /// The request's scope.
+    pub scope: Scope,
     /// Deposit to refund.
     pub deposit_id: Uuid,
     /// Fallback route of an unrouted deposit.
@@ -247,14 +327,14 @@ pub struct NewRefund<'a> {
     /// `Idempotency-Key` of the request.
     pub idempotency_key: Option<&'a str>,
     /// Audit actor.
-    pub actor: &'a str,
+    pub actor: &'a Actor,
 }
 
 /// Creates a refund request after every policy check and returns its id; a repeated
 /// `Idempotency-Key` returns the refund created with it.
 pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uuid, ApiError> {
     if let Some(key) = refund.idempotency_key
-        && let Some(existing) = refund_by_key(pool, refund.product_id, key).await?
+        && let Some(existing) = refund_by_key(pool, refund.scope, key).await?
     {
         return existing.replay(refund);
     }
@@ -263,29 +343,30 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
                deposit.final_at IS NOT NULL AS is_final,
-               COALESCE(deposit.route, $3) AS effective_route,
+               COALESCE(deposit.route, $4) AS effective_route,
+               customer.paused_scopes AS customer_scopes,
                account.paused_scopes AS account_scopes,
-               product.paused_scopes AS product_scopes,
                COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
         FROM deposits AS deposit
+        JOIN customers AS customer ON customer.id = deposit.customer_id
         JOIN accounts AS account ON account.id = deposit.account_id
-        JOIN products AS product ON product.id = account.product_id
-        LEFT JOIN route_pauses AS route_pause ON route_pause.route = COALESCE(deposit.route, $3)
-        WHERE deposit.id = $1 AND product.id = $2
-        FOR UPDATE OF deposit, account
+        LEFT JOIN route_pauses AS route_pause ON route_pause.route = COALESCE(deposit.route, $4)
+        WHERE deposit.id = $1 AND deposit.account_id = $2 AND deposit.livemode = $3
+        FOR UPDATE OF deposit, customer
         "#,
     )
     .bind(refund.deposit_id)
-    .bind(refund.product_id)
+    .bind(refund.scope.account_id())
+    .bind(refund.scope.livemode())
     .bind(&refund.route.route)
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(|| ApiError::not_found().with_param("deposit"))?;
 
+    let customer_scopes: Vec<String> = row.try_get("customer_scopes")?;
     let account_scopes: Vec<String> = row.try_get("account_scopes")?;
-    let product_scopes: Vec<String> = row.try_get("product_scopes")?;
     let route_scopes: Vec<String> = row.try_get("route_scopes")?;
-    if [&account_scopes, &product_scopes, &route_scopes]
+    if [&customer_scopes, &account_scopes, &route_scopes]
         .into_iter()
         .any(|scopes| scopes.iter().any(|scope| scope == "refunds"))
     {
@@ -348,18 +429,19 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     let inserted = sqlx::query(
         r#"
         INSERT INTO refunds
-            (id, deposit_id, amount_atomic, to_address, route, status, requested_by, product_id,
-             idempotency_key)
-        VALUES ($1, $2, $3::text::numeric, $4, $5, 'requested', $6, $7, $8)
+            (id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
+             requested_by, idempotency_key)
+        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8, $9)
         "#,
     )
     .bind(refund_id)
+    .bind(refund.scope.account_id())
+    .bind(refund.scope.livemode())
     .bind(refund.deposit_id)
     .bind(amount.to_string())
     .bind(to_address)
     .bind(effective_route)
-    .bind(refund.actor)
-    .bind(refund.product_id)
+    .bind(refund.actor.to_string())
     .bind(refund.idempotency_key)
     .execute(&mut *transaction)
     .await;
@@ -367,11 +449,11 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
         Ok(_) => {}
         // A concurrent request with the same key committed first: answer as its repeat.
         Err(sqlx::Error::Database(error))
-            if error.constraint() == Some("refunds_product_idempotency_key_unique") =>
+            if error.constraint() == Some("refunds_idempotency_key_unique") =>
         {
             drop(transaction);
             let key = refund.idempotency_key.ok_or_else(ApiError::internal)?;
-            return refund_by_key(pool, refund.product_id, key)
+            return refund_by_key(pool, refund.scope, key)
                 .await?
                 .ok_or_else(ApiError::internal)?
                 .replay(refund);
@@ -380,6 +462,7 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     }
     insert_audit_tx(
         &mut transaction,
+        Some(refund.scope.account_id()),
         refund.actor,
         "refund_requested",
         &format!("refund:{refund_id}"),
@@ -414,17 +497,18 @@ impl StoredRefund {
 
 async fn refund_by_key(
     pool: &PgPool,
-    product_id: Uuid,
+    scope: Scope,
     key: &str,
 ) -> Result<Option<StoredRefund>, ApiError> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
         r#"
         SELECT id, deposit_id, to_address, amount_atomic::text
         FROM refunds
-        WHERE product_id = $1 AND idempotency_key = $2
+        WHERE account_id = $1 AND livemode = $2 AND idempotency_key = $3
         "#,
     )
-    .bind(product_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
     .bind(key)
     .fetch_optional(pool)
     .await?;
@@ -454,7 +538,7 @@ pub async fn approve_refund(
     pool: &PgPool,
     refund_id: Uuid,
     routes: &[RouteFile],
-    actor: &str,
+    actor: &Actor,
 ) -> Result<AdminRefundResponse, ApiError> {
     let mut transaction = pool.begin().await?;
     let current = refund_admin_row(&mut transaction, refund_id).await?;
@@ -474,11 +558,12 @@ pub async fn approve_refund(
             "UPDATE refunds SET status = 'approved', approved_by = $2, updated_at = now() WHERE id = $1",
         )
         .bind(refund_id)
-        .bind(actor)
+        .bind(actor.to_string())
         .execute(&mut *transaction)
         .await?;
         insert_audit_tx(
             &mut transaction,
+            Some(current.account_id),
             actor,
             "refund_approved",
             &format!("refund:{refund_id}"),
@@ -495,7 +580,7 @@ pub async fn record_refund(
     pool: &PgPool,
     refund_id: Uuid,
     tx_hash: B256,
-    actor: &str,
+    actor: &Actor,
 ) -> Result<AdminRefundResponse, ApiError> {
     let mut transaction = pool.begin().await?;
     let current = refund_admin_row(&mut transaction, refund_id).await?;
@@ -521,6 +606,7 @@ pub async fn record_refund(
             .await?;
             insert_audit_tx(
                 &mut transaction,
+                Some(current.account_id),
                 actor,
                 "refund_recorded",
                 &format!("refund:{refund_id}"),
@@ -551,6 +637,7 @@ pub async fn record_refund(
             .await?;
             insert_audit_tx_with_reason(
                 &mut transaction,
+                Some(current.account_id),
                 actor,
                 "refund_tx_hash_corrected",
                 &format!("refund:{refund_id}"),
@@ -579,11 +666,14 @@ pub async fn record_refund(
 pub async fn nudge_deposit(
     pool: &PgPool,
     deposit_id: Uuid,
-    actor: &str,
+    actor: &Actor,
 ) -> Result<NudgeResponse, ApiError> {
     let mut transaction = pool.begin().await?;
-    let next_attempt_at = sqlx::query_scalar::<_, DateTime<Utc>>(
-        "UPDATE deposits SET next_attempt_at = now() WHERE id = $1 RETURNING next_attempt_at",
+    let (next_attempt_at, account_id) = sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+        r#"
+        UPDATE deposits SET next_attempt_at = now() WHERE id = $1
+        RETURNING next_attempt_at, account_id
+        "#,
     )
     .bind(deposit_id)
     .fetch_optional(&mut *transaction)
@@ -591,6 +681,7 @@ pub async fn nudge_deposit(
     .ok_or_else(ApiError::not_found)?;
     insert_audit_tx(
         &mut transaction,
+        Some(account_id),
         actor,
         "deposit_nudged",
         &format!("deposit:{deposit_id}"),
@@ -612,7 +703,7 @@ pub async fn nudge_deposit(
 pub async fn lift_reconciliation_block(
     pool: &PgPool,
     block_key: &str,
-    actor: &str,
+    actor: &Actor,
     reason: &str,
 ) -> Result<ReconciliationBlockLiftResponse, ApiError> {
     let mut transaction = pool.begin().await?;
@@ -641,6 +732,7 @@ pub async fn lift_reconciliation_block(
         });
         insert_audit_tx_with_reason(
             &mut transaction,
+            None,
             actor,
             "reconciliation_block.lift",
             &subject,
@@ -667,45 +759,41 @@ pub async fn lift_reconciliation_block(
     })
 }
 
-/// Queues one webhook event for delivery again and appends an audit row in the same transaction.
+/// Queues one webhook event for delivery again to every endpoint it was queued for, and appends
+/// an audit row in the same transaction.
 ///
-/// A delivered event is marked undelivered and a pending one becomes due now; the event's
-/// identifier and payload never change. Repeating the request while the event is already due
-/// changes nothing and writes no audit row.
+/// A delivered delivery is marked undelivered and a pending one becomes due now; the event's
+/// identifier and payload never change. Repeating the request while every delivery is already
+/// due changes nothing and writes no audit row.
 pub async fn replay_outbox_event(
     pool: &PgPool,
     event_id: Uuid,
-    actor: &str,
+    actor: &Actor,
     reason: &str,
 ) -> Result<OutboxReplayResponse, ApiError> {
     let mut transaction = pool.begin().await?;
-    let row = sqlx::query(
-        r#"
-        SELECT event_type, format, next_attempt_at,
-               delivered_at IS NULL AND next_attempt_at <= now() AS due
-        FROM outbox
-        WHERE id = $1
-        FOR UPDATE
-        "#,
+    let (event_type, account_id) = sqlx::query_as::<_, (String, Uuid)>(
+        "SELECT type, account_id FROM events WHERE id = $1 FOR UPDATE",
     )
     .bind(event_id)
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let mut next_attempt_at: DateTime<Utc> = row.try_get("next_attempt_at")?;
-    if !row.try_get::<bool, _>("due")? {
-        next_attempt_at = sqlx::query_scalar(
-            r#"
-            UPDATE outbox SET next_attempt_at = now(), delivered_at = NULL
-            WHERE id = $1
-            RETURNING next_attempt_at
-            "#,
-        )
-        .bind(event_id)
-        .fetch_one(&mut *transaction)
-        .await?;
+    let rescheduled = sqlx::query(
+        r#"
+        UPDATE webhook_deliveries
+        SET next_attempt_at = now(), delivered_at = NULL
+        WHERE event_id = $1 AND NOT (delivered_at IS NULL AND next_attempt_at <= now())
+        "#,
+    )
+    .bind(event_id)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if rescheduled > 0 {
         insert_audit_tx_with_reason(
             &mut transaction,
+            Some(account_id),
             actor,
             "outbox.replay",
             &format!("event:{event_id}"),
@@ -713,43 +801,46 @@ pub async fn replay_outbox_event(
         )
         .await?;
     }
+    let next_attempt_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT min(next_attempt_at) FROM webhook_deliveries WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(OutboxReplayResponse {
-        event_id: crate::outbox::webhook_id(row.try_get("format")?, event_id),
-        event_type: row.try_get("event_type")?,
+        event_id: crate::outbox::webhook_id(event_id),
+        event_type,
         next_attempt_at,
     })
 }
 
-/// Adds or removes account pause scopes and appends an audit row in the same transaction.
-pub async fn mutate_account_scopes(
+/// Adds or removes a customer's pause scopes and appends an audit row in the same transaction.
+pub async fn mutate_customer_scopes(
     pool: &PgPool,
-    product_id: Uuid,
-    account_id: Uuid,
+    customer: &Customer,
     requested: &[String],
     pause: bool,
-    actor: &str,
+    actor: &Actor,
 ) -> Result<Vec<String>, ApiError> {
     let mut transaction = pool.begin().await?;
-    let current: Option<Vec<String>> = sqlx::query_scalar(
-        "SELECT paused_scopes FROM accounts WHERE id = $1 AND product_id = $2 FOR UPDATE",
-    )
-    .bind(account_id)
-    .bind(product_id)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let current = current.ok_or_else(ApiError::not_found)?;
+    let current: Vec<String> =
+        sqlx::query_scalar("SELECT paused_scopes FROM customers WHERE id = $1 FOR UPDATE")
+            .bind(customer.id)
+            .fetch_one(&mut *transaction)
+            .await?;
     let updated = updated_scopes(current, requested, pause);
-    sqlx::query("UPDATE accounts SET paused_scopes = $2 WHERE id = $1")
-        .bind(account_id)
+    sqlx::query("UPDATE customers SET paused_scopes = $2 WHERE id = $1")
+        .bind(customer.id)
         .bind(&updated)
         .execute(&mut *transaction)
         .await?;
     insert_audit_tx(
         &mut transaction,
+        Some(customer.account_id),
         actor,
         if pause { "pause" } else { "resume" },
-        &format!("account:{account_id}"),
+        &format!("customer:{}", customer.id),
     )
     .await?;
     transaction.commit().await?;
@@ -762,7 +853,7 @@ pub async fn mutate_route_scopes(
     route: &str,
     requested: &[String],
     pause: bool,
-    actor: &str,
+    actor: &Actor,
 ) -> Result<Vec<String>, ApiError> {
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -784,6 +875,7 @@ pub async fn mutate_route_scopes(
         .await?;
     insert_audit_tx(
         &mut transaction,
+        None,
         actor,
         if pause { "pause" } else { "resume" },
         &format!("route:{route}"),
@@ -805,86 +897,40 @@ pub async fn route_paused_scopes(pool: &PgPool, route: &str) -> Result<Vec<Strin
 }
 
 #[derive(FromRow)]
-struct ProductRow {
-    id: Uuid,
-    slug: String,
-    webhook_url: String,
-    pubkey: String,
-    paused_scopes: Vec<String>,
-}
-
-impl From<ProductRow> for Product {
-    fn from(row: ProductRow) -> Self {
-        Self {
-            id: row.id,
-            slug: row.slug,
-            webhook_url: row.webhook_url,
-            pubkey: row.pubkey,
-            paused_scopes: row.paused_scopes,
-        }
-    }
-}
-
-#[derive(FromRow)]
-struct AccountRow {
-    id: Uuid,
-    product_id: Uuid,
-    external_id: String,
-    status: String,
-    paused_scopes: Vec<String>,
-}
-
-impl From<AccountRow> for Account {
-    fn from(row: AccountRow) -> Self {
-        Self {
-            id: row.id,
-            product_id: row.product_id,
-            external_id: row.external_id,
-            status: row.status,
-            paused_scopes: row.paused_scopes,
-        }
-    }
-}
-
-#[derive(FromRow)]
-struct AddressRow {
+struct CustomerRow {
     id: Uuid,
     account_id: Uuid,
-    chain_id: i64,
-    kind: String,
-    version: i64,
-    lock_ref: Option<String>,
-    salt: String,
-    address: String,
-    retired_at: Option<DateTime<Utc>>,
+    livemode: bool,
+    client_reference_id: String,
+    paused_scopes: Vec<String>,
 }
 
-impl TryFrom<AddressRow> for Address {
-    type Error = ApiError;
-
-    fn try_from(row: AddressRow) -> Result<Self, Self::Error> {
-        let kind = match row.kind.as_str() {
-            "persistent" => AddressKind::Persistent,
-            "lock" => AddressKind::Lock,
-            _ => return Err(ApiError::internal()),
-        };
-        Ok(Self {
+impl From<CustomerRow> for Customer {
+    fn from(row: CustomerRow) -> Self {
+        Self {
             id: row.id,
             account_id: row.account_id,
-            chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
-            kind,
-            version: u64::try_from(row.version).map_err(|_| ApiError::internal())?,
-            lock_ref: row.lock_ref,
-            salt: B256::from_str(&row.salt).map_err(|_| ApiError::internal())?,
-            address: EvmAddress::from_str(&row.address).map_err(|_| ApiError::internal())?,
-            retired_at: row.retired_at,
-        })
+            livemode: row.livemode,
+            client_reference_id: row.client_reference_id,
+            paused_scopes: row.paused_scopes,
+        }
     }
+}
+
+fn account_from_row(row: &PgRow) -> Result<Account, ApiError> {
+    Ok(Account {
+        id: row.try_get("id")?,
+        public_id: row.try_get("public_id")?,
+        name: row.try_get("name")?,
+        paused_scopes: row.try_get("paused_scopes")?,
+    })
 }
 
 #[derive(FromRow)]
 struct DepositViewRow {
     id: Uuid,
+    account: String,
+    livemode: bool,
     external_id: String,
     chain_id: i64,
     tx_hash: String,
@@ -894,7 +940,7 @@ struct DepositViewRow {
     block_time: DateTime<Utc>,
     final_at: Option<DateTime<Utc>>,
     address: String,
-    lock_ref: Option<String>,
+    quote_id: Uuid,
     route: Option<String>,
     route_version: Option<i64>,
     asset_contract: String,
@@ -936,7 +982,6 @@ impl From<DepositTransitionRow> for DepositTransitionResponse {
 #[derive(FromRow)]
 struct DepositEventRow {
     id: Uuid,
-    format: i16,
     deposit_id: Uuid,
     event_type: String,
     created_at: DateTime<Utc>,
@@ -946,7 +991,7 @@ struct DepositEventRow {
 impl From<DepositEventRow> for DepositEventResponse {
     fn from(row: DepositEventRow) -> Self {
         Self {
-            id: crate::outbox::webhook_id(row.format, row.id),
+            id: crate::outbox::webhook_id(row.id),
             event_type: row.event_type,
             created_at: row.created_at,
             delivered_at: row.delivered_at,
@@ -984,6 +1029,7 @@ impl TryFrom<ReconciliationBlockRow> for ReconciliationBlockReport {
 #[derive(FromRow)]
 struct RefundAdminRow {
     id: Uuid,
+    account_id: Uuid,
     route: String,
     status: String,
     tx_hash: Option<String>,
@@ -1007,6 +1053,8 @@ impl TryFrom<DepositViewRow> for DepositResponse {
     fn try_from(row: DepositViewRow) -> Result<Self, Self::Error> {
         Ok(Self {
             id: crate::ids::format(crate::ids::DEPOSIT, row.id),
+            account: row.account,
+            livemode: row.livemode,
             external_id: row.external_id,
             chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
             tx_hash: row.tx_hash,
@@ -1017,7 +1065,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             block_time: row.block_time,
             final_at: row.final_at,
             address: row.address,
-            lock_ref: row.lock_ref,
+            lock_ref: Some(crate::locks::quote_id(row.quote_id)),
             route: row.route,
             route_version: row
                 .route_version
@@ -1041,10 +1089,11 @@ impl TryFrom<DepositViewRow> for DepositResponse {
 fn deposit_query() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         r#"
-        SELECT deposit.id, account.external_id, deposit.chain_id, deposit.tx_hash,
+        SELECT deposit.id, account.public_id AS account, deposit.livemode,
+               customer.client_reference_id AS external_id, deposit.chain_id, deposit.tx_hash,
                deposit.receipt_log_index, deposit.log_index,
                deposit.block_number, deposit.block_time, deposit.final_at, address.address,
-               address.lock_ref,
+               address.quote_id,
                deposit.route, deposit.route_version, deposit.asset_contract,
                deposit.from_address, deposit.amount_atomic::text AS amount_atomic,
                deposit.state, deposit.valuation_at, deposit.price_scaled::text AS price_scaled,
@@ -1052,6 +1101,7 @@ fn deposit_query() -> QueryBuilder<Postgres> {
                deposit.created_at, deposit.updated_at
         FROM deposits AS deposit
         JOIN accounts AS account ON account.id = deposit.account_id
+        JOIN customers AS customer ON customer.id = deposit.customer_id
         JOIN addresses AS address ON address.id = deposit.address_id
         "#,
     )
@@ -1091,18 +1141,18 @@ async fn fetch_support_page(
     }
     let events = sqlx::query_as::<_, DepositEventRow>(
         r#"
-        SELECT id, format,
-               CASE WHEN format = 1 THEN (payload ->> 'deposit_id')::uuid ELSE object_id END
-                   AS deposit_id,
-               event_type, created_at, delivered_at
-        FROM outbox
-        WHERE (object_type = 'deposit' AND object_id = ANY($1))
-           OR (format = 1 AND payload ->> 'deposit_id' = ANY($2))
-        ORDER BY created_at, id
+        SELECT event.id, event.object_id AS deposit_id, event.type AS event_type,
+               event.created AS created_at,
+               (SELECT CASE WHEN bool_and(delivery.delivered_at IS NOT NULL)
+                            THEN max(delivery.delivered_at) END
+                FROM webhook_deliveries AS delivery
+                WHERE delivery.event_id = event.id) AS delivered_at
+        FROM events AS event
+        WHERE event.object_type = 'deposit' AND event.object_id = ANY($1)
+        ORDER BY event.created, event.id
         "#,
     )
     .bind(&ids)
-    .bind(ids.iter().map(Uuid::to_string).collect::<Vec<_>>())
     .fetch_all(pool)
     .await?;
     let mut events_by_deposit = BTreeMap::<Uuid, Vec<DepositEventResponse>>::new();
@@ -1187,7 +1237,7 @@ pub async fn daily_report(
     for row in sqlx::query(
         r#"
         SELECT route, COALESCE(sum(amount_atomic), 0)::text AS amount
-        FROM rate_locks
+        FROM quotes
         WHERE consumed_by IS NULL AND expires_at > $1
         GROUP BY route
         "#,
@@ -1236,13 +1286,14 @@ pub async fn daily_report(
                    deposit.route,
                    'unrouted:' || deposit.chain_id::text || ':' || deposit.asset_contract
                ) AS report_key,
-               count(*)::bigint AS count,
+               count(DISTINCT event.id)::bigint AS count,
                COALESCE(
-                   max(extract(epoch FROM ($1 - outbox.created_at)))::bigint, 0
+                   max(extract(epoch FROM ($1 - event.created)))::bigint, 0
                ) AS max_age_seconds
-        FROM outbox
-        JOIN deposits AS deposit ON deposit.id = outbox.object_id
-        WHERE outbox.event_type = 'deposit.credited' AND outbox.delivered_at IS NULL
+        FROM events AS event
+        JOIN webhook_deliveries AS delivery ON delivery.event_id = event.id
+        JOIN deposits AS deposit ON deposit.id = event.object_id
+        WHERE event.type = 'deposit.credited' AND delivery.delivered_at IS NULL
         GROUP BY report_key
         "#,
     )
@@ -1319,7 +1370,7 @@ pub async fn daily_report(
     let exposure_minor = sqlx::query_scalar(
         r#"
         SELECT COALESCE(sum(credit_minor), 0)::text
-        FROM rate_locks
+        FROM quotes
         WHERE status = 'open' AND exposure_reserved
         "#,
     )
@@ -1445,7 +1496,7 @@ async fn refund_admin_row(
 ) -> Result<RefundAdminRow, ApiError> {
     sqlx::query_as::<_, RefundAdminRow>(
         r#"
-        SELECT id, route, status, tx_hash, confirmation_evidence
+        SELECT id, account_id, route, status, tx_hash, confirmation_evidence
         FROM refunds
         WHERE id = $1
         FOR UPDATE
@@ -1467,9 +1518,9 @@ async fn refund_approval_eligibility(
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason
         FROM refunds AS refund
         JOIN deposits AS deposit ON deposit.id = refund.deposit_id
-        JOIN accounts AS account ON account.id = deposit.account_id
+        JOIN customers AS customer ON customer.id = deposit.customer_id
         WHERE refund.id = $1
-        FOR UPDATE OF deposit, account
+        FOR UPDATE OF deposit, customer
         "#,
     )
     .bind(refund_id)
@@ -1484,13 +1535,13 @@ async fn refund_approval_paused(
 ) -> Result<bool, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT account.paused_scopes AS account_scopes,
-               product.paused_scopes AS product_scopes,
+        SELECT customer.paused_scopes AS customer_scopes,
+               account.paused_scopes AS account_scopes,
                COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
         FROM refunds AS refund
         JOIN deposits AS deposit ON deposit.id = refund.deposit_id
+        JOIN customers AS customer ON customer.id = deposit.customer_id
         JOIN accounts AS account ON account.id = deposit.account_id
-        JOIN products AS product ON product.id = account.product_id
         LEFT JOIN route_pauses AS route_pause ON route_pause.route = refund.route
         WHERE refund.id = $1
         "#,
@@ -1498,10 +1549,10 @@ async fn refund_approval_paused(
     .bind(refund_id)
     .fetch_one(&mut **transaction)
     .await?;
+    let customer_scopes: Vec<String> = row.try_get("customer_scopes")?;
     let account_scopes: Vec<String> = row.try_get("account_scopes")?;
-    let product_scopes: Vec<String> = row.try_get("product_scopes")?;
     let route_scopes: Vec<String> = row.try_get("route_scopes")?;
-    Ok([account_scopes, product_scopes, route_scopes]
+    Ok([customer_scopes, account_scopes, route_scopes]
         .iter()
         .any(|scopes| scopes.iter().any(|scope| scope == "refunds")))
 }
@@ -1520,29 +1571,40 @@ fn updated_scopes(current: Vec<String>, requested: &[String], pause: bool) -> Ve
 
 async fn insert_audit_tx(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
-    actor: &str,
+    account_id: Option<Uuid>,
+    actor: &Actor,
     action: &str,
     subject: &str,
 ) -> Result<(), ApiError> {
-    insert_audit_tx_with_reason(transaction, actor, action, subject, "signed API request").await
+    insert_audit_tx_with_reason(
+        transaction,
+        account_id,
+        actor,
+        action,
+        subject,
+        "signed API request",
+    )
+    .await
 }
 
 async fn insert_audit_tx_with_reason(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
-    actor: &str,
+    account_id: Option<Uuid>,
+    actor: &Actor,
     action: &str,
     subject: &str,
     reason: &str,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO audit (id, actor, action, subject, reason) VALUES ($1, $2, $3, $4, $5)",
+    audit::insert(
+        &mut **transaction,
+        &audit::Entry {
+            account_id,
+            actor,
+            action,
+            subject,
+            reason,
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(actor)
-    .bind(action)
-    .bind(subject)
-    .bind(reason)
-    .execute(&mut **transaction)
     .await?;
     Ok(())
 }

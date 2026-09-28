@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn staging_route_resolves_to_the_reviewed_values() {
         let route = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
-        assert_eq!(route.destination.product_kid(), "phala-cloud/v1");
+        assert!(!route.livemode, "Sepolia is a test route");
         assert_eq!(
             format!("{:#x}", route.chain.contracts.implementation),
             "0x70b714508bfa441449dc09f790ca03baa5170360"
@@ -133,12 +133,10 @@ mod tests {
                 VALID.replace("  chain_id: 1\n", "  chain_id: 1\n  finality: finalized\n"),
                 "finality",
             ),
+            // Routes belong to no product: any account quotes on the routes of its mode.
             (
-                VALID.replace(
-                    "product: phala-cloud\n",
-                    "product: phala-cloud\nproduct_kid: x/v1\n",
-                ),
-                "product_kid",
+                VALID.replace("livemode: true\n", "livemode: true\nproduct: phala-cloud\n"),
+                "product",
             ),
             (
                 VALID.replace(
@@ -200,10 +198,12 @@ mod tests {
                 VALID.replace("symbol: pha\n", "symbol: PHA\n"),
                 "asset.symbol",
             ),
+            // Chain 1 is a mainnet, so its route is live.
             (
-                VALID.replace("product: phala-cloud\n", "product: -phala\n"),
-                "product",
+                VALID.replace("livemode: true\n", "livemode: false\n"),
+                "livemode",
             ),
+            (VALID.replace("livemode: true\n", ""), "livemode"),
             (
                 VALID.replace(
                     "rpc_providers: [alchemy, quicknode]",

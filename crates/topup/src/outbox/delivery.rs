@@ -12,17 +12,18 @@ use topup_core::{Signer, retry::backoff};
 use tracing::Instrument as _;
 use uuid::Uuid;
 
-use super::{Event, EventEnvelope, LEGACY_FORMAT, SignedWebhook, webhook_id};
+use super::{Event, SignedWebhook, webhook_id};
 use crate::db::EventObject;
 use crate::jitter::{JitterSource, OsJitter};
 use crate::routes::RouteSet;
+use crate::tenancy::Scope;
 
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
 
-/// Runtime limits for the outbox delivery loop.
+/// Runtime limits for the webhook delivery loop.
 #[derive(Clone, Debug)]
 pub struct DeliveryConfig {
-    /// Maximum number of due rows reserved by one polling pass.
+    /// Maximum number of due deliveries reserved by one polling pass.
     pub batch_size: u32,
     /// Complete HTTP request timeout, including reading the response body.
     pub request_timeout: Duration,
@@ -30,7 +31,7 @@ pub struct DeliveryConfig {
     pub claim_lease: Duration,
     /// Delay between empty polls or database failures.
     pub poll_interval: Duration,
-    /// Maximum response body bytes retained in `outbox.response`.
+    /// Maximum response body bytes retained in `webhook_deliveries.response`.
     pub response_body_limit: usize,
     /// Pending age after which every claimed event emits a warning.
     pub age_alert_threshold: Duration,
@@ -58,17 +59,20 @@ pub enum DeliveryError {
     /// The HTTP client could not be constructed.
     #[error("failed to build webhook client: {0}")]
     Client(#[source] reqwest::Error),
-    /// PostgreSQL could not claim or persist an event.
-    #[error("outbox database operation failed: {0}")]
+    /// PostgreSQL could not claim or persist a delivery.
+    #[error("webhook delivery database operation failed: {0}")]
     Database(#[from] sqlx::Error),
 }
 
+/// One event's delivery to one endpoint, reserved by a claim lease.
 #[derive(Clone, Debug)]
 struct ClaimedEvent {
     id: Uuid,
+    endpoint_id: Uuid,
+    url: String,
+    scope: Scope,
     event_type: String,
-    payload: Value,
-    format: i16,
+    data: Value,
     object: Option<EventObject>,
     attempts: i32,
     created_at: DateTime<Utc>,
@@ -78,13 +82,12 @@ struct ClaimedEvent {
 struct ClaimedDelivery {
     transaction: Transaction<'static, Postgres>,
     event: ClaimedEvent,
-    product_id: Result<Uuid, &'static str>,
 }
 
 enum ClaimResult {
     Empty,
     Deferred,
-    Ready(ClaimedDelivery),
+    Ready(Box<ClaimedDelivery>),
 }
 
 /// PostgreSQL-backed Standard Webhooks sender.
@@ -124,7 +127,7 @@ where
         })
     }
 
-    /// Polls until shutdown, retaining failed events for unlimited retries.
+    /// Polls until shutdown, retaining failed deliveries for unlimited retries.
     pub async fn run(&self, shutdown: CancellationToken) {
         self.run_with_instance("0".to_owned(), shutdown).await;
     }
@@ -155,7 +158,7 @@ where
         }
     }
 
-    /// Claims one small batch and attempts each event once.
+    /// Claims one small batch and attempts each delivery once.
     pub async fn run_once(&self) -> Result<usize, DeliveryError> {
         let mut claimed = 0_usize;
         for _ in 0..self.config.batch_size {
@@ -173,7 +176,7 @@ where
                         delivery.event.object.map(EventObject::id),
                         delivery.event.attempts,
                     );
-                    self.deliver_claimed(delivery).instrument(span).await?;
+                    self.deliver_claimed(*delivery).instrument(span).await?;
                 }
             }
         }
@@ -200,19 +203,8 @@ where
         let ClaimedDelivery {
             mut transaction,
             event,
-            product_id,
         } = delivery;
-        let product_id = match product_id {
-            Ok(product_id) => product_id,
-            Err(message) => {
-                self.record_failure(&mut transaction, &event, None, None, message)
-                    .await?;
-                transaction.commit().await?;
-                return Ok(());
-            }
-        };
-
-        self.deliver_in_transaction(&mut transaction, &event, product_id)
+        self.deliver_in_transaction(&mut transaction, &event)
             .await?;
         transaction.commit().await?;
         Ok(())
@@ -222,20 +214,8 @@ where
         &self,
         connection: &mut PgConnection,
         event: &ClaimedEvent,
-        product_id: Uuid,
     ) -> Result<(), DeliveryError> {
-        let webhook_url =
-            sqlx::query_scalar::<_, String>("SELECT webhook_url FROM products WHERE id = $1")
-                .bind(product_id)
-                .fetch_optional(&mut *connection)
-                .await?;
-        let Some(webhook_url) = webhook_url else {
-            self.record_failure(connection, event, None, None, "product_not_found")
-                .await?;
-            return Ok(());
-        };
-
-        let (webhook_id, body) = match self.event_body(connection, event, product_id).await? {
+        let (webhook_id, body) = match self.event_body(connection, event).await? {
             Ok(rendered) => rendered,
             Err(error) => {
                 self.record_failure(connection, event, None, None, error)
@@ -261,7 +241,7 @@ where
 
         let response = self
             .client
-            .post(webhook_url)
+            .post(&event.url)
             .header("content-type", "application/json")
             .header("webhook-id", &signed.id)
             .header("webhook-timestamp", &signed.timestamp)
@@ -299,45 +279,41 @@ where
         Ok(())
     }
 
-    /// Returns the `webhook-id` and body. A format-2 event's `data` is rendered on its first
-    /// attempt and stored with the attempt's outcome, so every retry and replay sends it unchanged.
+    /// Returns the `webhook-id` and body. The event's `data` is rendered on its first attempt at
+    /// any endpoint and stored with that attempt's outcome, so every endpoint, retry, and replay
+    /// sends it unchanged.
     async fn event_body(
         &self,
         connection: &mut PgConnection,
         event: &ClaimedEvent,
-        product_id: Uuid,
     ) -> Result<Result<(String, Vec<u8>), &'static str>, DeliveryError> {
-        if event.format == LEGACY_FORMAT {
-            let envelope = EventEnvelope {
-                event_id: event.id,
-                event_type: event.event_type.clone(),
-                created_at: event.created_at,
-                data: event.payload.clone(),
-            };
-            return Ok(serde_json::to_vec(&envelope)
-                .map(|body| (webhook_id(event.format, event.id), body))
-                .map_err(|_| "envelope_serialization"));
-        }
         let Some(object) = event.object else {
             return Ok(Err("missing_object"));
         };
-        let data = if event.payload.get("object").is_some() {
-            event.payload.clone()
+        let data = if event.data.get("object").is_some() {
+            event.data.clone()
         } else {
-            match crate::api::event_data(&self.pool, &self.routes, product_id, object).await {
+            match crate::api::event_data(&self.pool, &self.routes, event.scope, object).await {
                 Ok(Some(data)) => {
-                    sqlx::query("UPDATE outbox SET payload = $2 WHERE id = $1")
-                        .bind(event.id)
-                        .bind(&data)
-                        .execute(&mut *connection)
-                        .await?;
-                    data
+                    // Another endpoint's delivery may have rendered it first: keep that one.
+                    sqlx::query_scalar::<_, Value>(
+                        r#"
+                        UPDATE events
+                        SET data = CASE WHEN data = '{}'::jsonb THEN $2 ELSE data END
+                        WHERE id = $1
+                        RETURNING data
+                        "#,
+                    )
+                    .bind(event.id)
+                    .bind(&data)
+                    .fetch_one(&mut *connection)
+                    .await?
                 }
                 Ok(None) => return Ok(Err("object_not_found")),
                 Err(()) => return Ok(Err("render_failed")),
             }
         };
-        let id = webhook_id(event.format, event.id);
+        let id = webhook_id(event.id);
         let envelope = Event {
             id: id.clone(),
             object: "event",
@@ -400,20 +376,26 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
     let row = sqlx::query(
         r#"
         WITH candidates AS (
-            SELECT id
-            FROM outbox
-            WHERE delivered_at IS NULL AND next_attempt_at <= now()
-            ORDER BY next_attempt_at, id
-            FOR UPDATE SKIP LOCKED
+            SELECT delivery.event_id, delivery.endpoint_id
+            FROM webhook_deliveries AS delivery
+            JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
+            WHERE delivery.delivered_at IS NULL
+              AND delivery.next_attempt_at <= now()
+              AND endpoint.status = 'enabled'
+            ORDER BY delivery.next_attempt_at, delivery.event_id, delivery.endpoint_id
+            FOR UPDATE OF delivery SKIP LOCKED
             LIMIT 1
         )
-        UPDATE outbox AS event
+        UPDATE webhook_deliveries AS delivery
         SET next_attempt_at = now() + make_interval(secs => $1)
-        FROM candidates
-        WHERE event.id = candidates.id
-        RETURNING event.id, event.event_type, event.payload, event.format, event.product_id,
-                  event.object_type, event.object_id, event.attempts, event.created_at,
-                  event.next_attempt_at
+        FROM candidates, events AS event, webhook_endpoints AS endpoint
+        WHERE delivery.event_id = candidates.event_id
+          AND delivery.endpoint_id = candidates.endpoint_id
+          AND event.id = delivery.event_id
+          AND endpoint.id = delivery.endpoint_id
+        RETURNING delivery.event_id, delivery.endpoint_id, endpoint.url, event.account_id,
+                  event.livemode, event.type, event.data, event.object_type, event.object_id,
+                  delivery.attempts, event.created, delivery.next_attempt_at
         "#,
     )
     .bind(lease_seconds)
@@ -423,50 +405,35 @@ async fn claim_next(pool: &PgPool, config: &DeliveryConfig) -> Result<ClaimResul
         transaction.commit().await?;
         return Ok(ClaimResult::Empty);
     };
-    let object_type: Option<String> = row.try_get("object_type")?;
-    let object_id: Option<Uuid> = row.try_get("object_id")?;
+    let object_type: String = row.try_get("object_type")?;
     let event = ClaimedEvent {
-        id: row.try_get("id")?,
-        event_type: row.try_get("event_type")?,
-        payload: row.try_get("payload")?,
-        format: row.try_get("format")?,
-        object: object_type
-            .zip(object_id)
-            .and_then(|(object_type, id)| EventObject::from_parts(&object_type, id)),
+        id: row.try_get("event_id")?,
+        endpoint_id: row.try_get("endpoint_id")?,
+        url: row.try_get("url")?,
+        scope: Scope::new(row.try_get("account_id")?, row.try_get("livemode")?),
+        event_type: row.try_get("type")?,
+        data: row.try_get("data")?,
+        object: EventObject::from_parts(&object_type, row.try_get("object_id")?),
         attempts: row.try_get("attempts")?,
-        created_at: row.try_get("created_at")?,
+        created_at: row.try_get("created")?,
         claim_until: row.try_get("next_attempt_at")?,
     };
-    let product_id = match row.try_get::<Option<Uuid>, _>("product_id")? {
-        Some(product_id) => Ok(product_id),
-        None => legacy_product_id(&event.payload),
-    };
-    if let Ok(product_id) = product_id {
-        let locked = sqlx::query_scalar::<_, bool>(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
-        )
-        .bind(product_id.to_string())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if !locked {
-            release_claim(&mut transaction, &event, config.poll_interval).await?;
-            transaction.commit().await?;
-            return Ok(ClaimResult::Deferred);
-        }
+    // One delivery at a time per endpoint keeps each endpoint's events in order.
+    let locked =
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(event.endpoint_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+    if !locked {
+        release_claim(&mut transaction, &event, config.poll_interval).await?;
+        transaction.commit().await?;
+        return Ok(ClaimResult::Deferred);
     }
 
-    Ok(ClaimResult::Ready(ClaimedDelivery {
+    Ok(ClaimResult::Ready(Box::new(ClaimedDelivery {
         transaction,
         event,
-        product_id,
-    }))
-}
-
-fn legacy_product_id(payload: &Value) -> Result<Uuid, &'static str> {
-    let Some(raw) = payload.get("product_id").and_then(Value::as_str) else {
-        return Err("missing_product_id");
-    };
-    Uuid::parse_str(raw).map_err(|_| "invalid_product_id")
+    })))
 }
 
 async fn release_claim(
@@ -477,12 +444,14 @@ async fn release_claim(
     let delay_seconds = i32::try_from(poll_interval.as_secs().max(1)).unwrap_or(i32::MAX);
     sqlx::query(
         r#"
-        UPDATE outbox
-        SET next_attempt_at = now() + make_interval(secs => $3)
-        WHERE id = $1 AND delivered_at IS NULL AND next_attempt_at = $2
+        UPDATE webhook_deliveries
+        SET next_attempt_at = now() + make_interval(secs => $4)
+        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
+          AND next_attempt_at = $3
         "#,
     )
     .bind(event.id)
+    .bind(event.endpoint_id)
     .bind(event.claim_until)
     .bind(delay_seconds)
     .execute(connection)
@@ -497,12 +466,14 @@ async fn mark_delivered(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        UPDATE outbox
-        SET delivered_at = now(), response = $3
-        WHERE id = $1 AND delivered_at IS NULL AND next_attempt_at = $2
+        UPDATE webhook_deliveries
+        SET delivered_at = now(), response = $4
+        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
+          AND next_attempt_at = $3
         "#,
     )
     .bind(event.id)
+    .bind(event.endpoint_id)
     .bind(event.claim_until)
     .bind(response)
     .execute(connection)
@@ -522,14 +493,16 @@ async fn record_failure_on(
     let response = response_value(status, body, Some(error));
     sqlx::query(
         r#"
-        UPDATE outbox
+        UPDATE webhook_deliveries
         SET attempts = CASE WHEN attempts < 2147483647 THEN attempts + 1 ELSE attempts END,
-            next_attempt_at = now() + make_interval(secs => $3),
-            response = $4
-        WHERE id = $1 AND delivered_at IS NULL AND next_attempt_at = $2
+            next_attempt_at = now() + make_interval(secs => $4),
+            response = $5
+        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
+          AND next_attempt_at = $3
         "#,
     )
     .bind(event.id)
+    .bind(event.endpoint_id)
     .bind(event.claim_until)
     .bind(delay_seconds)
     .bind(response)

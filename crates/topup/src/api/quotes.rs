@@ -9,15 +9,17 @@ use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
 use uuid::Uuid;
 
-use crate::db::{Account, Product};
+use crate::db::{Account, Customer};
 use crate::ids;
 use crate::locks::{self, RateLock, RateLockError, RateLockStatus};
 use crate::routes::RouteSet;
+use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
+use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
-use super::handlers::{ensure_account, validate_external_id};
+use super::handlers::{ensure_customer, validate_external_id};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
 };
@@ -37,12 +39,18 @@ use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
     security(("http_message_signature" = [])),
     tag = "config"
 )]
-/// The calling product's assets, limits, and quote terms, from its attested routes.
+/// The assets, limits, and quote terms of the attested routes in the credential's mode.
 pub(crate) async fn get_config(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
 ) -> ApiResult<Json<Config>> {
-    let routes = product_routes(&state, &product).collect::<Vec<_>>();
+    merchant
+        .require(&state.pool, Permission::AccountRead)
+        .await?;
+    let routes = state
+        .routes
+        .current_in(merchant.scope.livemode())
+        .collect::<Vec<_>>();
     let max_open_amount_per_account = routes
         .iter()
         .map(|route| route.rate_lock.max_open_minor.account)
@@ -114,16 +122,21 @@ pub(crate) async fn get_config(
 /// and a single-use address, valid until `expires_at`.
 pub(crate) async fn create_quote(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<CreateQuoteRequest>,
 ) -> ApiResult<Json<Quote>> {
+    merchant
+        .require(&state.pool, Permission::QuotesWrite)
+        .await?;
     let key = idempotency_key(&headers)?;
     validate_external_id(&request.account_id)?;
     if request.currency != "usd" {
         return Err(ApiError::invalid_param("currency", "currency must be usd"));
     }
-    let route = product_routes(&state, &product)
+    let route = state
+        .routes
+        .current_in(merchant.scope.livemode())
         .find(|route| {
             route.chain.chain_id == request.chain_id && route.asset.symbol == request.asset
         })
@@ -140,29 +153,29 @@ pub(crate) async fn create_quote(
         ));
     }
     let credit = MinorAmount::new(request.amount);
-    let account = ensure_account(&state, product.id, &request.account_id).await?;
-    // A repeat creates nothing, so a `quotes` pause does not hide a quote the product already
+    let customer = ensure_customer(&state, merchant.scope, &request.account_id).await?;
+    // A repeat creates nothing, so a `quotes` pause does not hide a quote the merchant already
     // showed.
     if let Some(key) = key.as_deref()
-        && let Some(existing) = locks::find_by_idempotency_key(&state.pool, product.id, key)
+        && let Some(existing) = locks::find_by_idempotency_key(&state.pool, merchant.scope, key)
             .await
             .map_err(map_error)?
     {
-        let lock = locks::replay(existing, &account, route, credit).map_err(map_error)?;
+        let lock = locks::replay(existing, &customer, route, credit).map_err(map_error)?;
         return respond_with_client_secret(&state, lock).await;
     }
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
     }
     let route_scopes = repository::route_paused_scopes(&state.pool, &route.route).await?;
-    if has_quotes_pause(&product, &account, &route_scopes) {
+    if has_quotes_pause(&merchant.account, &customer, &route_scopes) {
         return Err(ApiError::paused("quotes are paused"));
     }
     let lock = locks::create(
         &state.pool,
         &state.rate_lock_quotes,
-        &product,
-        &account,
+        &merchant.account,
+        &customer,
         route,
         key.as_deref(),
         credit,
@@ -207,12 +220,12 @@ pub(crate) async fn create_quote(
 /// public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
 pub(crate) async fn get_quote(
     State(state): State<AppState>,
-    product: Option<Extension<Product>>,
+    merchant: Option<Extension<Merchant>>,
     ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> Response {
     let pairs = query_pairs(query.as_deref());
-    let Some(Extension(product)) = product else {
+    let Some(Extension(merchant)) = merchant else {
         let client_secret = pairs
             .iter()
             .find(|(name, _)| name == "client_secret")
@@ -228,9 +241,12 @@ pub(crate) async fn get_quote(
         return response;
     };
     let quote = async {
+        merchant
+            .require(&state.pool, Permission::QuotesRead)
+            .await?;
         let expand = expansions(&pairs, &["deposit"])?;
         let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
-        let lock = locks::get(&state.pool, product.id, quote)
+        let lock = locks::get(&state.pool, merchant.scope, quote)
             .await
             .map_err(map_error)?
             .ok_or_else(ApiError::not_found)?;
@@ -239,14 +255,10 @@ pub(crate) async fn get_quote(
         if expand.contains(&"deposit")
             && let Some(deposit) = consumed_by
         {
-            let deposit = super::deposits::find_deposit(
-                &state.pool,
-                &state.routes,
-                Some(product.id),
-                deposit,
-            )
-            .await?
-            .ok_or_else(ApiError::internal)?;
+            let deposit =
+                super::deposits::find_deposit(&state.pool, &state.routes, merchant.scope, deposit)
+                    .await?
+                    .ok_or_else(ApiError::internal)?;
             quote.deposit = Some(ExpandableDeposit::Object(Box::new(deposit)));
         }
         Ok::<_, ApiError>(quote)
@@ -307,7 +319,7 @@ async fn client_quote(
         }
     };
     Ok(ClientQuote {
-        id: locks::quote_id(lock.address_id),
+        id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
         status: status(lock.status).to_owned(),
         amount: lock.credit_minor.value(),
@@ -347,24 +359,17 @@ async fn client_quote(
 /// address are credited at spot.
 pub(crate) async fn cancel_quote(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Quote>> {
+    merchant
+        .require(&state.pool, Permission::QuotesWrite)
+        .await?;
     let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
-    let lock = locks::cancel(&state.pool, &product, quote)
+    let lock = locks::cancel(&state.pool, merchant.scope, &merchant.actor(), quote)
         .await
         .map_err(map_error)?;
     respond(&state, lock).await
-}
-
-fn product_routes<'a>(
-    state: &'a AppState,
-    product: &'a Product,
-) -> impl Iterator<Item = &'a RouteFile> {
-    state
-        .routes
-        .current()
-        .filter(move |route| route.destination.product == product.slug)
 }
 
 async fn respond(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
@@ -375,7 +380,7 @@ async fn respond(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
 
 /// Responds to `POST /v1/quotes` with a newly issued client secret.
 async fn respond_with_client_secret(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
-    let client_secret = locks::issue_client_secret(&state.pool, lock.address_id)
+    let client_secret = locks::issue_client_secret(&state.pool, lock.id)
         .await
         .map_err(map_error)?;
     let mut quote = quote_object(&state.pool, &state.routes, lock).await?;
@@ -393,14 +398,14 @@ fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
     )
 }
 
-/// Returns one of `product_id`'s quotes by its address row id.
+/// Returns the scope's quote `id`.
 pub(crate) async fn find_quote(
     pool: &PgPool,
     routes: &RouteSet,
-    product_id: Uuid,
+    scope: Scope,
     id: Uuid,
 ) -> ApiResult<Option<Quote>> {
-    match locks::get(pool, product_id, id).await.map_err(map_error)? {
+    match locks::get(pool, scope, id).await.map_err(map_error)? {
         Some(lock) => quote_object(pool, routes, lock).await.map(Some),
         None => Ok(None),
     }
@@ -424,9 +429,9 @@ pub(crate) async fn quote_object(
     let payment = super::pending::quote_payment(pool, route, &lock).await?;
     let payment_uri = payment_uri(route, &lock);
     Ok(Quote {
-        id: locks::quote_id(lock.address_id),
+        id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
-        account_id: lock.account_external_id,
+        account_id: lock.client_reference_id,
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),
         chain_id: lock.chain_id,
@@ -462,9 +467,9 @@ pub(super) fn decimal(scaled: u64) -> String {
     format!("{integer}.{fraction}")
 }
 
-fn has_quotes_pause(product: &Product, account: &Account, route_scopes: &[String]) -> bool {
-    product.paused_scopes.iter().any(|scope| scope == "quotes")
-        || account.paused_scopes.iter().any(|scope| scope == "quotes")
+fn has_quotes_pause(account: &Account, customer: &Customer, route_scopes: &[String]) -> bool {
+    account.paused_scopes.iter().any(|scope| scope == "quotes")
+        || customer.paused_scopes.iter().any(|scope| scope == "quotes")
         || route_scopes.iter().any(|scope| scope == "quotes")
 }
 

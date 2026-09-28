@@ -154,47 +154,64 @@ CREATE TABLE restore_drill_marker (
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
-INSERT INTO products (id, slug, webhook_url, pubkey)
-VALUES (
-    '11111111-1111-1111-1111-111111111111',
-    'restore-drill',
-    'http://mock-product:8081/webhooks',
-    'restore-drill-key'
-);
-INSERT INTO accounts (id, product_id, external_id)
+INSERT INTO accounts (id, name)
+VALUES ('11111111-1111-1111-1111-111111111111', 'restore-drill');
+INSERT INTO customers (id, account_id, livemode, client_reference_id)
 VALUES (
     '22222222-2222-2222-2222-222222222222',
     '11111111-1111-1111-1111-111111111111',
-    'restore-drill-account'
+    true,
+    'restore-drill-customer'
+);
+INSERT INTO quotes (
+    id, account_id, livemode, customer_id, route, amount_atomic, price_scaled, credit_minor,
+    expires_at, status, closed_at
+)
+VALUES (
+    '55555555-5555-5555-5555-555555555555',
+    '11111111-1111-1111-1111-111111111111',
+    true,
+    '22222222-2222-2222-2222-222222222222',
+    'restore-drill',
+    1000,
+    25000000,
+    250,
+    '2026-09-22T00:15:00Z',
+    'expired',
+    '2026-09-22T00:15:00Z'
 );
 INSERT INTO addresses (
-    id, account_id, chain_id, kind, version, salt, address
+    id, account_id, livemode, chain_id, quote_id, salt, treasury, address
 )
 VALUES (
     '33333333-3333-3333-3333-333333333333',
-    '22222222-2222-2222-2222-222222222222',
+    '11111111-1111-1111-1111-111111111111',
+    true,
     1,
-    'persistent',
-    1,
+    '55555555-5555-5555-5555-555555555555',
     '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    '0x0000000000000000000000000000000000007ea5',
     '0xdddddddddddddddddddddddddddddddddddddddd'
 );
 INSERT INTO deposits (
-    id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
-    address_id, account_id, route, route_version, asset_contract, from_address,
-    amount_atomic, state, next_attempt_at, valuation_at, price_scaled, price_source,
-    credit_minor
+    id, account_id, livemode, customer_id, chain_id, tx_hash, log_index, receipt_log_index,
+    block_number, block_hash, block_time, address_id, route, route_version, asset_contract,
+    from_address, amount_atomic, state, next_attempt_at, valuation_at, price_scaled,
+    price_source, credit_minor, final_at
 )
 VALUES (
     '44444444-4444-4444-4444-444444444444',
+    '11111111-1111-1111-1111-111111111111',
+    true,
+    '22222222-2222-2222-2222-222222222222',
     1,
     '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    0,
     0,
     100,
     '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
     '2026-09-22T00:00:00Z',
     '33333333-3333-3333-3333-333333333333',
-    '22222222-2222-2222-2222-222222222222',
     'restore-drill',
     1,
     '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -205,7 +222,8 @@ VALUES (
     '2026-09-22T00:00:00Z',
     25000000,
     'spot',
-    250
+    250,
+    '2026-09-22T00:00:00Z'
 );
 INSERT INTO heartbeat DEFAULT VALUES;
 INSERT INTO restore_drill_marker(mode) VALUES ('base');
@@ -347,9 +365,7 @@ test_restore_failures_are_fatal() {
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 
 routes_dir=$(mktemp -d)
-# The seeded deposit belongs to the `restore-drill` product, so the drill route names it.
 sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
-    -e 's|^product: .*|product: restore-drill|' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
 chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"
@@ -498,7 +514,7 @@ test "$(printf '%s\n' "$restore_report" | jq -er '.status')" = ok || {
     printf 'restore-check: %s\n' "$restore_report" >&2
     exit 1
 }
-test "$(topup_status POST /v1/admin/products)" = 503
+test "$(topup_status POST /v1/admin/accounts)" = 503
 test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 401
 
 # restore-check logged in as the owner, and the application login works too: the restored roles

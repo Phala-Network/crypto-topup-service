@@ -1,7 +1,7 @@
 //! Display-only transfers seen above the finalized head (architecture §8, §12).
 //!
-//! Nothing here reads or writes deposits, transitions, rate locks, exposure, settlements, or
-//! reconciliation state. Support, amount matching, and timeliness are computed by readers, so an
+//! Nothing here reads or writes deposits, transitions, quotes, exposure, or reconciliation
+//! state. Support, amount matching, and timeliness are computed by readers, so an
 //! unfinalized transfer can never produce a stored rejection or credit.
 
 use alloy_primitives::{Address as EvmAddress, B256};
@@ -100,25 +100,24 @@ pub async fn list_watched_addresses(
     chain_id: u64,
 ) -> Result<Vec<ScanAddress>, sqlx::Error> {
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT address.id, address.account_id, address.address
+        SELECT address.id, address.address
         FROM addresses AS address
-        JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
+        JOIN quotes AS quote ON quote.id = address.quote_id
         WHERE address.chain_id = $1
-          AND rate_lock.status IN ('open', 'expired')
-          AND rate_lock.consumed_by IS NULL
-          AND rate_lock.expires_at + interval '1 hour' > now()
+          AND quote.status IN ('open', 'expired')
+          AND quote.consumed_by IS NULL
+          AND quote.expires_at + interval '1 hour' > now()
         "#,
     )
     .bind(chain_id)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
-        .map(|(id, account_id, address)| {
+        .map(|(id, address)| {
             Ok(ScanAddress {
                 id,
-                account_id,
                 address: parse_address(&address)?,
                 created_block: 0,
                 backfilled: true,

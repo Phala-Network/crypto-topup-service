@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::db::{self, AddressKind, Deposit, FlushedEvent, NewDeposit, NewFlush};
+use topup::db::{self, Deposit, FlushedEvent, NewDeposit, NewFlush};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
@@ -34,7 +34,7 @@ use topup_core::route::RouteFile;
 use uuid::Uuid;
 
 use support::TestDatabase;
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 
 const CHAIN_ID: u64 = 31_337;
 
@@ -160,7 +160,6 @@ impl ReconciliationChain for MockChain {
 }
 
 struct Seed {
-    account_id: Uuid,
     address_id: Uuid,
     salt: B256,
     address: Address,
@@ -189,11 +188,21 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
         ensure!(missing.len() == 1 && missing[0].repair_applied);
         let requests = chain.log_requests.lock().unwrap().clone();
         ensure!(requests == [(0, 5)]);
-        ensure!(reconciler.check(CheckName::MissingDeposit).await?.is_empty());
+        ensure!(
+            reconciler
+                .check(CheckName::MissingDeposit)
+                .await?
+                .is_empty()
+        );
         ensure!(chain.log_requests.lock().unwrap().len() == 1);
         chain.finalized.store(9, Ordering::SeqCst);
         scanned_through(&pool, 9).await?;
-        ensure!(reconciler.check(CheckName::MissingDeposit).await?.is_empty());
+        ensure!(
+            reconciler
+                .check(CheckName::MissingDeposit)
+                .await?
+                .is_empty()
+        );
         ensure!(chain.log_requests.lock().unwrap().last() == Some(&(6, 9)));
         let repaired = deposit(&pool, deposit_id(CHAIN_ID, B256::from([11; 32]), 2)).await?;
         ensure!(repaired.state == DepositState::Detected);
@@ -213,9 +222,15 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
         }));
         let linked = deposit(&pool, linked_id).await?;
         ensure!(linked.flush_id == Some(flush_id) && linked.state == DepositState::Swept);
-        ensure!(reconciler.check(CheckName::MissingFlushLink).await?.is_empty());
+        ensure!(
+            reconciler
+                .check(CheckName::MissingFlushLink)
+                .await?
+                .is_empty()
+        );
         let repairs: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit WHERE actor = 'reconciler' AND action = 'reconciliation_repair'",
+            "SELECT count(*) FROM audit WHERE actor_type = 'system' AND actor_id = 'reconciler' \
+             AND action = 'reconciliation_repair'",
         )
         .fetch_one(&pool)
         .await?;
@@ -1206,7 +1221,7 @@ async fn application_role_cannot_rewrite_findings_or_blocks() -> Result<()> {
 async fn loop_respects_cancellation() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
-        seed_product(&pool, &route.destination.product).await?;
+        seed_account(&pool).await?;
         let chain = Arc::new(MockChain {
             finalized_delay: StdDuration::from_secs(10),
             ..MockChain::default()
@@ -1294,6 +1309,7 @@ fn route() -> Result<RouteFile> {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
     route.chain.chain_id = CHAIN_ID;
+    route.livemode = false;
     route.chain.rpc_providers = vec![
         "http://127.0.0.1:8546".to_owned(),
         "http://localhost:8546".to_owned(),
@@ -1363,39 +1379,36 @@ fn transfer(
     }
 }
 
-/// Returns the route's product, creating it once: settlement calls resolve its attested destination.
-async fn seed_product(pool: &PgPool, slug: &str) -> Result<Uuid> {
-    let existing = sqlx::query_scalar::<_, Uuid>("SELECT id FROM products WHERE slug = $1")
-        .bind(slug)
-        .fetch_optional(pool)
-        .await?;
+/// Returns the test account, creating it once.
+async fn seed_account(pool: &PgPool) -> Result<Uuid> {
+    let existing =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM accounts WHERE name = 'reconciler'")
+            .fetch_optional(pool)
+            .await?;
     if let Some(id) = existing {
         return Ok(id);
     }
-    let id = Uuid::new_v4();
-    seed::create_product(
+    let account = seed::create_account(
         pool,
-        &NewProduct {
-            id,
-            slug: slug.to_owned(),
+        &NewAccount {
+            livemode: false,
             webhook_url: "http://product.test/webhooks".to_owned(),
-            pubkey: "test".to_owned(),
-            paused_scopes: Vec::new(),
+            ..NewAccount::named("reconciler")
         },
     )
     .await?;
-    Ok(id)
+    Ok(account.id)
 }
 
 async fn seed_identity(pool: &PgPool, route: &RouteFile, number: u8) -> Result<Seed> {
-    let product_id = seed_product(pool, &route.destination.product).await?;
-    let account_id = Uuid::new_v4();
-    seed::create_account(
+    let account_id = seed_account(pool).await?;
+    let customer = seed::create_customer(
         pool,
-        &NewAccount {
-            id: account_id,
-            product_id,
-            external_id: format!("workspace-{number}"),
+        &NewCustomer {
+            id: Uuid::new_v4(),
+            account_id,
+            livemode: false,
+            client_reference_id: format!("workspace-{number}"),
             paused_scopes: Vec::new(),
         },
     )
@@ -1407,19 +1420,15 @@ async fn seed_identity(pool: &PgPool, route: &RouteFile, number: u8) -> Result<S
         pool,
         &NewAddress {
             id: address_id,
-            account_id,
+            customer_id: customer.id,
             chain_id: route.chain.chain_id,
-            kind: AddressKind::Persistent,
-            version: 1,
-            lock_ref: None,
+            route: route.route.clone(),
             salt,
             address,
-            retired_at: None,
         },
     )
     .await?;
     Ok(Seed {
-        account_id,
         address_id,
         salt,
         address,
@@ -1486,7 +1495,6 @@ async fn seed_deposit(
         block_hash: B256::from([number.wrapping_add(1); 32]),
         block_time: Utc::now(),
         address_id: seed.address_id,
-        account_id: seed.account_id,
         route: Some(route.route.clone()),
         route_version: Some(route.version),
         asset_contract: route.asset.contract,

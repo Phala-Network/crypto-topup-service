@@ -95,11 +95,6 @@ mod tests {
                 rejected(RejectReason::UnsupportedAsset),
                 Ok(()),
             ),
-            (
-                "product refusal, including late funds to a closed workspace",
-                rejected(RejectReason::ProductRefused),
-                Ok(()),
-            ),
             ("out of bounds", rejected(RejectReason::OutOfBounds), Ok(())),
             (
                 "sanctioned",

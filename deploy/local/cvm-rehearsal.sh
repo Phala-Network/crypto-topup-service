@@ -408,23 +408,25 @@ wait_for "a fresh backup marker" 120 marker_fresh
 echo "ok: WAL archiving refreshed the backup marker"
 
 echo "== one quote-first deposit against the reference product"
-# A CVM has no database access, so the owner issues the product through the signed admin API.
+# A CVM has no database access, so the owner issues the account through the signed admin API.
 # `-j` omits the trailing newline, so the body passes through an argument byte for byte.
 jq -cjn --arg public_key "$(jq -er .public_key <<<"$product_key")" \
-    '{slug: "phala-cloud", public_key: $public_key, webhook_url: "http://product:8089/webhooks"}' \
+    '{name: "phala-cloud", livemode: false, public_key: $public_key,
+      webhook_url: "http://product:8089/webhooks"}' \
     >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
-    http://topup:8080/v1/admin/products "$tmp/product.json" "$tmp/admin.pem" rehearsal-admin/v1)
-product_python - "$(<"$tmp/product.json")" "${headers[@]}" <<'PY' >/dev/null ||
+    http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" rehearsal-admin/v1)
+account=$(product_python - "$(<"$tmp/product.json")" "${headers[@]}" <<'PY'
 import sys, httpx
 headers = dict(header.split(": ", 1) for header in sys.argv[2:])
 headers["content-type"] = "application/json"
-response = httpx.post("http://topup:8080/v1/admin/products", content=sys.argv[1].encode(),
+response = httpx.post("http://topup:8080/v1/admin/accounts", content=sys.argv[1].encode(),
                       headers=headers, timeout=30)
 assert response.status_code == 200, (response.status_code, response.text)
+print(response.json()["id"])
 PY
-    die "POST /v1/admin/products did not issue the product"
-echo "ok: POST /v1/admin/products issued the product"
+) || die "POST /v1/admin/accounts did not issue the account"
+echo "ok: POST /v1/admin/accounts issued $account"
 
 echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed seed"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
@@ -433,6 +435,8 @@ sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
     -e "s|^\(        \"treasury\": \).*|\1\"$treasury\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
+    -e "s|^\(        \"product_slug\": \).*|\1\"$account\",|" \
+    -e "s|^\(        \"product_keyid\": \).*|\1\"$account/v1\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
@@ -479,9 +483,9 @@ unset seed
 pc up -d >/dev/null
 wait_for "the product's /healthz after sealing" 90 product_healthy
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
-    --arg payer "$owner" --arg treasury "$treasury" \
-    '{service_url: "http://topup:8080", product_slug: "phala-cloud",
-      product_keyid: "phala-cloud/v1", route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
+    --arg payer "$owner" --arg treasury "$treasury" --arg account "$account" \
+    '{service_url: "http://topup:8080", product_slug: $account,
+      product_keyid: ($account + "/v1"), route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       treasury: $treasury, token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
     docker exec -i "$client" sh -c 'cat >/opt/driver.json'
@@ -491,7 +495,7 @@ echo "ok: the deposit driver's quote-first deposit is credited once in the produ
 # The route prices only from Coin Metrics, Binance, and Kraken over HTTPS, so a priced lock proves
 # the distroless service image verified those servers with its system CA bundle.
 priced_locks=$(dc exec -T postgres psql -U postgres -d topup -XAtq -c \
-    "SELECT count(*) FROM rate_locks WHERE route = 'phala-cloud-sepolia-pha-usd' AND price_scaled > 0")
+    "SELECT count(*) FROM quotes WHERE route = 'phala-cloud-sepolia-pha-usd' AND price_scaled > 0")
 ((priced_locks >= 1)) || die "no rate lock was priced from the live HTTPS sources"
 echo "ok: topup priced a lock from live HTTPS price sources (TLS with system roots)"
 

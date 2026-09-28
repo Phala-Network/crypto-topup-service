@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::locks::QuoteProvider;
 use crate::routes::RouteSet;
+use crate::tenancy::Scope;
 use axum::extract::{Extension, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -55,47 +56,51 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub(crate) fn route_for_product<'a>(
-        &'a self,
-        product: &crate::db::Product,
-    ) -> Result<&'a RouteFile, error::ApiError> {
-        let mut routes = self
-            .routes
-            .routes()
-            .iter()
-            .filter(|route| route.destination.product == product.slug);
-        let first = routes.next().ok_or_else(error::ApiError::not_found)?;
-        let mut current = first;
-        for route in routes {
-            if route.route != first.route {
-                return Err(error::ApiError::conflict(
-                    "multiple active routes match this product",
-                ));
-            }
-            if route.version > current.version {
-                current = route;
-            }
+    /// The route a refund of the scope's deposit is checked against: the current version of the
+    /// deposit's route, or, for a deposit of an asset without a route, the first current route of
+    /// its chain in the scope's mode. A deposit outside the scope is `404`.
+    pub(crate) async fn refund_route(
+        &self,
+        scope: Scope,
+        deposit_id: uuid::Uuid,
+    ) -> Result<&RouteFile, error::ApiError> {
+        let (route, chain_id) = sqlx::query_as::<_, (Option<String>, i64)>(
+            "SELECT route, chain_id FROM deposits WHERE id = $1 AND account_id = $2 AND livemode = $3",
+        )
+        .bind(deposit_id)
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| error::ApiError::not_found().with_param("deposit"))?;
+        let chain_id = u64::try_from(chain_id).map_err(|_| error::ApiError::internal())?;
+        let mut current = self.routes.current_in(scope.livemode());
+        match route {
+            Some(name) => current.find(|route| route.route == name),
+            None => current.find(|route| route.chain.chain_id == chain_id),
         }
-        Ok(current)
+        .ok_or_else(|| {
+            tracing::error!(%deposit_id, "the deposit's route is not loaded");
+            error::ApiError::internal()
+        })
     }
 }
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
-/// about, as returned by `GET /v1/deposits/{id}` or `GET /v1/quotes/{id}`. `Ok(None)` means the
-/// object does not exist for `product_id`; `Err(())` means rendering failed and was logged.
+/// about, as returned by `GET /v1/deposits/{id}` or `GET /v1/quotes/{id}` to the event's account
+/// and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
     routes: &RouteSet,
-    product_id: uuid::Uuid,
+    scope: Scope,
     object: crate::db::EventObject,
 ) -> Result<Option<serde_json::Value>, ()> {
     let rendered = match object {
-        crate::db::EventObject::Deposit(id) => {
-            deposits::find_deposit(pool, routes, Some(product_id), id)
-                .await
-                .map(|deposit| deposit.map(serde_json::to_value))
-        }
-        crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, product_id, id)
+        crate::db::EventObject::Deposit(id) => deposits::find_deposit(pool, routes, scope, id)
+            .await
+            .map(|deposit| deposit.map(serde_json::to_value)),
+        crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, scope, id)
             .await
             .map(|quote| quote.map(serde_json::to_value)),
     };
@@ -115,7 +120,7 @@ pub(crate) async fn event_data(
 
 /// Builds the authenticated Axum router and its OpenAPI document.
 pub fn router(state: AppState) -> (Router, OpenApi) {
-    let product = OpenApiRouter::new()
+    let merchant = OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
         .routes(routes!(quotes::create_quote))
         .routes(routes!(quotes::cancel_quote))
@@ -125,15 +130,15 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(deposits::get_refund))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::authenticate_product,
+            auth::authenticate_merchant,
         ));
 
     let admin = OpenApiRouter::new()
-        .routes(routes!(handlers::register_product))
-        .routes(routes!(handlers::update_product))
+        .routes(routes!(handlers::create_account))
+        .routes(routes!(handlers::update_account))
         .routes(routes!(handlers::admin_get_deposit))
-        .routes(routes!(handlers::pause_account))
-        .routes(routes!(handlers::resume_account))
+        .routes(routes!(handlers::pause_customer))
+        .routes(routes!(handlers::resume_customer))
         .routes(routes!(handlers::pause_route))
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))
@@ -152,17 +157,17 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(quotes::get_quote))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::authenticate_product_or_client_secret,
+            auth::authenticate_merchant_or_client_secret,
         ));
 
     let mut documented = OpenApiRouter::new()
-        .merge(product)
+        .merge(merchant)
         .merge(quote)
         .merge(admin)
         .routes(routes!(handlers::get_attestation));
     let mut info = Info::new("Phala Pay API", env!("CARGO_PKG_VERSION"));
     info.description = Some(
-        "Authenticated product and administrative API for Phala Pay crypto payments.".to_owned(),
+        "Authenticated merchant and administrative API for Phala Pay crypto payments.".to_owned(),
     );
     documented.get_openapi_mut().info = info;
     documented
@@ -283,52 +288,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use tower::ServiceExt as _;
 
-    use super::{AppState, RouteSet, VerificationKey};
-    use crate::db::Product;
-    use topup_core::route::RouteFile;
-    use uuid::Uuid;
-
-    #[tokio::test]
-    async fn current_product_route_is_the_highest_loaded_version() {
-        let route: RouteFile =
-            serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
-                .expect("route fixture parses");
-        let mut newer = route.clone();
-        newer.version = route.version + 1;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
-            .expect("lazy pool URL is valid");
-        let admin_key = SigningKey::from_bytes(&[1; 32]);
-        let state = AppState {
-            pool,
-            routes: Arc::new(RouteSet::new(vec![newer.clone(), route]).expect("routes load")),
-            admin_key: VerificationKey::from_base64(
-                "admin/v1".to_owned(),
-                &STANDARD.encode(admin_key.verifying_key().as_bytes()),
-            )
-            .expect("admin key is valid"),
-            public_origin: super::PublicOrigin::parse("http://api.test")
-                .expect("test origin is valid"),
-            attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
-            rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
-            client_reads: Arc::default(),
-        };
-        let product = Product {
-            id: Uuid::nil(),
-            slug: "phala-cloud".to_owned(),
-            webhook_url: String::new(),
-            pubkey: String::new(),
-            paused_scopes: Vec::new(),
-        };
-
-        assert_eq!(
-            state
-                .route_for_product(&product)
-                .expect("product route exists")
-                .version,
-            newer.version
-        );
-    }
+    use super::{AppState, VerificationKey};
 
     #[tokio::test]
     async fn unknown_paths_are_not_found_with_a_request_id() {

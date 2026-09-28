@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, slug, webhook_url, pubkey, paused_scopes FROM products WHERE id = $1",
+  "query": "\n        SELECT id, account_id, livemode, client_reference_id, paused_scopes\n        FROM customers\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -9,41 +9,41 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "products",
+            "table": "customers",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "slug",
-        "type_info": "Text",
+        "name": "account_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "products",
-            "name": "slug"
+            "table": "customers",
+            "name": "account_id"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "webhook_url",
-        "type_info": "Text",
+        "name": "livemode",
+        "type_info": "Bool",
         "origin": {
           "Table": {
-            "table": "products",
-            "name": "webhook_url"
+            "table": "customers",
+            "name": "livemode"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "pubkey",
+        "name": "client_reference_id",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "products",
-            "name": "pubkey"
+            "table": "customers",
+            "name": "client_reference_id"
           }
         }
       },
@@ -53,7 +53,7 @@
         "type_info": "TextArray",
         "origin": {
           "Table": {
-            "table": "products",
+            "table": "customers",
             "name": "paused_scopes"
           }
         }
@@ -72,5 +72,5 @@
       false
     ]
   },
-  "hash": "22082730331f8f783af5e37642d48a223c522d87466b9e0ff4a7eb3a7dc12bec"
+  "hash": "cb1a31b66e7bc58430e0d7fa2a9d14c441fbe5f6a50c5dca00fcb3049df3abb6"
 }

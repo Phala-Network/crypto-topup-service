@@ -67,7 +67,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[ErrorResponse | SupportDepositResponse]:
-    """One deposit of any product with its stored facts, transitions, and webhook events.
+    """One deposit of any account with its stored facts, transitions, and webhook events.
 
     Args:
         id (str):
@@ -96,7 +96,7 @@ def sync(
     *,
     client: AuthenticatedClient,
 ) -> ErrorResponse | SupportDepositResponse | None:
-    """One deposit of any product with its stored facts, transitions, and webhook events.
+    """One deposit of any account with its stored facts, transitions, and webhook events.
 
     Args:
         id (str):
@@ -120,7 +120,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[ErrorResponse | SupportDepositResponse]:
-    """One deposit of any product with its stored facts, transitions, and webhook events.
+    """One deposit of any account with its stored facts, transitions, and webhook events.
 
     Args:
         id (str):
@@ -147,7 +147,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
 ) -> ErrorResponse | SupportDepositResponse | None:
-    """One deposit of any product with its stored facts, transitions, and webhook events.
+    """One deposit of any account with its stored facts, transitions, and webhook events.
 
     Args:
         id (str):

@@ -6,15 +6,15 @@ use std::sync::Arc;
 use alloy_primitives::Address;
 use topup_adapters::attestation::OperatorKey;
 use topup_adapters::chain::evm::EvmClient;
-use topup_core::route::{ChainConfig, DestinationConfig, RouteFile};
+use topup_core::route::{ChainConfig, RouteFile};
 
 use crate::rpc_provider::{UnresolvedProvider, configured_provider_url, provider_label};
 
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
 /// Construction checks everything that must agree across routes: unique versions, one finality
-/// rule and provider list per chain, one route name per chain asset, one product key id per
-/// product, and one destination unit across rate-lock routes.
+/// rule and provider list per chain, one route name per chain asset, and one destination unit
+/// across rate-lock routes.
 #[derive(Debug, Default)]
 pub struct RouteSet {
     routes: Vec<RouteFile>,
@@ -208,13 +208,11 @@ impl RouteSet {
             .map_err(Clone::clone)
     }
 
-    /// Returns the attested destination of `product`, or `None` when no route names it.
-    #[must_use]
-    pub fn destination(&self, product: &str) -> Option<&DestinationConfig> {
-        self.routes
-            .iter()
-            .find(|route| route.destination.product == product)
-            .map(|route| &route.destination)
+    /// Returns the current routes of one mode: a test-mode key quotes only on test routes, a
+    /// live-mode key only on live ones (design D9).
+    pub fn current_in(&self, livemode: bool) -> impl Iterator<Item = &RouteFile> {
+        self.current()
+            .filter(move |route| route.livemode == livemode)
     }
 }
 
@@ -265,20 +263,20 @@ mod tests {
     }
 
     #[test]
-    fn products_are_found_by_slug() {
-        let route = fixture();
-        let mut other = route.clone();
-        other.route = "builder-route".to_owned();
-        other.asset.contract = Address::repeat_byte(0x42);
-        other.destination.product = "builder".to_owned();
-        let set = RouteSet::new(vec![route, other]).expect("two products load");
-        assert_eq!(
-            set.destination("builder")
-                .map(DestinationConfig::product_kid)
-                .as_deref(),
-            Some("builder/v1")
-        );
-        assert_eq!(set.destination("unknown"), None);
+    fn each_mode_sees_only_its_own_routes() {
+        let live = fixture();
+        let mut test = live.clone();
+        test.route = "sepolia-route".to_owned();
+        test.livemode = false;
+        test.chain.chain_id = 11_155_111;
+        let set = RouteSet::new(vec![live, test]).expect("a live and a test route load");
+        let names = |livemode| {
+            set.current_in(livemode)
+                .map(|route| route.route.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(true), ["phala-cloud-ethereum-pha-usd"]);
+        assert_eq!(names(false), ["sepolia-route"]);
     }
 
     #[test]

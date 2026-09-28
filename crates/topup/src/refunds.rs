@@ -26,8 +26,10 @@ sol! {
 pub struct RefundCheck {
     /// Refund workflow identifier.
     pub refund_id: Uuid,
-    /// Product receiving the webhook event.
-    pub product_id: Uuid,
+    /// Account receiving the webhook event.
+    pub account_id: Uuid,
+    /// Mode of the refunded deposit.
+    pub livemode: bool,
     /// Related deposit identifier.
     pub deposit_id: Uuid,
     /// EVM chain identifier.
@@ -364,7 +366,8 @@ where
 #[derive(FromRow)]
 struct RefundCheckRow {
     refund_id: Uuid,
-    product_id: Uuid,
+    account_id: Uuid,
+    livemode: bool,
     deposit_id: Uuid,
     chain_id: i64,
     asset_contract: String,
@@ -378,7 +381,8 @@ impl RefundCheckRow {
     fn into_check(self, treasury: Address) -> Result<RefundCheck, sqlx::Error> {
         Ok(RefundCheck {
             refund_id: self.refund_id,
-            product_id: self.product_id,
+            account_id: self.account_id,
+            livemode: self.livemode,
             deposit_id: self.deposit_id,
             chain_id: u64::try_from(self.chain_id).map_err(decode_error)?,
             asset_contract: self.asset_contract.parse().map_err(decode_error)?,
@@ -407,11 +411,11 @@ async fn claim_due_refund(
         )
         UPDATE refunds AS refund
         SET next_check_at = now() + make_interval(secs => $1), updated_at = now()
-        FROM candidate, deposits AS deposit, accounts AS account
+        FROM candidate, deposits AS deposit
         WHERE refund.id = candidate.id
           AND deposit.id = refund.deposit_id
-          AND account.id = deposit.account_id
-        RETURNING refund.id AS refund_id, account.product_id, deposit.id AS deposit_id,
+        RETURNING refund.id AS refund_id, refund.account_id, refund.livemode,
+                  deposit.id AS deposit_id,
                   deposit.chain_id, deposit.asset_contract, refund.to_address,
                   refund.amount_atomic::text AS amount_atomic, refund.tx_hash,
                   refund.tx_version
@@ -529,11 +533,12 @@ async fn confirm_refund(
     // The event's object is the deposit, with its refunded amount (as Stripe's `charge.refunded`
     // is the charge); its id is derived from the refund, one event per refund.
     crate::db::enqueue_in(
-        &mut *transaction,
+        &mut transaction,
         &crate::db::NewOutboxEvent {
             id: topup_core::identity::event_id("deposit.refunded", check.refund_id),
             event_type: "deposit.refunded".to_owned(),
-            product_id: check.product_id,
+            account_id: check.account_id,
+            livemode: check.livemode,
             object: crate::db::EventObject::Deposit(check.deposit_id),
             next_attempt_at: chrono::Utc::now(),
         },

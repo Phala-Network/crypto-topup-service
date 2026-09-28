@@ -89,6 +89,8 @@ mod tests {
             block_time: Utc::now(),
             address_id: Uuid::nil(),
             account_id: Uuid::nil(),
+            livemode: true,
+            customer_id: Uuid::nil(),
             route: Some("route-a".to_owned()),
             route_version: Some(1),
             asset_contract: Address::ZERO,

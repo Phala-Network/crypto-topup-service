@@ -99,6 +99,16 @@ impl ApiError {
         )
     }
 
+    /// Returns a request the credential is not permitted to make (design D13).
+    #[must_use]
+    pub fn permission_denied() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "the credential does not have the required permission",
+        )
+    }
+
     /// Returns a missing or foreign resource.
     #[must_use]
     pub fn not_found() -> Self {

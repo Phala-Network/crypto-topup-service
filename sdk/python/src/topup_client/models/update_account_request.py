@@ -9,18 +9,18 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 
-T = TypeVar("T", bound="UpdateProductRequest")
+T = TypeVar("T", bound="UpdateAccountRequest")
 
 
 @_attrs_define
-class UpdateProductRequest:
-    """Administrative replacement of an issued product's verification key and webhook URL. The key id
-    stays the route's `destination.product_kid`.
+class UpdateAccountRequest:
+    """Administrative replacement of an account's verification key and webhook URL. The key id and
+    mode stay.
 
         Attributes:
-            public_key (str): Standard base64 of the product's new 32-byte ed25519 request-verification public key.
+            public_key (str): Standard base64 of the account's new 32-byte ed25519 request-verification public key.
             reason (str): Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
-            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+            webhook_url (str): Absolute `https` URL of the account's webhook receiver; `http` only when the service's
                 own public origin uses `http` (local stacks).
     """
 
@@ -57,14 +57,14 @@ class UpdateProductRequest:
 
         webhook_url = d.pop("webhook_url")
 
-        update_product_request = cls(
+        update_account_request = cls(
             public_key=public_key,
             reason=reason,
             webhook_url=webhook_url,
         )
 
-        update_product_request.additional_properties = d
-        return update_product_request
+        update_account_request.additional_properties = d
+        return update_account_request
 
     @property
     def additional_keys(self) -> list[str]:

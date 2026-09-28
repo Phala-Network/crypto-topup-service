@@ -23,10 +23,10 @@ class DepositEventResponse:
     Attributes:
         created_at (datetime.datetime): Event creation time.
         event_type (str): Event type, such as `deposit.credited`.
-        id (str): Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an
-            older event.
-        delivered_at (datetime.datetime | None | Unset): When the receiver accepted the event, or `null` while it is
-            undelivered.
+        id (str): Stable event identifier, sent as the `webhook-id` header: `evt_…`.
+        delivered_at (datetime.datetime | None | Unset): When the last of the account's webhook endpoints accepted the
+            event, or `null` while one
+            has not or the account has none.
     """
 
     created_at: datetime.datetime

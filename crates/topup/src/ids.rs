@@ -3,6 +3,10 @@
 
 use uuid::Uuid;
 
+/// Account ids (`accounts.public_id`).
+pub const ACCOUNT: &str = "acct_";
+/// Webhook endpoint ids.
+pub const WEBHOOK_ENDPOINT: &str = "we_";
 /// Quote ids.
 pub const QUOTE: &str = "qt_";
 /// Deposit ids; the UUID is the deterministic deposit id (architecture §0).

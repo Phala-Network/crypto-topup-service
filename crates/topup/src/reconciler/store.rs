@@ -47,24 +47,24 @@ pub(crate) async fn persist_finding(
         } else {
             "reconciliation_mismatch"
         };
-        sqlx::query(
-            r#"
-            INSERT INTO audit (id, actor, action, subject, reason)
-            VALUES ($1, 'reconciler', $2, $3, $4)
-            "#,
+        let subject = serde_json::to_string(&finding.subjects)?;
+        let reason = json!({
+            "check": finding.check.code(),
+            "expected": finding.expected,
+            "observed": finding.observed,
+        })
+        .to_string();
+        crate::audit::insert_with_id(
+            &mut *transaction,
+            Uuid::new_v5(&finding.id, b"audit"),
+            &crate::audit::Entry {
+                account_id: None,
+                actor: &crate::audit::Actor::system("reconciler"),
+                action,
+                subject: &subject,
+                reason: &reason,
+            },
         )
-        .bind(Uuid::new_v5(&finding.id, b"audit"))
-        .bind(action)
-        .bind(serde_json::to_string(&finding.subjects)?)
-        .bind(
-            json!({
-                "check": finding.check.code(),
-                "expected": finding.expected,
-                "observed": finding.observed,
-            })
-            .to_string(),
-        )
-        .execute(&mut *transaction)
         .await?;
     }
     transaction.commit().await?;

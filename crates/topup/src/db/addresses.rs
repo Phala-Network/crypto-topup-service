@@ -1,86 +1,54 @@
 use alloy_primitives::{Address as EvmAddress, B256};
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::types::{parse_address, parse_b256, to_i64, to_u64};
 
-/// The derivation purpose of a deposit address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AddressKind {
-    /// Reusable account address.
-    Persistent,
-    /// Single-use rate-lock address.
-    Lock,
-}
-
-impl AddressKind {
-    fn parse(value: &str) -> Result<Self, sqlx::Error> {
-        match value {
-            "persistent" => Ok(Self::Persistent),
-            "lock" => Ok(Self::Lock),
-            other => Err(sqlx::Error::Decode(
-                format!("unknown address kind `{other}`").into(),
-            )),
-        }
-    }
-}
-
-/// A stored physical deposit address.
+/// A stored quote forwarder address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Address {
     /// Address row identifier.
     pub id: Uuid,
-    /// Owning account identifier.
+    /// Owning account.
     pub account_id: Uuid,
+    /// Mode of the owning quote.
+    pub livemode: bool,
     /// EVM chain identifier.
     pub chain_id: u64,
-    /// Address derivation purpose.
-    pub kind: AddressKind,
-    /// Persistent address version, or zero for locks.
-    pub version: u64,
-    /// Product lock reference for lock addresses.
-    pub lock_ref: Option<String>,
+    /// The quote the address was issued for.
+    pub quote_id: Uuid,
     /// CREATE2 salt.
     pub salt: B256,
+    /// The treasury the forwarder pays, its clone argument.
+    pub treasury: EvmAddress,
     /// Physical chain address.
     pub address: EvmAddress,
-    /// Retirement time for rotated persistent addresses.
-    pub retired_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct AddressRecord {
     id: Uuid,
     account_id: Uuid,
+    livemode: bool,
     chain_id: i64,
-    kind: String,
-    version: i64,
-    lock_ref: Option<String>,
+    quote_id: Uuid,
     salt: String,
+    treasury: String,
     address: String,
-    retired_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) struct AddressWithPauseScopes {
     pub(crate) address: Address,
+    pub(crate) customer_scopes: Vec<String>,
     pub(crate) account_scopes: Vec<String>,
-    pub(crate) product_scopes: Vec<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct AddressWithPauseScopesRecord {
-    id: Uuid,
-    account_id: Uuid,
-    chain_id: i64,
-    kind: String,
-    version: i64,
-    lock_ref: Option<String>,
-    salt: String,
-    address: String,
-    retired_at: Option<DateTime<Utc>>,
+    #[sqlx(flatten)]
+    address: AddressRecord,
+    customer_scopes: Vec<String>,
     account_scopes: Vec<String>,
-    product_scopes: Vec<String>,
 }
 
 impl TryFrom<AddressRecord> for Address {
@@ -90,13 +58,12 @@ impl TryFrom<AddressRecord> for Address {
         Ok(Self {
             id: record.id,
             account_id: record.account_id,
+            livemode: record.livemode,
             chain_id: to_u64(record.chain_id, "addresses.chain_id")?,
-            kind: AddressKind::parse(&record.kind)?,
-            version: to_u64(record.version, "addresses.version")?,
-            lock_ref: record.lock_ref,
+            quote_id: record.quote_id,
             salt: parse_b256(&record.salt)?,
+            treasury: parse_address(&record.treasury)?,
             address: parse_address(&record.address)?,
-            retired_at: record.retired_at,
         })
     }
 }
@@ -105,7 +72,11 @@ impl TryFrom<AddressRecord> for Address {
 pub async fn get_address(pool: &PgPool, id: Uuid) -> Result<Option<Address>, sqlx::Error> {
     let record = sqlx::query_as!(
         AddressRecord,
-        "SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at FROM addresses WHERE id = $1",
+        r#"
+        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address
+        FROM addresses
+        WHERE id = $1
+        "#,
         id
     )
     .fetch_optional(pool)
@@ -113,7 +84,7 @@ pub async fn get_address(pool: &PgPool, id: Uuid) -> Result<Option<Address>, sql
     record.map(TryInto::try_into).transpose()
 }
 
-/// Lists every active or retired forwarder address stored for a chain.
+/// Lists every forwarder address stored for a chain, across accounts.
 pub async fn list_chain_addresses(
     pool: &PgPool,
     chain_id: u64,
@@ -121,7 +92,7 @@ pub async fn list_chain_addresses(
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
     let records = sqlx::query_as::<_, AddressRecord>(
         r#"
-        SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at
+        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address
         FROM addresses
         WHERE chain_id = $1
         ORDER BY address, id
@@ -143,18 +114,18 @@ pub(crate) async fn list_chain_addresses_with_pause_scopes(
         SELECT
             address.id,
             address.account_id,
+            address.livemode,
             address.chain_id,
-            address.kind,
-            address.version,
-            address.lock_ref,
+            address.quote_id,
             address.salt,
+            address.treasury,
             address.address,
-            address.retired_at,
-            account.paused_scopes AS account_scopes,
-            product.paused_scopes AS product_scopes
+            customer.paused_scopes AS customer_scopes,
+            account.paused_scopes AS account_scopes
         FROM addresses AS address
+        JOIN quotes AS quote ON quote.id = address.quote_id
+        JOIN customers AS customer ON customer.id = quote.customer_id
         JOIN accounts AS account ON account.id = address.account_id
-        JOIN products AS product ON product.id = account.product_id
         WHERE address.chain_id = $1
         ORDER BY address.address, address.id
         "#,
@@ -165,22 +136,10 @@ pub(crate) async fn list_chain_addresses_with_pause_scopes(
     records
         .into_iter()
         .map(|record| {
-            let address = AddressRecord {
-                id: record.id,
-                account_id: record.account_id,
-                chain_id: record.chain_id,
-                kind: record.kind,
-                version: record.version,
-                lock_ref: record.lock_ref,
-                salt: record.salt,
-                address: record.address,
-                retired_at: record.retired_at,
-            }
-            .try_into()?;
             Ok(AddressWithPauseScopes {
-                address,
+                address: record.address.try_into()?,
+                customer_scopes: record.customer_scopes,
                 account_scopes: record.account_scopes,
-                product_scopes: record.product_scopes,
             })
         })
         .collect()

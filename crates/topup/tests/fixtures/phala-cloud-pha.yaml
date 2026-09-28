@@ -4,7 +4,7 @@
 # behaviour before fast credit), and the deposit and flush floors.
 route: phala-cloud-ethereum-pha-usd
 version: 1
-product: phala-cloud
+livemode: true
 
 chain:
   chain_id: 1

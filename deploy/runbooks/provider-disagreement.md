@@ -10,7 +10,7 @@ deposit at once.
 ## First steps
 
 1. Take the `deposit_id` from the Sentry event and read its timeline with a support lookup
-   (`GET /v1/products/{p}/deposits/{id}`). The latest attempt's `evidence` names the failure:
+   (`GET /v1/admin/deposits/{id}`). The latest attempt's `evidence` names the failure:
    `stage: "finality"` with `error` `rpc_disagreement`, `rpc_failure`, `recipient_mismatch`, or
    `log_absent_at_finality`; `stage: "valuation"` (a price failure: [Price outage](price-outage.md));
    or, in `confirmed`, the oracle answers of `provider_a` and `provider_b`.

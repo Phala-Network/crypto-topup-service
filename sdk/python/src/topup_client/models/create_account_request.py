@@ -9,31 +9,35 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 
-T = TypeVar("T", bound="RegisterProductRequest")
+T = TypeVar("T", bound="CreateAccountRequest")
 
 
 @_attrs_define
-class RegisterProductRequest:
-    """Administrative product registration body. The product's key id is not part of it: the
-    attested route is its only source.
+class CreateAccountRequest:
+    """Administrative account issuance body, until self-serve signup (design PR 5) and API keys
+    (design PR 6) replace it.
 
         Attributes:
-            public_key (str): Standard base64 of the product's 32-byte ed25519 request-verification public key.
-            slug (str): Product slug named by a loaded route's `destination.product`; matches
-                `^[a-z0-9][a-z0-9-]{0,62}$`.
-            webhook_url (str): Absolute `https` URL of the product's webhook receiver; `http` only when the service's
+            livemode (bool): The mode the account's signing key acts in: `true` for live routes, `false` for test
+                routes.
+            name (str): Display name, 1 to 200 characters.
+            public_key (str): Standard base64 of the account's 32-byte ed25519 request-verification public key.
+            webhook_url (str): Absolute `https` URL of the account's webhook receiver; `http` only when the service's
                 own public origin uses `http` (local stacks).
     """
 
+    livemode: bool
+    name: str
     public_key: str
-    slug: str
     webhook_url: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        public_key = self.public_key
+        livemode = self.livemode
 
-        slug = self.slug
+        name = self.name
+
+        public_key = self.public_key
 
         webhook_url = self.webhook_url
 
@@ -41,8 +45,9 @@ class RegisterProductRequest:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
+                "livemode": livemode,
+                "name": name,
                 "public_key": public_key,
-                "slug": slug,
                 "webhook_url": webhook_url,
             }
         )
@@ -52,20 +57,23 @@ class RegisterProductRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        public_key = d.pop("public_key")
+        livemode = d.pop("livemode")
 
-        slug = d.pop("slug")
+        name = d.pop("name")
+
+        public_key = d.pop("public_key")
 
         webhook_url = d.pop("webhook_url")
 
-        register_product_request = cls(
+        create_account_request = cls(
+            livemode=livemode,
+            name=name,
             public_key=public_key,
-            slug=slug,
             webhook_url=webhook_url,
         )
 
-        register_product_request.additional_properties = d
-        return register_product_request
+        create_account_request.additional_properties = d
+        return create_account_request
 
     @property
     def additional_keys(self) -> list[str]:

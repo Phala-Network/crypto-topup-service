@@ -25,22 +25,24 @@ use topup_core::money::{
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
-use crate::db::{Account, Product};
+use crate::audit::{self, Actor};
+use crate::db::{Account, Customer};
+use crate::tenancy::Scope;
 use pricing::{PricingRuntime, ValidatedQuote};
 
 /// The columns of [`RateLockRow`]; callers append the `WHERE` clause with `concat!`.
 macro_rules! select_lock {
     () => {
         r#"
-    SELECT rate_lock.address_id, account.external_id, rate_lock.route, address.chain_id,
-           address.address,
-           rate_lock.amount_atomic::text AS amount_atomic,
-           rate_lock.price_scaled::text AS price_scaled,
-           rate_lock.credit_minor::text AS credit_minor,
-           rate_lock.expires_at, rate_lock.status, rate_lock.created_at, rate_lock.consumed_by
-    FROM rate_locks AS rate_lock
-    JOIN addresses AS address ON address.id = rate_lock.address_id
-    JOIN accounts AS account ON account.id = address.account_id"#
+    SELECT quote.id, address.id AS address_id, customer.client_reference_id, quote.route,
+           address.chain_id, address.address,
+           quote.amount_atomic::text AS amount_atomic,
+           quote.price_scaled::text AS price_scaled,
+           quote.credit_minor::text AS credit_minor,
+           quote.expires_at, quote.status, quote.created_at, quote.consumed_by
+    FROM quotes AS quote
+    JOIN addresses AS address ON address.quote_id = quote.id
+    JOIN customers AS customer ON customer.id = quote.customer_id"#
     };
 }
 
@@ -82,13 +84,15 @@ impl RateLockStatus {
     }
 }
 
-/// Product-visible immutable rate-lock facts and lifecycle state: the API's quote.
+/// Merchant-visible immutable rate-lock facts and lifecycle state: the API's quote.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateLock {
-    /// Address row identifier, also the quote id.
+    /// Quote identifier.
+    pub id: Uuid,
+    /// The quote's address row.
     pub address_id: Uuid,
-    /// The account's product-owned identifier.
-    pub account_external_id: String,
+    /// The customer's `client_reference_id`.
+    pub client_reference_id: String,
     /// Route name.
     pub route: String,
     /// EVM chain identifier.
@@ -99,7 +103,7 @@ pub struct RateLock {
     pub amount_atomic: AtomicAmount,
     /// Frozen eight-decimal price.
     pub price: ScaledPrice,
-    /// Frozen product credit.
+    /// Frozen credit.
     pub credit_minor: MinorAmount,
     /// Payment deadline.
     pub expires_at: DateTime<Utc>,
@@ -111,11 +115,11 @@ pub struct RateLock {
     pub consumed_by: Option<Uuid>,
 }
 
-/// The public id of a quote: `qt_` and the hex of its address row id. New quotes derive their
-/// address salt from it, so a product can recompute the address from the id alone.
+/// The public id of a quote: `qt_` and the hex of its id. Quotes derive their address salt from
+/// it, so a merchant can recompute the address from the id alone.
 #[must_use]
-pub fn quote_id(address_id: Uuid) -> String {
-    crate::ids::format(crate::ids::QUOTE, address_id)
+pub fn quote_id(id: Uuid) -> String {
+    crate::ids::format(crate::ids::QUOTE, id)
 }
 
 /// A validated quote source used by rate-lock creation.
@@ -186,13 +190,13 @@ pub enum RateLockError {
     /// Current validated pricing is unavailable.
     #[error("validated pricing is unavailable")]
     PricingUnavailable,
-    /// The per-account rolling creation limit was reached.
+    /// The per-customer rolling creation limit was reached.
     #[error("rate-lock creation limit exceeded")]
     RateLimited,
     /// An open exposure cap would be exceeded.
     #[error("the {scope} cap on open quotes leaves {remaining} cents")]
     ExposureCap {
-        /// `account`, `product`, or `global`.
+        /// `customer`, `account`, or `global`.
         scope: &'static str,
         /// Credit, in minor units, still available under the cap.
         remaining: u64,
@@ -226,29 +230,39 @@ pub enum RateLockError {
     Database(#[from] sqlx::Error),
 }
 
-/// Creates a lock for `credit` on `route`, or, for a repeated `idempotency_key`, returns the lock
-/// created with it.
+/// Creates a lock for `credit` on `route` for `customer` of `account`, or, for a repeated
+/// `idempotency_key`, returns the lock created with it.
 ///
-/// A repeat must name the same account, route, and credit; anything else is an idempotency
-/// mismatch. Callers answer a repeat (with [`find_by_idempotency_key`]) before any other check, so
-/// pausing quotes never hides a lock the product already showed.
+/// The quote is scoped to the customer's account and mode, and `route` must be a route of that
+/// mode. A repeat must name the same customer, route, and credit; anything else is an
+/// idempotency mismatch. Callers answer a repeat (with [`find_by_idempotency_key`]) before any
+/// other check, so pausing quotes never hides a lock the merchant already showed.
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
-    product: &Product,
     account: &Account,
+    customer: &Customer,
     route: &RouteFile,
     idempotency_key: Option<&str>,
     credit_minor: MinorAmount,
 ) -> Result<RateLock, RateLockError> {
+    if customer.account_id != account.id {
+        return Err(RateLockError::NotFound);
+    }
+    if route.livemode != customer.livemode {
+        return Err(RateLockError::InvalidInput(
+            "the route's mode differs from the customer's",
+        ));
+    }
+    let scope = Scope::new(account.id, customer.livemode);
     if let Some(key) = idempotency_key
-        && let Some(existing) = find_by_idempotency_key(pool, product.id, key).await?
+        && let Some(existing) = find_by_idempotency_key(pool, scope, key).await?
     {
-        return replay(existing, account, route, credit_minor);
+        return replay(existing, customer, route, credit_minor);
     }
     // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
-    // authoritative check repeats under the account row lock below.
-    check_creation_rate(pool, account.id, route).await?;
+    // authoritative check repeats under the customer row lock below.
+    check_creation_rate(pool, customer.id, route).await?;
 
     let quote = quotes
         .quote(route)
@@ -268,86 +282,91 @@ pub async fn create(
         .ok_or(RateLockError::Arithmetic)?;
 
     let mut transaction = pool.begin().await?;
-    lock_account(&mut transaction, product.id, account.id).await?;
-    check_creation_rate(&mut *transaction, account.id, route).await?;
-    check_exposure(
-        &mut transaction,
-        product.id,
-        account.id,
-        credit_minor,
-        route,
-    )
-    .await?;
+    lock_customer(&mut transaction, customer).await?;
+    check_creation_rate(&mut *transaction, customer.id, route).await?;
+    check_exposure(&mut transaction, account, customer, credit_minor, route).await?;
+    let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
-    let lock_ref = quote_id(address_id);
-    let salt = lock_salt(&product.slug, &account.external_id, &lock_ref);
+    let salt = lock_salt(
+        &account.public_id,
+        &customer.client_reference_id,
+        &quote_id(id),
+    );
+    // The route's treasury until accounts set their own (design PR 8); the address keeps it for
+    // good, as the forwarder does.
+    let treasury = route.chain.contracts.treasury;
     let address = forwarder_address(
         route.chain.contracts.forwarder_factory,
         route.chain.contracts.implementation,
-        route.chain.contracts.treasury,
+        treasury,
         salt,
     );
-    // A freshly derived single-use address cannot hold earlier payments, so the scanner only
-    // needs to cover it from the chain's committed cursor instead of backfilling from genesis.
-    sqlx::query(
-        r#"
-        INSERT INTO addresses (
-            id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at,
-            created_block
-        )
-        VALUES (
-            $1, $2, $3, 'lock', 0, $4, $5, $6, NULL,
-            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $3), 0)
-        )
-        "#,
-    )
-    .bind(address_id)
-    .bind(account.id)
-    .bind(i64::try_from(route.chain.chain_id).map_err(|_| RateLockError::Arithmetic)?)
-    .bind(&lock_ref)
-    .bind(format!("{salt:#x}"))
-    .bind(format!("{address:#x}"))
-    .execute(&mut *transaction)
-    .await?;
     let inserted = sqlx::query(
         r#"
-        INSERT INTO rate_locks (
-            address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
-            status, exposure_reserved, created_at, product_id, idempotency_key
+        INSERT INTO quotes (
+            id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
+            credit_minor, expires_at, status, exposure_reserved, created_at, idempotency_key
         )
-        VALUES ($1, $2, $3::text::numeric, $4::text::numeric, $5::text::numeric, $6,
-                'open', true, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
+                $9, 'open', true, $10, $11)
         "#,
     )
-    .bind(address_id)
+    .bind(id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(customer.id)
     .bind(&route.route)
     .bind(amount_atomic.value().to_string())
     .bind(locked_price.value().to_string())
     .bind(credit_minor.value().to_string())
     .bind(expires_at)
     .bind(now)
-    .bind(product.id)
     .bind(idempotency_key)
     .execute(&mut *transaction)
     .await;
     match inserted {
-        Ok(_) => transaction.commit().await?,
+        Ok(_) => {}
         // A concurrent request with the same key committed first: answer as its repeat.
         Err(sqlx::Error::Database(error))
-            if error.constraint() == Some("rate_locks_product_idempotency_key_unique") =>
+            if error.constraint() == Some("quotes_idempotency_key_unique") =>
         {
             drop(transaction);
             let key = idempotency_key.ok_or(RateLockError::DatabaseInvariant)?;
-            let existing = find_by_idempotency_key(pool, product.id, key)
+            let existing = find_by_idempotency_key(pool, scope, key)
                 .await?
                 .ok_or(RateLockError::DatabaseInvariant)?;
-            return replay(existing, account, route, credit_minor);
+            return replay(existing, customer, route, credit_minor);
         }
         Err(error) => return Err(error.into()),
     }
+    // A freshly derived single-use address cannot hold earlier payments, so the scanner only
+    // needs to cover it from the chain's committed cursor instead of backfilling from genesis.
+    sqlx::query(
+        r#"
+        INSERT INTO addresses (
+            id, account_id, livemode, chain_id, quote_id, salt, treasury, address, created_block
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $4), 0)
+        )
+        "#,
+    )
+    .bind(address_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(i64::try_from(route.chain.chain_id).map_err(|_| RateLockError::Arithmetic)?)
+    .bind(id)
+    .bind(format!("{salt:#x}"))
+    .bind(format!("{treasury:#x}"))
+    .bind(format!("{address:#x}"))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(RateLock {
+        id,
         address_id,
-        account_external_id: account.external_id.clone(),
+        client_reference_id: customer.client_reference_id.clone(),
         route: route.route.clone(),
         chain_id: route.chain.chain_id,
         address,
@@ -361,35 +380,36 @@ pub async fn create(
     })
 }
 
-/// Returns the product's lock created with `idempotency_key`, if any.
+/// Returns the scope's lock created with `idempotency_key`, if any.
 pub async fn find_by_idempotency_key(
     pool: &PgPool,
-    product_id: Uuid,
+    scope: Scope,
     idempotency_key: &str,
 ) -> Result<Option<RateLock>, RateLockError> {
     let row = sqlx::query_as::<_, RateLockRow>(concat!(
         select_lock!(),
-        " WHERE rate_lock.product_id = $1 AND rate_lock.idempotency_key = $2"
+        " WHERE quote.account_id = $1 AND quote.livemode = $2 AND quote.idempotency_key = $3"
     ))
-    .bind(product_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
     .bind(idempotency_key)
     .fetch_optional(pool)
     .await?;
     row.map(TryInto::try_into).transpose()
 }
 
-/// Checks that a repeated idempotency key names the stored lock's account, route, and credit.
+/// Checks that a repeated idempotency key names the stored lock's customer, route, and credit.
 ///
 /// # Errors
 ///
 /// [`RateLockError::IdempotencyMismatch`] when any of them differs.
 pub fn replay(
     existing: RateLock,
-    account: &Account,
+    customer: &Customer,
     route: &RouteFile,
     credit_minor: MinorAmount,
 ) -> Result<RateLock, RateLockError> {
-    if existing.account_external_id == account.external_id
+    if existing.client_reference_id == customer.client_reference_id
         && existing.route == route.route
         && existing.chain_id == route.chain.chain_id
         && existing.credit_minor == credit_minor
@@ -405,20 +425,19 @@ const CLIENT_SECRET_BYTES: usize = 24;
 
 /// Issues the quote's `client_secret`, `qt_…_secret_` followed by 48 random hex digits, and stores
 /// only its SHA-256, replacing any earlier secret so that one stops working.
-pub async fn issue_client_secret(pool: &PgPool, address_id: Uuid) -> Result<String, RateLockError> {
+pub async fn issue_client_secret(pool: &PgPool, id: Uuid) -> Result<String, RateLockError> {
     let mut random = [0_u8; CLIENT_SECRET_BYTES];
     SysRng.try_fill_bytes(&mut random).map_err(|error| {
         tracing::error!(%error, "OS RNG failed; no client secret issued");
         RateLockError::EntropyUnavailable
     })?;
-    let secret = format!("{}_secret_{}", quote_id(address_id), hex::encode(random));
-    let updated =
-        sqlx::query("UPDATE rate_locks SET client_secret_hash = $2 WHERE address_id = $1")
-            .bind(address_id)
-            .bind(Sha256::digest(secret.as_bytes()).as_slice())
-            .execute(pool)
-            .await?
-            .rows_affected();
+    let secret = format!("{}_secret_{}", quote_id(id), hex::encode(random));
+    let updated = sqlx::query("UPDATE quotes SET client_secret_hash = $2 WHERE id = $1")
+        .bind(id)
+        .bind(Sha256::digest(secret.as_bytes()).as_slice())
+        .execute(pool)
+        .await?
+        .rows_affected();
     if updated != 1 {
         return Err(RateLockError::NotFound);
     }
@@ -431,7 +450,7 @@ pub async fn get_by_client_secret(
     pool: &PgPool,
     client_secret: &str,
 ) -> Result<Option<RateLock>, RateLockError> {
-    let Some(address_id) = client_secret
+    let Some(id) = client_secret
         .split_once("_secret_")
         .and_then(|(quote, _)| crate::ids::parse(crate::ids::QUOTE, quote))
     else {
@@ -439,27 +458,24 @@ pub async fn get_by_client_secret(
     };
     let row = sqlx::query_as::<_, RateLockRow>(concat!(
         select_lock!(),
-        " WHERE rate_lock.address_id = $1 AND rate_lock.client_secret_hash = $2"
+        " WHERE quote.id = $1 AND quote.client_secret_hash = $2"
     ))
-    .bind(address_id)
+    .bind(id)
     .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
     .fetch_optional(pool)
     .await?;
     row.map(TryInto::try_into).transpose()
 }
 
-/// Loads one lock when it belongs to the authenticated product.
-pub async fn get(
-    pool: &PgPool,
-    product_id: Uuid,
-    address_id: Uuid,
-) -> Result<Option<RateLock>, RateLockError> {
+/// Loads one lock when it belongs to `scope`.
+pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<RateLock>, RateLockError> {
     let row = sqlx::query_as::<_, RateLockRow>(concat!(
         select_lock!(),
-        " WHERE account.product_id = $1 AND rate_lock.address_id = $2"
+        " WHERE quote.account_id = $1 AND quote.livemode = $2 AND quote.id = $3"
     ))
-    .bind(product_id)
-    .bind(address_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(id)
     .fetch_optional(pool)
     .await?;
     row.map(TryInto::try_into).transpose()
@@ -472,11 +488,12 @@ pub async fn get(
 /// lock stays open until it is consumed or expires.
 pub async fn cancel(
     pool: &PgPool,
-    product: &Product,
-    address_id: Uuid,
+    scope: Scope,
+    actor: &Actor,
+    id: Uuid,
 ) -> Result<RateLock, RateLockError> {
     let mut transaction = pool.begin().await?;
-    let row = get_in(&mut transaction, product.id, address_id)
+    let row = get_in(&mut transaction, scope, id)
         .await?
         .ok_or(RateLockError::NotFound)?;
     if row.status == RateLockStatus::Cancelled {
@@ -509,23 +526,24 @@ pub async fn cancel(
     }
     sqlx::query(
         r#"
-        UPDATE rate_locks
+        UPDATE quotes
         SET status = 'cancelled', exposure_reserved = false, closed_at = now()
-        WHERE address_id = $1 AND status = 'open' AND consumed_by IS NULL
+        WHERE id = $1 AND status = 'open' AND consumed_by IS NULL
         "#,
     )
-    .bind(row.address_id)
+    .bind(row.id)
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "INSERT INTO audit (id, actor, action, subject, reason) VALUES ($1, $2, $3, $4, $5)",
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(scope.account_id()),
+            actor,
+            action: "quote.cancel",
+            subject: &format!("quote:{}", quote_id(row.id)),
+            reason: "API request",
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(format!("product:{}", product.id))
-    .bind("cancel_rate_lock")
-    .bind(format!("rate_lock:{}", row.address_id))
-    .bind("signed API request")
-    .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
     Ok(RateLock {
@@ -541,8 +559,14 @@ pub(crate) async fn consume(
     deposit_id: Uuid,
     idempotent: bool,
 ) -> Result<bool, sqlx::Error> {
-    let Some((status, consumed_by)) = sqlx::query_as::<_, (String, Option<Uuid>)>(
-        "SELECT status, consumed_by FROM rate_locks WHERE address_id = $1 FOR UPDATE",
+    let Some((id, status, consumed_by)) = sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
+        r#"
+        SELECT quote.id, quote.status, quote.consumed_by
+        FROM quotes AS quote
+        JOIN addresses AS address ON address.quote_id = quote.id
+        WHERE address.id = $1
+        FOR UPDATE OF quote
+        "#,
     )
     .bind(address_id)
     .fetch_optional(&mut **transaction)
@@ -559,12 +583,12 @@ pub(crate) async fn consume(
     }
     sqlx::query(
         r#"
-        UPDATE rate_locks
+        UPDATE quotes
         SET consumed_by = $2, status = 'consumed', exposure_reserved = false, closed_at = now()
-        WHERE address_id = $1 AND status IN ('open', 'expired') AND consumed_by IS NULL
+        WHERE id = $1 AND status IN ('open', 'expired') AND consumed_by IS NULL
         "#,
     )
-    .bind(address_id)
+    .bind(id)
     .bind(deposit_id)
     .execute(&mut **transaction)
     .await?;
@@ -581,23 +605,22 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query_as::<_, ExpiringRow>(
         r#"
-        SELECT rate_lock.address_id, account.product_id
-        FROM rate_locks AS rate_lock
-        JOIN addresses AS address ON address.id = rate_lock.address_id
-        JOIN accounts AS account ON account.id = address.account_id
+        SELECT quote.id, quote.account_id, quote.livemode
+        FROM quotes AS quote
+        JOIN addresses AS address ON address.quote_id = quote.id
         JOIN cursors AS cursor ON cursor.chain_id = address.chain_id
-        WHERE rate_lock.status = 'open'
-          AND rate_lock.consumed_by IS NULL
-          AND rate_lock.expires_at < cursor.scanned_block_time
+        WHERE quote.status = 'open'
+          AND quote.consumed_by IS NULL
+          AND quote.expires_at < cursor.scanned_block_time
           AND NOT EXISTS (
               SELECT 1
               FROM deposits AS deposit
-              WHERE deposit.address_id = rate_lock.address_id
+              WHERE deposit.address_id = address.id
                 AND deposit.state = 'detected'
-                AND deposit.block_time <= rate_lock.expires_at
+                AND deposit.block_time <= quote.expires_at
           )
-        ORDER BY rate_lock.expires_at, rate_lock.address_id
-        FOR UPDATE OF rate_lock SKIP LOCKED
+        ORDER BY quote.expires_at, quote.id
+        FOR UPDATE OF quote SKIP LOCKED
         LIMIT $1
         "#,
     )
@@ -609,15 +632,15 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
         return Ok(0);
     }
     let count = u64::try_from(rows.len()).map_err(|_| RateLockError::DatabaseInvariant)?;
-    let address_ids = rows.iter().map(|row| row.address_id).collect::<Vec<_>>();
+    let ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
     let updated = sqlx::query(
         r#"
-        UPDATE rate_locks
+        UPDATE quotes
         SET status = 'expired', exposure_reserved = false, closed_at = now()
-        WHERE address_id = ANY($1) AND status = 'open' AND consumed_by IS NULL
+        WHERE id = ANY($1) AND status = 'open' AND consumed_by IS NULL
         "#,
     )
-    .bind(&address_ids)
+    .bind(&ids)
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != count {
@@ -626,12 +649,13 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
 
     for row in &rows {
         crate::db::enqueue_in(
-            &mut *transaction,
+            &mut transaction,
             &crate::db::NewOutboxEvent {
-                id: topup_core::identity::event_id("quote.expired", row.address_id),
+                id: topup_core::identity::event_id("quote.expired", row.id),
                 event_type: "quote.expired".to_owned(),
-                product_id: row.product_id,
-                object: crate::db::EventObject::Quote(row.address_id),
+                account_id: row.account_id,
+                livemode: row.livemode,
+                object: crate::db::EventObject::Quote(row.id),
                 next_attempt_at: Utc::now(),
             },
         )
@@ -741,7 +765,7 @@ fn validate_bounds(
 
 async fn check_creation_rate<'e, E>(
     executor: E,
-    account_id: Uuid,
+    customer_id: Uuid,
     route: &RouteFile,
 ) -> Result<(), RateLockError>
 where
@@ -750,13 +774,12 @@ where
     let recent: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)
-        FROM rate_locks AS rate_lock
-        JOIN addresses AS address ON address.id = rate_lock.address_id
-        WHERE address.account_id = $1
-          AND rate_lock.created_at >= now() - interval '1 minute'
+        FROM quotes
+        WHERE customer_id = $1
+          AND created_at >= now() - interval '1 minute'
         "#,
     )
-    .bind(account_id)
+    .bind(customer_id)
     .fetch_one(executor)
     .await?;
     let recent = u64::try_from(recent).map_err(|_| RateLockError::DatabaseInvariant)?;
@@ -766,19 +789,21 @@ where
     Ok(())
 }
 
-async fn lock_account(
+async fn lock_customer(
     transaction: &mut Transaction<'_, Postgres>,
-    product_id: Uuid,
-    account_id: Uuid,
+    customer: &Customer,
 ) -> Result<(), RateLockError> {
-    // `NO KEY UPDATE` serializes creations per account without blocking the `KEY SHARE` locks
-    // that foreign-key checks take when the scanner inserts deposits for this account.
-    let found =
-        sqlx::query("SELECT id FROM accounts WHERE id = $1 AND product_id = $2 FOR NO KEY UPDATE")
-            .bind(account_id)
-            .bind(product_id)
-            .fetch_optional(&mut **transaction)
-            .await?;
+    // `NO KEY UPDATE` serializes creations per customer without blocking the `KEY SHARE` locks
+    // that foreign-key checks take when the scanner inserts deposits for this customer.
+    let found = sqlx::query(
+        "SELECT id FROM customers WHERE id = $1 AND account_id = $2 AND livemode = $3 \
+         FOR NO KEY UPDATE",
+    )
+    .bind(customer.id)
+    .bind(customer.account_id)
+    .bind(customer.livemode)
+    .fetch_optional(&mut **transaction)
+    .await?;
     if found.is_none() {
         return Err(RateLockError::NotFound);
     }
@@ -786,15 +811,19 @@ async fn lock_account(
 }
 
 /// Rejects a creation that would take any scope's open reserved lock credit past its cap, and
-/// raises `TopupLockExposureNearCap` when it takes the product or global credit to 90 percent.
+/// raises `TopupLockExposureNearCap` when it takes the account's or global credit to 90 percent.
+///
+/// The route's `max_open_minor.account` caps one customer, `product` one account in one mode,
+/// and `global` every quote; the route file keeps those names until caps move to
+/// `account_limits` (design §12).
 ///
 /// The transaction-level advisory lock serialises creations from this check to commit, and under
 /// `READ COMMITTED` the sum, a later statement, sees every creation committed before it. Closing a
 /// lock only lowers the sums, so cancellation, consumption, and expiry need no lock.
 async fn check_exposure(
     transaction: &mut Transaction<'_, Postgres>,
-    product_id: Uuid,
-    account_id: Uuid,
+    account: &Account,
+    customer: &Customer,
     amount: MinorAmount,
     route: &RouteFile,
 ) -> Result<(), RateLockError> {
@@ -803,26 +832,24 @@ async fn check_exposure(
         .await?;
     let open = sqlx::query(
         r#"
-        SELECT coalesce(sum(rate_lock.credit_minor)
-                   FILTER (WHERE address.account_id = $1), 0)::text AS account,
-               coalesce(sum(rate_lock.credit_minor)
-                   FILTER (WHERE account.product_id = $2), 0)::text AS product,
-               coalesce(sum(rate_lock.credit_minor), 0)::text AS global
-        FROM rate_locks AS rate_lock
-        JOIN addresses AS address ON address.id = rate_lock.address_id
-        JOIN accounts AS account ON account.id = address.account_id
-        WHERE rate_lock.status = 'open' AND rate_lock.exposure_reserved
+        SELECT coalesce(sum(credit_minor) FILTER (WHERE customer_id = $1), 0)::text AS customer,
+               coalesce(sum(credit_minor)
+                   FILTER (WHERE account_id = $2 AND livemode = $3), 0)::text AS account,
+               coalesce(sum(credit_minor), 0)::text AS global
+        FROM quotes
+        WHERE status = 'open' AND exposure_reserved
         "#,
     )
-    .bind(account_id)
-    .bind(product_id)
+    .bind(customer.id)
+    .bind(account.id)
+    .bind(customer.livemode)
     .fetch_one(&mut **transaction)
     .await?;
     let caps = &route.rate_lock.max_open_minor;
     for (scope, cap) in [
-        ("account", caps.account),
+        ("customer", caps.account),
         ("global", caps.global),
-        ("product", caps.product),
+        ("account", caps.product),
     ] {
         let current = parse_u64(open.try_get(scope)?)?;
         let exceeded = RateLockError::ExposureCap {
@@ -835,9 +862,9 @@ async fn check_exposure(
         if next > cap {
             return Err(exceeded);
         }
-        if scope != "account" && near_cap(next, cap) {
-            let id = if scope == "product" {
-                route.destination.product.as_str()
+        if scope != "customer" && near_cap(next, cap) {
+            let id = if scope == "account" {
+                account.public_id.as_str()
             } else {
                 "global"
             };
@@ -861,8 +888,9 @@ fn near_cap(open: u64, cap: u64) -> bool {
 
 #[derive(FromRow)]
 struct RateLockRow {
+    id: Uuid,
     address_id: Uuid,
-    external_id: String,
+    client_reference_id: String,
     route: String,
     chain_id: i64,
     address: String,
@@ -880,8 +908,9 @@ impl TryFrom<RateLockRow> for RateLock {
 
     fn try_from(row: RateLockRow) -> Result<Self, Self::Error> {
         Ok(Self {
+            id: row.id,
             address_id: row.address_id,
-            account_external_id: row.external_id,
+            client_reference_id: row.client_reference_id,
             route: row.route,
             chain_id: u64::try_from(row.chain_id).map_err(|_| RateLockError::DatabaseInvariant)?,
             address: EvmAddress::from_str(&row.address)
@@ -907,15 +936,17 @@ impl TryFrom<RateLockRow> for RateLock {
 
 async fn get_in(
     transaction: &mut Transaction<'_, Postgres>,
-    product_id: Uuid,
-    address_id: Uuid,
+    scope: Scope,
+    id: Uuid,
 ) -> Result<Option<RateLock>, RateLockError> {
     let row = sqlx::query_as::<_, RateLockRow>(concat!(
         select_lock!(),
-        " WHERE account.product_id = $1 AND rate_lock.address_id = $2 FOR UPDATE OF rate_lock"
+        " WHERE quote.account_id = $1 AND quote.livemode = $2 AND quote.id = $3",
+        " FOR UPDATE OF quote"
     ))
-    .bind(product_id)
-    .bind(address_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(id)
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(TryInto::try_into).transpose()
@@ -923,8 +954,9 @@ async fn get_in(
 
 #[derive(FromRow)]
 struct ExpiringRow {
-    address_id: Uuid,
-    product_id: Uuid,
+    id: Uuid,
+    account_id: Uuid,
+    livemode: bool,
 }
 
 fn parse_minor(value: &str) -> Result<MinorAmount, RateLockError> {

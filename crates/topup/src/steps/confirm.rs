@@ -232,7 +232,6 @@ impl ConfirmStep {
         let Some((route_name, route_version)) = selected_route else {
             return rejected_result(
                 deposit,
-                context.product_id,
                 RejectReason::UnsupportedAsset,
                 json!({
                     "stage": "route",
@@ -287,7 +286,7 @@ impl ConfirmStep {
                     runtime.route.destination.unit_decimals,
                 );
                 let Ok(credit_minor) = computed else {
-                    return reject_out_of_range(deposit, context.product_id, effects, &quote);
+                    return reject_out_of_range(deposit, effects, &quote);
                 };
                 effects.valuation = Some(stored_valuation(
                     valuation_at,
@@ -298,7 +297,6 @@ impl ConfirmStep {
                 ));
                 return rejected_result(
                     deposit,
-                    context.product_id,
                     RejectReason::BelowMinimum,
                     json!({
                         "stage": "valuation",
@@ -310,7 +308,7 @@ impl ConfirmStep {
                 );
             }
             Err(ValuationError::ArithmeticOutOfRange | ValuationError::Credit(_)) => {
-                return reject_out_of_range(deposit, context.product_id, effects, &quote);
+                return reject_out_of_range(deposit, effects, &quote);
             }
             Err(error) => {
                 return retry(
@@ -367,7 +365,6 @@ impl Step for ConfirmStep {
 #[derive(Clone)]
 struct ConfirmationContext {
     address: Address,
-    product_id: Uuid,
     lock: Option<StoredLock>,
 }
 
@@ -397,14 +394,13 @@ impl ContextLookup for PostgresContextLookup {
 async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address, account.product_id, address.kind,
-               rate_lock.route, rate_lock.amount_atomic::text AS amount_atomic,
-               rate_lock.price_scaled::text AS price_scaled,
-               rate_lock.credit_minor::text AS credit_minor,
-               rate_lock.expires_at, rate_lock.consumed_by, rate_lock.status AS lock_status
+        SELECT address.address,
+               quote.route, quote.amount_atomic::text AS amount_atomic,
+               quote.price_scaled::text AS price_scaled,
+               quote.credit_minor::text AS credit_minor,
+               quote.expires_at, quote.consumed_by, quote.status AS lock_status
         FROM addresses AS address
-        JOIN accounts AS account ON account.id = address.account_id
-        LEFT JOIN rate_locks AS rate_lock ON rate_lock.address_id = address.id
+        JOIN quotes AS quote ON quote.id = address.quote_id
         WHERE address.id = $1
         "#,
     )
@@ -414,11 +410,9 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
     let address_text: String = row.try_get("address")?;
     let address = Address::from_str(&address_text)
         .map_err(|error| sqlx::Error::Decode(format!("invalid address: {error}").into()))?;
-    let kind: String = row.try_get("kind")?;
     let consumed_by: Option<Uuid> = row.try_get("consumed_by")?;
     let lock_status: Option<String> = row.try_get("lock_status")?;
-    let lock = if kind == "lock"
-        && consumed_by.is_none()
+    let lock = if consumed_by.is_none()
         && matches!(lock_status.as_deref(), Some("open" | "expired"))
     {
         let route: Option<String> = row.try_get("route")?;
@@ -460,11 +454,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
     } else {
         None
     };
-    Ok(ConfirmationContext {
-        address,
-        product_id: row.try_get("product_id")?,
-        lock,
-    })
+    Ok(ConfirmationContext { address, lock })
 }
 
 enum FinalityResult {
@@ -655,13 +645,11 @@ const fn valuation_source_code(source: ValuationSource) -> &'static str {
 
 fn reject_out_of_range(
     deposit: &Deposit,
-    product_id: Uuid,
     effects: TransitionEffects,
     quote: &ValidatedQuote,
 ) -> StepResult {
     rejected_result(
         deposit,
-        product_id,
         RejectReason::OutOfRange,
         json!({
             "stage": "valuation",
@@ -674,7 +662,6 @@ fn reject_out_of_range(
 
 fn rejected_result(
     deposit: &Deposit,
-    product_id: Uuid,
     reason: RejectReason,
     evidence: Value,
     effects: TransitionEffects,
@@ -682,16 +669,17 @@ fn rejected_result(
     StepResult {
         outcome: StepOutcome::Reject(reason),
         evidence,
-        events: vec![rejected_event(deposit, product_id)],
+        events: vec![rejected_event(deposit)],
         effects,
     }
 }
 
-fn rejected_event(deposit: &Deposit, product_id: Uuid) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit) -> OutboxEvent {
     OutboxEvent {
         id: event_id("deposit.rejected", deposit.id),
         event_type: "deposit.rejected".to_owned(),
-        product_id,
+        account_id: deposit.account_id,
+        livemode: deposit.livemode,
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     }
@@ -1125,7 +1113,6 @@ mod tests {
         let mut canonical = transfer(&deposit);
         canonical.token = Address::repeat_byte(9);
         let context = context(None);
-        let product_id = context.product_id;
         let result = step(
             route(PricingMode::Spot),
             chain(100, vec![canonical.clone()]),
@@ -1139,7 +1126,7 @@ mod tests {
             result.outcome,
             StepOutcome::Reject(RejectReason::UnsupportedAsset)
         );
-        assert_rejected_event(&result.events[0], deposit.id, product_id);
+        assert_rejected_event(&result.events[0], &deposit);
     }
 
     #[tokio::test]
@@ -1306,7 +1293,6 @@ mod tests {
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
         let context = context(None);
-        let product_id = context.product_id;
         let result = step(
             route,
             chain(100, vec![log.clone()]),
@@ -1323,7 +1309,7 @@ mod tests {
         let valuation = result.effects.valuation.expect("valuation");
         assert_eq!(valuation.credit_minor, MinorAmount::new(100));
         assert!(valuation.quote.is_object());
-        assert_rejected_event(&result.events[0], deposit.id, product_id);
+        assert_rejected_event(&result.events[0], &deposit);
     }
 
     #[tokio::test]
@@ -1333,7 +1319,6 @@ mod tests {
         deposit.amount_atomic = AtomicAmount::new(U256::MAX);
         let log = transfer(&deposit);
         let context = context(None);
-        let product_id = context.product_id;
         let result = step(
             route(PricingMode::Spot),
             chain(100, vec![log.clone()]),
@@ -1347,7 +1332,7 @@ mod tests {
             result.outcome,
             StepOutcome::Reject(RejectReason::OutOfRange)
         );
-        assert_rejected_event(&result.events[0], deposit.id, product_id);
+        assert_rejected_event(&result.events[0], &deposit);
     }
 
     struct PriceSet {
@@ -1423,6 +1408,8 @@ mod tests {
             block_time: now,
             address_id: Uuid::new_v4(),
             account_id: Uuid::new_v4(),
+            livemode: true,
+            customer_id: Uuid::new_v4(),
             route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
             route_version: Some(1),
             asset_contract: asset(),
@@ -1476,7 +1463,6 @@ mod tests {
     fn context(lock: Option<StoredLock>) -> ConfirmationContext {
         ConfirmationContext {
             address: recipient(),
-            product_id: Uuid::new_v4(),
             lock,
         }
     }
@@ -1511,11 +1497,12 @@ mod tests {
         u64::try_from(Utc::now().timestamp()).expect("current timestamp")
     }
 
-    fn assert_rejected_event(event: &OutboxEvent, deposit_id: Uuid, product_id: Uuid) {
+    fn assert_rejected_event(event: &OutboxEvent, deposit: &Deposit) {
         assert_eq!(event.event_type, "deposit.rejected");
-        assert_eq!(event.id, event_id("deposit.rejected", deposit_id));
-        assert_eq!(event.product_id, product_id);
-        assert_eq!(event.object, EventObject::Deposit(deposit_id));
+        assert_eq!(event.id, event_id("deposit.rejected", deposit.id));
+        assert_eq!(event.account_id, deposit.account_id);
+        assert_eq!(event.livemode, deposit.livemode);
+        assert_eq!(event.object, EventObject::Deposit(deposit.id));
     }
 
     fn recipient() -> Address {

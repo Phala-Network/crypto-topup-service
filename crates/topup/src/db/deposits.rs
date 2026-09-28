@@ -34,8 +34,12 @@ pub struct Deposit {
     pub block_time: DateTime<Utc>,
     /// Receiving address row.
     pub address_id: Uuid,
-    /// Owning account row.
+    /// Owning account.
     pub account_id: Uuid,
+    /// Mode of the receiving address.
+    pub livemode: bool,
+    /// The account's customer the quote was issued for.
+    pub customer_id: Uuid,
     /// Selected route name, absent for unsupported assets.
     pub route: Option<String>,
     /// Selected route version.
@@ -100,10 +104,8 @@ pub struct NewDeposit {
     pub block_hash: B256,
     /// Chain block time.
     pub block_time: DateTime<Utc>,
-    /// Receiving address row.
+    /// Receiving address row; the deposit takes its account, mode, and customer from it.
     pub address_id: Uuid,
-    /// Owning account row.
-    pub account_id: Uuid,
     /// Selected route name, absent for unsupported assets.
     pub route: Option<String>,
     /// Selected route version.
@@ -253,6 +255,8 @@ struct DepositRecord {
     block_time: DateTime<Utc>,
     address_id: Uuid,
     account_id: Uuid,
+    livemode: bool,
+    customer_id: Uuid,
     route: Option<String>,
     route_version: Option<i64>,
     asset_contract: String,
@@ -292,6 +296,8 @@ impl TryFrom<DepositRecord> for Deposit {
             block_time: record.block_time,
             address_id: record.address_id,
             account_id: record.account_id,
+            livemode: record.livemode,
+            customer_id: record.customer_id,
             route: record.route,
             route_version: record
                 .route_version
@@ -355,15 +361,17 @@ pub(crate) async fn insert_deposit_in(
         r#"
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
-            address_id, account_id, route, route_version, asset_contract, from_address,
-            amount_atomic, state, reason, next_attempt_at, receipt_log_index, tx_from, tx_nonce,
-            final_at
+            address_id, account_id, livemode, customer_id, route, route_version, asset_contract,
+            from_address, amount_atomic, state, reason, next_attempt_at, receipt_log_index,
+            tx_from, tx_nonce, final_at
         )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14::text::numeric, $15, $16, $17, $18, $19, $20::text::numeric,
-            CASE WHEN $21 THEN now() END
-        )
+        SELECT
+            $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
+            quote.customer_id, $9, $10, $11, $12, $13::text::numeric, $14, $15, $16, $17, $18,
+            $19::text::numeric, CASE WHEN $20 THEN now() END
+        FROM addresses AS address
+        JOIN quotes AS quote ON quote.id = address.quote_id
+        WHERE address.id = $8
         ON CONFLICT (chain_id, tx_hash, receipt_log_index) DO NOTHING
         "#,
         id,
@@ -374,7 +382,6 @@ pub(crate) async fn insert_deposit_in(
         block_hash,
         deposit.block_time,
         deposit.address_id,
-        deposit.account_id,
         deposit.route,
         route_version,
         asset_contract,
@@ -456,7 +463,8 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
         r#"
         SELECT
             id, chain_id, tx_hash, receipt_log_index, log_index, block_number, block_hash,
-            block_time, address_id, account_id, route, route_version, asset_contract,
+            block_time, address_id, account_id, livemode, customer_id, route, route_version,
+            asset_contract,
             from_address, amount_atomic::text AS "amount_atomic!", tx_from,
             tx_nonce::text AS tx_nonce, final_at, state, reason, attempt, next_attempt_at,
             lease_token, lease_until, valuation_at, price_scaled::text AS price_scaled,
@@ -498,7 +506,8 @@ pub async fn claim_deposit(
         RETURNING
             deposit.id, deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index,
             deposit.log_index, deposit.block_number, deposit.block_hash, deposit.block_time,
-            deposit.address_id, deposit.account_id, deposit.route, deposit.route_version,
+            deposit.address_id, deposit.account_id, deposit.livemode, deposit.customer_id,
+            deposit.route, deposit.route_version,
             deposit.asset_contract, deposit.from_address,
             deposit.amount_atomic::text AS "amount_atomic!", deposit.tx_from,
             deposit.tx_nonce::text AS tx_nonce, deposit.final_at, deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,
@@ -668,7 +677,7 @@ pub async fn apply_transition(
     .await?;
 
     for event in writes.outbox_events {
-        super::outbox::enqueue_in(&mut **transaction, event).await?;
+        super::outbox::enqueue_in(transaction, event).await?;
     }
 
     if writes.effects.mark_final {

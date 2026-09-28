@@ -132,9 +132,10 @@ contract ForwarderFactory {                            // no roles, no admin, no
   most `NATIVE_SEND_GAS` and copy no return data, so a treasury cannot consume the batch's gas;
   the factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
   refused.
-- `salt = keccak256(abi.encode(product_slug, account_id, "lock", quote_id))`, where
-  `quote_id` is the service-assigned `qt_…` id. The product holds every input, including the
-  treasury, so it recomputes an address before showing it.
+- `salt = keccak256(abi.encode(account, account_id, "lock", quote_id))`, where `account` is the
+  merchant's `acct_…` id, `account_id` its customer's identifier, and `quote_id` the
+  service-assigned `qt_…` id. The merchant holds every input, including the treasury, so it
+  recomputes an address before showing it.
 - One factory per chain, deployed by anyone through the deterministic deployment proxy with the
   fixed salt `keccak256("phala-pay.ForwarderFactory.v2")`: no constructor arguments, so the same
   factory and implementation addresses on every chain. Each route records `forwarder_factory`,
@@ -202,53 +203,64 @@ config/routes     route files (attested)   deploy/  compose + Dockerfile   tests
 ## 6. Schema
 
 Amounts are `numeric(78,0) CHECK (>= 0)` mapped to `U256`; `transitions` and `audit` are
-append-only. Physical addresses belong to an account and a chain; routes are selected per
-deposit by `(chain_id, asset_contract)`.
+append-only. Physical addresses belong to a quote, and so to an account, a mode, and a chain;
+routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (users,
+memberships, sessions, API keys, treasuries, confirmation policies, limits, idempotency keys, and
+the authorization table) are listed in [design §14](design/multi-tenant.md#14-data-model); the
+tables the service uses today:
 
 ```text
-products      id, slug, webhook_url, pubkey, paused_scopes text[]   -- key id: {slug}/v1 (§12)
-accounts      id, product_id, external_id, paused_scopes text[]    UNIQUE (product_id, external_id)
-              -- external_id is the API's account_id; created by the account's first quote
+accounts      id, public_id (acct_ + hex, generated), name, paused_scopes text[], …   -- the tenant
               -- scopes: quotes | settlement | flush | refunds; empty = active
+request_signing_keys  account_id PK, livemode, public_key   -- key id {public_id}/v1 (§12), until API keys
+customers     id, account_id, livemode, client_reference_id, paused_scopes text[]
+              UNIQUE (account_id, livemode, client_reference_id)
+              -- client_reference_id is the API's account_id; created by the customer's first quote
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
-addresses     id, account_id, chain_id, kind (lock | persistent: legacy, never issued again), version,
-              lock_ref, salt, address, retired_at
-              UNIQUE (chain_id, address)
-rate_locks    address_id PK (the quote: qt_ + hex), route, amount_atomic, price_scaled, credit_minor,
-              expires_at, status, consumed_by (deposit_id) UNIQUE, product_id, idempotency_key,
-              client_secret_hash                  UNIQUE (product_id, idempotency_key)
+quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
+              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, idempotency_key,
+              client_secret_hash                  UNIQUE (account_id, livemode, idempotency_key)
+addresses     id, account_id, livemode, chain_id, quote_id UNIQUE, salt, treasury, address
+              UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
 cursors       chain_id PK, scanned_block, scanned_block_time,       -- finalized scanner
               confirmed_block                                       -- fast scan (§8)
 pending_transfers  chain_id, tx_hash, log_index, receipt_log_index, block_number, block_hash,
               block_time, head_block, address_id, asset_contract, from_address, amount_atomic,
               first_seen_at
               PRIMARY KEY (chain_id, tx_hash, log_index)          -- display only (§8)
-deposits      id, chain_id, tx_hash, receipt_log_index, log_index, block_number, block_hash,
-              block_time, address_id, account_id, route, route_version, asset_contract, from_address,
-              amount_atomic, tx_from, tx_nonce, final_at,
-              state, reason, attempt, next_attempt_at, lease_token, lease_until,
+deposits      id, account_id, livemode, customer_id, chain_id, tx_hash, receipt_log_index,
+              log_index, block_number, block_hash, block_time, address_id, route, route_version,
+              asset_contract, from_address, amount_atomic, tx_from, tx_nonce, confirmations_at,
+              final_at, state, reason, attempt, next_attempt_at, lease_token, lease_until,
               valuation_at, price_scaled, price_source (spot|lock), credit_minor, quote jsonb,
               flush_id, created_at, updated_at
               UNIQUE (chain_id, tx_hash, receipt_log_index)
-              -- log_index and the block columns are evidence that follows re-inclusion;
-              -- tx_from and tx_nonce prove a dropped transaction; swept requires final_at
+              -- account, mode, and customer are the address's; log_index and the block columns are
+              -- evidence that follows re-inclusion; tx_from and tx_nonce prove a dropped
+              -- transaction; swept requires final_at
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
               -- also the finality watch's `final` and `followed` records (from_state = to_state)
-settlements   deposit_id PK, product_id, key, payload jsonb, status, destination_tx_id, receipt jsonb,
-              resend_forbidden bool, sent_at     -- read-only history of the retired settlement protocol
 flushes       id, chain_id, token, operator, nonce, tx_hash, block_number,
               status (planned|sent|confirmed|reverted), receipt jsonb
               UNIQUE (chain_id, operator, nonce)
 flushed       flush_id, address_id, amount_atomic, block_number, log_index   -- one row per Flushed event
               PRIMARY KEY (flush_id, address_id)
-refunds       id, deposit_id, amount_atomic, to_address, tx_hash, status (requested|approved|sent|confirmed),
-              requested_by, approved_by, idempotency_key, created_at   -- executed from the treasury Safe
-outbox        id, event_type, format, product_id, object_type (deposit|quote), object_id,
-              payload jsonb, next_attempt_at, delivered_at, response jsonb
-              -- format 2: payload is the event's data, rendered at the first attempt;
-              -- format 1: rows written before Stripe-style events, delivered unchanged
-audit         id, actor, action, subject, reason, created_at
+refunds       id, account_id, livemode, deposit_id, amount_atomic, to_address, tx_hash,
+              status (requested|approved|sent|confirmed), requested_by, approved_by,
+              idempotency_key, created_at   -- executed from the treasury Safe
+webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
+events        id (evt_…), account_id, livemode, type, object_type (deposit|quote), object_id,
+              data jsonb, created   -- data: the object, rendered at the first delivery attempt
+webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
+              PRIMARY KEY (event_id, endpoint_id)   -- one per enabled endpoint of the event's scope
+audit         id, account_id, actor_type (user|api_key|admin|system), actor_id, action, subject,
+              reason, created_at
 ```
+
+Composite foreign keys tie each tenant row to its parent's account and mode (a quote to its
+customer, an address to its quote, a deposit to its address and customer, a refund to its
+deposit), so no row joins two accounts or two modes. The flusher tables and `deposits.flush_id`
+go with the flusher (design PR 4), `request_signing_keys` with API keys (design PR 6).
 
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
 `(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`.
@@ -540,20 +552,22 @@ knows it. Where it departs, the last column says why.
 | Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | On `POST /v1/quotes` and `POST /v1/refunds`, covered by the signature, stored on the object and never pruned |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
 | Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
-| Test mode | `livemode` and test keys | Each environment is its own origin and key; no flag |
+| Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; `livemode` in objects comes with design PR 11 |
 
-Every product request is signed (§3); the product is the signature's `keyid`, which must have the
-form `{slug}/v1`, name a registered product with its stored key, and be named by a loaded route.
+Every merchant request is signed (§3); the account is the signature's `keyid`, which must have the
+form `{acct_…}/v1` and name an issued account with its stored key. The server builds the request's
+scope, the account and the key's mode, from the verified key alone, and every query filters on
+both (design D13); the authorization table then grants the key's permissions.
 The verifier rebuilds `@target-uri` from the configured public origin (`TOPUP_PUBLIC_ORIGIN`,
 §14) and the request's path and query, never from `Host` or `X-Forwarded-*`, so signers sign the
 public URL they call. Signatures are single-use within the acceptance window. Each deployment
 (sandbox, staging, production) must pin a distinct product key: single use is recorded per
 database, so a shared key would let a signed request be replayed within the freshness window
 against another deployment that shares its public origin (for example a replacement or restored
-instance). A request for another product's object answers `404`. The admin key can only issue
-products and replace their key and webhook URL, pause and resume, nudge, drive the refund
-workflow, lift reconciliation blocks (§13), and replay webhook events; each change writes
-`audit`.
+instance). A request for another account's object, or for the same account's object in the other
+mode, answers `404` as for a missing one. The admin key can only issue accounts and replace their
+key and webhook URL, pause and resume, nudge, drive the refund workflow, lift reconciliation
+blocks (§13), and replay webhook events; each change writes `audit`.
 
 ```text
 GET    /v1/config                                                 assets, limits, quote terms
@@ -566,10 +580,10 @@ POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or 
 GET    /v1/refunds/{id}
 GET    /v1/attestation?nonce=…                                    settlement key and flusher operators (§14)
 
-POST   /v1/admin/products {slug, public_key, webhook_url}   same values → same product, different → 409
-PUT    /v1/admin/products/{slug} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
+POST   /v1/admin/accounts {name, livemode, public_key, webhook_url}   issue an account and its key id {acct}/v1
+PUT    /v1/admin/accounts/{acct} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
 GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
-POST   /v1/admin/products/{slug}/accounts/{account_id}/pause | resume {scopes, reason}
+POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, reason}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
@@ -581,7 +595,7 @@ GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, 
 Admin paths take an object's prefixed id or, for ids handed out before prefixed ids, its bare
 UUID; admin responses show prefixed ids.
 
-**Config.** One `assets` entry per loaded route of the calling product (its current version):
+**Config.** One `assets` entry per loaded route of the key's mode (its current version):
 chain, asset code, contract, decimals, pricing mode, `min_amount` (the route's minimum credit in
 cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and tolerance, the
 route's `confirmations` (a depth such as `"2"`, `"safe"`, or `"finalized"`), the typical credit
@@ -779,8 +793,11 @@ flowchart LR
 
 One route file per chain and asset pair, with its chain settings inline, in the compose, hence
 attested. The file names only what differs per route or environment: route name and version,
-product, chain id, forwarder factory, treasury, asset symbol, contract, and decimals, price
-sources, and the policy limits (minimum credit, maximum deposit, refund floor, exposure caps).
+`livemode` (false on a test network such as Sepolia or Anvil, true on a mainnet; startup checks it
+against a built-in list of test networks), chain id, forwarder factory, treasury, asset symbol,
+contract, and decimals, price sources, and the policy limits (minimum credit, maximum deposit,
+refund floor, exposure caps). A route names no product: every account quotes on the routes of its
+key's mode.
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints
 the resolved route, every value explicit (JSON, itself a valid route file); preflight reads the
@@ -807,8 +824,9 @@ defaulted addresses from it. The defaults and why:
 The defaults are the pilot's numbers *(policy)*: finance confirms each, including the zero token
 floors, before production, and a route overrides any it does not accept.
 
-Crediting before `finalized` is limited to the reviewed chain families of §8. A product's key id is
-`{product}/v1`; the database stores only the product's slug, webhook URL, and public key.
+Crediting before `finalized` is limited to the reviewed chain families of §8. An account's key id is
+`{acct_…}/v1`; the database stores the account's public key and the mode it signs in, and its
+webhook endpoint's URL.
 Changing a value, including a default, is a new version and compose hash; deposits keep the
 version that created them. Bumping `operator_key_version` is such a new version; fund the new operator address (§15 Rotation). Pause flags are the only runtime-mutable state. Every
 other setting (RPC URLs, admin key, object storage location, public origin, Sentry environment)
@@ -898,7 +916,7 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | Gas is a service cost; credit is never reduced. Treasury bears price exposure between valuation and flush, and open quote exposure up to the caps. |
-| Rotation | Operator key: fund `operator/v2` (the factory has no roles); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Product key: the admin replaces the stored public key (`PUT /v1/admin/products/{slug}`), a hard cut: requests are verified against one stored key under the one key id the product's routes name (§14), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Operator key: fund `operator/v2` (the factory has no roles); flush nonces are tracked per operator address, so the new key starts at nonce 0 without conflict. Settlement key: add `settlement/v2`; products accept both for 30 days. Account key: the admin replaces the stored public key (`PUT /v1/admin/accounts/{acct}`), a hard cut: requests are verified against one stored key under the account's one key id (§12), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `flush`, `refunds`) at account, product, or route level. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | operator key compromise, product key compromise, provider disagreement, price outage, outbox backlog (undelivered credits), restore, treasury change, gas refill, refund execution, rejected funds at treasury, deposit reversed. |

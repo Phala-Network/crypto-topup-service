@@ -24,9 +24,9 @@ quote route.
 
 - Legitimate demand: the cap already rejects over-cap quotes; tell the product and ask Finance
   and Risk whether to raise the caps.
-- One account concentrates exposure: pause `quotes` for that account
-  (`admin POST "/v1/admin/products/$PRODUCT/accounts/$ACCOUNT/pause" '{"scopes":["quotes"]}'`), or
-  pause the route.
+- One customer concentrates exposure: pause `quotes` for that customer of the account
+  (`admin POST "/v1/admin/accounts/$ACCOUNT/customers/$CUSTOMER/pause" '{"scopes":["quotes"]}'`),
+  or pause the route.
 
 ## Fix
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, product_id, external_id, status, paused_scopes FROM accounts WHERE id = $1",
+  "query": "SELECT id, public_id AS \"public_id!\", name, paused_scopes FROM accounts WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -16,39 +16,28 @@
       },
       {
         "ordinal": 1,
-        "name": "product_id",
-        "type_info": "Uuid",
+        "name": "public_id!",
+        "type_info": "Text",
         "origin": {
           "Table": {
             "table": "accounts",
-            "name": "product_id"
+            "name": "public_id"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "external_id",
+        "name": "name",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "accounts",
-            "name": "external_id"
+            "name": "name"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "status",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "accounts",
-            "name": "status"
-          }
-        }
-      },
-      {
-        "ordinal": 4,
         "name": "paused_scopes",
         "type_info": "TextArray",
         "origin": {
@@ -66,11 +55,10 @@
     },
     "nullable": [
       false,
-      false,
-      false,
+      true,
       false,
       false
     ]
   },
-  "hash": "c8c53e880a3ec07423d21ee972f015d0bb2fa5f57d67d04569999ab5d3c56133"
+  "hash": "fd4e4cdc7c40e32946339d2dd2dcdf84f01123827d96f4dc1eee7099ea894850"
 }

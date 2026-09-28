@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
-use topup::db::{self, AddressKind};
+use topup::db;
 use topup::finality::FinalityWatch;
 use topup::flusher::SweepStep;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, StepSet};
@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 use support::TestDatabase;
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress};
 
 /// Anvil's second and third default accounts: the payer, and a sender whose transaction shifts
 /// the payer's log within a re-mined block.
@@ -253,7 +253,7 @@ async fn a_payment_is_credited_within_thirty_seconds_of_inclusion_on_twelve_seco
                     }
                     if let Some(included_at) = included_at {
                         let created = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
-                            "SELECT created_at FROM outbox WHERE event_type = 'deposit.credited'",
+                            "SELECT created FROM events WHERE type = 'deposit.credited'",
                         )
                         .fetch_optional(&chain.pool)
                         .await?;
@@ -320,7 +320,6 @@ struct FastChain {
     token: Address,
     address: Address,
     address_id: Uuid,
-    product_id: Uuid,
     route: RouteFile,
     routes: ChainRoutes,
     reader: FinalizedReader,
@@ -352,10 +351,11 @@ impl FastChain {
         }
         anvil.mine(4)?;
 
-        let (product_id, address_id, address) = seed_address(&pool).await?;
+        let (address_id, address) = seed_address(&pool).await?;
         let mut route: RouteFile = serde_saphyr::from_str(
             &include_str!("fixtures/phala-cloud-pha.yaml")
                 .replace("chain_id: 1", &format!("chain_id: {CHAIN_ID}"))
+                .replace("livemode: true", "livemode: false")
                 .replace(
                     "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
                     &format!("{token:#x}"),
@@ -424,7 +424,6 @@ impl FastChain {
             token,
             address,
             address_id,
-            product_id,
             route,
             routes,
             reader,
@@ -613,7 +612,7 @@ impl FastChain {
 
     async fn events(&self, event_type: &str) -> Result<Vec<Uuid>> {
         Ok(
-            sqlx::query_scalar("SELECT id FROM outbox WHERE event_type = $1 ORDER BY id")
+            sqlx::query_scalar("SELECT id FROM events WHERE type = $1 ORDER BY id")
                 .bind(event_type)
                 .fetch_all(&self.pool)
                 .await?,
@@ -624,16 +623,16 @@ impl FastChain {
     async fn open_quote(&self) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, expires_at,
-                                    credit_minor, status, exposure_reserved, product_id)
-            VALUES ($1, $2, $3::text::numeric, 9000000, now() + interval '1 hour', 90, 'open',
-                    true, $4)
+            UPDATE quotes
+            SET route = $2, amount_atomic = $3::text::numeric, price_scaled = 9000000,
+                expires_at = now() + interval '1 hour', credit_minor = 90, status = 'open',
+                exposure_reserved = true, closed_at = NULL
+            WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
             "#,
         )
         .bind(self.address_id)
         .bind(&self.route.route)
         .bind(AMOUNT.to_string())
-        .bind(self.product_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -641,7 +640,8 @@ impl FastChain {
 
     async fn quote_status(&self) -> Result<(String, Option<Uuid>)> {
         let row = sqlx::query(
-            "SELECT status, consumed_by, exposure_reserved FROM rate_locks WHERE address_id = $1",
+            "SELECT quote.status, quote.consumed_by, quote.exposure_reserved FROM quotes AS quote \
+             JOIN addresses AS address ON address.quote_id = quote.id WHERE address.id = $1",
         )
         .bind(self.address_id)
         .fetch_one(&self.pool)
@@ -679,28 +679,15 @@ fn reader(rpc_url: &str) -> Result<FinalizedReader> {
     Ok(FinalizedReader::new(Arc::new(EvmClient::new(rpc_url)?)))
 }
 
-async fn seed_address(pool: &PgPool) -> Result<(Uuid, Uuid, Address)> {
-    let product_id = Uuid::new_v4();
-    seed::create_product(
-        pool,
-        &NewProduct {
-            id: product_id,
-            slug: "phala-cloud".to_owned(),
-            webhook_url: "https://product.test/webhooks".to_owned(),
-            pubkey: "test-key".to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
-    let account_id = Uuid::new_v4();
-    seed::create_account(
+async fn seed_address(pool: &PgPool) -> Result<(Uuid, Address)> {
+    let (_, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
-            id: account_id,
-            product_id,
-            external_id: "workspace-fast".to_owned(),
-            paused_scopes: Vec::new(),
+            livemode: false,
+            webhook_url: "https://product.test/webhooks".to_owned(),
+            ..NewAccount::named("phala-cloud")
         },
+        "workspace-fast",
     )
     .await?;
     let address = Address::repeat_byte(0x5a);
@@ -709,18 +696,15 @@ async fn seed_address(pool: &PgPool) -> Result<(Uuid, Uuid, Address)> {
         pool,
         &NewAddress {
             id: address_id,
-            account_id,
+            customer_id: customer.id,
             chain_id: CHAIN_ID,
-            kind: AddressKind::Lock,
-            version: 1,
-            lock_ref: Some("qt-fast-credit".to_owned()),
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: B256::repeat_byte(0x5a),
             address,
-            retired_at: None,
         },
     )
     .await?;
-    Ok((product_id, address_id, address))
+    Ok((address_id, address))
 }
 
 /// Provider B, `lag` blocks behind provider A's head.

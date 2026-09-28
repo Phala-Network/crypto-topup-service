@@ -57,7 +57,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[Config | ErrorResponse]:
-    """The calling product's assets, limits, and quote terms, from its attested routes.
+    """The assets, limits, and quote terms of the attested routes in the credential's mode.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -80,7 +80,7 @@ def sync(
     *,
     client: AuthenticatedClient,
 ) -> Config | ErrorResponse | None:
-    """The calling product's assets, limits, and quote terms, from its attested routes.
+    """The assets, limits, and quote terms of the attested routes in the credential's mode.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -99,7 +99,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[Config | ErrorResponse]:
-    """The calling product's assets, limits, and quote terms, from its attested routes.
+    """The assets, limits, and quote terms of the attested routes in the credential's mode.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -120,7 +120,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
 ) -> Config | ErrorResponse | None:
-    """The calling product's assets, limits, and quote terms, from its attested routes.
+    """The assets, limits, and quote terms of the attested routes in the credential's mode.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

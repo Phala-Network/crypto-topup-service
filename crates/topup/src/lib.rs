@@ -13,6 +13,7 @@
 )]
 
 pub mod api;
+pub mod audit;
 pub mod contracts;
 pub mod db;
 pub mod finality;
@@ -33,3 +34,4 @@ pub mod routes;
 mod rpc_provider;
 pub mod scanner;
 pub mod steps;
+pub mod tenancy;

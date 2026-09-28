@@ -1,6 +1,6 @@
 //! Confirmed-to-credited screening step.
 //!
-//! A deposit that passes screening is credited: its USD value is final and owed to the product,
+//! A deposit that passes screening is credited: its USD value is final and owed to the account,
 //! which learns it from the `deposit.credited` webhook written in the same transaction.
 
 use std::collections::BTreeMap;
@@ -58,12 +58,7 @@ impl ScreenRoute {
         }
     }
 
-    async fn evaluate(
-        &self,
-        deposit: &Deposit,
-        product_id: Uuid,
-        pause_scopes: PauseScopeSources,
-    ) -> StepResult {
+    async fn evaluate(&self, deposit: &Deposit, pause_scopes: PauseScopeSources) -> StepResult {
         let sanctions = self
             .sanctions
             .sanctions(deposit.from_address, deposit.block_number)
@@ -81,7 +76,7 @@ impl ScreenRoute {
         let evidence = screening_evidence(self.oracle, sanctions, self.bounds, &pause_scopes);
         let mut result = StepResult::new(outcome, evidence);
         if let StepOutcome::Reject(_) = outcome {
-            result.events.push(rejected_event(deposit, product_id));
+            result.events.push(rejected_event(deposit));
         }
         result
     }
@@ -182,10 +177,10 @@ impl ScreenStep {
 
     async fn pause_scopes(
         &self,
-        account_id: Uuid,
+        customer_id: Uuid,
         route: &str,
-    ) -> Result<Option<(Uuid, PauseScopeSources)>, sqlx::Error> {
-        pause::account_pause_scopes(&self.pool, account_id, route).await
+    ) -> Result<Option<PauseScopeSources>, sqlx::Error> {
+        pause::customer_pause_scopes(&self.pool, customer_id, route).await
     }
 }
 
@@ -205,17 +200,14 @@ impl Step for ScreenStep {
         let Some(screening_route) = self.routes.get(&key) else {
             return invariant_result("unknown_deposit_route", deposit.block_number);
         };
-        let pauses = match self.pause_scopes(deposit.account_id, route).await {
+        let pause_scopes = match self.pause_scopes(deposit.customer_id, route).await {
             Ok(Some(pauses)) => pauses,
-            Ok(None) => return invariant_result("account_not_found", deposit.block_number),
+            Ok(None) => return invariant_result("customer_not_found", deposit.block_number),
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
         };
-        let (product_id, pause_scopes) = pauses;
-        let mut result = screening_route
-            .evaluate(deposit, product_id, pause_scopes)
-            .await;
+        let mut result = screening_route.evaluate(deposit, pause_scopes).await;
         if result.outcome == StepOutcome::Advance {
-            match credited_event(deposit, product_id) {
+            match credited_event(deposit) {
                 Ok(event) => result.events.push(event),
                 Err(error) => return invariant_result(error, deposit.block_number),
             }
@@ -226,14 +218,15 @@ impl Step for ScreenStep {
 
 /// The fulfillment event: `deposit.credited`, whose object is the credited deposit, keyed by an
 /// id derived from the deposit id.
-fn credited_event(deposit: &Deposit, product_id: Uuid) -> Result<OutboxEvent, &'static str> {
+fn credited_event(deposit: &Deposit) -> Result<OutboxEvent, &'static str> {
     // A credit always has its valuation; the event's deposit object carries it.
     deposit.credit_minor.ok_or("credit_minor_missing")?;
     deposit.valuation_at.ok_or("valuation_at_missing")?;
     Ok(OutboxEvent {
         id: credited_event_id(deposit.id),
         event_type: "deposit.credited".to_owned(),
-        product_id,
+        account_id: deposit.account_id,
+        livemode: deposit.livemode,
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     })
@@ -255,18 +248,19 @@ fn screening_evidence(
             "max_atomic": bounds.max_atomic,
         },
         "pause_scopes": {
+            "customer": pause_scopes.customer,
             "account": pause_scopes.account,
-            "product": pause_scopes.product,
             "route": pause_scopes.route,
         },
     })
 }
 
-fn rejected_event(deposit: &Deposit, product_id: Uuid) -> OutboxEvent {
+fn rejected_event(deposit: &Deposit) -> OutboxEvent {
     OutboxEvent {
         id: event_id("deposit.rejected", deposit.id),
         event_type: "deposit.rejected".to_owned(),
-        product_id,
+        account_id: deposit.account_id,
+        livemode: deposit.livemode,
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
     }
@@ -335,6 +329,8 @@ mod tests {
             block_time: now,
             address_id: Uuid::new_v4(),
             account_id: Uuid::new_v4(),
+            livemode: true,
+            customer_id: Uuid::new_v4(),
             route: Some("route".to_owned()),
             route_version: Some(1),
             asset_contract: Address::ZERO,
@@ -374,11 +370,11 @@ mod tests {
         )
     }
 
-    fn pauses(account: &[&str], product: &[&str], route: &[&str]) -> PauseScopeSources {
+    fn pauses(customer: &[&str], account: &[&str], route: &[&str]) -> PauseScopeSources {
+        let customer = customer.iter().map(ToString::to_string).collect::<Vec<_>>();
         let account = account.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let product = product.iter().map(ToString::to_string).collect::<Vec<_>>();
         let route = route.iter().map(ToString::to_string).collect::<Vec<_>>();
-        PauseScopeSources::from_codes(&account, &product, &route).expect("valid pause scopes")
+        PauseScopeSources::from_codes(&customer, &account, &route).expect("valid pause scopes")
     }
 
     #[tokio::test]
@@ -437,9 +433,8 @@ mod tests {
 
         for (provider_a, provider_b, expected) in cases {
             let deposit = deposit(amount(15));
-            let product_id = Uuid::new_v4();
             let result = route(provider_a, provider_b)
-                .evaluate(&deposit, product_id, pauses(&[], &[], &[]))
+                .evaluate(&deposit, pauses(&[], &[], &[]))
                 .await;
             assert_eq!(result.outcome, expected);
             assert_eq!(result.evidence["block_number"], 123);
@@ -450,7 +445,8 @@ mod tests {
                     result.events[0].id,
                     event_id("deposit.rejected", deposit.id)
                 );
-                assert_eq!(result.events[0].product_id, product_id);
+                assert_eq!(result.events[0].account_id, deposit.account_id);
+                assert_eq!(result.events[0].livemode, deposit.livemode);
                 assert_eq!(result.events[0].object, EventObject::Deposit(deposit.id));
             } else {
                 assert!(result.events.is_empty());
@@ -460,9 +456,8 @@ mod tests {
 
     #[tokio::test]
     async fn bounds_and_pause_outcomes_preserve_evidence_and_event_rules() {
-        let product_id = Uuid::new_v4();
         let out_of_bounds = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(21)), product_id, pauses(&[], &[], &[]))
+            .evaluate(&deposit(amount(21)), pauses(&[], &[], &[]))
             .await;
         assert_eq!(
             out_of_bounds.outcome,
@@ -473,11 +468,7 @@ mod tests {
         assert_eq!(out_of_bounds.evidence["bounds"]["max_atomic"], "20");
 
         let waiting = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(
-                &deposit(amount(15)),
-                product_id,
-                pauses(&["settlement"], &[], &[]),
-            )
+            .evaluate(&deposit(amount(15)), pauses(&["settlement"], &[], &[]))
             .await;
         assert_eq!(
             waiting.outcome,
@@ -486,14 +477,13 @@ mod tests {
             }
         );
         assert!(waiting.events.is_empty());
-        assert_eq!(waiting.evidence["pause_scopes"]["account"][0], "settlement");
+        assert_eq!(
+            waiting.evidence["pause_scopes"]["customer"][0],
+            "settlement"
+        );
 
         let route_paused = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(
-                &deposit(amount(15)),
-                product_id,
-                pauses(&[], &[], &["settlement"]),
-            )
+            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["settlement"]))
             .await;
         assert_eq!(
             route_paused.outcome,
@@ -507,11 +497,7 @@ mod tests {
         );
 
         let non_settlement_route_pause = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(
-                &deposit(amount(15)),
-                product_id,
-                pauses(&[], &[], &["flush"]),
-            )
+            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["flush"]))
             .await;
         assert_eq!(non_settlement_route_pause.outcome, StepOutcome::Advance);
     }
@@ -525,7 +511,7 @@ mod tests {
             block_number: 124,
         }));
         let result = route
-            .evaluate(&deposit(amount(15)), Uuid::new_v4(), pauses(&[], &[], &[]))
+            .evaluate(&deposit(amount(15)), pauses(&[], &[], &[]))
             .await;
         assert_eq!(
             result.outcome,

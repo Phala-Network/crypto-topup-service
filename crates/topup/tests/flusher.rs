@@ -18,7 +18,7 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
-use topup::db::{AddressKind, NewDeposit};
+use topup::db::NewDeposit;
 use topup::flusher::runtime::FlusherTask;
 use topup::flusher::{
     AlertSink, BroadcastingChain, ChainClient, ChainError, ChainReceipt, EvmClient, FeeQuote,
@@ -38,7 +38,7 @@ use topup_core::{
 use uuid::Uuid;
 
 use support::chain::{Anvil, forge_create};
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 use support::with_database;
 
 const ADMIN_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -315,10 +315,10 @@ async fn paused_account_is_dropped_from_a_multi_account_batch_on_replan() -> Res
             let batch = planner.plan(&route).await?.context("plan batch")?;
             ensure!(planned_address_ids(&database.app_pool, batch).await?.len() == 2);
 
-            set_account_flush_pause(&database.app_pool, seeded[0].account_id, true).await?;
+            set_customer_flush_pause(&database.app_pool, seeded[0].customer_id, true).await?;
             ensure!(flusher.send_next(&route).await? == RunResult::Idle);
             let reason = voided_reason(&database.app_pool, batch).await?;
-            ensure!(reason.contains(&format!("account {}", seeded[0].account_id)));
+            ensure!(reason.contains(&format!("customer {}", seeded[0].customer_id)));
             ensure!(reason.contains(&format!("token {:#x}", route.asset.contract)));
             let ids = reason
                 .split_once("address ids [")
@@ -367,7 +367,7 @@ async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
                 entered.notified().await;
                 let paused = tokio::time::timeout(
                     StdDuration::from_secs(2),
-                    set_account_flush_pause(&database.app_pool, seeded[0].account_id, true),
+                    set_customer_flush_pause(&database.app_pool, seeded[0].customer_id, true),
                 )
                 .await;
                 release.notify_one();
@@ -380,7 +380,7 @@ async fn slow_signing_does_not_hold_pause_row_locks() -> Result<()> {
             ensure!(
                 voided_reason(&database.app_pool, batch)
                     .await?
-                    .contains(&format!("account {}", seeded[0].account_id))
+                    .contains(&format!("customer {}", seeded[0].customer_id))
             );
             Ok(())
         })
@@ -405,12 +405,12 @@ async fn first_route_pause_waits_for_a_send_that_passed_the_route_check() -> Res
 
             // Hold the sender between its route check and its account check.
             let mut account_lock = database.app_pool.begin().await?;
-            sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
-                .bind(seeded[0].account_id)
+            sqlx::query("SELECT 1 FROM customers WHERE id = $1 FOR UPDATE")
+                .bind(seeded[0].customer_id)
                 .execute(&mut *account_lock)
                 .await?;
             let first_pause = async {
-                wait_for_lock_wait(&database.app_pool, "FOR SHARE OF account, product").await?;
+                wait_for_lock_wait(&database.app_pool, "FOR SHARE OF customer, account").await?;
                 let mut pause = database.app_pool.begin().await?;
                 sqlx::query("SET LOCAL lock_timeout = '300ms'")
                     .execute(&mut *pause)
@@ -566,7 +566,7 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             set_route_flush_pause(&database.app_pool, &route.route, false).await?;
 
             mint(&anvil.rpc_url, token, address.physical)?;
-            set_product_flush_pause(&database.app_pool, address.product_id, true).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
             let completed_before_product = completed_flush_count(&database.app_pool).await?;
             for _ in 0..2 {
                 ensure!(planner.plan(&route).await?.is_none());
@@ -575,12 +575,12 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
                     completed_flush_count(&database.app_pool).await? == completed_before_product
                 );
             }
-            set_product_flush_pause(&database.app_pool, address.product_id, false).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
             let product_plan = planner
                 .plan(&route)
                 .await?
                 .context("plan after product resume")?;
-            set_product_flush_pause(&database.app_pool, address.product_id, true).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
             for _ in 0..2 {
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(planner.plan(&route).await?.is_none());
@@ -588,9 +588,9 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             ensure!(
                 voided_reason(&database.app_pool, product_plan)
                     .await?
-                    .contains(&format!("product {}", address.product_id))
+                    .contains(&format!("account {}", address.account_id))
             );
-            set_product_flush_pause(&database.app_pool, address.product_id, false).await?;
+            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
             let product_plan = planner
                 .plan(&route)
                 .await?
@@ -610,7 +610,7 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             );
 
             mint(&anvil.rpc_url, token, address.physical)?;
-            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
+            set_customer_flush_pause(&database.app_pool, address.customer_id, true).await?;
             let completed_before_account = completed_flush_count(&database.app_pool).await?;
             for _ in 0..2 {
                 ensure!(planner.plan(&route).await?.is_none());
@@ -619,12 +619,12 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
                     completed_flush_count(&database.app_pool).await? == completed_before_account
                 );
             }
-            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
+            set_customer_flush_pause(&database.app_pool, address.customer_id, false).await?;
             let account_plan = planner
                 .plan(&route)
                 .await?
                 .context("plan after account resume")?;
-            set_account_flush_pause(&database.app_pool, address.account_id, true).await?;
+            set_customer_flush_pause(&database.app_pool, address.customer_id, true).await?;
             for _ in 0..2 {
                 ensure!(flusher.run_once(&route).await? == RunResult::Idle);
                 ensure!(planner.plan(&route).await?.is_none());
@@ -632,9 +632,9 @@ async fn flush_pauses_gate_planning_and_void_unsent_plans_without_blocking_confi
             ensure!(
                 voided_reason(&database.app_pool, account_plan)
                     .await?
-                    .contains(&format!("account {}", address.account_id))
+                    .contains(&format!("customer {}", address.customer_id))
             );
-            set_account_flush_pause(&database.app_pool, address.account_id, false).await?;
+            set_customer_flush_pause(&database.app_pool, address.customer_id, false).await?;
             let account_plan = planner
                 .plan(&route)
                 .await?
@@ -778,7 +778,7 @@ async fn anvil_flush_lifecycle_covers_linkage_replacement_recovery_rotation_and_
                 token,
                 DepositFixture {
                     state: DepositState::Rejected,
-                    reason: Some(RejectReason::ProductRefused),
+                    reason: Some(RejectReason::OutOfBounds),
                     block_number: 1,
                     log_index: 1,
                     number: 2,
@@ -1423,6 +1423,7 @@ fn test_route(factory: Address, token: Address) -> Result<RouteFile> {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
     route.chain.chain_id = 31_337;
+    route.livemode = false;
     route.chain.contracts.forwarder_factory = factory;
     route.chain.contracts.treasury = Address::from_str(TREASURY)?;
     route.chain.flush.max_gas_ratio_bps = Bps::new(10_000)?;
@@ -1433,8 +1434,8 @@ fn test_route(factory: Address, token: Address) -> Result<RouteFile> {
 
 struct SeededAddress {
     id: Uuid,
+    customer_id: Uuid,
     account_id: Uuid,
-    product_id: Uuid,
     physical: Address,
 }
 
@@ -1443,42 +1444,44 @@ async fn seed_addresses(
     factory: Address,
     implementation: Address,
 ) -> Result<Vec<SeededAddress>> {
-    let product = NewProduct {
-        id: Uuid::new_v4(),
-        slug: "c7-product".to_owned(),
-        webhook_url: "https://product.test/webhooks".to_owned(),
-        pubkey: "test-key".to_owned(),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_product(pool, &product).await?;
+    let account = seed::create_account(
+        pool,
+        &NewAccount {
+            livemode: false,
+            webhook_url: "https://product.test/webhooks".to_owned(),
+            ..NewAccount::named("c7-product")
+        },
+    )
+    .await?;
     let mut result = Vec::new();
     for number in 1_u8..=2 {
-        let account = NewAccount {
-            id: Uuid::new_v4(),
-            product_id: product.id,
-            external_id: format!("account-{number}"),
-            paused_scopes: Vec::new(),
-        };
-        seed::create_account(pool, &account).await?;
+        let customer = seed::create_customer(
+            pool,
+            &NewCustomer {
+                id: Uuid::new_v4(),
+                account_id: account.id,
+                livemode: false,
+                client_reference_id: format!("account-{number}"),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
         let salt = B256::from([number; 32]);
         let physical =
             forwarder_address(factory, implementation, Address::from_str(TREASURY)?, salt);
         let address = NewAddress {
             id: Uuid::new_v4(),
-            account_id: account.id,
+            customer_id: customer.id,
             chain_id: 31_337,
-            kind: AddressKind::Persistent,
-            version: 1,
-            lock_ref: None,
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt,
             address: physical,
-            retired_at: (number == 2).then(Utc::now),
         };
         seed::insert_address(pool, &address).await?;
         result.push(SeededAddress {
             id: address.id,
+            customer_id: customer.id,
             account_id: account.id,
-            product_id: product.id,
             physical,
         });
     }
@@ -1556,16 +1559,6 @@ async fn set_route_flush_pause(pool: &PgPool, route: &str, paused: bool) -> Resu
     Ok(())
 }
 
-async fn set_product_flush_pause(pool: &PgPool, product_id: Uuid, paused: bool) -> Result<()> {
-    let scopes = if paused {
-        vec!["flush".to_owned()]
-    } else {
-        Vec::new()
-    };
-    seed::set_product_paused_scopes(pool, product_id, &scopes).await?;
-    Ok(())
-}
-
 async fn set_account_flush_pause(pool: &PgPool, account_id: Uuid, paused: bool) -> Result<()> {
     let scopes = if paused {
         vec!["flush".to_owned()]
@@ -1573,6 +1566,16 @@ async fn set_account_flush_pause(pool: &PgPool, account_id: Uuid, paused: bool) 
         Vec::new()
     };
     seed::set_account_paused_scopes(pool, account_id, &scopes).await?;
+    Ok(())
+}
+
+async fn set_customer_flush_pause(pool: &PgPool, customer_id: Uuid, paused: bool) -> Result<()> {
+    let scopes = if paused {
+        vec!["flush".to_owned()]
+    } else {
+        Vec::new()
+    };
+    seed::set_customer_paused_scopes(pool, customer_id, &scopes).await?;
     Ok(())
 }
 
@@ -1742,7 +1745,6 @@ async fn insert_deposit(
         block_hash: B256::from([number.wrapping_add(100); 32]),
         block_time: Utc::now(),
         address_id: address.id,
-        account_id: address.account_id,
         route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
         route_version: Some(1),
         asset_contract: token,

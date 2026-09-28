@@ -15,8 +15,8 @@ from typing import cast
 
 
 def _get_kwargs(
-    slug: str,
-    account_id: str,
+    account: str,
+    customer: str,
     *,
     body: PauseRequest,
 ) -> dict[str, Any]:
@@ -24,9 +24,9 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/admin/products/{slug}/accounts/{account_id}/resume".format(
-            slug=quote(str(slug), safe=""),
-            account_id=quote(str(account_id), safe=""),
+        "url": "/v1/admin/accounts/{account}/customers/{customer}/resume".format(
+            account=quote(str(account), safe=""),
+            customer=quote(str(customer), safe=""),
         ),
     }
 
@@ -74,17 +74,17 @@ def _build_response(
 
 
 def sync_detailed(
-    slug: str,
-    account_id: str,
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
-    """Resumes scopes of one product account.
+    """Resumes scopes of one customer of an account.
 
     Args:
-        slug (str):
-        account_id (str):
+        account (str):
+        customer (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -96,8 +96,8 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
-        account_id=account_id,
+        account=account,
+        customer=customer,
         body=body,
     )
 
@@ -109,17 +109,17 @@ def sync_detailed(
 
 
 def sync(
-    slug: str,
-    account_id: str,
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
-    """Resumes scopes of one product account.
+    """Resumes scopes of one customer of an account.
 
     Args:
-        slug (str):
-        account_id (str):
+        account (str):
+        customer (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -131,25 +131,25 @@ def sync(
     """
 
     return sync_detailed(
-        slug=slug,
-        account_id=account_id,
+        account=account,
+        customer=customer,
         client=client,
         body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    slug: str,
-    account_id: str,
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
-    """Resumes scopes of one product account.
+    """Resumes scopes of one customer of an account.
 
     Args:
-        slug (str):
-        account_id (str):
+        account (str):
+        customer (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -161,8 +161,8 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
-        account_id=account_id,
+        account=account,
+        customer=customer,
         body=body,
     )
 
@@ -172,17 +172,17 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    slug: str,
-    account_id: str,
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
     body: PauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
-    """Resumes scopes of one product account.
+    """Resumes scopes of one customer of an account.
 
     Args:
-        slug (str):
-        account_id (str):
+        account (str):
+        customer (str):
         body (PauseRequest): Pause or resume request.
 
     Raises:
@@ -195,8 +195,8 @@ async def asyncio(
 
     return (
         await asyncio_detailed(
-            slug=slug,
-            account_id=account_id,
+            account=account,
+            customer=customer,
             client=client,
             body=body,
         )

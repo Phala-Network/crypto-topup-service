@@ -18,7 +18,7 @@ use topup::api::models::{AttestationResponse, OperatorIdentity};
 use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
-use topup::db::{AddressKind, NewDeposit};
+use topup::db::{Account, NewDeposit};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::{AttestedOperator, OperatorKey, report_data};
@@ -33,13 +33,12 @@ use topup_core::{SETTLEMENT_KEY_DOMAIN, SecretKey32, Signer as _};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 use support::{
     SignatureOptions, SignatureParameter, TEST_ORIGIN, TestDatabase, public_key_base64,
     signed_request, signed_request_with_options,
 };
 
-const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
 
 #[tokio::test]
@@ -50,7 +49,8 @@ async fn signature_verification_vectors() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let app = test_router(&database.app_pool, &admin_key);
         let path = "/v1/config".to_owned();
         let body = serde_json::to_vec(&json!({"external_id": "signed-account"}))?;
@@ -62,7 +62,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -79,7 +79,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-idempotency"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -96,7 +96,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-alg"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -109,7 +109,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "reordered-parameters"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -130,7 +130,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "different-label"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -148,7 +148,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &origin_path,
                 serde_json::to_vec(&json!({"external_id": "origin-form-query"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -165,7 +165,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "wrong-algorithm"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -187,7 +187,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &wrong_key,
                 now,
             ))
@@ -200,7 +200,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "future-created"}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 (Utc::now() + Duration::minutes(6)).timestamp(),
             ))
@@ -211,7 +211,7 @@ async fn signature_verification_vectors() -> Result<()> {
             Method::GET,
             &path,
             body.clone(),
-            PRODUCT_KID,
+            &product_kid,
             &product_key,
             now,
         );
@@ -225,7 +225,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 (Utc::now() - Duration::minutes(6)).timestamp(),
             ))
@@ -236,14 +236,14 @@ async fn signature_verification_vectors() -> Result<()> {
             Method::GET,
             &path,
             serde_json::to_vec(&json!({"external_id": "missing-component"}))?,
-            PRODUCT_KID,
+            &product_kid,
             &product_key,
             now,
         );
         missing_component.headers_mut().insert(
             "signature-input",
             format!(
-                "sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{PRODUCT_KID}\";alg=\"ed25519\""
+                "sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{product_kid}\";alg=\"ed25519\""
             )
             .parse()?,
         );
@@ -257,7 +257,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 replay_body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -268,7 +268,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 replay_body,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -292,7 +292,8 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
     let result = async {
         let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let app = test_router(&database.app_pool, &admin_key);
         let path = "/v1/config".to_owned();
         let now = Utc::now().timestamp();
@@ -301,7 +302,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": external_id}))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
                 &SignatureOptions {
@@ -358,21 +359,14 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         let other_key = SigningKey::from_bytes(&[18; 32]);
         let admin_key = SigningKey::from_bytes(&[19; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let other = seed_product(&database.app_pool, "builder", &other_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
-        let account_id = seed::create_account(
-            &database.app_pool,
-            &NewAccount {
-                id: Uuid::new_v4(),
-                product_id: product.id,
-                external_id: "account-001".to_owned(),
-                paused_scopes: Vec::new(),
-            },
-        )
-        .await?
-        .id;
+        let customer_id = seed_customer(&database.app_pool, product.id, "account-001")
+            .await?
+            .id;
 
         let other_deposit = seed_other_tenant_deposit(&database.app_pool, other.id).await?;
         let cross_tenant_path = format!("/v1/deposits/dep_{}", other_deposit.simple());
@@ -382,17 +376,17 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 Method::GET,
                 &cross_tenant_path,
                 Vec::new(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
 
-        // Pausing an account is an operator action.
+        // Pausing a customer is an operator action.
         let pause_path = format!(
-            "/v1/admin/products/{}/accounts/account-001/pause",
-            product.slug
+            "/v1/admin/accounts/{}/customers/account-001/pause",
+            product.public_id
         );
         let pause_body = serde_json::to_vec(&json!({"scopes": ["quotes", "settlement"]}))?;
         let response = app
@@ -401,7 +395,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 Method::POST,
                 &pause_path,
                 pause_body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -422,18 +416,18 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         let paused = response_json(response).await?;
         ensure!(paused["paused_scopes"] == json!(["quotes", "settlement"]));
         let stored_scopes: Vec<String> =
-            sqlx::query_scalar("SELECT paused_scopes FROM accounts WHERE id = $1")
-                .bind(account_id)
+            sqlx::query_scalar("SELECT paused_scopes FROM customers WHERE id = $1")
+                .bind(customer_id)
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(stored_scopes == ["quotes", "settlement"]);
         let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit WHERE subject = $1")
-            .bind(format!("account:{account_id}"))
+            .bind(format!("customer:{customer_id}"))
             .fetch_one(&database.app_pool)
             .await?;
         ensure!(audit_count == 1);
 
-        // The paused account gets no quote.
+        // The paused customer gets no quote.
         let paused_quote = app
             .clone()
             .oneshot(signed_request(
@@ -443,7 +437,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                     "account_id": "account-001", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 2,
             ))
@@ -459,7 +453,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 Method::POST,
                 admin_path,
                 admin_body.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -482,6 +476,219 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(admin_audit_count == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Every merchant endpoint that names an object answers `404` to another account's key and to
+/// the owning account's key in the other mode, exactly as for an object that does not exist, and
+/// lists show neither (design D13: the scope comes from the credential, never the request).
+#[tokio::test]
+async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let owner_key = SigningKey::from_bytes(&[21; 32]);
+        let other_key = SigningKey::from_bytes(&[22; 32]);
+        let admin_key = SigningKey::from_bytes(&[23; 32]);
+        let owner = seed_product(pool, "owner", &owner_key).await?;
+        let other = seed_product(pool, "other", &other_key).await?;
+        let owner_kid = seed::key_id(&owner);
+        let other_kid = seed::key_id(&other);
+        let customer = seed_customer(pool, owner.id, "owned-customer").await?;
+        let address = seed::insert_address(
+            pool,
+            &NewAddress {
+                id: Uuid::new_v4(),
+                customer_id: customer.id,
+                chain_id: 1,
+                route: "phala-cloud-ethereum-pha-usd".to_owned(),
+                salt: B256::repeat_byte(0x61),
+                address: Address::repeat_byte(0x62),
+            },
+        )
+        .await?;
+        let tx_hash = B256::repeat_byte(0x63);
+        ensure!(
+            topup::db::insert_deposit(
+                pool,
+                &NewDeposit {
+                    chain_id: 1,
+                    tx_hash,
+                    log_index: 0,
+                    receipt_log_index: 0,
+                    tx_from: Address::ZERO,
+                    tx_nonce: 0,
+                    is_final: true,
+                    block_number: 5,
+                    block_hash: B256::repeat_byte(0x64),
+                    block_time: Utc::now(),
+                    address_id: address.id,
+                    route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
+                    route_version: Some(1),
+                    asset_contract: Address::repeat_byte(0x65),
+                    from_address: Address::repeat_byte(0x66),
+                    amount_atomic: AtomicAmount::new(U256::from(1_000_u64)),
+                    state: DepositState::Rejected,
+                    reason: Some(topup_core::deposit::RejectReason::OutOfBounds),
+                    next_attempt_at: Utc::now() + Duration::hours(1),
+                },
+            )
+            .await?
+        );
+        let deposit = deposit_id(1, tx_hash, 0);
+        let refund = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO refunds (id, account_id, livemode, deposit_id, amount_atomic, to_address,
+                                 route, status, requested_by)
+            SELECT $1, account_id, livemode, id, 10, $3, route, 'requested', 'test'
+            FROM deposits WHERE id = $2
+            "#,
+        )
+        .bind(refund)
+        .bind(deposit)
+        .bind(format!("{:#x}", Address::repeat_byte(0x67)))
+        .execute(pool)
+        .await?;
+
+        let quote = topup::ids::format(topup::ids::QUOTE, address.quote_id);
+        let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit);
+        let refund = topup::ids::format(topup::ids::REFUND, refund);
+        let refund_body = serde_json::to_vec(&json!({
+            "deposit": deposit,
+            "destination_address": format!("{:#x}", Address::repeat_byte(0x68)),
+            "amount_atomic": "10",
+        }))?;
+        let object_requests = [
+            (Method::GET, format!("/v1/quotes/{quote}"), Vec::new()),
+            (
+                Method::GET,
+                format!("/v1/quotes/{quote}?expand[]=deposit"),
+                Vec::new(),
+            ),
+            (
+                Method::POST,
+                format!("/v1/quotes/{quote}/cancel"),
+                Vec::new(),
+            ),
+            (Method::GET, format!("/v1/deposits/{deposit}"), Vec::new()),
+            (
+                Method::GET,
+                format!("/v1/deposits/{deposit}?expand[]=quote"),
+                Vec::new(),
+            ),
+            (Method::GET, format!("/v1/refunds/{refund}"), Vec::new()),
+            (
+                Method::GET,
+                format!("/v1/refunds/{refund}?expand[]=deposit"),
+                Vec::new(),
+            ),
+            (Method::POST, "/v1/refunds".to_owned(), refund_body),
+        ];
+        let lists = [
+            "/v1/deposits".to_owned(),
+            format!("/v1/deposits?quote={quote}"),
+            "/v1/deposits?account_id=owned-customer".to_owned(),
+        ];
+        let app = test_router(pool, &admin_key);
+        let created = std::sync::atomic::AtomicI64::new(Utc::now().timestamp() - 60);
+        let call = |method: Method, path: &str, body: Vec<u8>, kid: &str, key: &SigningKey| {
+            let request = signed_request(
+                method,
+                path,
+                body,
+                kid,
+                key,
+                created.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            );
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await?;
+                let status = response.status();
+                anyhow::Ok((status, response_json(response).await?))
+            }
+        };
+
+        // The owner reaches every one of its objects; its refund request succeeds.
+        for (method, path, body) in &object_requests {
+            let (status, answer) =
+                call(method.clone(), path, body.clone(), &owner_kid, &owner_key).await?;
+            ensure!(
+                status == StatusCode::OK,
+                "owner {method} {path}: {status} {answer}"
+            );
+        }
+        for path in &lists {
+            let (status, answer) =
+                call(Method::GET, path, Vec::new(), &owner_kid, &owner_key).await?;
+            ensure!(status == StatusCode::OK && answer["data"].as_array().map(Vec::len) == Some(1));
+        }
+
+        // Another account, and then the owner's own key moved to test mode, see nothing.
+        for (who, kid, key) in [
+            ("other account", &other_kid, &other_key),
+            ("other mode", &owner_kid, &owner_key),
+        ] {
+            if who == "other mode" {
+                sqlx::query(
+                    "UPDATE request_signing_keys SET livemode = false WHERE account_id = $1",
+                )
+                .bind(owner.id)
+                .execute(pool)
+                .await?;
+            }
+            for (method, path, body) in &object_requests {
+                let (status, answer) = call(method.clone(), path, body.clone(), kid, key).await?;
+                ensure!(
+                    status == StatusCode::NOT_FOUND
+                        && answer["error"]["code"] == "resource_missing",
+                    "{who} {method} {path}: {status} {answer}"
+                );
+            }
+            for path in &lists {
+                let (status, answer) = call(Method::GET, path, Vec::new(), kid, key).await?;
+                ensure!(
+                    status == StatusCode::OK && answer["data"] == json!([]),
+                    "{who} {path}: {status} {answer}"
+                );
+            }
+            // A cursor naming a foreign deposit fails exactly like one naming no deposit.
+            let (status, foreign) = call(
+                Method::GET,
+                &format!("/v1/deposits?starting_after={deposit}"),
+                Vec::new(),
+                kid,
+                key,
+            )
+            .await?;
+            let unknown = topup::ids::format(topup::ids::DEPOSIT, Uuid::new_v4());
+            let (unknown_status, missing) = call(
+                Method::GET,
+                &format!("/v1/deposits?starting_after={unknown}"),
+                Vec::new(),
+                kid,
+                key,
+            )
+            .await?;
+            ensure!(
+                status == unknown_status && foreign == missing,
+                "{who}: {foreign}"
+            );
+        }
+        // Nothing was written for the other tenants: the owner's objects are untouched.
+        let refunds: i64 = sqlx::query_scalar("SELECT count(*) FROM refunds")
+            .fetch_one(pool)
+            .await?;
+        ensure!(
+            refunds == 2,
+            "only the owner's own request created a refund"
+        );
         Ok(())
     }
     .await;
@@ -530,9 +737,10 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
             .clone()
             .oneshot(signed_request(
                 Method::POST,
-                "/v1/admin/products",
+                "/v1/admin/accounts",
                 serde_json::to_vec(&json!({
-                    "slug": "phala-cloud",
+                    "name": "Phala Cloud",
+                    "livemode": true,
                     "public_key": public_key_base64(&product_key),
                     "webhook_url": "https://product.test/webhooks",
                 }))?,
@@ -544,10 +752,10 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
         ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
         let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
         ensure!(body["error"]["code"] == "unavailable", "{body}");
-        let products: i64 = sqlx::query_scalar("SELECT count(*) FROM products")
+        let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
             .fetch_one(&database.app_pool)
             .await?;
-        ensure!(products == 0);
+        ensure!(accounts == 0);
         Ok(())
     }
     .await;
@@ -556,18 +764,20 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
     result.and(cleanup)
 }
 
-/// `POST /v1/admin/products` is the only way to issue product credentials: admin-signed,
-/// validated at the boundary, idempotent for identical values, and audited once.
+/// `POST /v1/admin/accounts` issues an account and its request signing key until self-serve
+/// signup and API keys replace it: admin-signed, validated at the boundary, and audited.
 #[tokio::test]
-async fn admin_product_registration() -> Result<()> {
+async fn admin_account_issuance() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
+        let merchant_key = SigningKey::from_bytes(&[40; 32]);
         let product_key = SigningKey::from_bytes(&[41; 32]);
         let admin_key = SigningKey::from_bytes(&[42; 32]);
+        let merchant = seed_product(&database.app_pool, "merchant", &merchant_key).await?;
         let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/admin/products";
+        let path = "/v1/admin/accounts";
         let now = Utc::now().timestamp();
         let register = |body: Value, created: i64, kid: &str, key: &SigningKey| -> Result<_> {
             Ok(signed_request(
@@ -580,29 +790,35 @@ async fn admin_product_registration() -> Result<()> {
             ))
         };
         let valid = json!({
-            "slug": "phala-cloud",
+            "name": "Phala Cloud",
+            "livemode": true,
             "public_key": public_key_base64(&product_key),
             "webhook_url": "https://product.test/webhooks",
         });
 
         let response = app
             .clone()
-            .oneshot(register(valid.clone(), now, PRODUCT_KID, &product_key)?)
+            .oneshot(register(
+                valid.clone(),
+                now,
+                &seed::key_id(&merchant),
+                &merchant_key,
+            )?)
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
 
         let invalid = [
-            json!({"slug": "Phala", "public_key": public_key_base64(&product_key),
+            json!({"name": " ", "livemode": true, "public_key": public_key_base64(&product_key),
                    "webhook_url": "https://product.test/webhooks"}),
-            json!({"slug": "phala-cloud", "public_key": "AAAA",
+            json!({"name": "Phala Cloud", "livemode": true, "public_key": "AAAA",
                    "webhook_url": "https://product.test/webhooks"}),
             // The test origin is `http`, so only non-HTTP schemes are refused here.
-            json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
+            json!({"name": "Phala Cloud", "livemode": true,
+                   "public_key": public_key_base64(&product_key),
                    "webhook_url": "ftp://product.test/webhooks"}),
-            json!({"slug": "phala-cloud", "public_key": public_key_base64(&product_key),
+            json!({"name": "Phala Cloud", "livemode": true,
+                   "public_key": public_key_base64(&product_key),
                    "webhook_url": "https://user:secret@product.test/webhooks"}),
-            json!({"slug": "unrouted", "public_key": public_key_base64(&product_key),
-                   "webhook_url": "https://product.test/webhooks"}),
         ];
         for (offset, body) in (1_i64..).zip(invalid) {
             let response = app
@@ -622,41 +838,43 @@ async fn admin_product_registration() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let created = response_json(response).await?;
-        ensure!(created["slug"] == "phala-cloud");
+        let id = created["id"].as_str().context("account id")?.to_owned();
+        ensure!(id.starts_with("acct_") && id.len() == 37, "{created}");
+        ensure!(created["key_id"] == format!("{id}/v1"));
+        ensure!(created["name"] == "Phala Cloud" && created["livemode"] == true);
         ensure!(created["public_key"] == valid["public_key"]);
         ensure!(created["webhook_url"] == "https://product.test/webhooks");
 
+        // Each issuance is a new account.
         let response = app
             .clone()
             .oneshot(register(valid.clone(), now + 11, ADMIN_KID, &admin_key)?)
             .await?;
         ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["id"] == created["id"]);
+        ensure!(response_json(response).await?["id"] != created["id"]);
 
-        let mut changed = valid.clone();
-        changed["webhook_url"] = json!("https://product.test/other");
-        let response = app
-            .clone()
-            .oneshot(register(changed, now + 12, ADMIN_KID, &admin_key)?)
-            .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
-        ensure!(response_json(response).await?["error"]["code"] == "conflict");
+        let audit = sqlx::query(
+            "SELECT account_id, actor_type, actor_id, action FROM audit WHERE subject = $1",
+        )
+        .bind(format!("account:{id}"))
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(audit.len() == 1);
+        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
+        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
+        ensure!(audit[0].try_get::<String, _>("action")? == "account.issue");
+        ensure!(
+            audit[0].try_get::<Option<Uuid>, _>("account_id")?
+                == topup::ids::parse(topup::ids::ACCOUNT, &id)
+        );
 
-        let audit =
-            sqlx::query("SELECT actor, action FROM audit WHERE subject = 'product:phala-cloud'")
-                .fetch_all(&database.app_pool)
-                .await?;
-        ensure!(audit.len() == 1, "only the first registration is audited");
-        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
-        ensure!(audit[0].try_get::<String, _>("action")? == "product.issue");
-
-        // The registered key authenticates product requests under the key id `{slug}/v1`.
+        // The issued key authenticates merchant requests under the key id `{acct_…}/v1`.
         let response = app
             .oneshot(signed_request(
                 Method::GET,
                 "/v1/config",
                 Vec::new(),
-                PRODUCT_KID,
+                &format!("{id}/v1"),
                 &product_key,
                 now,
             ))
@@ -669,10 +887,10 @@ async fn admin_product_registration() -> Result<()> {
     result.and(cleanup)
 }
 
-/// `PUT /v1/admin/products/{slug}` replaces an issued product's key and webhook URL: a hard cut
-/// from the old key to the new one under the route's key id, audited once with the replaced values.
+/// `PUT /v1/admin/accounts/{account}` replaces an account's key and webhook URL: a hard cut from
+/// the old key to the new one under the same key id, audited once with the replaced values.
 #[tokio::test]
-async fn admin_product_key_replacement() -> Result<()> {
+async fn admin_account_key_replacement() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -682,46 +900,48 @@ async fn admin_product_key_replacement() -> Result<()> {
         let admin_key = SigningKey::from_bytes(&[47; 32]);
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        let update = |slug: &str, body: &Value, created: i64| -> Result<_> {
+        let update = |account: &str, body: &Value, created: i64| -> Result<_> {
             Ok(signed_request(
                 Method::PUT,
-                &format!("/v1/admin/products/{slug}"),
+                &format!("/v1/admin/accounts/{account}"),
                 serde_json::to_vec(body)?,
                 ADMIN_KID,
                 &admin_key,
                 created,
             ))
         };
-        let register_account = |key: &SigningKey, created: i64| -> Result<_> {
-            Ok(signed_request(
-                Method::GET,
-                &format!("/v1/config?request={created}"),
-                Vec::new(),
-                PRODUCT_KID,
-                key,
-                created,
-            ))
-        };
         let valid = json!({
             "public_key": public_key_base64(&new_key),
             "webhook_url": "https://product.test/rotated",
-            "reason": "scheduled product key rotation",
+            "reason": "scheduled key rotation",
         });
 
+        let unknown = topup::ids::format(topup::ids::ACCOUNT, Uuid::new_v4());
         let response = app
             .clone()
-            .oneshot(update("phala-cloud", &valid, now - 1)?)
+            .oneshot(update(&unknown, &valid, now - 1)?)
             .await?;
-        ensure!(response.status() == StatusCode::NOT_FOUND, "not issued yet");
+        ensure!(response.status() == StatusCode::NOT_FOUND, "not issued");
         let product = seed_product(&database.app_pool, "phala-cloud", &old_key).await?;
+        let product_kid = seed::key_id(&product);
+        let config = |key: &SigningKey, created: i64| {
+            signed_request(
+                Method::GET,
+                &format!("/v1/config?request={created}"),
+                Vec::new(),
+                &product_kid,
+                key,
+                created,
+            )
+        };
 
         let response = app
             .clone()
             .oneshot(signed_request(
                 Method::PUT,
-                "/v1/admin/products/phala-cloud",
+                &format!("/v1/admin/accounts/{}", product.public_id),
                 serde_json::to_vec(&valid)?,
-                PRODUCT_KID,
+                &product_kid,
                 &old_key,
                 now,
             ))
@@ -731,31 +951,23 @@ async fn admin_product_key_replacement() -> Result<()> {
             "only the admin key"
         );
 
-        let mut invalid = Vec::new();
-        for (field, value) in [
+        for (offset, (field, value)) in (1_i64..).zip([
             ("public_key", json!("AAAA")),
             ("webhook_url", json!("ftp://product.test/rotated")),
             ("reason", json!(" ")),
-        ] {
+        ]) {
             let mut body = valid.clone();
             body[field] = value;
-            invalid.push(("phala-cloud", body));
-        }
-        invalid.push(("unrouted", valid.clone()));
-        for (offset, (slug, body)) in (1_i64..).zip(invalid) {
             let response = app
                 .clone()
-                .oneshot(update(slug, &body, now + offset)?)
+                .oneshot(update(&product.public_id, &body, now + offset)?)
                 .await?;
             ensure!(
                 response.status() == StatusCode::BAD_REQUEST,
-                "{slug} {body} must be rejected"
+                "{body} must be rejected"
             );
         }
-        let response = app
-            .clone()
-            .oneshot(register_account(&old_key, now + 10)?)
-            .await?;
+        let response = app.clone().oneshot(config(&old_key, now + 10)).await?;
         ensure!(
             response.status() == StatusCode::OK,
             "the old key works before"
@@ -764,45 +976,39 @@ async fn admin_product_key_replacement() -> Result<()> {
         for offset in [11, 12] {
             let response = app
                 .clone()
-                .oneshot(update("phala-cloud", &valid, now + offset)?)
+                .oneshot(update(&product.public_id, &valid, now + offset)?)
                 .await?;
             ensure!(response.status() == StatusCode::OK);
             let updated = response_json(response).await?;
-            ensure!(updated["id"] == json!(product.id));
+            ensure!(updated["id"] == json!(product.public_id));
+            ensure!(updated["key_id"] == json!(product_kid));
             ensure!(updated["public_key"] == valid["public_key"]);
             ensure!(updated["webhook_url"] == "https://product.test/rotated");
         }
 
-        let response = app
-            .clone()
-            .oneshot(register_account(&old_key, now + 13)?)
-            .await?;
+        let response = app.clone().oneshot(config(&old_key, now + 13)).await?;
         ensure!(
             response.status() == StatusCode::UNAUTHORIZED,
             "the old key is cut"
         );
-        let response = app
-            .clone()
-            .oneshot(register_account(&new_key, now + 14)?)
-            .await?;
+        let response = app.clone().oneshot(config(&new_key, now + 14)).await?;
         ensure!(response.status() == StatusCode::OK, "the new key verifies");
 
         let audit = sqlx::query(
-            "SELECT actor, action, reason FROM audit WHERE subject = 'product:phala-cloud'",
+            "SELECT actor_type, actor_id, action, reason FROM audit WHERE subject = $1",
         )
+        .bind(format!("account:{}", product.public_id))
         .fetch_all(&database.app_pool)
         .await?;
         ensure!(
             audit.len() == 1,
             "a repeat with the stored values is not audited again"
         );
-        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
-        ensure!(audit[0].try_get::<String, _>("action")? == "product.update");
+        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
+        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
+        ensure!(audit[0].try_get::<String, _>("action")? == "account.update");
         let evidence: Value = serde_json::from_str(&audit[0].try_get::<String, _>("reason")?)?;
-        ensure!(
-            evidence["reason"] == "scheduled product key rotation",
-            "{evidence}"
-        );
+        ensure!(evidence["reason"] == "scheduled key rotation", "{evidence}");
         ensure!(
             evidence["replaced"]["public_key"] == json!(public_key_base64(&old_key)),
             "{evidence}"
@@ -823,16 +1029,8 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[31; 32]);
         let admin_key = SigningKey::from_bytes(&[32; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        seed::create_account(
-            &database.app_pool,
-            &NewAccount {
-                id: Uuid::new_v4(),
-                product_id: product.id,
-                external_id: "frozen-account".to_owned(),
-                paused_scopes: Vec::new(),
-            },
-        )
-        .await?;
+        let product_kid = seed::key_id(&product);
+        seed_customer(&database.app_pool, product.id, "frozen-account").await?;
         sqlx::query(
             r#"
             INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
@@ -853,7 +1051,7 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
                 Method::POST,
                 "/v1/quotes",
                 lock_body,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 2,
             ))
@@ -862,7 +1060,7 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
         ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
         // A refused creation leaves no lock or lock address behind.
         let leftovers: i64 = sqlx::query_scalar(
-            "SELECT (SELECT count(*) FROM rate_locks) + (SELECT count(*) FROM addresses)",
+            "SELECT (SELECT count(*) FROM quotes) + (SELECT count(*) FROM addresses)",
         )
         .fetch_one(&database.app_pool)
         .await?;
@@ -885,16 +1083,8 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[33; 32]);
         let admin_key = SigningKey::from_bytes(&[34; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        seed::create_account(
-            &database.app_pool,
-            &NewAccount {
-                id: Uuid::new_v4(),
-                product_id: product.id,
-                external_id: "lift-account".to_owned(),
-                paused_scopes: Vec::new(),
-            },
-        )
-        .await?;
+        let product_kid = seed::key_id(&product);
+        seed_customer(&database.app_pool, product.id, "lift-account").await?;
         sqlx::query(
             r#"
             INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason)
@@ -909,7 +1099,11 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             Ok(signed_request(
                 method,
                 path,
-                if body.is_null() { Vec::new() } else { serde_json::to_vec(&body)? },
+                if body.is_null() {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&body)?
+                },
                 ADMIN_KID,
                 &admin_key,
                 created,
@@ -918,7 +1112,12 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
 
         let response = app
             .clone()
-            .oneshot(admin(Method::GET, "/v1/admin/report/daily", Value::Null, now)?)
+            .oneshot(admin(
+                Method::GET,
+                "/v1/admin/report/daily",
+                Value::Null,
+                now,
+            )?)
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let blocks = response_json(response).await?["reconciliation_blocks"].clone();
@@ -935,7 +1134,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
                 Method::POST,
                 lift,
                 serde_json::to_vec(&reason)?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 1,
             ))
@@ -980,12 +1179,14 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         ensure!(response_json(response).await? == lifted);
 
         let audit = sqlx::query(
-            "SELECT actor, action, reason FROM audit WHERE subject = 'reconciliation_block:chain:1'",
+            "SELECT actor_type, actor_id, action, reason FROM audit \
+             WHERE subject = 'reconciliation_block:chain:1'",
         )
         .fetch_all(&database.app_pool)
         .await?;
         ensure!(audit.len() == 1, "only the first lift is audited");
-        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
+        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
         ensure!(audit[0].try_get::<String, _>("action")? == "reconciliation_block.lift");
         let evidence: Value = serde_json::from_str(&audit[0].try_get::<String, _>("reason")?)?;
         ensure!(evidence["reason"] == reason["reason"]);
@@ -1004,14 +1205,19 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
                     "account_id": "lift-account", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 6,
             ))
             .await?;
         ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
         let response = app
-            .oneshot(admin(Method::GET, "/v1/admin/report/daily", Value::Null, now + 7)?)
+            .oneshot(admin(
+                Method::GET,
+                "/v1/admin/report/daily",
+                Value::Null,
+                now + 7,
+            )?)
             .await?;
         ensure!(response_json(response).await?["reconciliation_blocks"] == json!([]));
         Ok(())
@@ -1022,8 +1228,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
 }
 
 /// `POST /v1/admin/outbox/{event_id}/replay` requeues an existing event without touching its
-/// payload; the operator finds the event id, `evt_…` or an older event's UUID, in the admin
-/// deposit view.
+/// payload; the operator finds the event id, `evt_…`, in the admin deposit view.
 #[tokio::test]
 async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -1033,28 +1238,23 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[35; 32]);
         let admin_key = SigningKey::from_bytes(&[36; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let deposit = seed_other_tenant_deposit(&database.app_pool, product.id).await?;
-        let legacy_event = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at, format,
-                                created_at)
-            VALUES ($1, 'deposit.pending', $2, now() - interval '2 hours', now(), 1,
-                    now() - interval '2 hours')
-            "#,
-        )
-        .bind(legacy_event)
-        .bind(json!({"product_id": product.id, "deposit_id": deposit}))
-        .execute(&database.app_pool)
-        .await?;
         let event_id = Uuid::new_v4();
         let payload = json!({"object": {"id": format!("dep_{}", deposit.simple())}});
         sqlx::query(
             r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at, delivered_at,
-                                product_id, object_type, object_id)
-            VALUES ($1, 'deposit.credited', $2, now() - interval '1 hour', now(), $3, 'deposit',
-                    $4)
+            WITH event AS (
+                INSERT INTO events (id, account_id, livemode, type, object_type, object_id, data,
+                                    created)
+                VALUES ($1, $3, true, 'deposit.credited', 'deposit', $4, $2,
+                        now() - interval '1 hour')
+                RETURNING id, account_id
+            )
+            INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at, delivered_at)
+            SELECT event.id, endpoint.id, now() - interval '1 hour', now()
+            FROM event
+            JOIN webhook_endpoints AS endpoint ON endpoint.account_id = event.account_id
             "#,
         )
         .bind(event_id)
@@ -1080,11 +1280,10 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
         let events = response_json(response).await?["events"].clone();
-        ensure!(events.as_array().map(Vec::len) == Some(2), "{events}");
-        ensure!(events[0]["id"] == legacy_event.to_string());
-        ensure!(events[1]["id"] == webhook_id);
-        ensure!(events[1]["event_type"] == "deposit.credited");
-        ensure!(!events[1]["delivered_at"].is_null());
+        ensure!(events.as_array().map(Vec::len) == Some(1), "{events}");
+        ensure!(events[0]["id"] == webhook_id);
+        ensure!(events[0]["event_type"] == "deposit.credited");
+        ensure!(!events[0]["delivered_at"].is_null());
 
         let replay = format!("/v1/admin/outbox/{webhook_id}/replay");
         let reason = serde_json::to_vec(&json!({"reason": "product lost the event"}))?;
@@ -1094,7 +1293,7 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
                 Method::POST,
                 &replay,
                 reason.clone(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 1,
             ))
@@ -1143,19 +1342,29 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
             ensure!(replayed["event_type"] == "deposit.credited");
         }
         let row = sqlx::query(
-            "SELECT payload, delivered_at IS NULL AND next_attempt_at <= now() AS due FROM outbox WHERE id = $1",
+            "SELECT event.data AS payload, \
+             delivery.delivered_at IS NULL AND delivery.next_attempt_at <= now() AS due \
+             FROM events AS event \
+             JOIN webhook_deliveries AS delivery ON delivery.event_id = event.id \
+             WHERE event.id = $1",
         )
         .bind(event_id)
         .fetch_one(&database.app_pool)
         .await?;
         ensure!(row.try_get::<bool, _>("due")?);
         ensure!(row.try_get::<Value, _>("payload")? == payload);
-        let audit = sqlx::query("SELECT actor, action, reason FROM audit WHERE subject = $1")
-            .bind(format!("event:{event_id}"))
-            .fetch_all(&database.app_pool)
-            .await?;
-        ensure!(audit.len() == 1, "a repeat while the event is due is not audited again");
-        ensure!(audit[0].try_get::<String, _>("actor")? == format!("admin:{ADMIN_KID}"));
+        let audit = sqlx::query(
+            "SELECT actor_type, actor_id, action, reason FROM audit WHERE subject = $1",
+        )
+        .bind(format!("event:{event_id}"))
+        .fetch_all(&database.app_pool)
+        .await?;
+        ensure!(
+            audit.len() == 1,
+            "a repeat while the event is due is not audited again"
+        );
+        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
+        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
         ensure!(audit[0].try_get::<String, _>("action")? == "outbox.replay");
         ensure!(audit[0].try_get::<String, _>("reason")? == "product lost the event");
         Ok(())
@@ -1347,49 +1556,51 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn seed_product(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    key: &SigningKey,
-) -> Result<topup::db::Product> {
-    Ok(seed::create_product(
+/// A live account signing with `key`, with a webhook endpoint.
+async fn seed_product(pool: &sqlx::PgPool, name: &str, key: &SigningKey) -> Result<Account> {
+    Ok(seed::create_account(
         pool,
-        &NewProduct {
-            id: Uuid::new_v4(),
-            slug: slug.to_owned(),
+        &NewAccount {
+            public_key: public_key_base64(key),
             webhook_url: "https://product.test/webhooks".to_owned(),
-            pubkey: public_key_base64(key),
+            ..NewAccount::named(name)
+        },
+    )
+    .await?)
+}
+
+async fn seed_customer(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+    client_reference_id: &str,
+) -> Result<topup::db::Customer> {
+    Ok(seed::create_customer(
+        pool,
+        &NewCustomer {
+            id: Uuid::new_v4(),
+            account_id,
+            livemode: true,
+            client_reference_id: client_reference_id.to_owned(),
             paused_scopes: Vec::new(),
         },
     )
     .await?)
 }
 
-async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, product_id: Uuid) -> Result<Uuid> {
-    let account = seed::create_account(
-        pool,
-        &NewAccount {
-            id: Uuid::new_v4(),
-            product_id,
-            external_id: "other-account".to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
+/// A live deposit of a new customer of `account_id`.
+async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Uuid> {
+    let customer = seed_customer(pool, account_id, "other-account").await?;
     let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),
-            account_id: account.id,
+            customer_id: customer.id,
             chain_id: 1,
-            kind: AddressKind::Persistent,
-            version: 1,
-            lock_ref: None,
+            route: "other-route".to_owned(),
             salt: B256::from_str(
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )?,
             address: Address::from_str("0x1111111111111111111111111111111111111111")?,
-            retired_at: None,
         },
     )
     .await?;
@@ -1411,7 +1622,6 @@ async fn seed_other_tenant_deposit(pool: &sqlx::PgPool, product_id: Uuid) -> Res
             )?,
             block_time: Utc::now(),
             address_id: address.id,
-            account_id: account.id,
             route: Some("other-route".to_owned()),
             route_version: Some(1),
             asset_contract: Address::from_str("0x2222222222222222222222222222222222222222")?,
