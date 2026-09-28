@@ -1,73 +1,46 @@
 import { Checkout, type Appearance } from "@phala/pay/react";
-import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import {
-  ApiError,
   createQuote,
   getAccount,
   getTimeline,
   getTrust,
   type Account,
-  type ApiExchange,
-  type Detail,
-  type Step,
-  type StepKey,
+  type CreatedQuote,
+  type Selection,
   type Timeline,
   type Trust,
-  type WebhookEvent,
 } from "./api.js";
-import { dollars, short, statusLabel, time, tokens } from "./format.js";
-import { firstWallet, mintTestTokens } from "./testTokens.js";
+import { ExplorerLink, describe, usePolling } from "./common.js";
+import { DepositAddressPanel } from "./DepositAddressPanel.js";
+import { dollars, short, signedDollars, statusLabel, time, tokens } from "./format.js";
+import { Sweeps } from "./Sweeps.js";
+import { errorMessage, mintTestTokens } from "./testTokens.js";
+import { BehindTheScenes } from "./Timeline.js";
 
 type Theme = "light" | "dark";
+type Method = "quote" | "address";
 
 interface Session {
   quote: string;
   clientSecret: string;
   expectedAddress: string;
+  orderId: string;
 }
 
-const STEP_COPY: Record<StepKey, { title: string; current: string; failed?: string }> = {
-  quote_created: {
-    title: "Quote created",
-    current: "Creating the quote…",
-  },
-  transfer_seen: {
-    title: "Transfer seen on chain",
-    current: "Waiting for your transfer to the forwarder address…",
-    failed: "The quote expired without a payment.",
-  },
-  finalized: {
-    title: "Confirmed on both RPC providers",
-    current:
-      "Waiting for the transfer's block and one more, about 30 seconds after the transfer; " +
-      "both providers must report the same block and log. The deposit stays watched until " +
-      "Ethereum finality (about 15 minutes), and a reorg that drops it is reversed with " +
-      "deposit.reversed.",
-  },
-  credited: {
-    title: "Credited by the service",
-    current: "Valuing the deposit and screening the sender…",
-    failed: "The deposit was rejected and will not be credited.",
-  },
-  webhook_received: {
-    title: "Webhook received by this product",
-    current: "Waiting for the signed deposit.credited webhook…",
-  },
-  swept: {
-    title: "Swept to the treasury Safe",
-    current:
-      "Waiting for the merchant to sweep: anyone may call the factory's flush, and the service " +
-      "marks the deposit swept once that flush is finalized.",
-  },
-};
+const METHODS: { id: Method; label: string }[] = [
+  { id: "quote", label: "Exact amount" },
+  { id: "address", label: "Deposit address" },
+];
 
 export function App() {
   const [theme, setTheme] = useTheme();
   const [account, setAccount] = useState<Account | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [method, setMethod] = useState<Method>("quote");
   const [session, setSession] = useState<Session | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [timeline, setTimeline] = useState<Timeline | null>(null);
+  const [selected, setSelected] = useState<Selection | null>(null);
+  const [timeline, setTimeline] = useState<{ key: string; view: Timeline } | null>(null);
   const [trust, setTrust] = useState<Trust | null>(null);
 
   const refreshAccount = useCallback(() => {
@@ -85,17 +58,22 @@ export function App() {
     getTrust().then(setTrust, () => setTrust(null));
   }, []);
 
-  const finished =
-    timeline !== null &&
-    timeline.quote.id === selected &&
-    timeline.steps.some((s) => s.state === "failed" || (s.key === "swept" && s.state === "complete"));
+  const selectedKey = selected === null ? null : `${selected.kind}:${selected.id}`;
   const refreshTimeline = useCallback(() => {
     if (selected === null) {
       return;
     }
-    getTimeline(selected).then(setTimeline, () => undefined);
+    const key = `${selected.kind}:${selected.id}`;
+    getTimeline(selected).then(
+      (view) => setTimeline({ key, view }),
+      () => undefined,
+    );
   }, [selected]);
-  usePolling(refreshTimeline, 2000, selected !== null && !finished);
+  usePolling(refreshTimeline, 3000, selected !== null);
+  const refreshAll = () => {
+    refreshTimeline();
+    refreshAccount();
+  };
 
   const appearance: Appearance = {
     theme,
@@ -109,6 +87,10 @@ export function App() {
       borderRadius: "10px",
       fontFamily: "var(--font)",
     },
+  };
+  const select = (next: Selection) => {
+    setSelected(next);
+    setTimeline(null);
   };
 
   return (
@@ -135,10 +117,11 @@ export function App() {
         <div className="page-head">
           <h1>Add credits</h1>
           <p className="muted">
-            A cloud console's billing page paid with Phala Pay: top up this account with{" "}
-            {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}. The balance
-            moves only when this console's webhook handler receives a verified{" "}
-            <code>deposit.credited</code>, exactly as a real integration applies credits.
+            A cloud console's billing page paid with Phala Pay: top up this workspace with{" "}
+            {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}, either for an
+            exact amount at a locked price, or at any time to your own deposit address. The balance
+            moves only when this console's webhook handler receives a verified <code>deposit.*</code>{" "}
+            event, exactly as a real integration applies credits.
           </p>
         </div>
         {accountError !== null && (
@@ -152,73 +135,118 @@ export function App() {
             <BalanceCard account={account} />
             <section className="card" aria-labelledby="pay-title">
               <h2 id="pay-title">Pay with crypto</h2>
-              {session === null || account === null ? (
-                <AmountPicker
-                  account={account}
-                  onQuote={(created) => {
-                    setSession({
-                      quote: created.quote,
-                      clientSecret: created.client_secret,
-                      expectedAddress: created.expected_address,
-                    });
-                    setSelected(created.quote);
-                    setTimeline(null);
-                  }}
-                />
-              ) : (
-                <div className="checkout">
-                  <Checkout
-                    clientSecret={session.clientSecret}
-                    expectedAddress={session.expectedAddress}
-                    apiBase={account.api_base}
-                    appearance={appearance}
-                    onSuccess={refreshAccount}
-                  />
-                  <button type="button" className="ghost" onClick={() => setSession(null)}>
-                    Start a new top-up
-                  </button>
-                </div>
-              )}
+              <MethodTabs method={method} onChange={setMethod} />
+              <div
+                role="tabpanel"
+                id={`panel-${method}`}
+                aria-labelledby={`tab-${method}`}
+                className="tabpanel"
+              >
+                {method === "quote" ? (
+                  session === null || account === null ? (
+                    <AmountPicker
+                      account={account}
+                      onQuote={(created: CreatedQuote) => {
+                        setSession({
+                          quote: created.quote,
+                          clientSecret: created.client_secret,
+                          expectedAddress: created.expected_address,
+                          orderId: created.order_id,
+                        });
+                        select({ kind: "quote", id: created.quote });
+                      }}
+                    />
+                  ) : (
+                    <div className="checkout">
+                      <p className="small">
+                        Order <code>{session.orderId}</code>, in the quote's <code>metadata</code>. The
+                        checkout shows the quote only if the service's address is the one the product's
+                        SDK recomputed from its pins.
+                      </p>
+                      <Checkout
+                        clientSecret={session.clientSecret}
+                        expectedAddress={session.expectedAddress}
+                        apiBase={account.api_base}
+                        appearance={appearance}
+                        onSuccess={refreshAccount}
+                      />
+                      <button type="button" className="ghost" onClick={() => setSession(null)}>
+                        Start a new top-up
+                      </button>
+                    </div>
+                  )
+                ) : account === null ? (
+                  <p className="muted">Loading…</p>
+                ) : (
+                  <DepositAddressPanel account={account} appearance={appearance} onSelect={select} />
+                )}
+              </div>
             </section>
           </div>
           <BehindTheScenes
-            timeline={timeline !== null && timeline.quote.id === selected ? timeline : null}
-            selected={selected}
+            timeline={timeline !== null && timeline.key === selectedKey ? timeline.view : null}
+            loading={selected?.id ?? null}
             account={account}
+            onChanged={refreshAll}
           />
         </div>
 
-        <Transactions
-          account={account}
-          selected={selected}
-          onSelect={(quote) => {
-            setSelected(quote);
-            setTimeline(null);
-          }}
-        />
+        <Payments account={account} selected={selected} onSelect={select} />
+        {account !== null && <Sweeps account={account} />}
         <TrustStrip trust={trust} account={account} />
       </main>
     </div>
   );
 }
 
-function TestnetBanner({ account }: { account: Account }) {
-  const [state, setState] = useState<{ kind: "idle" | "pending" | "done" | "failed"; text?: string }>(
-    { kind: "idle" },
+function MethodTabs({ method, onChange }: { method: Method; onChange: (method: Method) => void }) {
+  const refs = useRef<Record<Method, HTMLButtonElement | null>>({ quote: null, address: null });
+  // Arrow keys move between tabs (WAI-ARIA tabs pattern, automatic activation).
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const next = method === "quote" ? "address" : "quote";
+    onChange(next);
+    refs.current[next]?.focus();
+  };
+  return (
+    <div className="tabs" role="tablist" aria-label="Payment method">
+      {METHODS.map(({ id, label }) => (
+        <button
+          key={id}
+          ref={(element) => {
+            refs.current[id] = element;
+          }}
+          id={`tab-${id}`}
+          type="button"
+          role="tab"
+          className="tab"
+          aria-selected={method === id}
+          aria-controls={`panel-${id}`}
+          tabIndex={method === id ? 0 : -1}
+          onClick={() => onChange(id)}
+          onKeyDown={onKeyDown}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
+}
+
+function TestnetBanner({ account }: { account: Account }) {
+  const [state, setState] = useState<{ kind: "idle" | "pending" | "done" | "failed"; text?: string }>({
+    kind: "idle",
+  });
   const mint = async () => {
     setState({ kind: "pending" });
     try {
-      const wallet = await firstWallet();
-      if (wallet === undefined) {
-        setState({ kind: "failed", text: "No browser wallet found." });
-        return;
-      }
-      const hash = await mintTestTokens(wallet, account.network.chain_id, account.token.address, "1000");
+      const hash = await mintTestTokens(account.network.chain_id, account.token.address, "1000");
       setState({ kind: "done", text: hash });
     } catch (error) {
-      const message = error instanceof Error ? error.message.split("\n")[0] : undefined;
-      setState({ kind: "failed", text: message ?? "Minting failed." });
+      setState({ kind: "failed", text: errorMessage(error, "Minting failed.") });
     }
   };
   return (
@@ -250,19 +278,45 @@ function BalanceCard({ account }: { account: Account | null }) {
         {account === null ? "—" : dollars(account.balance)}
       </p>
       <p className="muted small">
-        Demo account <code>{account?.account_id ?? "…"}</code>, kept in a cookie in this browser.
+        Workspace <code>{account?.account_id ?? "…"}</code>, a demo account kept in a cookie in this
+        browser.
       </p>
+      {account !== null && account.ledger.length > 0 && (
+        <details className="ledger-lines">
+          <summary>How this balance adds up ({account.ledger.length})</summary>
+          <div className="table-scroll">
+          <table className="table compact">
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">Deposit</th>
+                <th scope="col">Event</th>
+                <th scope="col">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {account.ledger.map((line) => (
+                <tr key={`${line.deposit}-${line.reason}-${line.at}`} data-testid="ledger-line">
+                  <td>{time(line.at)}</td>
+                  <td className="mono" title={line.deposit}>
+                    {short(line.deposit)}
+                  </td>
+                  <td>
+                    <code>{line.reason}</code>
+                  </td>
+                  <td className={line.amount < 0 ? "danger" : "success"}>{signedDollars(line.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+        </details>
+      )}
     </section>
   );
 }
 
-function AmountPicker({
-  account,
-  onQuote,
-}: {
-  account: Account | null;
-  onQuote: (created: Awaited<ReturnType<typeof createQuote>>) => void;
-}) {
+function AmountPicker({ account, onQuote }: { account: Account | null; onQuote: (created: CreatedQuote) => void }) {
   const [preset, setPreset] = useState<number | "custom">(2000);
   const [custom, setCustom] = useState("");
   const [pending, setPending] = useState(false);
@@ -299,22 +353,12 @@ function AmountPicker({
         <div className="presets">
           {(account?.presets ?? [500, 2000, 5000]).map((cents) => (
             <label key={cents} className="preset">
-              <input
-                type="radio"
-                name="amount"
-                checked={preset === cents}
-                onChange={() => setPreset(cents)}
-              />
+              <input type="radio" name="amount" checked={preset === cents} onChange={() => setPreset(cents)} />
               <span>{dollars(cents)}</span>
             </label>
           ))}
           <label className="preset">
-            <input
-              type="radio"
-              name="amount"
-              checked={preset === "custom"}
-              onChange={() => setPreset("custom")}
-            />
+            <input type="radio" name="amount" checked={preset === "custom"} onChange={() => setPreset("custom")} />
             <span>Custom</span>
           </label>
         </div>
@@ -338,8 +382,9 @@ function AmountPicker({
         {pending ? "Creating quote…" : "Pay with crypto"}
       </button>
       <p className="muted small">
-        The price is locked for 15 minutes. Pay from a browser wallet, by QR code, or by sending
-        the exact amount manually.
+        A quote locks the price for 15 minutes for an exact amount. Pay from a browser wallet, by QR
+        code, or by sending the exact amount manually; another amount, or a late payment, is credited
+        at the market rate instead.
       </p>
       {error !== null && (
         <p className="alert" role="alert">
@@ -350,178 +395,20 @@ function AmountPicker({
   );
 }
 
-function BehindTheScenes({
-  timeline,
-  selected,
-  account,
-}: {
-  timeline: Timeline | null;
-  selected: string | null;
-  account: Account | null;
-}) {
-  return (
-    <aside className="card scenes" aria-labelledby="scenes-title">
-      <div className="scenes-head">
-        <h2 id="scenes-title">Behind the scenes</h2>
-        {selected !== null && <span className="live" aria-hidden="true">Live</span>}
-      </div>
-      {selected === null ? (
-        <p className="muted">
-          Create a quote to follow the payment through the service, the chain, and this product's
-          webhook handler, with real data only.
-        </p>
-      ) : timeline === null ? (
-        <p className="muted">Loading {short(selected)}…</p>
-      ) : (
-        <>
-          <ol className="timeline" aria-label="Payment timeline">
-            {timeline.steps.map((step) => (
-              <TimelineStep key={step.key} step={step} account={account} />
-            ))}
-          </ol>
-          <EventsLog events={timeline.events} />
-          <DeveloperView exchanges={timeline.api} />
-        </>
-      )}
-    </aside>
-  );
-}
-
-function TimelineStep({ step, account }: { step: Step; account: Account | null }) {
-  const copy = STEP_COPY[step.key];
-  return (
-    <li
-      className="step"
-      data-step={step.key}
-      data-state={step.state}
-      aria-current={step.state === "current" ? "step" : undefined}
-    >
-      <span className="dot" aria-hidden="true" />
-      <div className="step-body">
-        <div className="step-title">
-          <span>{copy.title}</span>
-          <span className="step-state">{stateLabel(step.state)}</span>
-        </div>
-        {step.at !== null && <div className="muted small">{time(step.at)}</div>}
-        {step.state === "current" && <div className="muted small">{copy.current}</div>}
-        {step.state === "failed" && copy.failed !== undefined && (
-          <div className="small danger">{copy.failed}</div>
-        )}
-        {step.details.length > 0 && (
-          <dl className="details">
-            {step.details.map((detail) => (
-              <div key={detail.label}>
-                <dt>{detail.label}</dt>
-                <dd>
-                  <DetailValue detail={detail} account={account} />
-                </dd>
-              </div>
-            ))}
-          </dl>
-        )}
-      </div>
-    </li>
-  );
-}
-
-function DetailValue({ detail, account }: { detail: Detail; account: Account | null }) {
-  const { value, kind } = detail;
-  if (value === null) {
-    return <>—</>;
-  }
-  if ((kind === "address" || kind === "tx") && typeof value === "string" && account !== null) {
-    return <ExplorerLink account={account} kind={kind} value={value} />;
-  }
-  if (kind === "time" && typeof value === "number") {
-    return <>{time(value)}</>;
-  }
-  if (kind === "usd" && typeof value === "number") {
-    return <>{dollars(value)}</>;
-  }
-  if (kind === "usd_delta" && typeof value === "number") {
-    return <span className="success">+{dollars(value)}</span>;
-  }
-  if (kind === "atomic" && typeof value === "string") {
-    return <>{tokens(value, account?.token.symbol ?? "")}</>;
-  }
-  return <span className={detail.mono === true ? "mono" : undefined}>{String(value)}</span>;
-}
-
-function EventsLog({ events }: { events: WebhookEvent[] }) {
-  return (
-    <section className="subsection" aria-labelledby="events-title">
-      <h3 id="events-title">Webhook events received</h3>
-      {events.length === 0 ? (
-        <p className="muted small">None yet.</p>
-      ) : (
-        <div className="table-scroll">
-          <table className="table compact">
-            <thead>
-              <tr>
-                <th scope="col">Type</th>
-                <th scope="col">Event id</th>
-                <th scope="col">Received</th>
-                <th scope="col">Signature</th>
-              </tr>
-            </thead>
-            <tbody>
-              {events.map((event) => (
-                <tr key={event.id} data-testid="webhook-event">
-                  <td>
-                    <code>{event.type}</code>
-                  </td>
-                  <td className="mono" title={event.id}>
-                    {short(event.id)}
-                  </td>
-                  <td>{time(event.received_at)}</td>
-                  <td className="success">{event.verified ? "Verified" : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function DeveloperView({ exchanges }: { exchanges: ApiExchange[] }) {
-  return (
-    <details className="subsection dev">
-      <summary>Developer view: the product's API requests ({exchanges.length})</summary>
-      <p className="muted small">
-        Sent with the product's secret API key from the server; the browser never holds it.
-      </p>
-      {exchanges.map((exchange, index) => (
-        <details key={`${exchange.method}-${exchange.url}-${index}`} className="exchange">
-          <summary>
-            <code>
-              {exchange.method} {new URL(exchange.url).pathname}
-              {new URL(exchange.url).search}
-            </code>{" "}
-            <span className={exchange.status < 400 ? "success" : "danger"}>{exchange.status}</span>
-          </summary>
-          <pre>{JSON.stringify({ request: exchange.request, response: exchange.response }, null, 2)}</pre>
-        </details>
-      ))}
-    </details>
-  );
-}
-
-function Transactions({
+function Payments({
   account,
   selected,
   onSelect,
 }: {
   account: Account | null;
-  selected: string | null;
-  onSelect: (quote: string) => void;
+  selected: Selection | null;
+  onSelect: (selection: Selection) => void;
 }) {
   const symbol = account?.token.symbol ?? "PHA";
   return (
     <section className="card" aria-labelledby="history-title">
-      <h2 id="history-title">Transaction history</h2>
-      {account === null || account.transactions.length === 0 ? (
+      <h2 id="history-title">Payments</h2>
+      {account === null || account.payments.length === 0 ? (
         <p className="muted">No top-ups yet.</p>
       ) : (
         <div className="table-scroll">
@@ -529,42 +416,55 @@ function Transactions({
             <thead>
               <tr>
                 <th scope="col">Date</th>
-                <th scope="col">Quote</th>
-                <th scope="col">Amount</th>
-                <th scope="col">{symbol} paid</th>
+                <th scope="col">Method</th>
+                <th scope="col">{symbol}</th>
                 <th scope="col">Transaction</th>
                 <th scope="col">Status</th>
                 <th scope="col">Credited</th>
                 <th scope="col">Refunded</th>
+                <th scope="col">Nets to</th>
                 <th scope="col">
                   <span className="visually-hidden">Timeline</span>
                 </th>
               </tr>
             </thead>
             <tbody>
-              {account.transactions.map((row) => (
-                <tr key={row.quote} data-testid="transaction" aria-selected={row.quote === selected}>
-                  <td>{time(row.created)}</td>
-                  <td className="mono" title={row.quote}>
-                    {short(row.quote)}
-                  </td>
-                  <td>{dollars(row.amount)}</td>
-                  <td>{tokens(row.paid_atomic ?? row.amount_atomic, symbol)}</td>
-                  <td>
-                    {row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}
-                  </td>
-                  <td>
-                    <span className={`badge ${row.status}`}>{statusLabel(row.status)}</span>
-                  </td>
-                  <td>{row.credited === null ? "—" : dollars(row.credited)}</td>
-                  <td>{row.refunded_atomic === "0" ? "—" : tokens(row.refunded_atomic, symbol)}</td>
-                  <td>
-                    <button type="button" className="link" onClick={() => onSelect(row.quote)}>
-                      Timeline
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {account.payments.map((row) => {
+                const selection: Selection = row.id.startsWith("dep_")
+                  ? { kind: "deposit", id: row.id }
+                  : { kind: "quote", id: row.id };
+                return (
+                  <tr
+                    key={row.id}
+                    data-testid="payment"
+                    data-kind={row.kind}
+                    aria-selected={selected?.id === row.id || selected?.id === row.quote}
+                  >
+                    <td>{time(row.created)}</td>
+                    <td>{row.kind === "quote" ? "Quote" : "Deposit address"}</td>
+                    <td>{tokens(row.amount_atomic, symbol)}</td>
+                    <td>{row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}</td>
+                    <td>
+                      <span className={`badge ${row.status}`}>{statusLabel(row.status)}</span>
+                      {row.final && <span className="badge"> final</span>}
+                      {row.swept && <span className="badge"> swept</span>}
+                    </td>
+                    <td>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</td>
+                    <td>{row.amount_refunded_atomic === "0" ? "—" : tokens(row.amount_refunded_atomic, symbol)}</td>
+                    <td>{row.net === null ? "—" : dollars(row.net)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="link"
+                        onClick={() => onSelect(selection)}
+                        aria-label={`Timeline of ${row.id}`}
+                      >
+                        Timeline
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -587,8 +487,9 @@ function TrustStrip({ trust, account }: { trust: Trust | null; account: Account 
           ) : attestation.binding_verified ? (
             <p className="small">
               <span className="success">Verified</span> for a fresh nonce: the TDX quote's report
-              data binds this account's webhook key <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code>{" "}
-              that signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
+              data binds this account's webhook key{" "}
+              <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code> that
+              signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
             </p>
           ) : (
             <p className="small danger">The attestation did not bind its keys.</p>
@@ -617,7 +518,11 @@ function TrustStrip({ trust, account }: { trust: Trust | null; account: Account 
           <p className="muted small">From the TLS certificate evidence quote (at issuance).</p>
         </div>
         <div>
-          <h3>Verify it yourself</h3>
+          <h3>Non-custodial</h3>
+          <p className="small">
+            Every address pays only the merchant's treasury, fixed in the address. Phala Pay holds no
+            funds and sends no transactions: the merchant sweeps and refunds itself.
+          </p>
           <p className="small">
             <a href={trust?.verify_docs} target="_blank" rel="noreferrer">
               Attestation guide
@@ -634,48 +539,6 @@ function TrustStrip({ trust, account }: { trust: Trust | null; account: Account 
       </div>
     </section>
   );
-}
-
-function ExplorerLink({
-  account,
-  kind,
-  value,
-}: {
-  account: Account;
-  kind: "address" | "tx";
-  value: string;
-}) {
-  const explorer = account.network.explorer;
-  if (explorer === null) {
-    return <span className="mono">{short(value)}</span>;
-  }
-  return (
-    <a className="mono" href={`${explorer}/${kind}/${value}`} target="_blank" rel="noreferrer" title={value}>
-      {short(value)}
-    </a>
-  );
-}
-
-function stateLabel(state: Step["state"]): string {
-  return { complete: "Done", current: "In progress", upcoming: "Pending", failed: "Failed" }[state];
-}
-
-function describe(error: unknown): string {
-  if (error instanceof ApiError) {
-    return error.code === "rate_limited" ? "too many requests, try again in a minute" : error.code;
-  }
-  return "network error";
-}
-
-function usePolling(callback: () => void, interval: number, enabled = true): void {
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    callback();
-    const timer = setInterval(callback, interval);
-    return () => clearInterval(timer);
-  }, [callback, interval, enabled]);
 }
 
 function useTheme(): [Theme, (theme: Theme) => void] {

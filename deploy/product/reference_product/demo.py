@@ -1,21 +1,34 @@
 """The Phala Pay demo: a cloud console's "Billing → Add credits" page, served on staging.
 
 With `demo_dir` configured, the product serves the built page of deploy/product/web at
-`{public_url}/demo/` and its JSON API at `{public_url}/demo/api/`:
+`{public_url}/demo/` and its JSON API at `{public_url}/demo/api/`. It shows both ways to collect
+a payment, as the product's backend runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
-  its balance from this product's ledger, and its top-ups;
-- `POST api/quotes` `{"amount"}` (cents): creates a quote with the SDK and returns its
-  `client_secret` and the `expected_address` the SDK recomputed, for `<Checkout>`;
-- `GET api/quotes/{id}`: the payment's timeline, built only from real data: the service's quote
-  and deposit (read with the product's API key), the webhook events and ledger rows of this
-  product, and the sweep transfer on chain; with the service requests behind it;
+  its balance from this product's ledger, the ledger lines behind it, and its payments;
+- `POST api/quotes` `{"amount"}` (cents): creates a locked-price quote with the SDK, with an order
+  id in its `metadata`, and returns its `client_secret` and the `expected_address` the SDK
+  recomputed from the pins, for `<Checkout>`;
+- `POST api/deposit_address`: the visitor's single deposit address, for every token on every
+  network (`POST /v1/deposit_addresses`), recomputed by the SDK from the pins, with a fresh
+  `client_secret` for `<DepositAddress>`; `GET api/deposit_address` reads it and its payments;
+- `GET api/quotes/{id}`, `GET api/deposits/{id}`: a payment's timeline, built only from real
+  data: the service's quote, deposit, refunds, and sweeps (read with the product's API key), the
+  chain's block times, and this product's verified webhook events and ledger rows; with the
+  service requests behind it;
+- `POST api/refunds` `{"deposit", "amount_atomic", "destination_address"}`,
+  `POST api/refunds/{id}/mark_paid` `{"transaction_hash", "receipt_log_index"?}`, and
+  `POST api/refunds/{id}/cancel`: the refund flow, for the visitor's own deposits; the visitor
+  plays the merchant's finance team, which pays refunds from the treasury;
+- `GET api/sweeps`: the account's unswept balance, the `factory.flush` call and Safe Transaction
+  Builder batch the SDK builds for the merchant to sign, and the finalized sweeps;
 - `GET api/trust`: the service's attestation, with the report-data binding checked by the SDK, and
   the app id and compose hash of its TLS evidence.
 
 The browser never holds a key: the product sends every service request itself, and the developer
 view shows those requests with the API key redacted to its prefix. Balances move only through the
-`deposit.credited` webhook (reference_product.fulfillment), exactly as for any other account.
+`deposit.*` webhooks (reference_product.fulfillment), exactly as for any other account. The
+product holds no wallet key: it never sweeps or pays a refund.
 """
 
 from __future__ import annotations
@@ -39,21 +52,35 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from topup_client.models import AttestationResponse, Deposit, Payment, Quote
-from topup_sdk import ApiError, AttestationError, TopupClient
+from topup_client.models import AttestationResponse, DepositAddress, Payment
+from topup_sdk import (
+    AddressMismatchError,
+    ApiError,
+    AttestationError,
+    TopupClient,
+    flush_transactions,
+    forwarder_address,
+    safe_batch,
+)
+from topup_sdk.addresses import same_address
 
-from .config import MissingProductKeyError, ProductConfig
-from .ledger import ORDER_FLOW_CODE, ProductLedger
+from .config import EVM_ADDRESS, MissingProductKeyError, ProductConfig
+from .ledger import ORDER_FLOW_CODE, DepositView, ProductLedger
 
 LOG = logging.getLogger(__name__)
 
 ACCOUNT_COOKIE = "demo_account"
 ACCOUNT_ID = re.compile(r"demo-[0-9a-f]{24}")
 QUOTE_ID = re.compile(r"qt_[0-9a-f]{32}")
+DEPOSIT_ID = re.compile(r"dep_[0-9a-f]{32}")
+REFUND_ID = re.compile(r"re_[0-9a-f]{32}")
+TX_HASH = re.compile(r"0x[0-9a-fA-F]{64}")
+ATOMIC = re.compile(r"[1-9][0-9]{0,77}")
 PRESETS = [500, 2000, 5000]
 MIN_AMOUNT = 100
 MAX_AMOUNT = 100_000
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# The forwarders one flush call may name (topup_sdk.sweeps.MAX_SALTS_PER_FLUSH).
+MAX_SWEEP_FORWARDERS = 200
 EXPLORERS = {1: "https://etherscan.io", 11155111: "https://sepolia.etherscan.io"}
 NETWORKS = {1: "Ethereum", 11155111: "Sepolia"}
 VERIFY_DOCS = (
@@ -66,6 +93,7 @@ CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml",
 }
+# `demo_quotes.api` keeps the quote's creation request for the developer view.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS demo_quotes (
     id TEXT PRIMARY KEY,
@@ -79,7 +107,34 @@ CREATE TABLE IF NOT EXISTS demo_quotes (
     api TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS demo_quotes_account ON demo_quotes (account, created);
+CREATE TABLE IF NOT EXISTS demo_deposit_addresses (
+    account TEXT PRIMARY KEY REFERENCES teams (id),
+    id TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS demo_refunds (
+    id TEXT PRIMARY KEY,
+    account TEXT NOT NULL REFERENCES teams (id),
+    deposit TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+-- When this demo first saw a deposit `final`: the API reports the flag, not its time.
+CREATE TABLE IF NOT EXISTS demo_final_observed (
+    deposit TEXT PRIMARY KEY,
+    observed_at REAL NOT NULL
+);
 """
+# A refund's `failure_reason`, explained to the visitor.
+REFUND_FAILURES = {
+    "sender_mismatch": "The transfer was not sent from the treasury the deposit's address pays.",
+    "destination_mismatch": "The transfer did not pay the refund's destination address.",
+    "amount_mismatch": "The transfer's amount is not the refund's amount.",
+    "transfer_not_found": "The transaction has no transfer of the deposit's token.",
+    "transaction_failed": "The transaction reverted.",
+    "transfer_already_used": "Another refund already used that transfer.",
+    "transaction_dropped": "The transaction left the chain and its sender's nonce was reused.",
+    "transaction_not_found": "No provider returned the transaction within 24 hours.",
+}
 
 
 @dataclass(frozen=True)
@@ -170,6 +225,8 @@ class DemoConsole:
         if "index.html" not in self.files:
             raise ValueError(f"{root} has no built demo page (index.html)")
         service = urlsplit(config.service_url)
+        # The page reads the public quote and deposit address views from the service, and sends
+        # the visitor's own wallet requests through the wallet's provider (no network access).
         self.csp = (
             "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             f"img-src 'self' data:; connect-src 'self' {service.scheme}://{service.netloc}; "
@@ -185,9 +242,12 @@ class DemoConsole:
         self._quotes_per_account = RateLimiter(3, 60, clock)
         self._quotes_per_day = RateLimiter(20, 86_400, clock)
         self._quotes = RateLimiter(30, 60, clock)
-        self._reads = RateLimiter(90, 60, clock)
+        self._writes_per_account = RateLimiter(10, 60, clock)
+        self._writes = RateLimiter(60, 60, clock)
+        self._reads = RateLimiter(120, 60, clock)
         self._trust: tuple[float, dict[str, Any]] | None = None
-        self._sweeps: dict[str, dict[str, str]] = {}
+        self._sweeps: tuple[float, dict[str, Any]] | None = None
+        self._block_times: dict[str, tuple[int, int]] = {}
         with ledger.transaction() as db:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
@@ -212,10 +272,17 @@ class DemoConsole:
         except ApiError as error:
             # The service's documented code is public; its message and everything else are not.
             LOG.warning("demo: service answered %s %s", error.status_code, error.code)
-            status = (
-                HTTPStatus.TOO_MANY_REQUESTS if error.status_code == 429 else HTTPStatus.BAD_GATEWAY
-            )
+            if error.status_code == 429:
+                status = HTTPStatus.TOO_MANY_REQUESTS
+            elif 400 <= error.status_code < 500:
+                status = HTTPStatus.BAD_REQUEST
+            else:
+                status = HTTPStatus.BAD_GATEWAY
             return _json(status, {"code": error.code})
+        except AddressMismatchError:
+            # The SDK refused an address the product cannot derive from its pins: never shown.
+            LOG.error("demo: the service returned an address the pins do not derive")
+            return _json(HTTPStatus.BAD_GATEWAY, {"code": "address_not_derivable"})
         except (httpx.HTTPError, MissingProductKeyError):
             LOG.warning("demo: service unavailable", exc_info=True)
             return _json(HTTPStatus.SERVICE_UNAVAILABLE, {"code": "unavailable"})
@@ -240,22 +307,44 @@ class DemoConsole:
         if account is None:
             return _json(HTTPStatus.UNAUTHORIZED, {"code": "no_demo_account"})
         self._ensure_account(account)
-        if name == "quotes" and method == "POST":
+        if method == "POST":
             # A JSON body forces a CORS preflight, which this API never answers, for other sites.
             if not headers.get("content-type", "").startswith("application/json"):
                 return _json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"code": "json_required"})
-            return self._create_quote(account, body)
+            request = _json_body(body)
+            if request is None:
+                return _json(HTTPStatus.BAD_REQUEST, {"code": "json_object_required"})
+            if name == "quotes":
+                return self._create_quote(account, request)
+            if not (self._writes.allow("global") and self._writes_per_account.allow(account)):
+                return _json(HTTPStatus.TOO_MANY_REQUESTS, {"code": "rate_limited"})
+            if name == "deposit_address":
+                return self._create_deposit_address(account)
+            if name == "refunds":
+                return self._create_refund(account, request)
+            refund, _, action = name.removeprefix("refunds/").partition("/")
+            if name.startswith("refunds/") and REFUND_ID.fullmatch(refund):
+                if action == "mark_paid":
+                    return self._mark_refund_paid(account, refund, request)
+                if action == "cancel":
+                    return self._cancel_refund(account, refund)
+            return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
         if method != "GET":
             return _json(HTTPStatus.METHOD_NOT_ALLOWED, {"code": "method_not_allowed"})
         if not self._reads.allow(account):
             return _json(HTTPStatus.TOO_MANY_REQUESTS, {"code": "rate_limited"})
-        quote_id = name.removeprefix("quotes/")
-        if name.startswith("quotes/") and QUOTE_ID.fullmatch(quote_id):
-            view = self._timeline(account, quote_id)
-            if view is None:
-                return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
-            return _json(HTTPStatus.OK, view)
-        return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
+        view: dict[str, Any] | None = None
+        if name == "deposit_address":
+            view = self._deposit_address(account)
+        elif name == "sweeps":
+            view = self._sweeps_view()
+        elif name.startswith("quotes/") and QUOTE_ID.fullmatch(name.removeprefix("quotes/")):
+            view = self._quote_timeline(account, name.removeprefix("quotes/"))
+        elif name.startswith("deposits/") and DEPOSIT_ID.fullmatch(name.removeprefix("deposits/")):
+            view = self._deposit_timeline(account, name.removeprefix("deposits/"))
+        if view is None:
+            return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
+        return _json(HTTPStatus.OK, view)
 
     def _static(self, method: str, name: str) -> Response:
         if method != "GET":
@@ -288,52 +377,64 @@ class DemoConsole:
             self.ledger.add_team(account)
 
     def _account(self, account: str) -> dict[str, Any]:
-        deposits = {
-            deposit.quote: deposit
+        deposits = [
+            deposit.to_dict()
             for deposit in _take(self._service().list_deposits(client_reference_id=account), 50)
-            if isinstance(deposit.quote, str)
-        }
+        ]
+        now = self._clock()
         with self.ledger.transaction() as db:
-            balance = db.execute(
-                "SELECT COALESCE(SUM(amount_minor), 0) FROM credit_transactions WHERE team_id = ?",
-                (account,),
-            ).fetchone()[0]
-            rows = db.execute(
+            quotes = db.execute(
                 "SELECT id, amount, amount_atomic, expires_at, created FROM demo_quotes "
                 "WHERE account = ? ORDER BY created DESC LIMIT 20",
                 (account,),
             ).fetchall()
-            credits = {
-                quote_id: self._credit(db, deposits[quote_id].id)
-                for quote_id, *_ in rows
-                if quote_id in deposits
+            address = db.execute(
+                "SELECT id FROM demo_deposit_addresses WHERE account = ?", (account,)
+            ).fetchone()
+            ledgers = {deposit["id"]: _ledger(db, deposit["id"]) for deposit in deposits}
+            lines = _ledger_lines(db, account)
+        paid_quotes = {d["quote"] for d in deposits if isinstance(d.get("quote"), str)}
+        payments = [
+            {
+                "kind": "quote" if isinstance(deposit.get("quote"), str) else "address",
+                "id": deposit["id"],
+                "quote": deposit.get("quote") if isinstance(deposit.get("quote"), str) else None,
+                "created": deposit["created"],
+                "amount": deposit.get("amount"),
+                "amount_atomic": deposit["amount_atomic"],
+                "status": deposit["status"],
+                "final": deposit["final"],
+                "swept": deposit["swept"],
+                "tx_hash": deposit["tx_hash"],
+                "amount_refunded_atomic": deposit["amount_refunded_atomic"],
+                "net": ledgers[deposit["id"]]["net"],
             }
-        now = self._clock()
-        transactions = []
-        for quote_id, amount, amount_atomic, expires_at, created in rows:
-            deposit = deposits.get(quote_id)
-            credit = credits.get(quote_id)
-            if deposit is not None:
-                status = _stage(deposit)
-            else:
-                status = "expired" if now >= expires_at else "awaiting_payment"
-            transactions.append(
+            for deposit in deposits
+        ]
+        for quote_id, amount, amount_atomic, expires_at, created in quotes:
+            if quote_id in paid_quotes:
+                continue
+            payments.append(
                 {
+                    "kind": "quote",
+                    "id": quote_id,
                     "quote": quote_id,
                     "created": created,
                     "amount": amount,
                     "amount_atomic": amount_atomic,
-                    "status": status,
-                    "deposit": None if deposit is None else deposit.id,
-                    "tx_hash": None if deposit is None else deposit.tx_hash,
-                    "paid_atomic": None if deposit is None else deposit.amount_atomic,
-                    "credited": None if credit is None else credit["amount"],
-                    "refunded_atomic": "0" if deposit is None else deposit.amount_refunded_atomic,
+                    "status": "expired" if now >= expires_at else "awaiting_payment",
+                    "final": False,
+                    "swept": False,
+                    "tx_hash": None,
+                    "amount_refunded_atomic": "0",
+                    "net": None,
                 }
             )
+        payments.sort(key=lambda payment: payment["created"], reverse=True)
         return {
             "account_id": account,
-            "balance": int(balance),
+            "balance": self.ledger.balance_for(account),
+            "ledger": lines,
             "presets": PRESETS,
             "min_amount": MIN_AMOUNT,
             "max_amount": MAX_AMOUNT,
@@ -345,17 +446,16 @@ class DemoConsole:
                 "testnet": self.config.chain_id != 1,
             },
             "token": {"symbol": self.config.token_symbol, "address": self.config.token},
-            "transactions": transactions,
+            "treasury": self.config.treasury,
+            "factory": self.config.factory,
+            "deposit_address": None if address is None else address[0],
+            "payments": payments,
         }
 
     # Quotes -------------------------------------------------------------------------------------
 
-    def _create_quote(self, account: str, body: bytes) -> Response:
-        try:
-            request = json.loads(body)
-            amount = request.get("amount") if isinstance(request, dict) else None
-        except ValueError:
-            amount = None
+    def _create_quote(self, account: str, request: dict[str, Any]) -> Response:
+        amount = request.get("amount")
         if type(amount) is not int or not MIN_AMOUNT <= amount <= MAX_AMOUNT:
             return _json(HTTPStatus.BAD_REQUEST, {"code": "amount_invalid"})
         if not (
@@ -364,6 +464,8 @@ class DemoConsole:
             and self._quotes_per_day.allow(account)
         ):
             return _json(HTTPStatus.TOO_MANY_REQUESTS, {"code": "rate_limited"})
+        # The console's order id travels in `metadata`, to the deposit and its webhooks.
+        order_id = f"order_{secrets.token_hex(6)}"
         with self.recorder.capture() as calls:
             quote = self._service().create_quote(
                 account,
@@ -371,6 +473,7 @@ class DemoConsole:
                 chain_id=self.config.chain_id,
                 asset=self.config.token_symbol.lower(),
                 idempotency_key=str(uuid.uuid4()),
+                metadata={"order_id": order_id, "workspace": account},
             )
         if not isinstance(quote.client_secret, str):
             return _json(HTTPStatus.BAD_GATEWAY, {"code": "unexpected_response"})
@@ -397,13 +500,15 @@ class DemoConsole:
             {
                 "quote": quote.id,
                 "client_secret": quote.client_secret,
-                # Recomputed from the pinned forwarder by the client; `<Checkout>` shows only it.
+                # Recomputed from the pins by the SDK (it raises otherwise); `<Checkout>` shows
+                # the quote only when the service's address is this one.
                 "expected_address": quote.address,
+                "order_id": order_id,
                 "api": calls,
             },
         )
 
-    def _timeline(self, account: str, quote_id: str) -> dict[str, Any] | None:
+    def _quote_timeline(self, account: str, quote_id: str) -> dict[str, Any] | None:
         with self.ledger.transaction() as db:
             row = db.execute(
                 "SELECT api FROM demo_quotes WHERE id = ? AND account = ?", (quote_id, account)
@@ -413,29 +518,147 @@ class DemoConsole:
         with self.recorder.capture() as calls:
             quote = self._service().get_quote(quote_id)
             deposits = list(_take(self._service().list_deposits(quote=quote_id), 10))
-        deposit = deposits[0] if deposits else None
-        events = self._events(quote, deposit)
+            payment = quote.payment.to_dict() if isinstance(quote.payment, Payment) else None
+            view = self._payment_view(
+                deposits[0].to_dict() if deposits else None, payment, quote.to_dict()
+            )
+        view["api"] = [*json.loads(row[0]), *calls]
+        return view
+
+    # Deposit addresses --------------------------------------------------------------------------
+
+    def _create_deposit_address(self, account: str) -> Response:
+        with self.recorder.capture() as calls:
+            # Returns the customer's active address, issuing it once; the SDK recomputes every
+            # network's address from the pins and raises on a mismatch.
+            address = self._service().create_deposit_address(
+                account, metadata={"workspace": account}
+            )
+        if not isinstance(address.client_secret, str):
+            return _json(HTTPStatus.BAD_GATEWAY, {"code": "unexpected_response"})
         with self.ledger.transaction() as db:
-            credit = None if deposit is None else self._credit(db, deposit.id)
-        sweep = self._sweep(deposit) if deposit is not None and deposit.swept else None
+            db.execute(
+                "INSERT INTO demo_deposit_addresses (account, id, created) VALUES (?, ?, ?) "
+                "ON CONFLICT (account) DO UPDATE SET id = excluded.id",
+                (account, address.id, address.created),
+            )
+        for network in address.networks:
+            self.ledger.record_quote_address(network.address, account, address.id)
+        return _json(
+            HTTPStatus.OK,
+            {
+                "deposit_address": _deposit_address_view(address),
+                "client_secret": address.client_secret,
+                "verified": True,
+                "api": calls,
+            },
+        )
+
+    def _deposit_address(self, account: str) -> dict[str, Any] | None:
+        with self.recorder.capture() as calls:
+            address = self._account_address(account)
+        if address is None:
+            return None
+        return {"deposit_address": _deposit_address_view(address), "verified": True, "api": calls}
+
+    def _account_address(self, account: str) -> DepositAddress | None:
+        """The visitor's deposit address, read with the SDK, which recomputes it from the pins."""
+        with self.ledger.transaction() as db:
+            row = db.execute(
+                "SELECT id FROM demo_deposit_addresses WHERE account = ?", (account,)
+            ).fetchone()
+        return None if row is None else self._service().get_deposit_address(row[0])
+
+    def _deposit_timeline(self, account: str, deposit_id: str) -> dict[str, Any] | None:
+        """A deposit's timeline; before the service records it, the payment its address saw."""
+        with self.recorder.capture() as calls:
+            try:
+                deposit: dict[str, Any] | None = self._service().get_deposit(deposit_id).to_dict()
+            except ApiError as error:
+                if error.status_code != 404:
+                    raise
+                deposit = None
+            payment = None
+            if deposit is None:
+                address = self._account_address(account)
+                payments = [] if address is None else address.to_dict()["payments"]
+                payment = next((p for p in payments if p.get("deposit") == deposit_id), None)
+                if payment is None:
+                    return None
+            elif deposit["client_reference_id"] != account:
+                return None
+            quote = None
+            if deposit is not None and isinstance(deposit.get("quote"), str):
+                quote = self._service().get_quote(deposit["quote"]).to_dict()
+            view = self._payment_view(deposit, payment, quote)
+        view["api"] = calls
+        return view
+
+    # Payments -----------------------------------------------------------------------------------
+
+    def _payment_view(
+        self,
+        deposit: dict[str, Any] | None,
+        payment: dict[str, Any] | None,
+        quote: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """A payment's timeline, refunds, ledger, and events; every value comes from the service,
+        the chain, or this product's ledger."""
+        refunds: list[dict[str, Any]] = []
+        sweep = None
+        if deposit is not None:
+            refunds = [
+                refund.to_dict()
+                for refund in _take(self._service().list_refunds(deposit=deposit["id"]), 20)
+            ]
+            if deposit["swept"]:
+                sweep = self._sweep_of(deposit)
+        tx_hash = deposit["tx_hash"] if deposit else (payment["tx_hash"] if payment else None)
+        sent = None if tx_hash is None else self._block_time(tx_hash)
+        keys = {deposit["id"]} if deposit else ({payment["deposit"]} if payment else set())
+        keys |= {refund["id"] for refund in refunds}
+        if quote is not None:
+            keys.add(quote["id"])
+        events = self._events(keys)
+        with self.ledger.transaction() as db:
+            ledger = None if deposit is None else _ledger(db, deposit["id"])
+            observed_final = None if deposit is None else self._observed_final(db, deposit)
         return {
-            "quote": _quote_view(quote),
-            "deposit": None if deposit is None else deposit.to_dict(),
+            "kind": "quote" if quote is not None else "address",
+            "quote": None if quote is None else _quote_view(quote),
+            "deposit": deposit,
+            "payment": payment,
+            "sent": sent,
             "steps": _steps(
                 quote,
                 deposit=deposit,
+                payment=payment,
                 events=events,
-                credit=credit,
+                ledger=ledger,
+                sent=sent,
+                observed_final=observed_final,
                 sweep=sweep,
                 now=self._clock(),
             ),
+            "refunds": [_refund_view(refund, deposit) for refund in refunds],
+            "ledger": None if deposit is None else _ledger_view(deposit, ledger),
             "events": events,
-            "api": [*json.loads(row[0]), *calls],
         }
 
-    def _events(self, quote: Quote, deposit: Deposit | None) -> list[dict[str, Any]]:
-        """This product's verified webhook events about the quote or its deposit."""
-        keys = {quote.id} if deposit is None else {quote.id, deposit.id}
+    def _observed_final(self, db: Any, deposit: dict[str, Any]) -> float | None:
+        if not deposit["final"]:
+            return None
+        db.execute(
+            "INSERT OR IGNORE INTO demo_final_observed (deposit, observed_at) VALUES (?, ?)",
+            (deposit["id"], self._clock()),
+        )
+        row = db.execute(
+            "SELECT observed_at FROM demo_final_observed WHERE deposit = ?", (deposit["id"],)
+        ).fetchone()
+        return float(row[0])
+
+    def _events(self, keys: set[str]) -> list[dict[str, Any]]:
+        """This product's verified webhook events about the quote, the deposit, or its refunds."""
         with self.ledger.transaction() as db:
             rows = db.execute(
                 "SELECT id, type, data, received_at FROM webhook_events ORDER BY received_at"
@@ -457,61 +680,178 @@ class DemoConsole:
             )
         return events
 
-    def _credit(self, db: Any, deposit_id: str) -> dict[str, Any] | None:
-        """The ledger's order and credit for a deposit (its order key is the deposit id)."""
-        row = db.execute(
-            "SELECT o.provider_order_id, o.status, o.reason, c.id, c.amount_minor, c.created_at "
-            "FROM orders o LEFT JOIN credit_transactions c ON c.order_id = o.id "
-            "WHERE o.order_flow_code = ? AND o.provider_order_id = ?",
-            (ORDER_FLOW_CODE, deposit_id),
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "order_key": row[0],
-            "status": row[1],
-            "reason": row[2],
-            "credit_transaction": row[3],
-            "amount": row[4],
-            "at": row[5],
-        }
+    def _block_time(self, tx_hash: str) -> dict[str, Any] | None:
+        """The block and time of the transaction's block, from the product's RPC."""
+        cached = self._block_times.get(tx_hash)
+        if cached is None:
+            try:
+                receipt = self._rpc("eth_getTransactionReceipt", tx_hash)
+                if not isinstance(receipt, dict):
+                    return None
+                block = self._rpc("eth_getBlockByNumber", receipt["blockNumber"], False)
+                cached = (int(receipt["blockNumber"], 16), int(block["timestamp"], 16))
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                LOG.warning("demo: block time lookup failed", exc_info=True)
+                return None
+            with self._lock:
+                self._block_times[tx_hash] = cached
+        return {"tx_hash": tx_hash, "block_number": cached[0], "at": cached[1]}
 
-    def _sweep(self, deposit: Deposit) -> dict[str, str] | None:
-        """The on-chain transfer that swept the deposit's address: the first token transfer out of
-        it after the deposit (a forwarder can pay only the treasury)."""
-        cached = self._sweeps.get(deposit.id)
-        if cached is not None:
-            return cached
-        try:
-            response = self._http.post(
-                self.config.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "eth_getLogs",
-                    "params": [
-                        {
-                            "address": deposit.asset_contract,
-                            "fromBlock": hex(deposit.block_number),
-                            "toBlock": "latest",
-                            "topics": [TRANSFER_TOPIC, _topic(deposit.address)],
-                        }
-                    ],
-                },
+    def _rpc(self, method: str, *params: Any) -> Any:
+        body = self._http.post(
+            self.config.rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
+        ).json()
+        return body["result"]
+
+    def _sweep_of(self, deposit: dict[str, Any]) -> dict[str, Any] | None:
+        """The finalized sweep (`GET /v1/sweeps`) that moved the deposit: the first of its
+        forwarder after its block."""
+        sweeps = self._service().list_sweeps(
+            chain_id=deposit["chain_id"], token=deposit["asset_contract"]
+        )
+        found = None
+        for sweep in _take(sweeps, 100):
+            if same_address(sweep.address, deposit["address"]) and (
+                sweep.block_number >= deposit["block_number"]
+            ):
+                found = sweep.to_dict()
+        return found
+
+    # Refunds ------------------------------------------------------------------------------------
+
+    def _create_refund(self, account: str, request: dict[str, Any]) -> Response:
+        deposit_id = request.get("deposit")
+        destination = request.get("destination_address")
+        amount = request.get("amount_atomic")
+        if not isinstance(deposit_id, str) or not DEPOSIT_ID.fullmatch(deposit_id):
+            return _json(HTTPStatus.BAD_REQUEST, {"code": "deposit_invalid"})
+        if not isinstance(destination, str) or not EVM_ADDRESS.fullmatch(destination):
+            return _json(HTTPStatus.BAD_REQUEST, {"code": "destination_address_invalid"})
+        if not isinstance(amount, str) or not ATOMIC.fullmatch(amount):
+            return _json(HTTPStatus.BAD_REQUEST, {"code": "amount_atomic_invalid"})
+        with self.recorder.capture() as calls:
+            deposit = self._service().get_deposit(deposit_id)
+            if deposit.client_reference_id != account:
+                return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
+            refund = self._service().create_refund(
+                deposit_id,
+                destination,
+                int(amount),
+                idempotency_key=str(uuid.uuid4()),
+                metadata={"workspace": account},
             )
-            logs = response.json().get("result")
-        except (httpx.HTTPError, ValueError):
-            LOG.warning("demo: sweep lookup failed", exc_info=True)
-            return None
-        if not isinstance(logs, list):
-            return None
-        for log in logs:
-            position = (int(log["blockNumber"], 16), int(log["logIndex"], 16))
-            if position > (deposit.block_number, deposit.log_index):
-                sweep = {"tx_hash": log["transactionHash"], "to": "0x" + log["topics"][2][-40:]}
-                self._sweeps[deposit.id] = sweep
-                return sweep
-        return None
+        with self.ledger.transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO demo_refunds (id, account, deposit, created) "
+                "VALUES (?, ?, ?, ?)",
+                (refund.id, account, deposit_id, refund.created),
+            )
+        body = _refund_view(refund.to_dict(), deposit.to_dict())
+        return _json(HTTPStatus.OK, {"refund": body, "api": calls})
+
+    def _mark_refund_paid(self, account: str, refund_id: str, request: dict[str, Any]) -> Response:
+        tx_hash = request.get("transaction_hash")
+        index = request.get("receipt_log_index")
+        if not isinstance(tx_hash, str) or not TX_HASH.fullmatch(tx_hash):
+            return _json(HTTPStatus.BAD_REQUEST, {"code": "transaction_hash_invalid"})
+        if index is not None and (type(index) is not int or not 0 <= index < 10_000):
+            return _json(HTTPStatus.BAD_REQUEST, {"code": "receipt_log_index_invalid"})
+        if not self._owns_refund(account, refund_id):
+            return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
+        with self.recorder.capture() as calls:
+            refund = self._service().mark_refund_paid(
+                refund_id, tx_hash.lower(), receipt_log_index=index
+            )
+        return _json(HTTPStatus.OK, {"refund": _refund_view(refund.to_dict()), "api": calls})
+
+    def _cancel_refund(self, account: str, refund_id: str) -> Response:
+        if not self._owns_refund(account, refund_id):
+            return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
+        with self.recorder.capture() as calls:
+            refund = self._service().cancel_refund(refund_id)
+        return _json(HTTPStatus.OK, {"refund": _refund_view(refund.to_dict()), "api": calls})
+
+    def _owns_refund(self, account: str, refund_id: str) -> bool:
+        with self.ledger.transaction() as db:
+            row = db.execute(
+                "SELECT 1 FROM demo_refunds WHERE id = ? AND account = ?", (refund_id, account)
+            ).fetchone()
+        return row is not None
+
+    # Sweeps -------------------------------------------------------------------------------------
+
+    def _sweeps_view(self) -> dict[str, Any]:
+        """The account's unswept balance, the flush the merchant signs, and the finalized sweeps;
+        the same for every visitor, cached for 10 seconds."""
+        now = self._clock()
+        with self._lock:
+            if self._sweeps is not None and now - self._sweeps[0] < 10:
+                return self._sweeps[1]
+        chain_id, token, treasury = self.config.chain_id, self.config.token, self.config.treasury
+        with self.recorder.capture() as calls:
+            balance = self._service().get_balance()
+            forwarders = list(
+                _take(
+                    self._service().list_forwarders(chain_id=chain_id, sweepable=token),
+                    MAX_SWEEP_FORWARDERS,
+                )
+            )
+            sweeps = [
+                sweep.to_dict()
+                for sweep in _take(self._service().list_sweeps(chain_id=chain_id, token=token), 10)
+            ]
+        # Flush only forwarders the pins derive: the service's word decides nothing here.
+        derived = [
+            forwarder
+            for forwarder in forwarders
+            if same_address(forwarder.factory, self.config.factory)
+            and same_address(forwarder.treasury, treasury)
+            and same_address(
+                forwarder_address(
+                    self.config.factory,
+                    self.config.implementation,
+                    treasury,
+                    bytes.fromhex(forwarder.salt.removeprefix("0x")),
+                ),
+                forwarder.address,
+            )
+        ]
+        calls_to_sign = flush_transactions(derived, token) if derived else []
+        unswept = next(
+            (
+                amount.to_dict()
+                for amount in balance.unswept
+                if amount.chain_id == chain_id and same_address(amount.token, token)
+            ),
+            {"amount_atomic": "0", "final_amount_atomic": "0"},
+        )
+        view = {
+            "chain_id": chain_id,
+            "token": token,
+            "treasury": treasury,
+            "factory": self.config.factory,
+            "unswept_atomic": unswept["amount_atomic"],
+            "final_unswept_atomic": unswept["final_amount_atomic"],
+            "sweepable_forwarders": len(derived),
+            "refused_forwarders": len(forwarders) - len(derived),
+            "flush": calls_to_sign,
+            "safe_batch": None
+            if not calls_to_sign
+            else safe_batch(
+                chain_id,
+                treasury,
+                calls_to_sign,
+                name="Phala Pay sweep",
+                description=f"Sweep {self.config.token_symbol} to the treasury",
+                created_at_ms=int(now * 1000),
+            ),
+            "sweeps": sweeps,
+            "api": calls,
+        }
+        with self._lock:
+            self._sweeps = (now, view)
+        return view
 
     # Trust --------------------------------------------------------------------------------------
 
@@ -566,7 +906,7 @@ class DemoConsole:
                 self._client = TopupClient(
                     self.config.service_url,
                     self.config.api_key(),
-                    account=self.config.product_slug,
+                    account=self.config.account,
                     forwarder=(self.config.factory, self.config.implementation),
                     treasuries={self.config.chain_id: self.config.treasury},
                     transport=self.recorder,
@@ -583,150 +923,315 @@ class DemoConsole:
 # Views ------------------------------------------------------------------------------------------
 
 
-def _stage(deposit: Deposit) -> str:
-    """The deposit's `status`, or `swept` once a sweep after it moved its forwarder's balance."""
-    return "swept" if deposit.swept else deposit.status
-
-
 def _steps(
-    quote: Quote,
+    quote: dict[str, Any] | None,
     *,
-    deposit: Deposit | None,
+    deposit: dict[str, Any] | None,
+    payment: dict[str, Any] | None,
     events: list[dict[str, Any]],
-    credit: dict[str, Any] | None,
-    sweep: dict[str, str] | None,
+    ledger: dict[str, Any] | None,
+    sent: dict[str, Any] | None,
+    observed_final: float | None,
+    sweep: dict[str, Any] | None,
     now: float,
 ) -> list[dict[str, Any]]:
-    """The payment's timeline; every value comes from the service, the ledger, or the chain."""
-    payment = quote.payment if isinstance(quote.payment, Payment) else None
-    status = None if deposit is None else _stage(deposit)
-    final = status in ("pending", "credited", "swept")
-    credited = status in ("credited", "swept")
-    delivered = next((e for e in events if e["type"] == "deposit.credited"), None)
-    expired = quote.status in ("expired", "canceled") or (
-        quote.status == "open" and now >= quote.expires_at
+    """The payment's timeline; every value and time comes from the service, the chain, or this
+    product's ledger. `at` is Unix seconds, or `None` where no source reports a time."""
+    status = None if deposit is None else deposit["status"]
+    credited = (
+        deposit is not None
+        and status in ("credited", "reversed")
+        and isinstance(deposit.get("valued_at"), int)
     )
+    delivered = next((e for e in events if e["type"] == "deposit.credited"), None)
+    reversal = next((e for e in events if e["type"] == "deposit.reversed"), None)
+    expired = quote is not None and (
+        quote["status"] in ("expired", "canceled")
+        or (quote["status"] == "open" and now >= quote["expires_at"])
+    )
+    steps: list[dict[str, Any]] = []
 
-    def step(
-        key: str, state: str, at: float | None, details: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        return {"key": key, "state": state, "at": at, "details": details}
+    def step(key: str, state: str, at: float | None, details: list[dict[str, Any]]) -> None:
+        steps.append({"key": key, "state": state, "at": at, "details": details})
 
-    steps = [
+    if quote is not None:
         step(
             "quote_created",
             "complete",
-            quote.created,
+            quote["created"],
             [
-                {"label": "Quote", "value": quote.id, "mono": True},
+                {"label": "Quote", "value": quote["id"], "mono": True},
                 {
                     "label": "Locked price",
-                    "value": f"{quote.exchange_rate} USD per {quote.asset.upper()}",
+                    "value": f"{quote['exchange_rate']} USD per {quote['asset'].upper()}",
                 },
-                {"label": "Amount to pay", "value": quote.amount_atomic, "kind": "atomic"},
-                {"label": "Forwarder address", "value": quote.address, "kind": "address"},
-                {"label": "Expires", "value": quote.expires_at, "kind": "time"},
+                {"label": "Exact amount", "value": quote["amount_atomic"], "kind": "atomic"},
+                {
+                    "label": "Address (recomputed by the SDK)",
+                    "value": quote["address"],
+                    "kind": "address",
+                },
+                {"label": "Expires", "value": quote["expires_at"], "kind": "time"},
+                {"label": "Metadata", "value": _metadata_text(quote.get("metadata"))},
             ],
         )
-    ]
-    tx_hash = deposit.tx_hash if deposit is not None else (payment.tx_hash if payment else None)
+
+    # Sent: the transaction's block on chain.
+    if sent is not None:
+        step(
+            "sent",
+            "complete",
+            sent["at"],
+            [
+                {"label": "Transaction", "value": sent["tx_hash"], "kind": "tx"},
+                {"label": "Block", "value": sent["block_number"]},
+            ],
+        )
+    else:
+        step("sent", "failed" if expired else "current", None, [])
+
+    # Received: the service saw the transfer (a `seen` payment), then recorded it.
     if deposit is not None:
-        details: list[dict[str, Any]] = [
-            {"label": "Transaction", "value": deposit.tx_hash, "kind": "tx"},
-            {"label": "From", "value": deposit.from_address, "kind": "address"},
-        ]
-        steps.append(step("transfer_seen", "complete", None, details))
+        step(
+            "received",
+            "complete",
+            deposit["created"],
+            [
+                {"label": "Deposit", "value": deposit["id"], "mono": True},
+                {"label": "From", "value": deposit["from_address"], "kind": "address"},
+                {"label": "Amount", "value": deposit["amount_atomic"], "kind": "atomic"},
+            ],
+        )
     elif payment is not None:
-        details = [{"label": "Transaction", "value": payment.tx_hash, "kind": "tx"}]
-        if isinstance(payment.confirmations, int):
-            details.append({"label": "Confirmations", "value": payment.confirmations})
-        details.append(
-            {"label": "Matches the quote", "value": "yes" if payment.matches_quote else "no"}
-        )
-        steps.append(step("transfer_seen", "complete", None, details))
-    else:
-        steps.append(step("transfer_seen", "failed" if expired else "current", None, []))
-
-    if final and deposit is not None:
-        steps.append(
-            step(
-                "finalized",
-                "complete",
-                deposit.created,
-                [
-                    {"label": "Block", "value": deposit.block_number},
-                    {"label": "Log index", "value": deposit.log_index},
-                    {"label": "Deposit", "value": deposit.id, "mono": True},
-                ],
+        details: list[dict[str, Any]] = [
+            {"label": "Amount", "value": payment["amount_atomic"], "kind": "atomic"},
+        ]
+        if isinstance(payment.get("confirmations"), int):
+            details.append({"label": "Confirmations", "value": payment["confirmations"]})
+        if isinstance(payment.get("matches_quote"), bool):
+            details.append(
+                {"label": "Matches the quote", "value": "yes" if payment["matches_quote"] else "no"}
             )
-        )
+        step("received", "complete", None, details)
     else:
-        waiting = tx_hash is not None and status != "rejected"
-        steps.append(step("finalized", "current" if waiting else "upcoming", None, []))
+        step("received", "upcoming", None, [])
 
+    # Credited: valued and screened at the route's confirmation.
     if status == "rejected" and deposit is not None:
-        reason = deposit.rejection_reason if isinstance(deposit.rejection_reason, str) else ""
-        steps.append(step("credited", "failed", None, [{"label": "Reason", "value": reason}]))
+        reason = deposit.get("rejection_reason") or ""
+        step("credited", "failed", None, [{"label": "Reason", "value": reason}])
     elif credited and deposit is not None:
-        amount = deposit.amount if isinstance(deposit.amount, int) else None
-        steps.append(
-            step(
-                "credited",
-                "complete",
-                deposit.valued_at if isinstance(deposit.valued_at, int) else None,
-                [
-                    {"label": "Credit", "value": amount, "kind": "usd"},
-                    {"label": "Priced at", "value": str(deposit.price_source)},
-                    {"label": "Rate", "value": str(deposit.exchange_rate)},
-                ],
-            )
+        step(
+            "credited",
+            "complete",
+            deposit["valued_at"],
+            [
+                {"label": "Credit", "value": deposit.get("amount"), "kind": "usd"},
+                {
+                    "label": "Priced at",
+                    "value": "the quote's locked price"
+                    if deposit.get("price_source") == "quote"
+                    else "spot (market rate on arrival)",
+                },
+                {"label": "Rate", "value": f"{deposit.get('exchange_rate')} USD"},
+            ],
         )
     else:
-        steps.append(step("credited", "current" if final else "upcoming", None, []))
+        step("credited", "current" if payment or deposit else "upcoming", None, [])
 
+    # The signed webhook, as this product's handler received and applied it.
     if delivered is not None:
+        obj = delivered["data"].get("object") or {}
         details = [
             {"label": "Event", "value": delivered["id"], "mono": True},
             {"label": "Signature", "value": "verified (Standard Webhooks v1a, pinned key)"},
+            {"label": "data.object.metadata", "value": _metadata_text(obj.get("metadata"))},
         ]
-        if credit is not None:
+        if ledger is not None and ledger["credit"] is not None:
             details += [
-                {"label": "Ledger order", "value": f"{credit['status']} ({credit['order_key']})"},
-                {
-                    "label": "Credit transaction",
-                    "value": credit["credit_transaction"],
-                    "mono": True,
-                },
-                {"label": "Balance", "value": credit["amount"], "kind": "usd_delta"},
+                {"label": "Ledger order", "value": f"{ledger['status']} ({ledger['order_key']})"},
+                {"label": "Credit", "value": ledger["credit"], "kind": "usd_delta"},
             ]
-        steps.append(step("webhook_received", "complete", delivered["received_at"], details))
+        step("webhook_received", "complete", delivered["received_at"], details)
     else:
-        steps.append(step("webhook_received", "current" if credited else "upcoming", None, []))
+        step("webhook_received", "current" if credited else "upcoming", None, [])
 
-    if status == "swept":
+    # Final: the deposit's block is final on both providers; it can no longer be reversed.
+    if deposit is not None and deposit["final"]:
+        step(
+            "final",
+            "complete",
+            observed_final,
+            [{"label": "Block", "value": deposit["block_number"]}],
+        )
+    elif status != "reversed":
+        step("final", "current" if deposit is not None else "upcoming", None, [])
+
+    if status == "reversed" and deposit is not None:
+        step(
+            "reversed",
+            "failed",
+            None if reversal is None else reversal["received_at"],
+            [
+                {"label": "Taken back", "value": deposit["amount_reversed"], "kind": "usd"},
+                {"label": "Event", "value": "deposit.reversed" if reversal else "not received"},
+            ],
+        )
+
+    # Swept: the merchant's own flush, indexed by the service once finalized.
+    if deposit is not None and deposit["swept"]:
         details = []
         if sweep is not None:
             details = [
-                {"label": "Sweep transaction", "value": sweep["tx_hash"], "kind": "tx"},
-                {"label": "Treasury", "value": sweep["to"], "kind": "address"},
+                {"label": "Flush transaction", "value": sweep["tx_hash"], "kind": "tx"},
+                {"label": "Treasury", "value": sweep["treasury"], "kind": "address"},
+                {"label": "Moved", "value": sweep["amount_atomic"], "kind": "atomic"},
             ]
-        steps.append(step("swept", "complete", None, details))
-    else:
-        steps.append(step("swept", "current" if credited else "upcoming", None, []))
+        step("swept", "complete", None if sweep is None else sweep["created"], details)
+    elif status != "reversed":
+        waiting = deposit is not None and deposit["final"]
+        step("swept", "current" if waiting else "upcoming", None, [])
     return steps
 
 
-def _quote_view(quote: Quote) -> dict[str, Any]:
+def _quote_view(quote: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": quote.id,
-        "status": quote.status,
-        "amount": quote.amount,
-        "amount_atomic": quote.amount_atomic,
-        "exchange_rate": quote.exchange_rate,
-        "address": quote.address,
-        "expires_at": quote.expires_at,
-        "created": quote.created,
+        key: quote.get(key)
+        for key in (
+            "id",
+            "status",
+            "amount",
+            "amount_atomic",
+            "exchange_rate",
+            "address",
+            "expires_at",
+            "created",
+            "metadata",
+        )
     }
+
+
+def _deposit_address_view(address: DepositAddress) -> dict[str, Any]:
+    body = address.to_dict()
+    return {
+        "id": address.id,
+        "client_reference_id": address.client_reference_id,
+        "address": body.get("address"),
+        "version": address.version,
+        "status": address.status,
+        "metadata": body.get("metadata", {}),
+        "networks": body["networks"],
+        "payments": body["payments"],
+        "created": address.created,
+    }
+
+
+def _refund_view(refund: dict[str, Any], deposit: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The refund, with the exact transfer that pays it while it awaits one."""
+    view = dict(refund)
+    reason = refund.get("failure_reason")
+    view["failure_explanation"] = None if reason is None else REFUND_FAILURES.get(reason, reason)
+    token = None
+    if deposit is not None:
+        token = deposit["asset_contract"]
+    elif isinstance(refund.get("deposit"), dict):
+        token = refund["deposit"]["asset_contract"]
+    view["transfer"] = None
+    if refund["status"] == "pending" and refund.get("transaction_hash") is None and token:
+        destination = refund["destination_address"]
+        amount = int(refund["amount_atomic"])
+        view["transfer"] = {
+            "from": refund["treasury"],
+            "token": token,
+            "to": destination,
+            "amount_atomic": refund["amount_atomic"],
+            # ERC-20 transfer(to, amount), sent from the treasury to the token contract.
+            "data": "0xa9059cbb"
+            + destination.lower().removeprefix("0x").rjust(64, "0")
+            + format(amount, "x").rjust(64, "0"),
+        }
+    return view
+
+
+def _ledger(db: Any, deposit_id: str) -> dict[str, Any]:
+    """The ledger's order for a deposit (its order key is the deposit id), its credit, and what it
+    nets to after refunds and reversals."""
+    row = db.execute(
+        "SELECT o.id, o.provider_order_id, o.status, o.reason, c.id, c.amount_minor "
+        "FROM orders o LEFT JOIN credit_transactions c ON c.order_id = o.id "
+        "WHERE o.order_flow_code = ? AND o.provider_order_id = ?",
+        (ORDER_FLOW_CODE, deposit_id),
+    ).fetchone()
+    snapshot = db.execute(
+        "SELECT status, amount_refunded_minor, amount_reversed_minor FROM deposit_snapshots "
+        "WHERE provider_order_id = ?",
+        (deposit_id,),
+    ).fetchone()
+    view: dict[str, Any] = {
+        "order_key": deposit_id,
+        "status": None,
+        "reason": None,
+        "credit_transaction": None,
+        "credit": None,
+        "net": None,
+        "adjustments": [],
+        "snapshot": None
+        if snapshot is None
+        else dict(zip(("status", "amount_refunded", "amount_reversed"), snapshot, strict=True)),
+    }
+    if row is None:
+        return view
+    order_id = row[0]
+    view.update(status=row[2], reason=row[3], credit_transaction=row[4], credit=row[5])
+    if row[5] is not None:
+        view["net"] = ProductLedger.order_amounts(db, order_id)[1]
+    view["adjustments"] = [
+        {"amount": amount, "reason": reason, "at": at}
+        for amount, reason, at in db.execute(
+            "SELECT amount_minor, reason, created_at FROM credit_adjustments WHERE order_id = ? "
+            "ORDER BY created_at",
+            (order_id,),
+        ).fetchall()
+    ]
+    return view
+
+
+def _ledger_view(deposit: dict[str, Any], ledger: dict[str, Any] | None) -> dict[str, Any]:
+    """The snapshot rule on the service's deposit, beside what this product's ledger applied."""
+    amount = deposit.get("amount") or 0
+    rule = DepositView(
+        deposit["status"], deposit["amount_refunded"], deposit["amount_reversed"]
+    ).contribution(amount)
+    return {
+        "status": deposit["status"],
+        "amount": deposit.get("amount"),
+        "amount_refunded": deposit["amount_refunded"],
+        "amount_reversed": deposit["amount_reversed"],
+        "nets_to": rule,
+        "product": ledger,
+    }
+
+
+def _ledger_lines(db: Any, account: str) -> list[dict[str, Any]]:
+    """The workspace's balance, line by line: credits and their claw-backs, newest first."""
+    rows = db.execute(
+        "SELECT o.provider_order_id, c.amount_minor, 'deposit.credited', c.created_at "
+        "FROM credit_transactions c JOIN orders o ON o.id = c.order_id WHERE c.team_id = ? "
+        "UNION ALL SELECT o.provider_order_id, a.amount_minor, a.reason, a.created_at "
+        "FROM credit_adjustments a JOIN orders o ON o.id = a.order_id WHERE a.team_id = ? "
+        "ORDER BY 4 DESC LIMIT 50",
+        (account, account),
+    ).fetchall()
+    return [
+        {"deposit": key, "amount": amount, "reason": reason, "at": at}
+        for key, amount, reason, at in rows
+    ]
+
+
+def _metadata_text(metadata: Any) -> str:
+    if not isinstance(metadata, dict) or not metadata:
+        return "{}"
+    return json.dumps(metadata, sort_keys=True)
 
 
 def _attestation_view(evidence: AttestationResponse) -> dict[str, Any]:
@@ -743,7 +1248,7 @@ def _attestation_view(evidence: AttestationResponse) -> dict[str, Any]:
 
 
 def _event_refs(payload: dict[str, Any]) -> set[str]:
-    """Deposit and quote ids an event names, in the flat and the enveloped (`object`) forms."""
+    """Deposit, quote, and refund ids an event names, in the flat and the enveloped forms."""
     inner = payload.get("object")
     sources = [payload, inner] if isinstance(inner, dict) else [payload]
     return {
@@ -782,7 +1287,7 @@ def _body(content: bytes) -> Any:
 def _mask(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: "qt_…_secret_… (handed to this browser's checkout)"
+            key: "…_secret_… (handed to this browser's page)"
             if key == "client_secret" and isinstance(item, str)
             else _mask(item)
             for key, item in value.items()
@@ -793,7 +1298,7 @@ def _mask(value: Any) -> Any:
 
 
 def _redact_key(authorization: str) -> str:
-    """`Bearer ppay_sk_test_…`: the scheme and the key's prefix, never the key."""
+    """`Bearer ppay_rk_test_…`: the scheme and the key's prefix, never the key."""
     _, _, key = authorization.partition(" ")
     for prefix in ("ppay_sk_test_", "ppay_sk_live_", "ppay_rk_test_", "ppay_rk_live_"):
         if key.startswith(prefix):
@@ -801,15 +1306,19 @@ def _redact_key(authorization: str) -> str:
     return "Bearer …"
 
 
-def _topic(address: str) -> str:
-    return "0x" + "0" * 24 + address.lower().removeprefix("0x")
-
-
 def _take[T](items: Iterator[T], limit: int) -> Iterator[T]:
     for index, item in enumerate(items):
         if index >= limit:
             return
         yield item
+
+
+def _json_body(body: bytes) -> dict[str, Any] | None:
+    try:
+        value = json.loads(body or b"{}")
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _cookie_account(header: str) -> str | None:

@@ -7,9 +7,9 @@ been in no block for an hour, with its sender's nonce still unused). Both carry 
 
 **Impact:** the service credits at the route's confirmation (two blocks on Ethereum) and watches
 each deposit to finality ([architecture §7](../../docs/architecture.md#7-states-and-pump)). A
-reversal already sent `deposit.reversed` when the product had been told of the deposit
+reversal already sent `deposit.reversed` when the merchant had been told of the deposit
 (`credited` or `rejected`); its snapshot's `amount_reversed` takes the credit back in the
-product's ledger, and a quote the deposit completed opened again (or expired). Nothing needs
+merchant's ledger, and a quote the deposit completed opened again (or expired). Nothing needs
 undoing in the service. What an account can lose this way is bounded by its cap on credit before
 finality (`max_unfinalized_credit`, $1 000 per mode by default). A reversal
 is a chain-health signal: depth-2 reorgs were not observed on post-Merge Ethereum, so more than a
@@ -41,7 +41,7 @@ rare one means the chain, or a provider, is misbehaving.
 
 - `TopupDepositReversed`, one deposit, both providers agree the transaction is gone (or the
   transfer is missing from its final receipt): a real reorg or a replaced transaction. Confirm the
-  product received `deposit.reversed` (the view's `events` shows `delivered_at`); if the payer
+  merchant received `deposit.reversed` (the view's `events` shows `delivered_at`); if the payer
   still wants to top up, they pay a new quote.
 - Several reversals on one chain in a short time: treat as a chain or provider incident. Pause
   settlement on the chain's routes so no further credit is made before finality, and escalate:
@@ -72,7 +72,7 @@ Raising a route's confirmation (for example to `finalized`) is a route config ch
 
 ## Done when
 
-The product confirms it applied `amount_reversed` for every reversed credit, and no further
+The merchant confirms it applied `amount_reversed` for every reversed credit, and no further
 reversals arrive (or
 settlement is resumed after the incident:
 `admin POST "/v1/admin/routes/$ROUTE/resume" '{"scopes":["settlement"]}'`).

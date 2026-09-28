@@ -466,7 +466,7 @@ sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
     -e "s|^\(        \"treasury\": \).*|\1\"$treasury\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
-    -e "s|^\(        \"product_slug\": \).*|\1\"$account\",|" \
+    -e "s|^\(        \"account\": \).*|\1\"$account\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
@@ -514,7 +514,7 @@ pc up -d >/dev/null
 wait_for "the product's /healthz after sealing" 90 product_healthy
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
     --arg payer "$owner" --arg treasury "$treasury" --arg account "$account" \
-    '{service_url: "http://topup:8080", product_slug: $account,
+    '{service_url: "http://topup:8080", account: $account,
       route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       treasury: $treasury, token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |

@@ -1,8 +1,8 @@
 # Chain frozen
 
 **Trigger:** `TopupReconciliationMismatch` with `check:address_derivation` or
-`check:custody_balance`; products report
-`423 chain_frozen` from address issuance or rate-lock creation; `topup-scanner-<chain_id>` misses
+`check:custody_balance`; merchants report
+`400 chain_frozen` from address issuance or quote creation; `topup-scanner-<chain_id>` misses
 its check-ins because the frozen chain's scanner has paused.
 
 **Impact:** the service can no longer vouch for its ledger on the chain: either the factory's
@@ -10,7 +10,7 @@ its check-ins because the frozen chain's scanner has paused.
 prove where deposits go, or a forwarder's finalized balance is not its final deposits minus its
 finalized `Flushed` amounts (`custody_balance`), so a transfer or sweep is missing from, or wrong
 in, the ledger. Until the freeze is lifted, the chain's deposits wait (nothing is credited), its
-scanner (the per-block scan and the finalized backstop) stops, and address issuance and rate-lock creation answer `423`. Other chains
+scanner (the per-block scan and the finalized backstop) stops, and address issuance and quote creation answer `400 chain_frozen`. Other chains
 keep running; credited facts are never rolled back.
 
 ## First steps
@@ -37,7 +37,8 @@ keep running; credited facts are never rolled back.
    cast logs --address "$FACTORY" --to-block "$BLOCK" 'Flushed(bytes32 indexed,address indexed,address indexed,address,uint256)' "" "$FORWARDER_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
    ```
 
-3. Tell the product that deposits on the chain are unavailable and must show no address
+3. Tell the merchants with routes on the chain, through their recorded contacts, that deposits on
+   the chain are unavailable and their checkouts must show no address
    ([incident communication](incident-communication.md)).
 
 ## Decide
@@ -52,8 +53,9 @@ keep running; credited facts are never rolled back.
   Engineering and Finance incident.
 - Contracts match but the stored address differs: database corruption or tampering; preserve the
   Sentry event and escalate to Security.
-- Funds already reached a stored address the factory does not derive: open a Finance and Security
-  incident for them.
+- Funds already reached a stored address the factory does not derive: open a Security incident
+  and tell the account that address belongs to, through its recorded contact; the funds are the
+  merchant's, and only it can recover what its treasury controls.
 
 ## Fix
 

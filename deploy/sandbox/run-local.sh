@@ -131,7 +131,7 @@ jq -n \
     --arg token "$(jq -er .test_token "$tmp/contracts.json")" \
     --arg unsupported "$(jq -er .unsupported_token "$tmp/contracts.json")" \
     --arg public_url "$public_url" --arg payer "$owner" --arg topup "$project-topup-1" \
-    '{service_url: "http://topup:8080", product_slug: $account,
+    '{service_url: "http://topup:8080", account: $account,
       api_key_file: "/sandbox/product.key", route: $route, chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       treasury: $payer, token: $token, token_symbol: "PHA", unsupported_token: $unsupported,

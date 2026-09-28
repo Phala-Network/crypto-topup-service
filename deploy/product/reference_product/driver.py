@@ -174,7 +174,7 @@ def run_deposit(
         LOG.info("registered workspace %s", team)
 
         quote = api.quote(team, amount_minor)
-        # Pay only an address recomputed here from the product slug, workspace, and quote id.
+        # Pay only an address recomputed here from the account, workspace, and quote id.
         if not same_address(quote_address(config, team, quote.id), quote.address):
             raise RuntimeError("quote address does not match the driver's own computation")
         address = quote.address

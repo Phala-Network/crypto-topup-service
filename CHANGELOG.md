@@ -9,6 +9,11 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed (breaking; nothing is live)
 
+- Staging is reset (deploy/README.md, "Staging reset"): its route `phala-cloud-sepolia-pha-usd`
+  is version 3 on the deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`
+  (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update
+  the forwarder you pin; accounts, keys, treasuries, endpoints, and webhook keys are created anew.
+
 - Launch hardening (docs/design/multi-tenant.md, "launch hardening" amendment):
   - Restricted keys: `POST /v1/api_keys {"type": "restricted", "permissions": [...]}` issues a
     `ppay_rk_{test,live}_` key holding only those permissions (a `write` includes its `read`);

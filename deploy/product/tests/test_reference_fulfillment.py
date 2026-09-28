@@ -28,7 +28,7 @@ SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([3] * 32))
 
 CONFIG = ProductConfig(
     service_url="http://service.test",
-    product_slug="acct_" + "ac" * 16,
+    account="acct_" + "ac" * 16,
     api_key_file="unused",
     route="sandbox-acme-tpha-usd",
     chain_id=11155111,
@@ -59,7 +59,7 @@ def _credited(
     amount_minor: int = 2_500,
     team: str = TEAM,
     *,
-    account: str = CONFIG.product_slug,
+    account: str = CONFIG.account,
     livemode: bool = False,
     event_type: str = "deposit.credited",
     **fields: object,

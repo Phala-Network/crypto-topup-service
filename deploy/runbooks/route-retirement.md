@@ -6,7 +6,7 @@
 
 **Impact:** a chain is scanned only while it has a loaded route, and a rate lock expires only once
 its chain's scanner passes `expires_at` (architecture §9). A lock left open on a chain without a
-scanner never expires: its exposure stays reserved and the product never gets `quote.expired`.
+scanner never expires: its exposure stays reserved and the merchant never gets `quote.expired`.
 In-flight deposits on the chain stop too, and deposits of a removed version lose their version.
 
 ## First steps
@@ -27,7 +27,10 @@ every route on it) `open_rate_lock_exposure_atomic`, the `detected`, `confirmed`
   after the last window closes; if it stays, follow
   [lock expiry worker failure](lock-expiry-worker-failure.md) and [scanner lag](scanner-lag.md).
 - In-flight deposits: let them reach `swept` or `rejected`, following the runbook their alert
-  points to.
+  points to. Sweeping is the merchants' (the service sends no transactions): tell each account
+  with `credited` deposits on the route, through its recorded contact, to sweep its forwarders
+  ([deploy/README.md, "Sweeping"](../README.md#sweeping)); once the route is gone, its sweeps and
+  reversals are no longer recorded.
 
 ## Fix
 

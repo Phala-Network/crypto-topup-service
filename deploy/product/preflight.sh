@@ -60,6 +60,7 @@ origin_pattern='^https://[a-z0-9.-]+(:[0-9]+)?$'
 
 echo "== env file"
 declare -A env=()
+account=""
 if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$env_file"; then
     fail "$env_file has a line that is not KEY=VALUE"
 fi
@@ -82,8 +83,10 @@ while IFS= read -r name; do
     fi
 done <"$tmp/expected"
 api_key=${env[PRODUCT_API_KEY]-}
-[[ -z "$api_key" || "$api_key" =~ ^ppay_sk_(test|live)_[0-9A-Za-z]{49}$ ]] ||
-    fail "PRODUCT_API_KEY must be a Phala Pay secret key (ppay_sk_test_…)"
+# 43 random base62 characters and a 6-character checksum (crates/topup/src/api_keys.rs). The
+# staging product runs with a restricted test key; a secret test key is accepted too.
+[[ -z "$api_key" || "$api_key" =~ ^ppay_(rk|sk)_test_[0-9A-Za-z]{49}$ ]] ||
+    fail "PRODUCT_API_KEY must be a Phala Pay test API key (ppay_rk_test_… or ppay_sk_test_…)"
 if [[ -n "$os_image" && "$os_image" != "$approved_os_image" ]]; then
     fail "OS image $os_image is not the approved $approved_os_image (deploy/README.md)"
 fi
@@ -108,9 +111,14 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
             PRODUCT_DRIVER_PUBLIC_KEY=driver_public_key; do
             setting[${pair%%=*}]=$(jq -r --arg key "${pair#*=}" '.[$key] // "" | strings' "$tmp/config.json")
         done
+        account=$(jq -r '.account // "" | strings' "$tmp/config.json")
     else
         fail "the compose's product_config is not a JSON object"
     fi
+    # The product's Phala Pay account: the account its webhooks and attestation must name, and the
+    # first input of every address it pins.
+    [[ "${account-}" =~ ^acct_[0-9a-f]{32}$ ]] ||
+        fail "the product config's account must be the product's acct_ id (32 lowercase hex digits)"
     for name in TOPUP_ORIGIN PRODUCT_PUBLIC_URL; do
         [[ "${setting[$name]-}" =~ $origin_pattern ]] ||
             fail "$name must be https://HOST[:PORT] in lowercase with no path"
@@ -152,6 +160,10 @@ fi
 
 check_anonymous_pulls "$tmp/images"
 
+echo "== product account"
+[[ "$account" != acct_00000000000000000000000000000000 ]] ||
+    fail "the product config's account is the placeholder; commit the product's acct_ id to $source_compose"
+
 echo "== product RPC and topup (no RPC URL is printed)"
 require_command cast
 if ! chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>"$tmp/cast.err"); then
@@ -166,12 +178,12 @@ attestation_url="${setting[TOPUP_ORIGIN]}/v1/attestation?nonce=$nonce"
 if [[ -n "$api_key" ]]; then
     if curl -fsS --max-time 30 -H @- "$attestation_url" >"$tmp/attestation.json" \
         <<<"Authorization: Bearer $api_key" &&
-        jq -e '.livemode == false and (.account | startswith("acct_"))
+        jq -e --arg account "$account" '.livemode == false and .account == $account
             and (.webhook_keys[0].public_key | test("^[0-9a-f]{64}$"))' \
             "$tmp/attestation.json" >/dev/null; then
         ok "TOPUP_ORIGIN attests the product account's test-mode webhook key"
     else
-        fail "TOPUP_ORIGIN does not attest the product account's webhook key"
+        fail "TOPUP_ORIGIN does not attest a test-mode webhook key of the config's account for PRODUCT_API_KEY"
     fi
 elif [[ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$attestation_url")" == 401 ]]; then
     ok "TOPUP_ORIGIN serves /v1/attestation to API keys only (PRODUCT_API_KEY not sealed yet)"

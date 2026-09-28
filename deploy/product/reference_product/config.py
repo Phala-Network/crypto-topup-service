@@ -13,6 +13,7 @@ from topup_sdk import TopupClient
 # The deposit driver signs its account API requests with this key id (see `AccountApi`).
 DRIVER_KEYID = "driver/v1"
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+ACCOUNT_ID = re.compile(r"acct_[0-9a-f]{32}")
 
 
 class MissingProductKeyError(Exception):
@@ -23,15 +24,18 @@ class MissingProductKeyError(Exception):
 class ProductConfig:
     """Everything the product needs; see deploy/sandbox/README.md for each field.
 
-    The product's Phala Pay secret key (`ppay_sk_…`) comes from `api_key_file`, or, in a CVM,
-    from the sealed environment variable named by `api_key_env`. `product_slug` is the product's
-    Phala Pay account id (`acct_…`), the first input of every quote's address. The deposit driver
-    needs no key: it calls the product's account API at `public_url`, signed with the driver key
-    whose public key is `driver_public_key`.
+    The product's Phala Pay API key comes from `api_key_file`, or, in a CVM, from the sealed
+    environment variable named by `api_key_env`: a restricted key (`ppay_rk_test_…`) holding only
+    the permissions the product uses (deploy/product/staging.env.example), or a secret key
+    (`ppay_sk_test_…`). `account` is the product's Phala Pay account id (`acct_…`): the account its
+    webhooks must name and the first input of every address's salt. `account`, `factory`,
+    `implementation`, and `treasury` (for `chain_id`) are the pins every quote and deposit address
+    is recomputed from. The deposit driver needs no Phala Pay key: it calls the product's account
+    API at `public_url`, signed with the driver key whose public key is `driver_public_key`.
     """
 
     service_url: str
-    product_slug: str
+    account: str
     route: str
     chain_id: int
     rpc_url: str
@@ -60,6 +64,10 @@ class ProductConfig:
     # The built demo checkout page (reference_product.demo); unset, no page is served.
     demo_dir: str | None = None
 
+    def __post_init__(self) -> None:
+        if not ACCOUNT_ID.fullmatch(self.account):
+            raise ValueError("account must be the product's Phala Pay account id, acct_…")
+
     @classmethod
     def load(cls, path: str | Path) -> ProductConfig:
         values = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -78,11 +86,12 @@ class ProductConfig:
         return self.api_key().startswith(("ppay_sk_live_", "ppay_rk_live_"))
 
     def client(self) -> TopupClient:
-        # The forwarder is pinned, so every open quote's address is recomputed before it is used.
+        # Every open quote's and active deposit address's address is recomputed from the pins
+        # before it is used; a mismatch raises.
         return TopupClient(
             self.service_url,
             self.api_key(),
-            account=self.product_slug,
+            account=self.account,
             forwarder=(self.factory, self.implementation),
             treasuries={self.chain_id: self.treasury},
         )

@@ -47,11 +47,16 @@ admin POST "/v1/admin/accounts/$ACCOUNT/api_keys" \
 3. Send the key to the contact through an encrypted channel. The merchant rolls it on receipt, so
    no one at Phala holds a working key.
 4. Review what the old key could have done: the merchant reviews every refund created since the
-   exposure (daily report `refunds_by_status`) and cancels those it did not make
-   (`POST /v1/refunds/{id}/cancel`), and checks its customers' pause scopes and open quotes. If the merchant cannot act
-   promptly, pause `quotes` and `refunds` on its routes meanwhile
-   (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","refunds"]}'`); deposits
-   keep being credited.
+   exposure (`GET /v1/refunds`; the daily report's `refunds_by_status` counts them per route) and
+   cancels those it did not make (`POST /v1/refunds/{id}/cancel`), and checks its customers' pause
+   scopes and open quotes. If the merchant cannot act promptly, pause `quotes` and `refunds` of its
+   account meanwhile (routes are shared by every account of the mode, so never pause a route for
+   one account); deposits keep being credited:
+
+```sh
+admin POST "/v1/admin/accounts/$ACCOUNT/pause" \
+  '{"scopes":["quotes","refunds"],"reason":"<ticket>: key exposure under review"}'
+```
 
 ## Done when
 

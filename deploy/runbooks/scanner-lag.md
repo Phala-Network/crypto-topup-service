@@ -27,5 +27,5 @@ When the lag is material, pause issuance (existing addresses stay valid and watc
 
 ## Done when
 
-`topup-scanner-<chain_id>` checks in again, deposits made during the lag appear (support lookup by
-`tx_hash`), and issuance is resumed.
+`topup-scanner-<chain_id>` checks in again, deposits made during the lag appear (the merchant's
+`GET /v1/deposits?tx_hash=…`, then the admin deposit view), and issuance is resumed.

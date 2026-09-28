@@ -12,8 +12,10 @@ observation once. Safe repairs raise no alert. By check:
 | `address_derivation` | freezes the chain: [Chain frozen](chain-frozen.md) | whole chain |
 | `custody_balance` | freezes the chain: [Chain frozen](chain-frozen.md) | whole chain |
 | `credit_recomputation` | alert only | one deposit |
-| `missing_deposit`, `missing_flush_link`, `sent_settlement` | repair: insert, link, or adopt the product's answer | one deposit |
-| `post_restore_settlement` | keeps a restore check incomplete ([RESTORE.md](../RESTORE.md)) | the restore |
+| `missing_deposit`, `missing_flush_link` | repair: insert the deposit, or link it to its sweep's `Flushed` event | one deposit |
+
+In the restore check's post-restore round, a finding the round could not verify keeps the check
+`incomplete` ([RESTORE.md](../RESTORE.md#the-restore-check-variant)).
 
 ## First steps
 
@@ -24,9 +26,10 @@ observation once. Safe repairs raise no alert. By check:
 
 ## Decide
 
-- `credit_recomputation`: compare the deposit's stored valuation (support lookup) with the
-  product's accepted payload. If the product credited a different amount, open a Finance incident;
-  never change the credit.
+- `credit_recomputation`: compare the deposit's stored valuation (the admin deposit view,
+  `admin GET /v1/admin/deposits/{id}`) with the `deposit.credited` the merchant accepted. If the
+  merchant credited a different amount, tell it through its recorded contact and open an
+  Engineering incident; never change the credit.
 
 ## Fix
 

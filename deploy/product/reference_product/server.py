@@ -330,7 +330,7 @@ def pin_webhook_keys(config: ProductConfig, *, wait_s: float = 0) -> PinnedKeys:
             )
             time.sleep(5)
     keys = verify_attestation_binding(
-        evidence, nonce, expected_account=config.product_slug, expected_livemode=livemode
+        evidence, nonce, expected_account=config.account, expected_livemode=livemode
     )
     LOG.warning("pinned webhook keys from attestation; verify the quote before production")
     return PinnedKeys(livemode, keys)
@@ -382,7 +382,7 @@ def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
         config.factory,
         config.implementation,
         config.treasury,
-        quote_salt(config.product_slug, team, quote_id),
+        quote_salt(config.account, team, quote_id),
     )
 
 

@@ -965,15 +965,15 @@ citing old numbers are corrected by the PR that next touches them.
 | 1 | Fast credit and reversal | ✓ | — | done (#187) |
 | 2 | Contracts and core address math | ✓ | — | done (#186) |
 | 3 | Schema reset and tenancy scope | ✓ | 1 | done (#188) |
-| 4 | Chain-sourced sweeps; remove the flusher | ✓ | 2, 3 | |
-| 5 | Operator onboarding, API keys, idempotency, rate limits | ✓ | 3 | |
-| 6 | Modes and per-account webhook keys | ✓ | 5 | |
-| 7 | Treasuries through the API: proof, time-lock, events | ✓ | 4, 5 | |
-| 8 | Webhook endpoints, account events, delivery | ✓ | 6 | |
-| 9 | Refunds | ✓ | 4 | |
-| 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | in review |
-| 11 | Deploy, docs, staging reset | ✓ | 1–10 | |
-| 12 | Restricted keys | ✓ (launch hardening) | 5 | in review |
+| 4 | Chain-sourced sweeps; remove the flusher | ✓ | 2, 3 | done (#190) |
+| 5 | Operator onboarding, API keys, idempotency, rate limits | ✓ | 3 | done (#191) |
+| 6 | Modes and per-account webhook keys | ✓ | 5 | done (#197) |
+| 7 | Treasuries through the API: proof, time-lock, events | ✓ | 4, 5 | done (#198) |
+| 8 | Webhook endpoints, account events, delivery | ✓ | 6 | done (#199) |
+| 9 | Refunds | ✓ | 4 | done (#192) |
+| 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | done (#200) |
+| 11 | Deploy, docs, staging reset | ✓ | 1–10 | in review |
+| 12 | Restricted keys | ✓ (launch hardening) | 5 | done (#203) |
 | 13 | Account closure | | 5 | |
 
 **PR 4 — chain-sourced sweeps.** Index factory events at finality, whoever sent them, for known

@@ -1,5 +1,15 @@
-import { expect, test, type Page } from "@playwright/test";
-import { createPublicClient, erc20Abi, getAddress, http, parseEther } from "viem";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  createPublicClient,
+  createTestClient,
+  encodeFunctionData,
+  erc20Abi,
+  getAddress,
+  http,
+  parseEther,
+  walletActions,
+  type Hash,
+} from "viem";
 import { sepolia } from "viem/chains";
 
 declare global {
@@ -19,15 +29,6 @@ function env(name: string): string {
   return value;
 }
 
-const STEPS = [
-  "quote_created",
-  "transfer_seen",
-  "finalized",
-  "credited",
-  "webhook_received",
-  "swept",
-] as const;
-
 async function tokenBalance(owner: string): Promise<bigint> {
   const chain = createPublicClient({ chain: sepolia, transport: http(env("ANVIL_URL")) });
   return chain.readContract({
@@ -36,6 +37,26 @@ async function tokenBalance(owner: string): Promise<bigint> {
     functionName: "balanceOf",
     args: [getAddress(owner)],
   });
+}
+
+/**
+ * Pays `amount` of the test token from the treasury: on Anvil the test plays the merchant's
+ * finance team, which controls the treasury (on staging it is Phala's finance Safe).
+ */
+async function payFromTreasury(to: string, amount: bigint): Promise<Hash> {
+  const treasury = getAddress(env("TREASURY"));
+  const chain = createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) }).extend(
+    walletActions,
+  );
+  await chain.impersonateAccount({ address: treasury });
+  await chain.setBalance({ address: treasury, value: parseEther("1") });
+  const hash = await chain.sendTransaction({
+    account: treasury,
+    to: getAddress(env("TOKEN_ADDRESS")),
+    data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [getAddress(to), amount] }),
+  });
+  await chain.stopImpersonatingAccount({ address: treasury });
+  return hash;
 }
 
 /** An EIP-6963 wallet on Anvil holding the payer account; it starts on mainnet. */
@@ -108,10 +129,36 @@ async function installWallet(page: Page) {
   );
 }
 
-test("tops up an account end to end and shows every step behind the scenes", async ({
+function step(timeline: Locator, key: string): Locator {
+  return timeline.locator(`[data-step="${key}"]`);
+}
+
+async function expectComplete(timeline: Locator, keys: string[], timeout = 60_000) {
+  for (const key of keys) {
+    await expect(step(timeline, key)).toHaveAttribute("data-state", "complete", { timeout });
+  }
+}
+
+/** Declares a refund of `amount` PHA of the selected deposit and returns its list item. */
+async function declareRefund(scenes: Locator, amount: string): Promise<Locator> {
+  const refunds = scenes.getByTestId("refund");
+  const before = await refunds.count();
+  const form = scenes.getByRole("form", { name: "Declare a refund" });
+  await form.getByLabel(/^Amount/).fill(amount);
+  await form.getByRole("button", { name: "Declare refund" }).click();
+  await expect(refunds).toHaveCount(before + 1);
+  // Newest first; followed by its id from here on.
+  const id = await refunds.first().getAttribute("data-refund");
+  const refund = scenes.locator(`[data-refund="${id ?? ""}"]`);
+  await expect(refund).toHaveAttribute("data-status", "pending");
+  return refund;
+}
+
+test("a quote: locked price, metadata, the merchant's sweep, and refunds that succeed, fail, or are canceled", async ({
   page,
   context,
 }, testInfo) => {
+  test.setTimeout(300_000);
   await installWallet(page);
   const response = await page.goto(env("DEMO_URL"));
   expect(response?.headers()["content-security-policy"]).toContain("default-src 'none'");
@@ -130,63 +177,171 @@ test("tops up an account end to end and shows every step behind the scenes", asy
   await expect(page.getByRole("note")).toContainText("Minted:");
   expect(await tokenBalance(env("PAYER_ADDRESS"))).toBe(parseEther("1000"));
 
-  // $20 at the fake service's 0.25 USD per PHA: 80 PHA.
+  // $20 at the fake service's 0.25 USD per PHA: exactly 80 PHA, with an order id in its metadata.
   await page.getByText("$20.00", { exact: true }).click();
   await page.getByRole("button", { name: "Pay with crypto", exact: true }).click();
-  const timeline = page.getByRole("list", { name: "Payment timeline" });
-  await expect(timeline.locator('[data-step="quote_created"]')).toHaveAttribute("data-state", "complete");
-  await expect(timeline.locator('[data-step="transfer_seen"]')).toHaveAttribute("data-state", "current");
-  await expect(timeline.locator('[data-step="quote_created"]')).toContainText("0.25000000 USD per PHA");
+  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const timeline = scenes.getByRole("list", { name: "Payment timeline" });
+  await expect(step(timeline, "quote_created")).toHaveAttribute("data-state", "complete");
+  await expect(step(timeline, "sent")).toHaveAttribute("data-state", "current");
+  await expect(step(timeline, "quote_created")).toContainText("0.25000000 USD per PHA");
+  await expect(step(timeline, "quote_created")).toContainText("80 PHA");
+  const order = (await page.getByText(/^Order order_[0-9a-f]{12}/).textContent())?.match(/order_[0-9a-f]{12}/)?.[0];
+  expect(order).toBeDefined();
   await page.screenshot({ path: testInfo.outputPath("checkout.png"), fullPage: true });
 
   await page.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
   await expect(page.getByText(/^Transaction sent:/)).toBeVisible();
-  for (const step of STEPS) {
-    await expect(timeline.locator(`[data-step="${step}"]`)).toHaveAttribute(
-      "data-state",
-      "complete",
-      { timeout: 60_000 },
-    );
-  }
+  await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
   await expect(page.getByRole("status").first()).toHaveText("Payment credited: $20.00");
   await expect(page.getByTestId("balance")).toHaveText("$20.00", { timeout: 10_000 });
-  expect(await tokenBalance(env("TREASURY"))).toBe(parseEther("80"));
+  // Real times: the block's, then each step's, with the elapsed time since sending.
+  await expect(step(timeline, "credited")).toContainText("after sending");
+  await expect(step(timeline, "credited")).toContainText("the quote's locked price");
+  // The order id arrives in the verified deposit.credited's data.object.metadata.
+  await expect(step(timeline, "webhook_received")).toContainText("verified");
+  await expect(step(timeline, "webhook_received")).toContainText(`"order_id": "${order ?? ""}"`);
+  await expect(step(timeline, "webhook_received")).toContainText("+$20.00");
+  await expect(scenes.getByTestId("webhook-event").first()).toContainText("deposit.credited");
+  // Refunds wait for finality.
+  await expect(scenes.getByTestId("refund-unavailable")).toContainText("deposit_not_final");
+  await expectComplete(timeline, ["final"]);
+  await expect(step(timeline, "swept")).toHaveAttribute("data-state", "current");
 
-  // The webhook, as this product received and verified it, and the swept transfer on chain.
-  await expect(timeline.locator('[data-step="webhook_received"]')).toContainText("verified");
-  await expect(timeline.locator('[data-step="webhook_received"]')).toContainText("+$20.00");
-  await expect(page.getByTestId("webhook-event")).toContainText("deposit.credited");
-  await expect(page.getByTestId("webhook-event")).toContainText("Verified");
-  await expect(timeline.locator('[data-step="swept"] a').first()).toHaveAttribute(
+  // The merchant sweeps: the SDK's flush, signed from a wallet (anyone may send it; the funds can
+  // only reach the treasury), indexed by the service once final.
+  const sweeps = page.getByRole("region", { name: "Sweeps: the merchant's transaction" });
+  await expect(sweeps.getByTestId("unswept")).toContainText("80 PHA in 1 forwarder", { timeout: 30_000 });
+  await sweeps.getByRole("button", { name: "Sign the flush from my wallet" }).click();
+  await expect(sweeps.getByTestId("flush-status")).toContainText("Flush sent: 0x");
+  await expectComplete(timeline, ["swept"]);
+  expect(await tokenBalance(env("TREASURY"))).toBe(parseEther("80"));
+  await expect(step(timeline, "swept").locator("a").first()).toHaveAttribute(
     "href",
     /^https:\/\/sepolia\.etherscan\.io\/tx\/0x[0-9a-f]{64}$/,
   );
+  await expect(sweeps.getByTestId("sweep")).toContainText("80 PHA", { timeout: 30_000 });
 
-  // The history row, with its transaction link.
-  const row = page.getByTestId("transaction");
-  await expect(row).toContainText("Credited · swept");
+  // A refund paid from the treasury succeeds: 20 of 80 PHA takes back a quarter of the credit.
+  const paid = await declareRefund(scenes, "20");
+  await expect(paid.getByTestId("refund-transfer")).toContainText(env("TREASURY").toLowerCase());
+  const hash = await payFromTreasury(env("PAYER_ADDRESS"), parseEther("20"));
+  await paid.getByLabel("Transaction hash of the payment").fill(hash);
+  await paid.getByRole("button", { name: "Mark paid" }).click();
+  await expect(paid).toContainText("Marked paid");
+  await expect(paid).toHaveAttribute("data-status", "succeeded", { timeout: 60_000 });
+  await expect(paid).toContainText("deposit.refunded");
+  await expect(scenes.getByTestId("nets-to")).toHaveText("$15.00");
+  await expect(page.getByTestId("balance")).toHaveText("$15.00", { timeout: 10_000 });
+  await expect(scenes.getByTestId("console-net")).toContainText("−$5.00 by deposit.refunded");
+
+  // A refund paid from another wallet fails verification: the service checks the sender.
+  const wrong = await declareRefund(scenes, "20");
+  await wrong.getByRole("button", { name: "Pay it from my wallet instead" }).click();
+  await expect(wrong.getByLabel("Transaction hash of the payment")).toHaveValue(/^0x[0-9a-f]{64}$/);
+  await wrong.getByRole("button", { name: "Mark paid" }).click();
+  await expect(wrong).toHaveAttribute("data-status", "failed", { timeout: 60_000 });
+  await expect(wrong).toContainText("sender_mismatch");
+  await expect(page.getByTestId("balance")).toHaveText("$15.00");
+
+  // A declared refund without a payment can be canceled.
+  const canceled = await declareRefund(scenes, "20");
+  await canceled.getByRole("button", { name: "Cancel refund" }).click();
+  await expect(canceled).toHaveAttribute("data-status", "canceled");
+  const events = scenes.getByTestId("webhook-event");
+  for (const type of ["refund.created", "refund.updated", "refund.failed", "deposit.refunded"]) {
+    await expect(events.filter({ hasText: type }).first()).toBeVisible();
+  }
+
+  // The history row and the ledger lines behind the balance.
+  const row = page.getByTestId("payment").first();
+  await expect(row).toContainText("Quote");
   await expect(row).toContainText("80 PHA");
-  await expect(row.locator("a")).toHaveAttribute("href", /sepolia\.etherscan\.io\/tx\//);
+  await expect(row).toContainText("$15.00");
+  await page.getByText(/^How this balance adds up/).click();
+  await expect(page.getByTestId("ledger-line").filter({ hasText: "deposit.refunded" })).toContainText("−$5.00");
 
-  // The developer view shows the requests, never the API key or the client secret.
-  await page.getByText(/^Developer view/).click();
-  const dev = page.locator("details.dev");
-  await expect(dev).toContainText("POST /v1/quotes");
+  // The developer view shows the requests, never the API key or a client secret.
+  await scenes.getByText(/^Developer view/).click();
+  const dev = scenes.locator("details.dev");
   await expect(dev).toContainText("GET /v1/deposits");
+  await expect(dev).toContainText("GET /v1/refunds");
   await dev.locator("details.exchange").first().click();
-  await expect(dev).toContainText("Bearer ppay_sk_test_…");
+  await expect(dev).toContainText("Bearer ppay_rk_test_…");
   await expect(dev).not.toContainText("AAAAAAAA");
-  await expect(dev).toContainText("handed to this browser's checkout");
-  await expect(dev).not.toContainText("_secret_5");
 
-  await page.screenshot({ path: testInfo.outputPath("credited-light.png"), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("refunds-light.png"), fullPage: true });
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
-  await page.screenshot({ path: testInfo.outputPath("credited-dark.png"), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("refunds-dark.png"), fullPage: true });
   await page.setViewportSize({ width: 420, height: 900 });
   await page.screenshot({ path: testInfo.outputPath("mobile-dark.png"), fullPage: true });
 });
 
-test("refuses another browser's quote and rate-limits quote creation", async ({ browser }) => {
+test("a deposit address: one verified address, any amount credited at spot, then reversed", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  await installWallet(page);
+  await page.goto(env("DEMO_URL"));
+  await expect(page.getByTestId("balance")).toHaveText("$0.00");
+
+  // The tabs follow the keyboard.
+  await page.getByRole("tab", { name: "Exact amount" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("tab", { name: "Deposit address" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Deposit address" })).toBeFocused();
+
+  await page.getByRole("button", { name: "Show my deposit address" }).click();
+  await expect(page.getByTestId("deposit-address-verified")).toContainText("Verified");
+  const address = (await page.getByTestId("deposit-address").textContent()) ?? "";
+  expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  // The SDK's <DepositAddress> shows the same address to copy.
+  await expect(page.getByText(address).first()).toBeVisible();
+
+  // Any amount, sent from a wallet as from an exchange.
+  await page.getByRole("button", { name: "Get 1,000 test PHA" }).click();
+  await expect(page.getByRole("note")).toContainText("Minted:");
+  const form = page.getByRole("form", { name: "Pay to the deposit address from a browser wallet" });
+  await form.getByLabel(/^Send from your browser wallet/).fill("25");
+  await form.getByRole("button", { name: "Send" }).click();
+  await expect(form).toContainText("Sent: 0x");
+
+  const payment = page.getByTestId("address-payment").first();
+  await expect(payment).toContainText("25 PHA");
+  await payment.getByRole("button", { name: "Timeline" }).click();
+  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const timeline = scenes.getByRole("list", { name: "Payment timeline" });
+  await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
+
+  // Before it is final, the service's finality watch proves the transaction dropped (here, the
+  // stand-in's test hook): deposit.reversed takes the credit back.
+  const deposit = await page.evaluate(async () => {
+    const response = await fetch("api/deposit_address");
+    return ((await response.json()) as { deposit_address: { payments: { deposit: string }[] } }).deposit_address
+      .payments[0]?.deposit;
+  });
+  const reversed = await fetch(`${env("SERVICE_URL")}/_test/deposits/${deposit ?? ""}/reverse`, { method: "POST" });
+  expect(reversed.status).toBe(200);
+
+  // 25 PHA at 0.25 USD, credited at spot; the address's metadata arrived with the deposit.
+  await expect(step(timeline, "credited")).toContainText("spot");
+  await expect(step(timeline, "credited")).toContainText("$6.25");
+  await expect(step(timeline, "webhook_received")).toContainText('"workspace": "demo-');
+  await expect(step(timeline, "webhook_received")).toContainText("+$6.25");
+  await expect(step(timeline, "reversed")).toHaveAttribute("data-state", "failed", { timeout: 30_000 });
+  await expect(scenes.getByTestId("nets-to")).toHaveText("$0.00");
+  await expect(page.getByTestId("balance")).toHaveText("$0.00", { timeout: 10_000 });
+  await expect(scenes.getByTestId("webhook-event").filter({ hasText: "deposit.reversed" })).toBeVisible();
+  await expect(scenes.getByTestId("refund-unavailable")).toContainText("reversed");
+  await expect(page.locator(".pp-payments")).toContainText("25 PHA");
+  await page.getByText(/^How this balance adds up/).click();
+  const lines = page.getByTestId("ledger-line");
+  await expect(lines.filter({ hasText: "deposit.credited" })).toContainText("+$6.25");
+  await expect(lines.filter({ hasText: "deposit.reversed" })).toContainText("−$6.25");
+  await page.screenshot({ path: testInfo.outputPath("deposit-address.png"), fullPage: true });
+});
+
+test("refuses another browser's payments and refunds, and rate-limits quote creation", async ({ browser }) => {
   const first = await browser.newContext();
   const page = await first.newPage();
   await page.goto(env("DEMO_URL"));
@@ -212,11 +367,17 @@ test("refuses another browser's quote and rate-limits quote creation", async ({ 
   const other = await second.newPage();
   await other.goto(env("DEMO_URL"));
   await expect(other.getByTestId("balance")).toHaveText("$0.00");
-  const status = await other.evaluate(
-    async (quote) => (await fetch(`api/quotes/${quote}`)).status,
-    created.quote,
-  );
-  expect(status).toBe(404);
+  const statuses = await other.evaluate(async (quote) => {
+    const post = (path: string, body: unknown) =>
+      fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    return [
+      (await fetch(`api/quotes/${quote}`)).status,
+      (await fetch(`api/deposits/dep_${"0".repeat(32)}`)).status,
+      (await post(`api/refunds/re_${"0".repeat(32)}/cancel`, {})).status,
+      (await post(`api/refunds/re_${"0".repeat(32)}/mark_paid`, { transaction_hash: `0x${"ab".repeat(32)}` })).status,
+    ];
+  }, created.quote);
+  expect(statuses).toEqual([404, 404, 404, 404]);
   await first.close();
   await second.close();
 });

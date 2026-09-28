@@ -40,10 +40,16 @@ in the report.
 
 ### Treasury Safe
 
-Routes still name the treasury their quotes pay until addresses carry their own (design §16,
-PR 3). `verify-safe.sh` checks the approved treasury Safe in
-`deploy/contracts/safe-expectations.json` on every target: the RPC's `eth_chainId` equals the
-committed chain id for the target network, the address has code (an EOA is rejected), the proxy
+Route files name no treasury: treasuries are the accounts' own, each proven per chain and mode
+through the API by its merchant with an EIP-4361 (EOA) or EIP-1271 (Safe) signature, and every
+forwarder commits to the treasury it pays
+([design D10](../docs/design/multi-tenant.md#d10-treasury-proof-and-changes);
+[Treasury change](runbooks/treasury-change.md)). The service never checks a Safe's configuration.
+`verify-safe.sh` remains a check of one Safe: the `treasury` in
+`deploy/contracts/safe-expectations.json`, Phala's finance Safe, which Phala's finance proves as the
+treasury of Phala Cloud's account. Run it before that proof and whenever the Safe's owners change
+(the Verify contracts workflow runs it daily on Sepolia). On every target it checks: the RPC's
+`eth_chainId` equals the committed chain id for the target network, the address has code (an EOA is rejected), the proxy
 runtime code hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton,
 the singleton's runtime code hash matches, owners match as a set, the threshold matches exactly,
 the enabled modules (`getModulesPaginated`) match as a set, and the guard and fallback handler
@@ -60,7 +66,8 @@ deploy/contracts/verify-safe.sh \
   --rpc sepolia/b="$SEPOLIA_RPC_B"
 ```
 
-Do not enable a route whose treasury fails any Safe check.
+If any Safe check fails, Phala's finance does not prove the Safe as a treasury (or moves the
+treasury off it) until the Safe or the reviewed expectations are corrected.
 
 ## Reproducible build
 
@@ -111,6 +118,14 @@ chains reject the unprotected legacy transaction; such a chain is unsupported un
 architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
+
+The staging route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) expects the #202 build's
+deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
+`0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`. Until they are deployed on Sepolia, `topup run`
+refuses to start with the route (its startup contract check reads the factory's
+`implementation()`). Deploying them is a **HUMAN-ONLY** step of
+the staging reset (`deploy/README.md`, "Staging reset"), before the Deploy `upgrade` that ships
+the route.
 
 **HUMAN-ONLY**, with the deployer key in the environment only (the forge script reads
 `PRIVATE_KEY`; it never appears in argv):
@@ -165,9 +180,12 @@ implementation, every sample forwarder, and runtime code hashes must be identica
 
 ## Route and compose update
 
-Copy the verified `factory` and `implementation` into the chain configuration,
-the route configuration, and the matching configuration embedded in `deploy/docker-compose.yml`.
-Create a new route version; never mutate the contract tuple of an enabled version. Then run:
+A route file carries only `chain.forwarder_factory`; the implementation is derived as the
+factory's first CREATE (`chain.implementation` is optional), and at startup `topup run` requires
+the factory's `implementation()` to be it and both runtime code hashes to match the build. Put the
+verified factory into the route file under `deploy/config/routes/` and the identical inline copy in `deploy/docker-compose.yml` (its
+`configs`); `deploy/validate-compose.sh` fails if the inline copy differs from the file. Create a
+new route version; never mutate the contract tuple of an enabled version. Then run:
 
 ```sh
 deploy/validate-compose.sh

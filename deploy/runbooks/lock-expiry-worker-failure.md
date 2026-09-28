@@ -7,7 +7,7 @@ in only after a successful scan).
 **Impact:** every five seconds the worker expires, in batches of 100, open locks whose chain's
 finalized scan has passed `expires_at` and that no in-window payment still awaits; that releases
 their exposure and queues `quote.expired`. While it fails, overdue locks keep holding exposure
-(new quotes hit `400 exposure_cap_exceeded` early) and products are not told checkouts expired. A
+(new quotes hit `400 exposure_cap_exceeded` early) and merchants are not told checkouts expired. A
 failing batch rolls back and the same oldest locks are picked again, so nothing progresses until
 the cause is fixed. Payments are unaffected: the confirm step judges them by `expires_at`.
 

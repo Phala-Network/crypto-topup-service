@@ -4,20 +4,26 @@ import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync }
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createTestClient, http, publicActions, walletActions, type Hex } from "viem";
+import { createTestClient, http, publicActions, walletActions, type Address, type Hash, type Hex } from "viem";
 import { sepolia } from "viem/chains";
 
 const web = resolve(import.meta.dirname, "..");
 const root = resolve(web, "../../..");
-const FACTORY = "0x2407bE5Be2b632F5b166872A49E4946a70CCa531";
-const IMPLEMENTATION = "0x70B714508BFa441449DC09f790Ca03Baa5170360";
+// The deterministic deployment (deploy/CONTRACTS.md) and staging's treasury, as the product pins them.
+const FACTORY = "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747";
+const IMPLEMENTATION = "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9";
 const TREASURY = "0x936c1991f8dA9a919fa11b557a3514719f5A4504";
+const ACCOUNT = `acct_${"e2e0".repeat(8)}`;
+const DETERMINISTIC_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
 
 /**
- * Runs the whole demo locally: Anvil as Sepolia with the test token, the fake top-up service
+ * Runs the whole demo locally: Anvil as Sepolia with the test token and the real forwarder
+ * factory, deployed as deploy/CONTRACTS.md deploys it (through the deterministic deployment proxy
+ * with the committed salt), so it lands at its pinned address; the fake top-up service
  * (e2e/fake_service.py), and the reference product serving the built page at `/demo/`, pinned to
- * the fake service's webhook key. Tests read DEMO_URL, ANVIL_URL, PAYER_ADDRESS,
- * TOKEN_ADDRESS, and TREASURY. Service logs go to test-results/services.
+ * the fake service's webhook key. Tests read DEMO_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS,
+ * TOKEN_ADDRESS, and TREASURY (which the tests control on Anvil, as the merchant's finance team
+ * controls its treasury). Service logs go to test-results/services.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const work = mkdtempSync(join(tmpdir(), "demo-e2e-"));
@@ -32,14 +38,34 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     execFileSync(
       process.env["FORGE"] ?? "forge",
       [
-        ...["build", "e2e/TestPha.sol", "--root", ".", "--contracts", "e2e", "--no-lint"],
+        ...["build", "e2e/TestPha.sol"],
+        ...["--root", ".", "--contracts", "e2e", "--no-lint"],
         ...["--out", join(work, "out"), "--cache-path", join(work, "cache")],
       ],
       { cwd: web, stdio: ["ignore", "ignore", "inherit"] },
     );
-    const artifact = JSON.parse(
-      readFileSync(join(work, "out", "TestPha.sol", "TestPha.json"), "utf8"),
-    ) as { bytecode: { object: Hex } };
+    const bytecode = (file: string, name: string) =>
+      (JSON.parse(readFileSync(join(work, "out", file, `${name}.json`), "utf8")) as { bytecode: { object: Hex } })
+        .bytecode.object;
+    // The factory's creation code, built with the contracts' own pinned compiler profile.
+    const factoryBuild = execFileSync(
+      process.env["FORGE"] ?? "forge",
+      [
+        ...["inspect", "ForwarderFactory", "bytecode", "--root", join(root, "contracts")],
+        ...["--out", join(work, "contracts-out"), "--cache-path", join(work, "contracts-cache")],
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
+    )
+      .trim()
+      .split("\n")
+      .at(-1);
+    if (factoryBuild === undefined || !/^0x[0-9a-f]+$/.test(factoryBuild)) {
+      throw new Error("forge inspect printed no ForwarderFactory bytecode");
+    }
+    const factoryInitCode: Hex = `0x${factoryBuild.slice(2)}`;
+    const { factory_salt: factorySalt } = JSON.parse(
+      readFileSync(join(root, "deploy/contracts/expected-codehashes.json"), "utf8"),
+    ) as { factory_salt: Hex };
 
     const [anvilPort, servicePort, productPort] = [await freePort(), await freePort(), await freePort()];
     children.push(
@@ -58,19 +84,39 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     if (payer === undefined) {
       throw new Error("anvil has no dev account");
     }
-    const hash = await chain.deployContract({
-      account: payer,
-      abi: [],
-      bytecode: artifact.bytecode.object,
+    const deployed = async (hash: Hash): Promise<Address> => {
+      const { contractAddress } = await chain.waitForTransactionReceipt({ hash });
+      if (contractAddress == null) {
+        throw new Error("contract deployment failed");
+      }
+      return contractAddress;
+    };
+    const token = await deployed(
+      await chain.deployContract({ account: payer, abi: [], bytecode: bytecode("TestPha.sol", "TestPha") }),
+    );
+    // Anvil carries the deterministic deployment proxy; its calldata is the salt, then the init
+    // code. The factory's constructor creates the implementation (its first CREATE).
+    await chain.waitForTransactionReceipt({
+      hash: await chain.sendTransaction({
+        account: payer,
+        to: DETERMINISTIC_PROXY,
+        data: `${factorySalt}${factoryInitCode.slice(2)}`,
+      }),
     });
-    const { contractAddress: token } = await chain.waitForTransactionReceipt({ hash });
-    if (token == null) {
-      throw new Error("token deployment failed");
+    const implementation = await chain.readContract({
+      address: FACTORY,
+      abi: [
+        { type: "function", name: "implementation", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
+      ],
+      functionName: "implementation",
+    });
+    if (implementation.toLowerCase() !== IMPLEMENTATION.toLowerCase()) {
+      throw new Error(`the factory's implementation is ${implementation}, not the pinned ${IMPLEMENTATION}`);
     }
 
     const webhookSeed = randomBytes(32);
-    // The stand-in service does not check the key; the SDK needs a secret key's form.
-    writeFileSync(join(work, "product.key"), `ppay_sk_test_${"A".repeat(43)}000000`, { mode: 0o600 });
+    // The stand-in service does not check the key; the product runs with a restricted key's form.
+    writeFileSync(join(work, "product.key"), `ppay_rk_test_${"A".repeat(43)}000000`, { mode: 0o600 });
     const product = `http://127.0.0.1:${productPort}`;
     const service = `http://127.0.0.1:${servicePort}`;
     const uv = ["run", "--locked", "--project", join(root, "sdk/python"), "python"];
@@ -85,14 +131,14 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           ...["--product-webhook", `${product}/webhooks`],
           ...["--webhook-seed", webhookSeed.toString("hex")],
           ...["--factory", FACTORY, "--implementation", IMPLEMENTATION],
-          ...["--product", "acme", "--treasury", TREASURY],
+          ...["--account", ACCOUNT, "--treasury", TREASURY],
         ],
         { stdio: ["ignore", openSync(join(logs, "fake_service.log"), "w"), "inherit"] },
       ),
     );
     const config = {
       service_url: service,
-      product_slug: "acme",
+      account: ACCOUNT,
       api_key_file: join(work, "product.key"),
       route: "sandbox-acme-tpha-usd",
       chain_id: sepolia.id,
@@ -122,6 +168,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
     Object.assign(process.env, {
       DEMO_URL: `${product}/demo/`,
+      SERVICE_URL: service,
       ANVIL_URL: anvil,
       PAYER_ADDRESS: payer,
       TOKEN_ADDRESS: token,

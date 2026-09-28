@@ -87,6 +87,7 @@ def test_topup_returns_the_client_secret_and_keys_the_quote_by_order(
     assert response.json()["expected_address"] == quote_object()["address"]
     sent = requests[0]
     assert json.loads(sent.content)["client_reference_id"] == "team-42"
+    assert json.loads(sent.content)["metadata"] == {"order_id": response.json()["order_id"]}
     assert sent.headers["idempotency-key"] == f'"{response.json()["order_id"]}"'
 
 

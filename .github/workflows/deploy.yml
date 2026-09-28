@@ -12,7 +12,7 @@ name: Deploy
 # attested compose and verifier read-back are the audit trail. The images are those of a
 # successful Release images run on `main`, read from its `images.json` artifact, never typed in.
 # The CVM's env holds only the owner-sealed secrets (deploy/staging.env.example, or
-# deploy/product/staging.env.example: the product's signing seed), which never enter GitHub:
+# deploy/product/staging.env.example: the product's Phala Pay API key), which never enter GitHub:
 # `provision` sends them empty, and the owner then seals them from their own machine (the run
 # summary prints the command); `upgrade` sends no env at all, so the sealed env stays. Every other
 # setting is public and attested: the target's render-compose.sh renders the Environment variables
@@ -470,7 +470,7 @@ jobs:
               echo
               echo "The product runs without its Phala Pay key: webhooks and fulfillment are served,"
               echo "the account API answers 503. From your own machine, write \`$env_file\` with the"
-              echo "single line \`PRODUCT_API_KEY=<the account's ppay_sk_test_ key>\` (mode 0600)."
+              echo "single line \`PRODUCT_API_KEY=<the account's restricted ppay_rk_test_ key>\` (mode 0600)."
             fi
             echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact:"
             echo

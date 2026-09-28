@@ -1,7 +1,7 @@
 # Outbox backlog
 
-**Trigger:** the `topup-outbox-test` or `topup-outbox-live` monitor missing its check-ins, `outbox delivery poll failed`
-issues, a non-zero `credited_undelivered` or any `failing_webhook_endpoints` in the daily report
+**Trigger:** the `topup-outbox-test` or `topup-outbox-live` monitor missing its check-ins, `outbox delivery claim failed` or
+`outbox delivery failed` issues, a non-zero `credited_undelivered` or any `failing_webhook_endpoints` in the daily report
 (`GET /v1/admin/reports/daily`), or a merchant reporting that webhooks or credits stopped.
 
 **Impact:** `deposit.credited` is how the merchant learns it owes a credit, so an undelivered one
@@ -14,8 +14,8 @@ whose endpoint keeps failing.
 
 ## First steps
 
-1. Read the error of `outbox delivery poll failed` in Sentry: a database error stops every
-   delivery; a receiver's failures do not raise an issue.
+1. Read the error of `outbox delivery claim failed` or `outbox delivery failed` in Sentry: a
+   database error stops every delivery; a receiver's failures do not raise an issue.
 2. The daily report's `failing_webhook_endpoints` names each failing endpoint, its account,
    `pending_deliveries`, `oldest_pending_at`, and `last_attempt_status` (`null`: no response,
    such as a timeout or a URL the egress proxy refused). With the merchant, from its recorded
@@ -26,7 +26,7 @@ whose endpoint keeps failing.
    events, so it cannot catch up by fetching state alone; `GET /v1/events?delivery_success=false`
    lists what its endpoints have not received.
 3. For a missing event, the admin deposit view lists each deposit's `events`: `id` (the
-   `webhook-id`), `event_type`, and `delivered_at` (`null` while undelivered); the merchant sees
+   `webhook-id`), `type`, and `delivered_at` (`null` while undelivered); the merchant sees
    the same event with `pending_webhooks` in `GET /v1/events`. Delivery attempts are not
    observable in production.
 
@@ -43,7 +43,9 @@ whose endpoint keeps failing.
   ([webhook egress](../README.md#webhook-egress)) and fails like an unreachable one: the merchant
   must use a public address.
 
-- Receiver rejects signatures (`4xx`): coordinate its settlement-key pinning.
+- Receiver rejects signatures (`4xx`): the merchant re-pins its account's webhook public keys for
+  the mode from `GET /v1/attestation` with its own key; after a webhook key roll the previous key
+  keeps signing for the roll's overlap (at least 48 hours in live mode).
 - Monitor silent with no error: the delivery worker stopped. **HUMAN-ONLY:** restart the CVM
   (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).
 
