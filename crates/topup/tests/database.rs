@@ -53,7 +53,7 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
 }
 
 /// The schema starts from one squashed migration that builds every table on an empty database:
-/// staging is reset rather than migrated (design §14, §16 PR 13). Later migrations are additive.
+/// staging is reset rather than migrated (design §14, §16 PR 11). Later migrations are additive.
 #[tokio::test]
 async fn one_migration_builds_the_schema_on_an_empty_database() -> Result<()> {
     with_database(|context| {

@@ -336,9 +336,9 @@ host, DNS, and the Phala/dstack platform endpoints, and record the rules.
 The service sends no transactions and holds no key that can move funds (design §5). A forwarder
 pays only the treasury its address commits to, and anyone can call the factory's public
 `flush(treasury, salts, token)`: the account's owner sweeps with its own wallet or Safe and pays
-the gas (for staging, the treasury Safe's owners). Until the dashboard and SDK sweep builder
-(design PRs 11 and 12) build the call, it can be sent with `cast`, where `SALTS` lists the quote
-salts (`0x…`, comma-separated) of the addresses to sweep:
+the gas (for staging, the treasury Safe's owners). Until the SDK sweep builder (design PR 10)
+builds the call or a Safe Transaction Builder batch, it can be sent with `cast`, where `SALTS`
+lists the quote salts (`0x…`, comma-separated) of the addresses to sweep:
 
 ```sh
 cast send "$FACTORY" 'flush(address,bytes32[],address)' "$TREASURY" "[$SALTS]" "$TOKEN" \

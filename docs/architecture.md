@@ -461,8 +461,8 @@ it sends no transactions and pays no gas (design D2, D4).
 **Sweeping** is the merchant's transaction. Anyone may call the permissionless factory's
 `flush(treasury, salts[], token)`; each forwarder pays only the treasury its address commits to,
 so the only effect is moving funds to their owner. The merchant sends it from its own wallet or
-Safe when sweeping is worth the gas (design D4); the dashboard and SDK build it (design PRs 11,
-12). The service learns of every sweep from the chain: the finalized scanner indexes `Flushed` and
+Safe when sweeping is worth the gas (design D4); the SDK builds the call or a Safe Transaction
+Builder batch (design PR 10). The service learns of every sweep from the chain: the finalized scanner indexes `Flushed` and
 `FlushFailed` for its addresses (§8), and deposits are swept by the rule in §7. A `FlushFailed`
 target (a token or treasury refusing the transfer) keeps its balance and its deposits stay
 `credited`; it is recorded in `flush_failures` for the merchant, not raised as a platform alert.
