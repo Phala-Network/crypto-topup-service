@@ -1,25 +1,40 @@
 # Chain frozen
 
-**Trigger:** `TopupReconciliationMismatch` with `check:address_derivation`; products report
+**Trigger:** `TopupReconciliationMismatch` with `check:address_derivation` or
+`check:custody_balance`; products report
 `423 chain_frozen` from address issuance or rate-lock creation; `topup-scanner-<chain_id>` misses
 its check-ins because the frozen chain's scanner has paused.
 
-**Impact:** the factory's `addressOf(salt)` disagrees with a stored address, so the service can no
-longer prove where that chain's deposits go. Until the freeze is lifted, the chain's deposits
-wait, its scanner and head scan stop, the flusher plans nothing, and address issuance and
-rate-lock creation answer `423`. Other chains keep running; credited facts are never rolled back.
+**Impact:** the service can no longer vouch for its ledger on the chain: either the factory's
+`addressOf(treasury, salt)` disagrees with a stored address (`address_derivation`), so it cannot
+prove where deposits go, or a forwarder's finalized balance is not its final deposits minus its
+finalized `Flushed` amounts (`custody_balance`), so a transfer or sweep is missing from, or wrong
+in, the ledger. Until the freeze is lifted, the chain's deposits wait (nothing is credited), its
+scanner and head scan stop, and address issuance and rate-lock creation answer `423`. Other chains
+keep running; credited facts are never rolled back.
 
 ## First steps
 
-1. Read `subjects` (`chain_id`, `address_id`, `salt`), `expected.address` (the factory's), and
-   `observed.address` (the stored one) from the Sentry event.
-2. Ask the factory through both providers and check the contract tuple against the attested route:
+1. Read `check` and `subjects` from the Sentry event: for `address_derivation`, `chain_id`,
+   `address_id`, `salt`, and `treasury`, with `expected.address` (the factory's) and
+   `observed.address` (the stored one); for `custody_balance`, `address_id`, `token`, and `block`,
+   with `expected` (`deposits_atomic`, `flushed_atomic`) and `observed.balance_atomic`.
+2. For `address_derivation`, ask the factory through both providers and check the contracts
+   against the attested route:
 
    ```sh
-   cast call "$FACTORY" 'addressOf(bytes32)(address)' "$SALT" --rpc-url "$RPC_PROVIDER_A_URL"
-   cast call "$FACTORY" 'addressOf(bytes32)(address)' "$SALT" --rpc-url "$RPC_PROVIDER_B_URL"
+   cast call "$FACTORY" 'addressOf(address,bytes32)(address)' "$TREASURY" "$SALT" --rpc-url "$RPC_PROVIDER_A_URL"
+   cast call "$FACTORY" 'addressOf(address,bytes32)(address)' "$TREASURY" "$SALT" --rpc-url "$RPC_PROVIDER_B_URL"
    cast call "$FACTORY" 'implementation()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
-   cast call "$IMPLEMENTATION" 'treasury()(address)' --rpc-url "$RPC_PROVIDER_A_URL"
+   ```
+
+   For `custody_balance`, read the forwarder's balance at the finding's block through both
+   providers, and list the factory's events for it (`Flushed` is the second topic set below):
+
+   ```sh
+   cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$BLOCK" --rpc-url "$RPC_PROVIDER_A_URL"
+   cast call "$TOKEN" 'balanceOf(address)(uint256)' "$FORWARDER_ADDRESS" --block "$BLOCK" --rpc-url "$RPC_PROVIDER_B_URL"
+   cast logs --address "$FACTORY" --to-block "$BLOCK" 'Flushed(bytes32 indexed,address indexed,address indexed,address,uint256)' "" "$FORWARDER_ADDRESS" --rpc-url "$RPC_PROVIDER_A_URL"
    ```
 
 3. Tell the product that deposits on the chain are unavailable and must show no address
@@ -27,9 +42,14 @@ rate-lock creation answer `423`. Other chains keep running; credited facts are n
 
 ## Decide
 
-- Providers disagree about `addressOf`: [provider disagreement](provider-disagreement.md) first.
-- Factory, implementation, or treasury differs from the route: configuration or deployment
-  incident; engage Security and Finance.
+- Providers disagree about `addressOf` or the balance: [provider disagreement](provider-disagreement.md) first.
+- Factory or implementation differs from the route: configuration or deployment incident; engage
+  Security and Finance.
+- `custody_balance`: compare the chain's `Transfer` logs to the forwarder and the factory's
+  `Flushed` logs for it with the deposit view (`admin GET /v1/admin/deposits/{id}`) of each of its
+  deposits. A transfer the ledger lacks is repaired by `missing_deposit` within a round; a
+  fee-on-transfer or rebasing token, or a ledger row that disagrees with the chain, is an
+  Engineering and Finance incident.
 - Contracts match but the stored address differs: database corruption or tampering; preserve the
   Sentry event and escalate to Security.
 - Funds already reached a stored address the factory does not derive: open a Finance and Security
@@ -53,5 +73,5 @@ freezes the chain again.
 
 ## Done when
 
-A reconciliation round raises no new `address_derivation` finding, `topup-scanner-<chain_id>`
-checks in again, and address issuance answers normally.
+A reconciliation round raises no new `address_derivation` or `custody_balance` finding,
+`topup-scanner-<chain_id>` checks in again, and address issuance answers normally.

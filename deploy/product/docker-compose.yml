@@ -36,8 +36,7 @@ services:
 volumes:
   ledger:
 
-# Addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml). The
-# product's caps admit one deposit above the route's min_flush_atomic (20000 test PHA).
+# Addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml).
 configs:
   product_config:
     content: |

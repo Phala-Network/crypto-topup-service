@@ -10,12 +10,12 @@ docker compose -f deploy/docker-compose.staging.yml exec -T postgres psql -c "SE
 topup reconcile \
   --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
 cargo run --locked -q -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
-export OPERATOR_ROLE="$(cast keccak OPERATOR_ROLE)"
+export TOPIC="$(cast keccak Flushed)"
 psql "$DATABASE_URL" <<'SQL'
 topup bogus --not-a-command
 SQL
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/admin/routes/$ROUTE/pause" /tmp/body.json "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H "${headers[0]}" "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
 curl --fail-with-body -sS "$BASE_URL/v1/attestation?nonce=00"
-admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["flush"]}'
+admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["refunds"]}'
 ```

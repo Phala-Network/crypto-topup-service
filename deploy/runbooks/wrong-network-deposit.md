@@ -66,21 +66,16 @@ chain is not added to any route.
    deploy/contracts/deploy-proxy.sh --rpc-url "$WRONG_CHAIN_RPC_URL"
    deploy/contracts/deploy-factory.sh --rpc "$WRONG_NETWORK"/a="$WRONG_CHAIN_RPC_URL" --dry-run
    deploy/contracts/deploy-factory.sh --rpc "$WRONG_NETWORK"/a="$WRONG_CHAIN_RPC_URL" --broadcast
-   cast call "$FACTORY" 'addressOf(bytes32)(address)' "$SALT" --rpc-url "$WRONG_CHAIN_RPC_URL"
+   cast call "$FACTORY" 'addressOf(address,bytes32)(address)' "$TREASURY" "$SALT" --rpc-url "$WRONG_CHAIN_RPC_URL"
    ```
 
    Stop if `addressOf` is not `DEPOSIT_ADDRESS` or the factory address differs from mainnet.
-3. The admin Safe (the factory's `DEFAULT_ADMIN_ROLE` holder) grants itself `OPERATOR_ROLE` on
-   that chain's factory, calls `flush([salt], token)` (`address(0)` for the native coin), and
-   revokes the role in the same Safe batch, so no service or hot key holds the role there. Prepare
-   the calldata for review:
+3. Anyone, usually the treasury Safe, calls the permissionless factory's
+   `flush(treasury, [salt], token)` on that chain (`address(0)` for the native coin); the forwarder
+   can only pay the treasury. Prepare the calldata for review:
 
    ```sh
-   export ADMIN_SAFE=0x...
-   export OPERATOR_ROLE="$(cast keccak OPERATOR_ROLE)"
-   cast calldata 'grantRole(bytes32,address)' "$OPERATOR_ROLE" "$ADMIN_SAFE"
-   cast calldata 'flush(bytes32[],address)' "[$SALT]" "$WRONG_CHAIN_TOKEN"
-   cast calldata 'revokeRole(bytes32,address)' "$OPERATOR_ROLE" "$ADMIN_SAFE"
+   cast calldata 'flush(address,bytes32[],address)' "$TREASURY" "[$SALT]" "$WRONG_CHAIN_TOKEN"
    ```
 
 4. Finance returns the recovered tokens, net of gas, from the treasury Safe on that chain to an
@@ -92,16 +87,14 @@ chain is not added to any route.
 ## Done when
 
 The forwarder's token balance on the other chain is zero, the factory emitted `Flushed` for the
-salt, the treasury Safe received the amount, the admin Safe no longer holds `OPERATOR_ROLE`, and
-the return transaction to the user is final and linked from the support case:
+salt, the treasury Safe received the amount, and the return transaction to the user is final and
+linked from the support case:
 
 ```sh
 cast call "$WRONG_CHAIN_TOKEN" 'balanceOf(address)(uint256)' "$DEPOSIT_ADDRESS" --rpc-url "$WRONG_CHAIN_RPC_URL"
-cast call "$FACTORY" 'hasRole(bytes32,address)(bool)' "$OPERATOR_ROLE" "$ADMIN_SAFE" --rpc-url "$WRONG_CHAIN_RPC_URL"
 ```
 
 ## Rollback
 
 There is nothing to roll back in the service. A factory deployed on the other chain stays there
-and is harmless: only the admin Safe can grant `OPERATOR_ROLE`, and every forwarder can only pay the
-treasury. Do not add the chain to a route without the architecture review in §8.
+and is harmless: it has no roles or admin, and every forwarder can only pay its treasury. Do not add the chain to a route without the architecture review in §8.

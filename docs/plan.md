@@ -40,7 +40,7 @@ each item. The design is [architecture.md](architecture.md); integrators read
 | Production Phala Cloud workspace and API key (`production` Environment) | Ops | open |
 | Sentry quota for production | Ops | open |
 | DNS for `pay-api.phala.com` (CNAME and `_dstack-app-address` TXT) | Ops | open |
-| Defaults in architecture §14: minimum deposit and flush 0, minimum credit $1, 4 quote decimals, deposit and exposure caps | Finance | to confirm |
+| Defaults in architecture §14: minimum deposit 0, minimum credit $1, 4 quote decimals, deposit and exposure caps | Finance | to confirm |
 | Refund policy and pilot allowlist | Finance, Product | open |
 | Compliance: region, Travel Rule, KYT timing | Compliance | open |
 

@@ -12,6 +12,12 @@ migrator refuses to start, because the applied versions are missing from the bin
 migrations are additive (plan §6 item 6): never edit an applied migration, and never squash again
 once any environment holds data.
 
+`20261005040000_chain_sourced_sweeps` (design PR 4) removes the operator flusher: `flushes`,
+`flush_exclusions`, `deposits.flush_id`, the `flush` pause scope, and the treasury-inflow totals
+of `reconciliation_custody_cursors`. It recreates `flushed` as the chain-sourced record of design
+§14, adds `flush_failures` and `addresses.deployed_block`, and indexes credited deposits by
+address for the sweep linkage.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-issues each account with `POST /v1/admin/accounts`
@@ -31,8 +37,9 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | Tables | `topup_app` |
 |---|---|
 | `transitions`, `audit`, `reconciliation_findings`, `heartbeat` | `SELECT`, `INSERT` (append-only) |
+| `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
 | `reconciliation_blocks` | `SELECT`, `INSERT`, `DELETE` |
-| `reconciliation_deposit_cursors`, `reconciliation_custody_cursors` | `SELECT`, `INSERT`, `UPDATE` |
+| `reconciliation_deposit_cursors` | `SELECT`, `INSERT`, `UPDATE` |
 | `_sqlx_migrations`, `permissions` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
@@ -51,8 +58,9 @@ server-side scope of both (`crate::tenancy::Scope`); the chain workers and the a
 platform and read across accounts. Composite foreign keys, `(parent_id, account_id, livemode)`
 referencing a unique key of the parent, make a quote agree with its customer, an address with its
 quote, a deposit with its address and customer, and a refund with its deposit, so no write can join
-two accounts or two modes. `transitions`, `pending_transfers`, `refund_payment_claims`, and
-`webhook_deliveries` have no `account_id` and are reached only through their scoped parent.
+two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush_failures`,
+`refund_payment_claims`, and `webhook_deliveries` have no `account_id` and are reached only
+through their scoped parent.
 
 `permissions` is the one authorization table (design D13): each row grants a permission to a role
 (`role:owner`, `role:administrator`, `role:developer`, `role:view_only`) or an API key kind
@@ -60,9 +68,6 @@ two accounts or two modes. `transitions`, `pending_transfers`, `refund_payment_c
 
 ## Kept until a later design PR
 
-- `flushes`, `flushed` (operator plans and their `Flushed` logs), `flush_exclusions`,
-  `deposits.flush_id`, and the `flush` pause scope belong to the operator flusher, which design PR 4
-  removes together with them; PR 4 also reshapes `flushed` into the chain-sourced record of §14.
 - `request_signing_keys` holds each account's RFC 9421 ed25519 key until API keys replace merchant
   request signing (design PR 5). Its key id is `{accounts.public_id}/v1`, and the key's `livemode`
   is the mode of every request it signs.
@@ -91,9 +96,10 @@ two accounts or two modes. `transitions`, `pending_transfers`, `refund_payment_c
 - `pending_transfers` is display-only, written by the head scan and cleared by the finalized
   scanner's cursor advance. Nothing that affects money reads it.
 - The heartbeat RPO target is the code constant `topup::heartbeat::RPO_SECONDS`, not a column.
-- A `chain` reconciliation block written by the address-derivation check freezes that chain at
-  runtime: pumps leave its deposits waiting, its scanner pauses, the flusher plans nothing, and
-  quote creation answers `409 chain_frozen`; the service keeps serving other chains. An `address`
-  block excludes one address from flush planning. An operator lifts a block with the admin-signed
+- A `chain` reconciliation block written by the address-derivation or the per-forwarder custody
+  check freezes that chain at runtime: pumps leave its deposits waiting, its scanner pauses, and
+  quote creation answers `409 chain_frozen`; the service keeps serving other chains. No check
+  writes the `address` scope since the flusher is gone. An operator lifts a block with the
+  admin-signed
   `POST /v1/admin/reconciliation-blocks/{block_key}/lift` and a `reason`: it deletes the row and
   writes an `audit` row carrying the removed block in one transaction.

@@ -21,7 +21,7 @@ flowchart LR
     end
     subgraph cvm["Phala Pay (dstack CVM, attested)"]
         api["HTTP API<br/>/v1/quotes, deposits, refunds"]
-        worker["Scanner, pump, flusher,<br/>outbox, reconciler"]
+        worker["Scanner, pump,<br/>outbox, reconciler"]
     end
     subgraph chain["Ethereum"]
         fwd["CREATE2 forwarders<br/>(one per quote)"]
@@ -33,7 +33,7 @@ flowchart LR
     backend -->|"signed: create quote, refunds"| api
     worker -->|"signed deposit.credited webhook"| backend
     worker -->|"reads finalized logs (2 RPC providers)"| fwd
-    worker -->|"batched flush"| fwd
+    sweeper(["Merchant wallet or Safe<br/>(anyone may flush)"]) -->|"factory flush, pays gas"| fwd
     fwd -->|"can only pay"| safe
 ```
 
@@ -45,7 +45,8 @@ product asks for a quote; the account is created with it
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
   → credited: a signed deposit.credited webhook, retried until the product fulfills it once
-  → batched flush of forwarders to the treasury
+  → the merchant (or anyone) flushes forwarders to the treasury; the service sends no transaction
+    and marks deposits swept from the finalized Flushed events
   → reconciliation of chain, service, and product ledger
 ```
 
@@ -56,7 +57,8 @@ credited.
 ## Ownership
 
 The service owns addresses, chain evidence, finality, screening, pricing, deposit state,
-credits and their webhooks, sweeps, and reconciliation. The product owns customer identity, spendable
+credits and their webhooks, the swept status it reads from the chain, and reconciliation. The
+merchant sweeps its forwarders and pays that gas. The product owns customer identity, spendable
 balance, debt, entitlements, and billing policy.
 
 ## Documents

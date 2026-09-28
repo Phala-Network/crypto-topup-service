@@ -151,7 +151,8 @@ sequenceDiagram
     opt Transaction dropped before finality (rare)
         PP->>BE: webhook deposit.reversed: claw back like a refund
     end
-    PP->>ETH: batched flush to the treasury Safe
+    BE->>ETH: sweep: factory flush to the treasury Safe (any wallet, pays gas)
+    PP-->>PP: finalized Flushed event marks the deposit swept
     opt Refund (operator only, from your admin)
         BE->>PP: POST /v1/refunds {deposit, destination_address}
         PP->>BE: webhook deposit.refunded, after finance's transfer is final
@@ -168,8 +169,8 @@ and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's blo
 the typical credit time (`typical_credit_seconds`, 30), and the typical finality time
 (`typical_finality_seconds`, 900). Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
-payment) carries no spread; network and exchange fees are the payer's; sweep gas is the service's
-and never reduces a credit.
+payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
+when you sweep, and never reduces a credit.
 
 `POST /v1/quotes {account_id, amount, currency: "usd", chain_id, asset}` with an
 `Idempotency-Key` returns the quote:
@@ -322,8 +323,8 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
 ```
 
 - `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
-  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a flush
-  covered it before that first delivery.
+  first delivered and never changed afterwards; its `status` is `credited`, or `swept` if a
+  finalized flush covered it before that first delivery.
 - `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
   otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
