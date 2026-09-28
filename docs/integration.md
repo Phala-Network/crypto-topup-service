@@ -169,7 +169,7 @@ the typical credit time (`typical_credit_seconds`, 30), and the typical finality
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
 when you sweep, and never reduces a credit.
 
-`POST /v1/quotes {account_id, amount, currency: "usd", chain_id, asset}` with an
+`POST /v1/quotes {account_id, amount, currency: "usd", chain_id, asset, metadata?}` with an
 `Idempotency-Key` returns the quote:
 
 ```json
@@ -179,7 +179,8 @@ when you sweep, and never reduces a credit.
   "amount_atomic": "100502600000000000000", "exchange_rate": "0.24875621",
   "address": "0x…", "payment_uri": "ethereum:0x…@11155111/transfer?address=0x…&uint256=…",
   "status": "open", "expires_at": 1790410500, "created": 1790409600,
-  "payment": null, "deposit": null, "client_secret": "qt_…_secret_…"
+  "payment": null, "deposit": null, "client_secret": "qt_…_secret_…",
+  "metadata": {"order_id": "6735"}
 }
 ```
 
@@ -201,6 +202,8 @@ when you sweep, and never reduces a credit.
   price when true), and the `dep_` id it has or will have. A seen payment can disappear in a
   reorg and is never a credit.
 - `deposit` is the deposit that completed the quote (`expand[]=deposit` returns it whole).
+- `metadata` holds your own key/value pairs, such as your order id; the deposit that pays the
+  quote starts with a copy (§1.4).
 - `GET /v1/quotes/{id}` resumes a checkout; `POST /v1/quotes/{id}/cancel` cancels an unpaid
   quote, after which any payment to its address is credited at spot.
 - A quote above the remaining open exposure fails with `409 exposure_cap_exceeded`; its message
@@ -297,6 +300,42 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 User-facing copy per state and reason, including what never to show, is in
 [architecture §12, product UI](architecture.md#customer-experience-obligations-product-ui).
 
+### 1.4 Metadata
+
+Quotes, deposits, and refunds carry `metadata`, as Stripe objects do
+([docs.stripe.com/api/metadata](https://docs.stripe.com/api/metadata),
+[docs.stripe.com/metadata](https://docs.stripe.com/metadata)): up to 50 key/value pairs for your
+own use, keys of up to 40 characters without square brackets, values of up to 500 characters,
+strings only. Phala Pay never reads it. **Do not store sensitive information in metadata**, such
+as personal data, credentials, or payment details; keep those in your own database and put its
+record id in metadata instead.
+
+- Set it on create: `metadata` on `POST /v1/quotes` and `POST /v1/refunds`. A key set to `""` is
+  left out.
+- Update it with `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, or `POST /v1/refunds/{id}`
+  `{"metadata": {…}}`, in any status. The update merges: a key with a value is set, a key set to
+  `""` is unset, keys you do not send are kept, and `{"metadata": ""}` unsets every key. The
+  50-key limit applies to the result.
+- A deposit's metadata is initialized from its quote's when the deposit is recorded, and is
+  independent afterwards: updating one does not change the other. This is how Stripe Checkout's
+  `payment_intent_data.metadata` sets the PaymentIntent's metadata, and how a PaymentIntent's
+  metadata is copied to its Charge. So an order id set on the quote arrives in the
+  `deposit.credited` webhook's `data.object.metadata`, and a second payment to the same address
+  carries it too.
+- Reads with your API key and every webhook's `data.object` include it; the payer's
+  `client_secret` view does not, as Stripe omits metadata from publishable-key reads.
+- A limit violation is `400 parameter_invalid` with `param` naming `metadata[key]` (the key,
+  value, or type is invalid) or `metadata` (too many keys, or not an object or `""`).
+- `metadata` is part of the request an `Idempotency-Key` identifies (§5.6): the same key with
+  other metadata is `400 idempotency_key_reused`.
+
+```python
+quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111, asset="pha",
+                          idempotency_key=order.id, metadata={"order_id": order.id})
+pay.deposits.update(deposit.id, metadata={"fulfilled_at": str(now)})
+pay.refunds.update(refund.id, metadata={"ticket": ""})   # unsets `ticket`
+```
+
 ## 2. Webhooks and fulfillment
 
 ### 2.1 The event
@@ -316,7 +355,8 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
  "created": 1790409590,
  "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit",
                      "account_id": "team-42", "quote": "qt_…", "status": "credited",
-                     "amount": 1234, "currency": "usd", "price_source": "quote", …}}}
+                     "amount": 1234, "currency": "usd", "price_source": "quote",
+                     "metadata": {"order_id": "6735"}, …}}}
 ```
 
 - `data.object` is the deposit as `GET /v1/deposits/{id}` returns it, rendered when the event is
@@ -326,6 +366,8 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
   otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
   valued at spot; it is `null` only for a legacy persistent address.
+- `metadata` is the deposit's, which starts as a copy of the quote's (§1.4). As the rest of
+  `data.object`, it is what the deposit held at the first delivery.
 - `webhook-id` is the event's `id`: `evt_` and the hex of
   `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
   (`topup_sdk.credited_event_id`), so every retry, operator replay, and re-emission after a
@@ -488,12 +530,14 @@ which may be an exchange), then:
 POST /v1/refunds
 Idempotency-Key: "…"
 
-{"deposit": "dep_…", "destination_address": "0x…", "amount_atomic": "…"}
+{"deposit": "dep_…", "destination_address": "0x…", "amount_atomic": "…",
+ "metadata": {"reason": "duplicate", "ticket": "T-1"}}
 ```
 
 ```json
 {"id": "re_…", "object": "refund", "deposit": "dep_…", "amount_atomic": "…",
- "destination_address": "0x…", "status": "pending", "tx_hash": null, "created": 1790500000}
+ "destination_address": "0x…", "status": "pending", "tx_hash": null, "created": 1790500000,
+ "metadata": {"reason": "duplicate", "ticket": "T-1"}}
 ```
 
 - `amount_atomic` is in token base units and defaults to the unrefunded remainder; more than the
@@ -710,7 +754,8 @@ included; the same key with another request is `400 idempotency_key_reused`
 `409 idempotency_key_in_use`, retry. A `429` or `5xx` is not kept, so a retry runs the request
 again. Without a key every `POST` runs. A replayed key creation or roll returns the key without
 its `secret`, which is never stored: roll again if the first response was lost. Canceling a
-canceled quote and revoking a revoked key return it unchanged.
+canceled quote and revoking a revoked key return it unchanged. Updating metadata is
+idempotent by its merge: sending the same `metadata` again leaves the object unchanged.
 
 `TopupClient.create_quote` and `create_refund` send a fresh key unless you pass one, and reuse it
 on every retry.
@@ -727,14 +772,17 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 |---|---|---|
 | `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes`, and the key's `livemode`. | `get_account` |
 | `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
-| `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
+| `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset, metadata?}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
 | `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
+| `POST /v1/quotes/{id}` `{metadata}` | Update the quote's metadata (§1.4). | `update_quote` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
 | `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
-| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
+| `POST /v1/deposits/{id}` `{metadata}` | Update the deposit's metadata (§1.4); the quote's is unchanged. | `update_deposit` |
+| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
 | `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
+| `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
 | `GET /v1/attestation?nonce=` | Settlement key evidence (§5.3); unauthenticated. | `attestation` |
 
 ### 5.8 Errors

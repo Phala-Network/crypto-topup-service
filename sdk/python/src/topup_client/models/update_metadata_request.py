@@ -16,41 +16,24 @@ if TYPE_CHECKING:
     from ..models.metadata_param_type_0 import MetadataParamType0
 
 
-T = TypeVar("T", bound="CreateRefundRequest")
+T = TypeVar("T", bound="UpdateMetadataRequest")
 
 
 @_attrs_define
-class CreateRefundRequest:
-    """`POST /v1/refunds` body.
+class UpdateMetadataRequest:
+    """`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}` body: the
+    object's updatable parameters, of which `metadata` is the one.
 
-    Attributes:
-        deposit (str): `dep_` id of the deposit to refund.
-        destination_address (str): Address the customer controls; never default it to the sender, which may be an
-            exchange.
-        amount_atomic (None | str | Unset): Amount in base units, as a decimal string; the unrefunded remainder when
-            absent.
-        metadata (MetadataClear | MetadataParamType0 | Unset): A `metadata` parameter: an object of string values, where
-            `""` unsets the key, or `""` to
-            unset every key.
+        Attributes:
+            metadata (MetadataClear | MetadataParamType0 | Unset): A `metadata` parameter: an object of string values, where
+                `""` unsets the key, or `""` to
+                unset every key.
     """
 
-    deposit: str
-    destination_address: str
-    amount_atomic: None | str | Unset = UNSET
     metadata: MetadataClear | MetadataParamType0 | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
-
-        deposit = self.deposit
-
-        destination_address = self.destination_address
-
-        amount_atomic: None | str | Unset
-        if isinstance(self.amount_atomic, Unset):
-            amount_atomic = UNSET
-        else:
-            amount_atomic = self.amount_atomic
 
         metadata: dict[str, Any] | str | Unset
         if isinstance(self.metadata, Unset):
@@ -62,14 +45,7 @@ class CreateRefundRequest:
 
         field_dict: dict[str, Any] = {}
 
-        field_dict.update(
-            {
-                "deposit": deposit,
-                "destination_address": destination_address,
-            }
-        )
-        if amount_atomic is not UNSET:
-            field_dict["amount_atomic"] = amount_atomic
+        field_dict.update({})
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
 
@@ -80,18 +56,6 @@ class CreateRefundRequest:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
 
         d = dict(src_dict)
-        deposit = d.pop("deposit")
-
-        destination_address = d.pop("destination_address")
-
-        def _parse_amount_atomic(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        amount_atomic = _parse_amount_atomic(d.pop("amount_atomic", UNSET))
 
         def _parse_metadata(data: object) -> MetadataClear | MetadataParamType0 | Unset:
             if isinstance(data, Unset):
@@ -112,11 +76,8 @@ class CreateRefundRequest:
 
         metadata = _parse_metadata(d.pop("metadata", UNSET))
 
-        create_refund_request = cls(
-            deposit=deposit,
-            destination_address=destination_address,
-            amount_atomic=amount_atomic,
+        update_metadata_request = cls(
             metadata=metadata,
         )
 
-        return create_refund_request
+        return update_metadata_request

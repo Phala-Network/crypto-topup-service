@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from phala_pay import Deposit, PhalaPay, Quote, SignatureVerificationError, Webhook
+from topup_client.models import DepositMetadata, QuoteMetadata
 from topup_sdk import load_public_key, sign_webhook
 
 API_KEY = "ppay_sk_test_" + "B" * 43 + "000000"
@@ -19,6 +20,7 @@ SERVICE_PUBLIC_KEY = base64.b64encode(
 ).decode()
 QUOTE_ID = "qt_" + "0c" * 16
 EVENT_ID = "evt_" + "26" * 16
+REFUND_ID = "re_" + "0d" * 16
 ADDRESS = "0x" + "11" * 20
 
 
@@ -69,6 +71,7 @@ def _deposit(index: int = 1) -> dict[str, object]:
         "amount_refunded_atomic": "0",
         "refunded": False,
         "created": 1_790_000_300,
+        "metadata": {"order_id": "6735"},
     }
 
 
@@ -95,6 +98,63 @@ def test_quotes_create_returns_the_client_secret_to_a_request_with_the_key() -> 
     assert quote.client_secret == f"{QUOTE_ID}_secret_{'ab' * 24}"
     assert seen[0].headers["idempotency-key"] == '"o-1"'
     assert json.loads(seen[0].content)["account_id"] == "team-42"
+
+
+def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
+    seen: list[httpx.Request] = []
+    refund: dict[str, object] = {
+        "id": REFUND_ID,
+        "object": "refund",
+        "deposit": f"dep_{1:032x}",
+        "amount_atomic": "100",
+        "destination_address": ADDRESS,
+        "status": "pending",
+        "tx_hash": None,
+        "created": 1_790_000_400,
+        "metadata": {},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = json.loads(request.content) if request.content else {}
+        metadata = body.get("metadata")
+        merged = metadata if isinstance(metadata, dict) else {}
+        if request.url.path.startswith("/v1/quotes"):
+            return httpx.Response(200, json=_quote(metadata=merged))
+        if request.url.path.startswith("/v1/deposits"):
+            return httpx.Response(200, json={**_deposit(), "metadata": merged})
+        return httpx.Response(200, json={**refund, "metadata": merged})
+
+    with _client(httpx.MockTransport(handler)) as client:
+        quote = client.quotes.create(
+            account_id="team-42",
+            amount=2500,
+            chain_id=11155111,
+            asset="pha",
+            metadata={"order_id": "6735"},
+        )
+        assert isinstance(quote.metadata, QuoteMetadata)
+        assert quote.metadata.to_dict() == {"order_id": "6735"}
+        client.quotes.update(QUOTE_ID, metadata={"order_id": "", "cart": "9"})
+        deposit = client.deposits.update(f"dep_{1:032x}", metadata="")
+        assert isinstance(deposit.metadata, DepositMetadata)
+        assert deposit.metadata.to_dict() == {}
+        client.refunds.create(
+            deposit=f"dep_{1:032x}", destination_address=ADDRESS, metadata={"ticket": "T-1"}
+        )
+        client.refunds.update(REFUND_ID, metadata={"ticket": "T-2"})
+        client.quotes.update(QUOTE_ID)
+        with pytest.raises(ValueError, match="unset every key"):
+            client.quotes.update(QUOTE_ID, metadata="x")  # type: ignore[arg-type]
+    sent = [(r.method, r.url.path, json.loads(r.content)) for r in seen]
+    assert sent == [
+        ("POST", "/v1/quotes", {**json.loads(seen[0].content), "metadata": {"order_id": "6735"}}),
+        ("POST", f"/v1/quotes/{QUOTE_ID}", {"metadata": {"order_id": "", "cart": "9"}}),
+        ("POST", f"/v1/deposits/dep_{1:032x}", {"metadata": ""}),
+        ("POST", "/v1/refunds", {**json.loads(seen[3].content), "metadata": {"ticket": "T-1"}}),
+        ("POST", f"/v1/refunds/{REFUND_ID}", {"metadata": {"ticket": "T-2"}}),
+        ("POST", f"/v1/quotes/{QUOTE_ID}", {}),
+    ]
 
 
 def test_deposits_list_follows_every_page() -> None:
@@ -153,6 +213,9 @@ def test_construct_event_returns_the_typed_deposit() -> None:
         "team-42",
         2500,
     )
+    # The quote's metadata, copied to its deposit, arrives with the event.
+    assert isinstance(event.deposit.metadata, DepositMetadata)
+    assert event.deposit.metadata.to_dict() == {"order_id": "6735"}
     with pytest.raises(TypeError):
         _ = event.quote
 

@@ -59,6 +59,8 @@ pub enum Permission {
     QuotesWrite,
     /// Read deposits.
     DepositsRead,
+    /// Update deposits' metadata.
+    DepositsWrite,
     /// Read refunds.
     RefundsRead,
     /// Request refunds.
@@ -78,6 +80,7 @@ impl Permission {
             Self::QuotesRead => "quotes.read",
             Self::QuotesWrite => "quotes.write",
             Self::DepositsRead => "deposits.read",
+            Self::DepositsWrite => "deposits.write",
             Self::RefundsRead => "refunds.read",
             Self::RefundsWrite => "refunds.write",
             Self::ApiKeysRead => "api_keys.read",

@@ -57,6 +57,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D12 | Go-live | The operator sets `charges_enabled` when creating the account (or later, same endpoint); third parties only after legal sign-off | Stripe `charges_enabled` |
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
+| D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
 
 ## 4. Fast credit and reversal (D1)
 
@@ -524,13 +525,13 @@ treasury_challenges nonce PK, account_id, livemode, chain_id, address, expires_a
 customers       id, account_id, livemode, client_reference_id, paused_scopes
                 UNIQUE (account_id, livemode, client_reference_id)
 addresses       id, account_id, livemode, chain_id, quote_id, salt, treasury, address UNIQUE (chain_id, address)
-quotes          (today's rate_locks) + account_id, livemode, customer_id
-deposits        + account_id, livemode, receipt_log_index, confirmations_at, final_at;
+quotes          (today's rate_locks) + account_id, livemode, customer_id, metadata jsonb
+deposits        + account_id, livemode, receipt_log_index, confirmations_at, final_at, metadata jsonb;
                 state adds `reversed`; UNIQUE (chain_id, tx_hash, receipt_log_index)
 flushed         chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
                 block_number, block_hash                     -- from finalized Flushed events, any sender
 refunds         id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
-                tx_hash, log_index, status, failure_reason, created_at
+                tx_hash, log_index, status, failure_reason, metadata jsonb, created_at
                 UNIQUE (chain_id, tx_hash, log_index)
 webhook_endpoints id (we_…), account_id, livemode, url, enabled_events text[], status, disabled_reason
 events          id (evt_…), account_id, livemode, type, object_type, object_id, actor, data jsonb, created
@@ -566,6 +567,7 @@ POST   /v1/treasuries/challenge {chain_id, address}  EIP-4361 message to sign
 GET|POST /v1/treasuries {chain_id, message, signature}, POST /v1/treasuries/{id}/cancel
 POST   /v1/quotes {client_reference_id, amount, currency, chain_id, asset}
 GET    /v1/quotes/{id}                               unsigned ?client_secret= as today
+POST   /v1/quotes/{id} {metadata}                  update (D15); likewise /v1/deposits/{id}, /v1/refunds/{id}
 POST   /v1/quotes/{id}/cancel
 GET    /v1/deposits?client_reference_id&quote&status&tx_hash&created[...]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}
@@ -587,6 +589,18 @@ POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   
 - Objects and events carry `livemode`; events carry `account` and `actor`. Deposit gains
   `status: reversed`, `confirmations`, `final` (bool), `swept`. Quote gains `treasury`. Events add
   `deposit.reversed` and the account events of §11.
+- **D15: metadata.** Quotes, deposits, and refunds carry Stripe's
+  [`metadata`](https://docs.stripe.com/api/metadata) exactly: at most 50 string pairs, keys of up
+  to 40 characters without `[` or `]`, values of up to 500 characters; set on create
+  (`POST /v1/quotes`, `POST /v1/refunds`) and by `POST /v1/{object}/{id}`, which merges
+  ([guide](https://docs.stripe.com/metadata): `""` unsets a key, `metadata: ""` unsets all).
+  Errors name `metadata[key]`. A deposit's metadata is initialized from its quote's when it is
+  recorded and is independent afterwards, as Checkout's `payment_intent_data.metadata` sets the
+  PaymentIntent's: the merchant's order id then arrives in `deposit.credited` without a lookup.
+  It is returned in API key reads and webhook `data.object`, not in the payer's `client_secret`
+  view (Stripe redacts it from publishable-key reads). Stored as `jsonb` with a `CHECK` of the
+  same rules; updates take the key's `Scope` like every write, and deposits gain
+  `deposits.write`. The service never reads it; merchants must not store sensitive data in it.
 - There is one public origin, the API's; no cookies, no second domain, no dashboard CSP.
 - Errors adopt Stripe's codes (`api_key_expired`, `livemode_mismatch`, `testmode_charges_only`,
   `rate_limit`, `resource_missing`, type `idempotency_error`); `signature_*` errors stay admin-only.

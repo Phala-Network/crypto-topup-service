@@ -402,6 +402,12 @@ async fn seed_account_event(pool: &PgPool, account_id: Uuid, event_id: Uuid) -> 
         },
     )
     .await?;
+    // The deposit starts with a copy of its quote's metadata, and events render it.
+    sqlx::query("UPDATE quotes SET metadata = $2 WHERE id = $1")
+        .bind(address.quote_id)
+        .bind(serde_json::json!({ "order_id": "6735" }))
+        .execute(pool)
+        .await?;
     let deposit = NewDeposit {
         chain_id: 1,
         tx_hash: alloy_primitives::keccak256(unique),
@@ -528,6 +534,7 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
         deposit["object"] == "deposit" && deposit["status"] == "detected",
         "{envelope}"
     );
+    ensure!(deposit["metadata"] == serde_json::json!({ "order_id": "6735" }));
     ensure!(
         deposit["id"]
             .as_str()

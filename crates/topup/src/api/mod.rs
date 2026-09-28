@@ -11,6 +11,7 @@ mod extract;
 mod handlers;
 mod idempotency;
 mod keys;
+mod metadata;
 pub mod models;
 mod pending;
 mod quotes;
@@ -142,11 +143,12 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let merchant = OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
         .routes(routes!(quotes::create_quote))
+        .routes(routes!(quotes::update_quote))
         .routes(routes!(quotes::cancel_quote))
         .routes(routes!(deposits::list_deposits))
-        .routes(routes!(deposits::get_deposit))
+        .routes(routes!(deposits::get_deposit, deposits::update_deposit))
         .routes(routes!(deposits::create_refund))
-        .routes(routes!(deposits::get_refund))
+        .routes(routes!(deposits::get_refund, deposits::update_refund))
         .routes(routes!(account::get_account))
         .routes(routes!(keys::list_api_keys, keys::create_api_key))
         .routes(routes!(keys::get_api_key, keys::revoke_api_key))

@@ -489,6 +489,7 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
             &account,
             &route,
             MinorAmount::new(1),
+            &Default::default(),
         )
         .await?;
         ensure!(lock.amount_atomic.value() == U256::from(34_u64));
@@ -602,6 +603,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
             &first_account,
             &account_route,
             MinorAmount::new(100),
+            &Default::default(),
         )
         .await?;
         ensure!(matches!(
@@ -612,6 +614,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &first_account,
                 &account_route,
                 MinorAmount::new(1),
+                &Default::default(),
             )
             .await,
             Err(RateLockError::ExposureCap {
@@ -631,6 +634,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
             &first_account,
             &product_route,
             MinorAmount::new(100),
+            &Default::default(),
         )
         .await?;
         ensure!(matches!(
@@ -641,6 +645,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &second_account,
                 &product_route,
                 MinorAmount::new(1),
+                &Default::default(),
             )
             .await,
             Err(RateLockError::ExposureCap {
@@ -661,6 +666,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
             &first_account,
             &global_route,
             MinorAmount::new(100),
+            &Default::default(),
         )
         .await?;
         ensure!(matches!(
@@ -671,6 +677,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &other_account,
                 &global_route,
                 MinorAmount::new(1),
+                &Default::default(),
             )
             .await,
             Err(RateLockError::ExposureCap {
@@ -874,6 +881,7 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
                 &account,
                 &route,
                 MinorAmount::new(100),
+                &Default::default(),
             )
             .await,
             Err(RateLockError::RateLimited)
@@ -970,6 +978,7 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
                     &account,
                     &route,
                     MinorAmount::new(100),
+                    &Default::default(),
                 )
                 .await
             });
@@ -1186,6 +1195,7 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
                         &account,
                         &route,
                         MinorAmount::new(100),
+                        &Default::default(),
                     )
                     .await?;
                 }
@@ -1367,6 +1377,7 @@ async fn create_lock(
         account,
         route,
         MinorAmount::new(100),
+        &Default::default(),
     )
     .await?)
 }

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 
 import httpx
 
 from topup_client.models import Config, Deposit, Quote, Refund
 from topup_sdk import TopupClient
+from topup_sdk.client import Metadata
 
 from ._webhook import Webhook
 
@@ -80,12 +81,16 @@ class Quotes:
         asset: str,
         currency: str = "usd",
         idempotency_key: str | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Quote:
         """Quotes `amount` cents for `account_id`, payable in `asset` on `chain_id`.
 
         Only this response carries `client_secret`, the value the payer's browser needs. Pass an
         `idempotency_key` of your own (for example your order id) to resume a checkout: the same
         key returns the same quote with a new `client_secret`, and the old one stops working.
+
+        `metadata` is Stripe's: up to 50 string pairs for your own use, such as your order id,
+        copied to the deposit that pays the quote. Do not store sensitive information in it.
         """
         return self._client.create_quote(
             account_id,
@@ -94,10 +99,16 @@ class Quotes:
             asset=asset,
             currency=currency,
             idempotency_key=idempotency_key,
+            metadata=metadata,
         )
 
     def retrieve(self, quote_id: str) -> Quote:
         return self._client.get_quote(quote_id)
+
+    def update(self, quote_id: str, *, metadata: Metadata | None = None) -> Quote:
+        """Merges `metadata` into the quote's: a key set to `""` is unset, and `metadata=""`
+        unsets every key."""
+        return self._client.update_quote(quote_id, metadata=metadata)
 
     def cancel(self, quote_id: str) -> Quote:
         """Cancels an open quote no payment has reached; repeating it returns the canceled quote."""
@@ -111,6 +122,11 @@ class Deposits:
     # Before `list`, whose name would shadow the builtin in later annotations.
     def retrieve(self, deposit_id: str, *, expand: list[str] | None = None) -> Deposit:
         return self._client.get_deposit(deposit_id, expand=expand)
+
+    def update(self, deposit_id: str, *, metadata: Metadata | None = None) -> Deposit:
+        """Merges `metadata` into the deposit's, which started as a copy of its quote's; the
+        quote's is left unchanged."""
+        return self._client.update_deposit(deposit_id, metadata=metadata)
 
     def list(
         self,
@@ -146,15 +162,24 @@ class Refunds:
         destination_address: str,
         amount_atomic: int | None = None,
         idempotency_key: str | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Refund:
         """Requests a refund of `deposit` (its unrefunded remainder unless `amount_atomic` is
         given) to an address the customer controls; finance approves and sends it."""
         return self._client.create_refund(
-            deposit, destination_address, amount_atomic, idempotency_key=idempotency_key
+            deposit,
+            destination_address,
+            amount_atomic,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
         )
 
     def retrieve(self, refund_id: str, *, expand: list[str] | None = None) -> Refund:
         return self._client.get_refund(refund_id, expand=expand)
+
+    def update(self, refund_id: str, *, metadata: Metadata | None = None) -> Refund:
+        """Merges `metadata` into the refund's."""
+        return self._client.update_refund(refund_id, metadata=metadata)
 
 
 class ConfigResource:

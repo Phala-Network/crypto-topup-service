@@ -569,6 +569,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             "destination_address": format!("{:#x}", Address::repeat_byte(0x68)),
             "amount_atomic": "10",
         }))?;
+        let metadata_body = serde_json::to_vec(&json!({ "metadata": { "owner": "yes" } }))?;
         let object_requests = [
             (Method::GET, format!("/v1/quotes/{quote}"), Vec::new()),
             (
@@ -595,6 +596,21 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             ),
             (Method::POST, "/v1/refunds".to_owned(), refund_body),
             (Method::GET, format!("/v1/api_keys/{api_key}"), Vec::new()),
+            (
+                Method::POST,
+                format!("/v1/quotes/{quote}"),
+                metadata_body.clone(),
+            ),
+            (
+                Method::POST,
+                format!("/v1/deposits/{deposit}"),
+                metadata_body.clone(),
+            ),
+            (
+                Method::POST,
+                format!("/v1/refunds/{refund}"),
+                metadata_body.clone(),
+            ),
         ];
         // Key mutations the owner is not asked to make: another tenant must not reach them.
         let key_mutations = [

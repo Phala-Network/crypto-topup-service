@@ -6,6 +6,15 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Added
+
+- `metadata`: `pay.quotes.create(…, metadata=)` and `pay.refunds.create(…, metadata=)`, and
+  `pay.quotes.update(id, metadata=)`, `pay.deposits.update(id, metadata=)`, and
+  `pay.refunds.update(id, metadata=)`, which merge (a key set to `""` is unset, `metadata=""`
+  unsets all); `TopupClient` gains the same `metadata=` and `update_quote`, `update_deposit`, and
+  `update_refund`. The regenerated `Quote`, `Deposit`, and `Refund` carry `metadata`, so a webhook
+  deposit carries its quote's.
+
 ### Changed
 
 - **Breaking**: the service sends no transactions, so attestation binds no flusher operators.

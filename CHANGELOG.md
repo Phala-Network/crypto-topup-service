@@ -34,6 +34,16 @@ webhook receivers must ignore unknown fields. The format follows
   `POST /v1/api_keys/{id}/roll {expires_in}` (the old key works for up to 7 days; `0` revokes it).
 - Events `api_key.created`, `api_key.updated`, `api_key.revoked`, and `account.updated`; every
   event records its `actor` (an API key id, `admin`, or `system`).
+- Stripe-style `metadata` on quotes, deposits, and refunds (docs/design/multi-tenant.md D15,
+  [docs.stripe.com/api/metadata](https://docs.stripe.com/api/metadata)): up to 50 string
+  key/value pairs, keys of up to 40 characters without square brackets, values of up to 500
+  characters. Set it with `metadata` on `POST /v1/quotes` and `POST /v1/refunds`; update it with
+  the new `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}`, which
+  merge (`""` unsets a key, `metadata: ""` unsets all). Invalid metadata is
+  `400 parameter_invalid` with `param` `metadata[key]` or `metadata`. A deposit starts with a
+  copy of its quote's metadata, so it arrives in `deposit.credited`'s `data.object`. Objects and
+  webhook payloads always carry `metadata` (`{}` when empty); the `client_secret` view does not.
+  Secret keys gain `deposits.write`. Do not store sensitive information in metadata.
 
 - Accounts and tenancy (docs/design/multi-tenant.md §14, D13, PR 3). The tenant is an account,
   `acct_…`. Its request signing key id is `{acct_…}/v1`, and the key is live or test: it quotes on

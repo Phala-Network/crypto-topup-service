@@ -13,6 +13,7 @@ from typing import cast
 
 if TYPE_CHECKING:
     from ..models.deposit import Deposit
+    from ..models.refund_metadata import RefundMetadata
 
 
 T = TypeVar("T", bound="Refund")
@@ -30,6 +31,10 @@ class Refund:
         id (str): `re_` id.
         object_ (str): Always `refund`.
         status (str): `pending` (requested, approved, or sent) or `succeeded` (the transfer is final).
+        metadata (RefundMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
+            when none.
+            Always sent; optional in the schema so clients also parse objects from servers, and
+            events rendered, before metadata.
         tx_hash (None | str | Unset): Refund transaction hash, once sent.
     """
 
@@ -40,11 +45,13 @@ class Refund:
     id: str
     object_: str
     status: str
+    metadata: RefundMetadata | Unset = UNSET
     tx_hash: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.refund_metadata import RefundMetadata  # noqa: PLC0415
 
         amount_atomic = self.amount_atomic
 
@@ -63,6 +70,10 @@ class Refund:
         object_ = self.object_
 
         status = self.status
+
+        metadata: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.metadata, Unset):
+            metadata = self.metadata.to_dict()
 
         tx_hash: None | str | Unset
         if isinstance(self.tx_hash, Unset):
@@ -83,6 +94,8 @@ class Refund:
                 "status": status,
             }
         )
+        if metadata is not UNSET:
+            field_dict["metadata"] = metadata
         if tx_hash is not UNSET:
             field_dict["tx_hash"] = tx_hash
 
@@ -91,6 +104,7 @@ class Refund:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.refund_metadata import RefundMetadata  # noqa: PLC0415
 
         d = dict(src_dict)
         amount_atomic = d.pop("amount_atomic")
@@ -118,6 +132,13 @@ class Refund:
 
         status = d.pop("status")
 
+        _metadata = d.pop("metadata", UNSET)
+        metadata: RefundMetadata | Unset
+        if isinstance(_metadata, Unset):
+            metadata = UNSET
+        else:
+            metadata = RefundMetadata.from_dict(_metadata)
+
         def _parse_tx_hash(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -135,6 +156,7 @@ class Refund:
             id=id,
             object_=object_,
             status=status,
+            metadata=metadata,
             tx_hash=tx_hash,
         )
 

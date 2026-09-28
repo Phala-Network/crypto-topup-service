@@ -6,6 +6,7 @@ use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
 use chrono::{DateTime, Utc};
+use sqlx::types::Json as JsonColumn;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
@@ -18,8 +19,10 @@ use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
+use super::metadata::{self, Metadata, Object};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote, Refund,
+    UpdateMetadataRequest,
 };
 use super::repository::{self, NewRefund};
 
@@ -202,6 +205,58 @@ pub(crate) async fn get_deposit(
 
 #[utoipa::path(
     post,
+    path = "/v1/deposits/{id}",
+    params(
+        ("id" = String, Path, description = "Deposit id, `dep_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    request_body = UpdateMetadataRequest,
+    responses(
+        (status = 200, description = "OK", body = Deposit),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "deposits"
+)]
+/// Updates a deposit's `metadata`; parameters not sent are left unchanged. The quote's metadata is
+/// not changed.
+pub(crate) async fn update_deposit(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(request): ApiJson<UpdateMetadataRequest>,
+) -> ApiResult<Json<Deposit>> {
+    merchant
+        .require(&state.pool, Permission::DepositsWrite)
+        .await?;
+    let id = ids::parse(ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
+    let scope = merchant.scope;
+    if !metadata::update(
+        &state.pool,
+        Object::Deposit,
+        scope,
+        id,
+        request.metadata.as_ref(),
+    )
+    .await?
+    {
+        return Err(ApiError::not_found());
+    }
+    find_deposit(&state.pool, &state.routes, scope, id)
+        .await?
+        .ok_or_else(ApiError::not_found)
+        .map(Json)
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/refunds",
     params(
         (
@@ -260,6 +315,7 @@ pub(crate) async fn create_refund(
             })
         })
         .transpose()?;
+    let metadata = metadata::on_create(request.metadata.as_ref())?;
     let route = state.refund_route(merchant.scope, deposit_id).await?;
     let refund_id = repository::request_refund(
         &state.pool,
@@ -269,6 +325,7 @@ pub(crate) async fn create_refund(
             route,
             destination,
             amount,
+            metadata: &metadata,
             actor: &merchant.actor(),
         },
     )
@@ -321,6 +378,57 @@ pub(crate) async fn get_refund(
     Ok(Json(refund))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/refunds/{id}",
+    params(
+        ("id" = String, Path, description = "Refund id, `re_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    request_body = UpdateMetadataRequest,
+    responses(
+        (status = 200, description = "OK", body = Refund),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "refunds"
+)]
+/// Updates a refund's `metadata`, in any status; parameters not sent are left unchanged.
+pub(crate) async fn update_refund(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(request): ApiJson<UpdateMetadataRequest>,
+) -> ApiResult<Json<Refund>> {
+    merchant
+        .require(&state.pool, Permission::RefundsWrite)
+        .await?;
+    let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
+    let scope = merchant.scope;
+    if !metadata::update(
+        &state.pool,
+        Object::Refund,
+        scope,
+        id,
+        request.metadata.as_ref(),
+    )
+    .await?
+    {
+        return Err(ApiError::not_found());
+    }
+    find_refund(&state, scope, id)
+        .await?
+        .ok_or_else(ApiError::not_found)
+        .map(Json)
+}
+
 /// The scope's deposit `id`, if it exists.
 pub(crate) async fn find_deposit(
     pool: &PgPool,
@@ -359,7 +467,7 @@ async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Opti
     let row = sqlx::query_as::<_, RefundRow>(
         r#"
         SELECT id, deposit_id, amount_atomic::text AS amount_atomic, to_address, status, tx_hash,
-               created_at
+               created_at, metadata
         FROM refunds
         WHERE id = $1 AND account_id = $2 AND livemode = $3
         "#,
@@ -383,6 +491,7 @@ async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Opti
         .to_owned(),
         tx_hash: row.tx_hash,
         created: row.created_at.timestamp(),
+        metadata: row.metadata.0,
     }))
 }
 
@@ -395,6 +504,7 @@ struct RefundRow {
     status: String,
     tx_hash: Option<String>,
     created_at: DateTime<Utc>,
+    metadata: JsonColumn<Metadata>,
 }
 
 #[derive(FromRow)]
@@ -419,6 +529,7 @@ struct DepositRow {
     block_number: i64,
     amount_refunded_atomic: String,
     created_at: DateTime<Utc>,
+    metadata: JsonColumn<Metadata>,
 }
 
 /// Deposits of `scope`; callers append further `AND` conditions.
@@ -437,7 +548,7 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
                    FROM refunds AS refund
                    WHERE refund.deposit_id = deposit.id AND refund.status = 'confirmed'
                ), 0)::text AS amount_refunded_atomic,
-               deposit.created_at
+               deposit.created_at, deposit.metadata
         FROM deposits AS deposit
         JOIN customers AS customer ON customer.id = deposit.customer_id
         JOIN addresses AS address ON address.id = deposit.address_id
@@ -497,6 +608,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         amount_refunded_atomic: row.amount_refunded_atomic,
         refunded,
         created: row.created_at.timestamp(),
+        metadata: row.metadata.0,
     })
 }
 
