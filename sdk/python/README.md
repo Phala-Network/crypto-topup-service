@@ -22,7 +22,8 @@ install with `uv` or `pip` directly, and switch to the PyPI package once it is r
 ## Quickstart
 
 The operator creates your account and hands your contact its first secret key, `ppay_sk_test_…`;
-roll it on receipt and keep the new key in your secret store.
+roll it on receipt, keep it offline for administration, and create a restricted key
+(`ppay_rk_…`) for your servers.
 
 Create a quote for the signed-in account and return its client secret to the browser:
 
@@ -33,10 +34,12 @@ from phala_pay import PhalaPay
 
 pay = PhalaPay(
     api_base="https://pay.example.com",
-    api_key=os.environ["PHALA_PAY_SECRET_KEY"],
-    # The forwarder factory and implementation, pinned from the attested deployment: every quote
-    # and deposit address is recomputed from them, failing closed (AddressMismatchError).
-    forwarder=(FACTORY, IMPLEMENTATION),
+    api_key=os.environ["PHALA_PAY_API_KEY"],  # a restricted key, ppay_rk_…
+    # Your pins, configured here and never read from the service: every quote and deposit address
+    # is recomputed from them, failing closed (AddressMismatchError); a live key requires all.
+    account="acct_…",
+    forwarder=(FACTORY, IMPLEMENTATION),  # pinned from the attested deployment
+    treasuries={11155111: TREASURY},  # your own treasury per chain, as you proved it
 )
 
 quote = pay.quotes.create(
@@ -96,14 +99,17 @@ an event your own request caused names it in `event.request` (`id`, `idempotency
 | `pay.refunds.list(deposit=, status=)` | `GET /v1/refunds`, every page |
 | `pay.config.retrieve()` | `GET /v1/config` |
 | `pay.balance.retrieve()` / `pay.sweeps.list(chain_id=, forwarder=, token=)` / `pay.forwarders.list(chain_id=, sweepable=)` | `GET /v1/balance`, `GET /v1/sweeps`, `GET /v1/forwarders` |
-| `pay.treasuries.challenge(chain_id=, address=)` / `.create(chain_id=, message=, signature=)` / `.set_eoa(chain_id=, address=, private_key=)` / `.list()` / `.retrieve(id)` / `.cancel(id)` | `POST /v1/treasuries/challenge`, `GET\|POST /v1/treasuries`, `POST /v1/treasuries/{id}/cancel` |
-| `pay.api_keys.create(name=)` / `.list()` / `.retrieve(id)` / `.roll(id, expires_in=)` / `.revoke(id)` | `/v1/api_keys` |
+| `pay.treasuries.challenge(chain_id=, address=)` / `.create(chain_id=, message=, signature=)` / `.set_eoa(chain_id=, address=, private_key=)` / `.list()` / `.retrieve(id)` / `.cancel(id)` / `.pause(id)` / `.resume(id)` | `POST /v1/treasuries/challenge`, `GET\|POST /v1/treasuries`, `POST /v1/treasuries/{id}/cancel\|pause\|resume` |
+| `pay.api_keys.create(name=, permissions=)` / `.list()` / `.retrieve(id)` / `.roll(id, expires_in=)` / `.revoke(id)` | `/v1/api_keys` |
 | `pay.webhook_endpoints.create(url=, enabled_events=)` / `.list()` / `.retrieve(id)` / `.update(id, …)` / `.delete(id)` / `.test(id)` | `/v1/webhook_endpoints` |
 | `pay.events.list(type=, types=, delivery_success=, created_gt=, …)` / `.retrieve(id)` / `.resend(id, webhook_endpoint=)` | `/v1/events` |
 | `pay.export_account(directory)` | every list, written as JSON files |
 | `pay.webhooks.construct_event(payload, headers, public_key, expected_account, expected_livemode=)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 
-Every request sends the secret key as `Authorization: Bearer ppay_sk_…`. Transport errors, `429`
+Every request sends the API key as `Authorization: Bearer …`: a restricted key, `ppay_rk_…`, for
+production servers (`pay.api_keys.create(permissions=[...])`, which never manages keys,
+treasuries, webhook endpoints, webhook keys, or account settings), or a secret key, `ppay_sk_…`,
+kept offline for administration. Transport errors, `429`
 (after its `Retry-After`), `5xx`, and `409 idempotency_key_in_use` are retried with backoff,
 reusing one `Idempotency-Key` per `POST`; a response the service saved for the key, even a `500`,
 comes back marked `Idempotent-Replayed` and is raised as it is, since the request already ran.
@@ -113,11 +119,14 @@ Failures raise `ApiError` with the service's stable `code`, `error_type`, `param
 `409`. Status arguments have `Literal` hints, and `EventType` names every event (`phala_pay.QuoteStatus`,
 `DepositStatus`, `RefundStatus`, `TreasuryStatus`, `EventType`, …); the generated models keep
 statuses as `str`, so a value added later still parses.
-`forwarder=(factory, implementation)`, pinned from the attested deployment, is required: every
-open quote is recomputed over its `treasury`, and every network of an active deposit address over
-its own, from your account id (read once from `GET /v1/account`, or passed as `account=`); a
-difference raises `AddressMismatchError`. `treasuries={chain_id: treasury}` additionally refuses an
-address that pays any other treasury, or a chain without a pinned one. `topup_sdk.deposit_address(factory, implementation, treasury, account=, livemode=,
+`forwarder=(factory, implementation)`, pinned from the attested deployment, `treasuries={chain_id:
+treasury}`, your own treasury per chain as you proved it, and `account=` (`acct_…`) are the pins
+every open quote and every network of an active deposit address is recomputed from, never the
+response's `treasury`: a compromised service could return an attacker's treasury with its valid
+address. An address you cannot derive, or one naming another treasury than your pinned one of its
+chain, raises `AddressMismatchError`. A live key requires all three pins and fails closed without
+them; in test mode `account` is read once from `GET /v1/account`, and an unpinned treasury falls
+back to the response's with an `UnpinnedTreasuryWarning`. `topup_sdk.deposit_address(factory, implementation, treasury, account=, livemode=,
 client_reference_id=, version=)` recomputes any deposit address offline; pass the treasury of the
 network, since a chain whose treasury differs has its own address.
 

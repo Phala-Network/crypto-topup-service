@@ -93,13 +93,17 @@ def sync_detailed(
     body: CreateApiKeyRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ApiKeyObject | ErrorResponse]:
-    """Creates a secret key in the requesting key's mode. The response is the only time its `secret`
-    is shown; a replay of the request (`Idempotency-Key`) returns the key without it.
+    """Creates a key in the requesting key's mode: a secret key, or with `type: restricted` a
+    restricted key (`ppay_rk_…`) holding only `permissions`, Stripe's restricted keys. Run
+    production servers with a restricted key and keep secret keys for administration. The
+    response is the only time its `secret` is shown; a replay of the request (`Idempotency-Key`)
+    returns the key without it.
 
     Args:
         idempotency_key (None | str | Unset):
         body (CreateApiKeyRequest): `POST /v1/api_keys` body. Example: {'name': 'fulfillment
-            worker'}.
+            worker', 'permissions': ['quotes.write', 'deposit_addresses.write', 'deposits.read',
+            'events.read', 'refunds.read'], 'type': 'restricted'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -127,13 +131,17 @@ def sync(
     body: CreateApiKeyRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ApiKeyObject | ErrorResponse | None:
-    """Creates a secret key in the requesting key's mode. The response is the only time its `secret`
-    is shown; a replay of the request (`Idempotency-Key`) returns the key without it.
+    """Creates a key in the requesting key's mode: a secret key, or with `type: restricted` a
+    restricted key (`ppay_rk_…`) holding only `permissions`, Stripe's restricted keys. Run
+    production servers with a restricted key and keep secret keys for administration. The
+    response is the only time its `secret` is shown; a replay of the request (`Idempotency-Key`)
+    returns the key without it.
 
     Args:
         idempotency_key (None | str | Unset):
         body (CreateApiKeyRequest): `POST /v1/api_keys` body. Example: {'name': 'fulfillment
-            worker'}.
+            worker', 'permissions': ['quotes.write', 'deposit_addresses.write', 'deposits.read',
+            'events.read', 'refunds.read'], 'type': 'restricted'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -156,13 +164,17 @@ async def asyncio_detailed(
     body: CreateApiKeyRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ApiKeyObject | ErrorResponse]:
-    """Creates a secret key in the requesting key's mode. The response is the only time its `secret`
-    is shown; a replay of the request (`Idempotency-Key`) returns the key without it.
+    """Creates a key in the requesting key's mode: a secret key, or with `type: restricted` a
+    restricted key (`ppay_rk_…`) holding only `permissions`, Stripe's restricted keys. Run
+    production servers with a restricted key and keep secret keys for administration. The
+    response is the only time its `secret` is shown; a replay of the request (`Idempotency-Key`)
+    returns the key without it.
 
     Args:
         idempotency_key (None | str | Unset):
         body (CreateApiKeyRequest): `POST /v1/api_keys` body. Example: {'name': 'fulfillment
-            worker'}.
+            worker', 'permissions': ['quotes.write', 'deposit_addresses.write', 'deposits.read',
+            'events.read', 'refunds.read'], 'type': 'restricted'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -188,13 +200,17 @@ async def asyncio(
     body: CreateApiKeyRequest,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ApiKeyObject | ErrorResponse | None:
-    """Creates a secret key in the requesting key's mode. The response is the only time its `secret`
-    is shown; a replay of the request (`Idempotency-Key`) returns the key without it.
+    """Creates a key in the requesting key's mode: a secret key, or with `type: restricted` a
+    restricted key (`ppay_rk_…`) holding only `permissions`, Stripe's restricted keys. Run
+    production servers with a restricted key and keep secret keys for administration. The
+    response is the only time its `secret` is shown; a replay of the request (`Idempotency-Key`)
+    returns the key without it.
 
     Args:
         idempotency_key (None | str | Unset):
         body (CreateApiKeyRequest): `POST /v1/api_keys` body. Example: {'name': 'fulfillment
-            worker'}.
+            worker', 'permissions': ['quotes.write', 'deposit_addresses.write', 'deposits.read',
+            'events.read', 'refunds.read'], 'type': 'restricted'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

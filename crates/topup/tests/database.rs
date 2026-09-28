@@ -210,9 +210,23 @@ async fn the_authorization_table_grants_key_kinds_as_designed() -> Result<()> {
             let expected: std::collections::BTreeSet<&str> = all
                 .iter()
                 .copied()
-                .filter(|permission| !["api_keys.write", "treasury.write"].contains(permission))
+                .filter(|permission| {
+                    ![
+                        "api_keys.write",
+                        "treasury.write",
+                        "endpoints.write",
+                        "account.write",
+                    ]
+                    .contains(permission)
+                })
                 .collect();
             ensure!(restricted == expected, "{restricted:?}");
+            // Every code in the table is a permission the service knows.
+            ensure!(
+                all.iter()
+                    .all(|code| topup::tenancy::Permission::parse(code).is_some()),
+                "{all:?}"
+            );
             for permission in [
                 "quotes.write",
                 "refunds.write",
@@ -1008,6 +1022,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
                     request: None,
+                    signing_key_version: None,
                 },
                 OutboxEvent {
                     id: Uuid::new_v4(),
@@ -1018,6 +1033,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
                     request: None,
+                    signing_key_version: None,
                 },
             ];
             let mut transaction = context.app_pool.begin().await?;
@@ -1057,6 +1073,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                 next_attempt_at: Utc::now(),
                 actor: topup::db::SYSTEM_ACTOR.to_owned(),
                 request: None,
+                signing_key_version: None,
             });
             let mut transaction = context.app_pool.begin().await?;
             ensure!(

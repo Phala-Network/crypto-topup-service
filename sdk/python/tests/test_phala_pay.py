@@ -111,6 +111,7 @@ def _client(handler: httpx.MockTransport) -> PhalaPay:
         API_KEY,
         account=ACCOUNT,
         forwarder=(FACTORY, IMPLEMENTATION),
+        treasuries={11155111: TREASURY},
         transport=handler,
     )
 
@@ -300,6 +301,7 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
         API_KEY,
         account=ACCOUNT,
         forwarder=(FACTORY, IMPLEMENTATION),
+        treasuries={11155111: TREASURY, 84532: TREASURY},
         transport=httpx.MockTransport(handler),
     ) as client:
         created = client.deposit_addresses.create(
@@ -342,7 +344,7 @@ def _derived(treasury: str) -> str:
     ("network", "treasuries"),
     [
         # Another address on one chain.
-        (_network(84532, "0x" + "11" * 20), None),
+        (_network(84532, "0x" + "11" * 20), {11155111: TREASURY, 84532: TREASURY}),
         # The address of another treasury, which a pin of the account's treasuries refuses.
         (
             _network(84532, _derived(OTHER_TREASURY), OTHER_TREASURY),
@@ -378,7 +380,7 @@ def test_a_deposit_address_the_account_cannot_derive_is_refused(
         client.deposit_addresses.retrieve(DEPOSIT_ADDRESS_ID)
 
 
-def test_the_key_must_be_a_secret_key() -> None:
+def test_the_key_must_be_an_api_key() -> None:
     with pytest.raises(ValueError, match="secret key"):
         PhalaPay("http://service.test", "acme/v1", forwarder=(FACTORY, IMPLEMENTATION))
 

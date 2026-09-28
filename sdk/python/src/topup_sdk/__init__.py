@@ -14,7 +14,14 @@ from .addresses import (
 )
 from .attestation import attestation_report_data, verify_attestation_binding
 from .client import TopupClient
-from .errors import AddressMismatchError, ApiError, AttestationError, SignatureError, TopupError
+from .errors import (
+    AddressMismatchError,
+    ApiError,
+    AttestationError,
+    SignatureError,
+    TopupError,
+    UnpinnedTreasuryWarning,
+)
 from .export import export_account
 from .fulfillment import (
     CREDITED_EVENT,
@@ -45,6 +52,7 @@ __all__ = [
     "SigningAuth",
     "TopupClient",
     "TopupError",
+    "UnpinnedTreasuryWarning",
     "VerifiedRequest",
     "WebhookEvent",
     "attestation_report_data",

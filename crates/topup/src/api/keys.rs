@@ -1,5 +1,7 @@
 //! The merchant's API keys (`/v1/api_keys`, design D7): list, create, roll, and revoke the keys
 //! of the requesting key's account and mode with a secret key. A test key never reaches live keys.
+//! A secret key may create restricted keys (design PR 12), which hold only the permissions they
+//! are granted.
 
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
@@ -117,8 +119,11 @@ pub(crate) async fn get_api_key(
     security(("api_key" = [])),
     tag = "api_keys"
 )]
-/// Creates a secret key in the requesting key's mode. The response is the only time its `secret`
-/// is shown; a replay of the request (`Idempotency-Key`) returns the key without it.
+/// Creates a key in the requesting key's mode: a secret key, or with `type: restricted` a
+/// restricted key (`ppay_rk_…`) holding only `permissions`, Stripe's restricted keys. Run
+/// production servers with a restricted key and keep secret keys for administration. The
+/// response is the only time its `secret` is shown; a replay of the request (`Idempotency-Key`)
+/// returns the key without it.
 pub(crate) async fn create_api_key(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -128,14 +133,41 @@ pub(crate) async fn create_api_key(
         .require(&state.pool, Permission::ApiKeysWrite)
         .await?;
     validate_name(&request.name)?;
-    let issued = api_keys::create(
-        &state.pool,
-        merchant.scope,
-        &request.name,
-        &merchant.actor(),
-        "",
-    )
-    .await
+    let issued = match (request.key_type.as_deref(), request.permissions) {
+        (None | Some("secret"), None) => {
+            api_keys::create(
+                &state.pool,
+                merchant.scope,
+                &request.name,
+                &merchant.actor(),
+                "",
+            )
+            .await
+        }
+        (None | Some("secret"), Some(_)) => {
+            return Err(ApiError::invalid_param(
+                "permissions",
+                "permissions apply only to a key of type restricted",
+            ));
+        }
+        (Some("restricted"), permissions) => {
+            let permissions = parse_permissions(permissions.unwrap_or_default())?;
+            api_keys::create_restricted(
+                &state.pool,
+                merchant.scope,
+                &request.name,
+                &permissions,
+                &merchant.actor(),
+            )
+            .await
+        }
+        (Some(_), _) => {
+            return Err(ApiError::invalid_param(
+                "type",
+                "type must be secret or restricted",
+            ));
+        }
+    }
     .map_err(map_error)?;
     Ok(issued_response(&issued))
 }
@@ -162,9 +194,9 @@ pub(crate) async fn create_api_key(
     security(("api_key" = [])),
     tag = "api_keys"
 )]
-/// Rolls a key: returns a new secret key with the same name, and the old key keeps working for
-/// `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it at once. A
-/// key may roll itself.
+/// Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
+/// working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
+/// at once. A secret key may roll itself.
 pub(crate) async fn roll_api_key(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -258,6 +290,12 @@ pub(crate) fn api_key_object(key: &ApiKey, secret: Option<String>) -> ApiKeyObje
         }
         .to_owned(),
         name: key.name.clone(),
+        permissions: key.permissions.as_ref().map(|permissions| {
+            permissions
+                .iter()
+                .map(|permission| permission.code().to_owned())
+                .collect()
+        }),
         secret,
         redacted: format!("{}…{}", key.prefix, key.last4),
         status: status.to_owned(),
@@ -265,6 +303,24 @@ pub(crate) fn api_key_object(key: &ApiKey, secret: Option<String>) -> ApiKeyObje
         expires_at: key.expires_at.map(|time| time.timestamp()),
         last_used: key.last_used_at.map(|time| time.timestamp()),
     }
+}
+
+/// A restricted key's requested permission codes; at least one, each a known permission.
+fn parse_permissions(codes: Vec<String>) -> ApiResult<Vec<Permission>> {
+    if codes.is_empty() {
+        return Err(ApiError::invalid_param(
+            "permissions",
+            "a restricted key needs at least one permission",
+        ));
+    }
+    codes
+        .iter()
+        .map(|code| {
+            Permission::parse(code).ok_or_else(|| {
+                ApiError::invalid_param("permissions", format!("unknown permission {code}"))
+            })
+        })
+        .collect()
 }
 
 /// A key's label is at most 200 characters.
@@ -288,6 +344,13 @@ pub(crate) fn map_error(error: ApiKeyError) -> ApiError {
         ApiKeyError::InvalidExpiry => ApiError::invalid_param(
             "expires_in",
             "expires_in must be between 0 and 604800 seconds (7 days)",
+        ),
+        ApiKeyError::PermissionNotGrantable(code) => ApiError::invalid_param(
+            "permissions",
+            format!(
+                "{code} cannot be granted to a restricted key: keys, treasuries, webhook \
+                 endpoints, webhook keys, and account settings need a secret key"
+            ),
         ),
         ApiKeyError::EntropyUnavailable => ApiError::internal(),
         ApiKeyError::Database(error) => error.into(),

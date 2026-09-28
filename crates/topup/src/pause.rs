@@ -11,6 +11,8 @@ pub(crate) struct PauseScopeSources {
     pub(crate) customer: PauseScopes,
     pub(crate) account: PauseScopes,
     pub(crate) route: PauseScopes,
+    /// `settlement` while crediting of the deposit's treasury is paused.
+    pub(crate) treasury: PauseScopes,
     pub(crate) effective: PauseScopes,
 }
 
@@ -19,34 +21,50 @@ impl PauseScopeSources {
         customer_codes: &[String],
         account_codes: &[String],
         route_codes: &[String],
+        treasury_codes: &[String],
     ) -> Result<Self, sqlx::Error> {
         Ok(Self {
             customer: parse_codes(customer_codes)?,
             account: parse_codes(account_codes)?,
             route: parse_codes(route_codes)?,
+            treasury: parse_codes(treasury_codes)?,
             effective: parse_codes(
                 &customer_codes
                     .iter()
                     .chain(account_codes)
                     .chain(route_codes)
+                    .chain(treasury_codes)
                     .collect::<Vec<_>>(),
             )?,
         })
     }
 }
 
-/// The pause scopes that apply to a customer's deposits on `route`.
+/// The pause scopes that apply to a customer's deposits on `route` to the forwarder `address_id`:
+/// the customer's, the account's, the route's, and `settlement` while crediting of the treasury
+/// the forwarder pays is paused.
 pub(crate) async fn customer_pause_scopes(
     pool: &PgPool,
     customer_id: Uuid,
     route: &str,
+    address_id: Uuid,
 ) -> Result<Option<PauseScopeSources>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT
             customer.paused_scopes AS customer_scopes,
             account.paused_scopes AS account_scopes,
-            COALESCE(route_pause.paused_scopes, '{}'::text[]) AS route_scopes
+            COALESCE(route_pause.paused_scopes, '{}'::text[]) AS route_scopes,
+            CASE WHEN EXISTS (
+                SELECT 1
+                FROM addresses AS address
+                JOIN treasuries AS treasury
+                  ON treasury.account_id = address.account_id
+                 AND treasury.livemode = address.livemode
+                 AND treasury.chain_id = address.chain_id
+                 AND treasury.address = address.treasury
+                WHERE address.id = $3 AND cardinality(treasury.crediting_paused_by) > 0
+            ) THEN ARRAY['settlement'] ELSE '{}'::text[] END AS treasury_scopes
         FROM customers AS customer
         JOIN accounts AS account ON account.id = customer.account_id
         LEFT JOIN route_pauses AS route_pause ON route_pause.route = $2
@@ -55,6 +73,7 @@ pub(crate) async fn customer_pause_scopes(
     )
     .bind(customer_id)
     .bind(route)
+    .bind(address_id)
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
@@ -63,21 +82,39 @@ pub(crate) async fn customer_pause_scopes(
     let customer_codes: Vec<String> = row.try_get("customer_scopes")?;
     let account_codes: Vec<String> = row.try_get("account_scopes")?;
     let route_codes: Vec<String> = row.try_get("route_scopes")?;
-    PauseScopeSources::from_codes(&customer_codes, &account_codes, &route_codes).map(Some)
+    let treasury_codes: Vec<String> = row.try_get("treasury_scopes")?;
+    PauseScopeSources::from_codes(
+        &customer_codes,
+        &account_codes,
+        &route_codes,
+        &treasury_codes,
+    )
+    .map(Some)
 }
 
 fn parse_codes<S: AsRef<str>>(codes: &[S]) -> Result<PauseScopes, sqlx::Error> {
     PauseScopes::from_codes(codes).map_err(|error| sqlx::Error::Decode(error.to_string().into()))
 }
 
-/// Whose pause of a whole account a mutation edits: the operator's (`paused_scopes`) or the
-/// merchant's own (`self_paused_scopes`, design §12). Both apply; neither lifts the other.
+/// Whose pause a mutation edits: of a whole account, the operator's (`paused_scopes`) or the
+/// merchant's own (`self_paused_scopes`, design §12); of a treasury's crediting, the owner's entry
+/// in `treasuries.crediting_paused_by`. Both apply; neither lifts the other.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PauseOwner {
     /// The operator's pauses: `quotes`, `settlement`, `refunds`.
     Operator,
     /// The merchant's own pause, through `POST /v1/account/pause`: `quotes` only.
     Merchant,
+}
+
+impl PauseOwner {
+    /// The owner's code in `treasuries.crediting_paused_by`.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Merchant => "merchant",
+        }
+    }
 }
 
 /// Adds (`pause`) or removes `scopes` of the whole account, in the caller's transaction, with an

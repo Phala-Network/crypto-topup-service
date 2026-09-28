@@ -92,6 +92,9 @@ pub struct NewOutboxEvent {
     /// The API request that caused the event, Stripe's event `request`; `None` for the service's
     /// own workers.
     pub request: Option<RequestRef>,
+    /// A webhook key version that signs every delivery of the event beside the keys signing at
+    /// delivery time: the version a webhook key roll retires, on the roll's notice.
+    pub signing_key_version: Option<u32>,
 }
 
 impl NewOutboxEvent {
@@ -108,6 +111,7 @@ impl NewOutboxEvent {
             next_attempt_at: Utc::now(),
             actor: crate::api_keys::event_actor(actor),
             request: actor.request.clone(),
+            signing_key_version: None,
         }
     }
 
@@ -123,6 +127,7 @@ impl NewOutboxEvent {
             next_attempt_at: Utc::now(),
             actor: SYSTEM_ACTOR.to_owned(),
             request: None,
+            signing_key_version: None,
         }
     }
 
@@ -297,9 +302,9 @@ async fn record(
         r#"
         INSERT INTO events (
             id, account_id, livemode, type, object_type, object_id, actor, data, request_id,
-            idempotency_key
+            idempotency_key, signing_key_version
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -317,6 +322,12 @@ async fn record(
             .request
             .as_ref()
             .and_then(|request| request.idempotency_key.as_ref()),
+    )
+    .bind(
+        event
+            .signing_key_version
+            .map(i64::from)
+            .and_then(|version| i32::try_from(version).ok()),
     )
     .execute(&mut *connection)
     .await?

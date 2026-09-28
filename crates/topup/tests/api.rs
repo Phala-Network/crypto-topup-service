@@ -1147,7 +1147,13 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
         };
         let too_long = roll(604_801).await?;
         ensure!(too_long.status() == StatusCode::BAD_REQUEST);
-        let rolled = roll(3600).await?;
+        // A live roll keeps the old key for at least the 48-hour treasury time-lock.
+        for too_short in [0, 3600, 172_799] {
+            let refused = roll(too_short).await?;
+            ensure!(refused.status() == StatusCode::BAD_REQUEST, "{too_short}");
+            ensure!(response_json(refused).await?["error"]["param"] == "expires_in");
+        }
+        let rolled = roll(172_800).await?;
         ensure!(rolled.status() == StatusCode::OK);
         let account = response_json(rolled).await?;
         ensure!(account["webhook_keys"][0] == json!({"version": 2, "expires_at": null}));
@@ -1156,7 +1162,8 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
             .as_i64()
             .context("the old key expires")?;
         ensure!(
-            (Utc::now().timestamp() + 3590..=Utc::now().timestamp() + 3600).contains(&expires_at)
+            (Utc::now().timestamp() + 172_790..=Utc::now().timestamp() + 172_800)
+                .contains(&expires_at)
         );
         let overlap = attest(live_key.clone()).await?;
         check(&overlap, &owner, true, &[2, 1])?;
@@ -1178,9 +1185,21 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
         .await?;
         ensure!(audited == 1);
 
-        // Rolling again with no overlap drops every previous key at once.
-        ensure!(roll(0).await?.status() == StatusCode::OK);
-        check(&attest(live_key.clone()).await?, &owner, true, &[3])?;
+        // Rolling again keeps the previous keys no longer than the new overlap.
+        ensure!(roll(172_800).await?.status() == StatusCode::OK);
+        check(&attest(live_key.clone()).await?, &owner, true, &[3, 2, 1])?;
+        // Test mode may drop the previous key at once.
+        let test_roll = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::POST,
+                "/v1/account/webhook_keys/roll",
+                serde_json::to_vec(&json!({ "expires_in": 0 }))?,
+                &test_key,
+            ))
+            .await?;
+        ensure!(test_roll.status() == StatusCode::OK);
+        check(&attest(test_key.clone()).await?, &owner, false, &[2])?;
 
         // A live key attests only while the operator keeps live mode enabled (design D12).
         sqlx::query("UPDATE accounts SET charges_enabled = false WHERE id = $1")
@@ -1193,7 +1212,7 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
             .await?;
         ensure!(refused.status() == StatusCode::FORBIDDEN);
         ensure!(response_json(refused).await?["error"]["code"] == "testmode_charges_only");
-        check(&attest(test_key).await?, &owner, false, &[1])?;
+        check(&attest(test_key).await?, &owner, false, &[2])?;
         Ok(())
     }
     .await;

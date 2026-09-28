@@ -29,6 +29,12 @@
 //! transaction; the replaced forwarders stay watched and credited and keep paying the old treasury,
 //! which the forwarder's clone argument fixes for good. Quotes and new networks take the chain's
 //! current treasury; quotes issued before keep their address.
+//!
+//! **Crediting pause.** In an incident, such as a compromised former treasury, the merchant
+//! (`POST /v1/treasuries/{id}/pause`) or the operator (admin API) pauses crediting of deposits to
+//! every forwarder over a treasury's address: they stay `pending` and no `deposit.credited` is
+//! sent until both pauses are lifted, as a `settlement` pause holds them. Neither lifts the
+//! other's pause. Each change is audited and announced as `treasury.updated`.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -214,6 +220,9 @@ pub struct Treasury {
     pub canceled_at: Option<DateTime<Utc>>,
     /// Why it was canceled.
     pub cancellation_reason: Option<CancellationReason>,
+    /// Who paused crediting of deposits to forwarders over the address: `merchant`, `operator`,
+    /// both, or neither.
+    pub crediting_paused_by: Vec<String>,
 }
 
 /// An issued EIP-4361 challenge.
@@ -774,6 +783,69 @@ pub async fn cancel(
     Ok(treasury)
 }
 
+/// Pauses (`pause`) or resumes crediting, for `owner`, of deposits to every forwarder over the
+/// address of the scope's treasury `id`: every treasury of the scope and chain with that address
+/// changes, each audited with `reason` and announced as `treasury.updated`. A deposit held by the
+/// pause stays `pending` and is credited once no pause remains. Returns treasury `id`.
+pub(crate) async fn set_crediting_paused(
+    pool: &PgPool,
+    scope: Scope,
+    id: Uuid,
+    owner: crate::pause::PauseOwner,
+    pause: bool,
+    actor: &Actor,
+    reason: &str,
+) -> Result<Treasury, TreasuryError> {
+    let mut transaction = pool.begin().await?;
+    lock(&mut transaction, scope, true).await?;
+    let treasury = get_in(&mut transaction, scope, id)
+        .await?
+        .ok_or(TreasuryError::NotFound)?;
+    let same_address: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM treasuries \
+         WHERE account_id = $1 AND livemode = $2 AND chain_id = $3 AND address = $4 \
+           AND ($5::text <> ALL (crediting_paused_by)) = $6 \
+         ORDER BY id",
+    )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(i64::try_from(treasury.chain_id).map_err(|_| TreasuryError::DatabaseInvariant)?)
+    .bind(format!("{:#x}", treasury.address))
+    .bind(owner.code())
+    .bind(pause)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for changed in same_address {
+        let before = snapshot(&mut transaction, scope, changed).await?;
+        sqlx::query(if pause {
+            "UPDATE treasuries SET crediting_paused_by = \
+             ARRAY(SELECT unnest(crediting_paused_by || ARRAY[$2::text]) ORDER BY 1) WHERE id = $1"
+        } else {
+            "UPDATE treasuries SET crediting_paused_by = array_remove(crediting_paused_by, $2::text) \
+             WHERE id = $1"
+        })
+        .bind(changed)
+        .bind(owner.code())
+        .execute(&mut *transaction)
+        .await?;
+        record(
+            &mut transaction,
+            scope,
+            changed,
+            Some(&before),
+            actor,
+            "treasury.updated",
+            reason,
+        )
+        .await?;
+    }
+    let treasury = get_in(&mut transaction, scope, id)
+        .await?
+        .ok_or(TreasuryError::DatabaseInvariant)?;
+    transaction.commit().await?;
+    Ok(treasury)
+}
+
 /// Applies every pending treasury whose time-lock ended by `now`, one transaction each, and
 /// returns how many applied. Each is screened again first: a treasury a sanctions list now names
 /// is canceled instead (`cancellation_reason: sanctioned`, `treasury.canceled`), and one
@@ -1203,7 +1275,7 @@ pub async fn current_on(
 /// The columns of [`TreasuryRow`]; callers append the `WHERE` clause.
 const SELECT: &str = r#"
     SELECT id, livemode, chain_id, address, kind, effective_at, created_at, applied_at,
-           replaced_at, canceled_at, cancellation_reason
+           replaced_at, canceled_at, cancellation_reason, crediting_paused_by
     FROM treasuries
     WHERE account_id = $1 AND livemode = $2
 "#;
@@ -1318,6 +1390,7 @@ struct TreasuryRow {
     replaced_at: Option<DateTime<Utc>>,
     canceled_at: Option<DateTime<Utc>>,
     cancellation_reason: Option<String>,
+    crediting_paused_by: Vec<String>,
 }
 
 impl TreasuryRow {
@@ -1345,6 +1418,7 @@ impl TreasuryRow {
                 .as_deref()
                 .map(CancellationReason::parse)
                 .transpose()?,
+            crediting_paused_by: self.crediting_paused_by,
         })
     }
 }

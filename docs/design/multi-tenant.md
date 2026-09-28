@@ -81,6 +81,48 @@ without aliases:
     published to GitHub Pages from `main`; its `Errors` section has one heading per code, the
     target of `doc_url`.
 
+**Amendment of 2026-09-28 (launch hardening, final design review).** An external review of funds
+direction and permissions found five risks; each is closed with a standard mechanism, and nothing
+was live, so the API and SDKs changed directly:
+
+1. *Treasury pinning is mandatory in live mode* (§8, "Compromised service"). The SDKs recomputed
+   an address over the treasury the response named, so a compromised service returning an
+   attacker's treasury with that treasury's valid `CREATE2` address passed the check. The merchant
+   now configures its account id, the forwarder factory and implementation, and its own treasury
+   per chain in its server; every address is derived from those pins, never from the response's
+   `treasury`, and a live-mode check fails closed without them (Python `TopupClient`/`PhalaPay`,
+   JS `verifyQuoteAddress`/`verifyDepositAddress`). Test mode may fall back to the response's
+   treasury with a warning. The integration guide makes pinning a setup step.
+2. *Restricted keys join the launch set* (PR 12, D7; Stripe's
+   [restricted keys](https://docs.stripe.com/keys#limit-access)). `ppay_rk_{test,live}_` keys hold
+   the permissions they are created with (`api_keys.permissions`), within what the authorization
+   table grants `key:restricted`, which no longer includes `account.write` or `endpoints.write`
+   (it never held `api_keys.write` or `treasury.write`): a restricted key cannot manage keys,
+   treasuries, webhook endpoints, webhook keys, or account settings. A `write` grant includes its
+   resource's `read`, as Stripe's. Secret keys stay for administration and are kept offline; the
+   guide recommends running production with a restricted key.
+3. *Webhook key trust continuity* (D11). A live roll keeps the previous key signing for at least
+   48 hours, the treasury time-lock (`expires_in: 0` is refused in live mode; test mode keeps it),
+   so a leaked secret key cannot cut the merchant's pinned key off before a treasury change it made
+   applies; and the roll's `account.updated` is signed by the retiring version whenever it is
+   delivered (`events.signing_key_version`), so the pinned key always verifies the notice of its
+   own replacement. Precedent: the Standard Webhooks multi-signature rotation, with the overlap
+   bounded below as a TimelockController's minimum delay bounds a change.
+4. *Crediting pause per treasury* (§12, incident control). The merchant (`POST
+   /v1/treasuries/{id}/pause|resume`, secret key) and the operator (`POST
+   /v1/admin/accounts/{acct}/treasuries/{trs}/pause|resume {reason}`, audited) each pause
+   crediting of deposits to every forwarder over one treasury address, for example a compromised
+   former treasury: deposits stay `pending` (`confirmed`, held as by a `settlement` pause), no
+   `deposit.credited` is sent, and resuming credits them. Neither owner lifts the other's pause,
+   as with the account's `paused_scopes` and `self_paused_scopes`; each change is
+   `treasury.updated` (`crediting_paused`, `crediting_paused_by`). Runbook:
+   `deploy/runbooks/treasury-credit-pause.md`.
+5. *Wording* (integration guide): a quote is a locked-price payment instruction, and under-, over-,
+   and late payments are credited at spot, so a quote is paid in full only when the deposit's
+   `price_source` is `quote`; the USD `amount` is a valuation, and the merchant receives tokens and
+   carries their price risk; the same deposit address on every EVM chain holds only with the same
+   factory deployment and treasury address on a chain with the same `CREATE2` rule.
+
 ## 1. Context
 
 Before this design (architecture before PR 1): a **product** was the tenant, registered by the
@@ -481,8 +523,10 @@ is the merchant's own record, so no `cus_` object is added.
   review your request",
   [GitHub](https://docs.github.com/en/authentication/securing-your-account-with-two-factor-authentication-2fa/recovering-your-account-if-you-lose-your-2fa-credentials)).
   The merchant rolls every operator-issued key on receipt, so no one at Phala holds a working key.
-- Restricted keys `ppay_rk_…` with per-resource `none | read | write` come after launch (PR 12),
-  sharing the authorization table below; they never hold `api_keys.write` or `treasury.write`.
+- Restricted keys `ppay_rk_…` (PR 12, pulled into the launch set by the launch hardening
+  amendment) hold the permissions they are created with, a `write` including its `read`, sharing
+  the authorization table below; they never hold `api_keys.write`, `treasury.write`,
+  `endpoints.write`, or `account.write`.
 
 RFC 9421 request signing is removed for merchants: every SDK and language needed signing,
 `Content-Digest`, target-URI rebuilding, and replay tables. TLS terminates inside the attested CVM,
@@ -532,8 +576,8 @@ a Stripe-hosted Dashboard" (`controller.stripe_dashboard.type = none`,
 |---|---|
 | Webhook forgery across tenants | Per-account, per-mode keys (D11): an event signed for account A never verifies at account B, so one merchant cannot replay its own `deposit.credited` to another. |
 | Where funds go | Fixed per address (treasury arg). The service sends no transactions and has no contract role. |
-| Compromised service | Cannot move funds; could issue new addresses for a wrong treasury or sign unbacked events. The SDK always recomputes each quote's address from `(factory, implementation, treasury, salt)` and fails closed on a mismatch; `<Checkout>` renders only the `expected_address` the merchant backend passes after that check. Pinning expected treasuries in the SDK is optional hardening. |
-| Leaked secret key | The holder could change the live treasury, but only after the 48 h time-lock (D10); the change is announced at once as `treasury.created` to every enabled live endpoint, whatever its `enabled_events`, and the merchant cancels it through the API, pauses `quotes`, and rolls its keys. Endpoint changes are announced to the changed endpoint first (§11), so the holder cannot silence the notice unseen. If the holder races the merchant, the operator revokes the mode's keys and issues a new one (D7). |
+| Compromised service | Cannot move funds; could issue new addresses for a wrong treasury or sign unbacked events. The SDK recomputes each address from the merchant's own pins, `(factory, implementation, treasury, account)` and the salt, never from the response's treasury, and fails closed on a mismatch; in live mode it fails closed without the pins (launch hardening amendment). `<Checkout>` renders only the `expected_address` the merchant backend passes after that check. |
+| Leaked secret key | The holder could change the live treasury, but only after the 48 h time-lock (D10); the change is announced at once as `treasury.created` to every enabled live endpoint, whatever its `enabled_events`, and the merchant cancels it through the API, pauses `quotes`, and rolls its keys. Endpoint changes are announced to the changed endpoint first (§11), and a live webhook key roll keeps the pinned key signing for 48 h and signs its own notice with it (D11), so the holder cannot silence the notice unseen. If the holder races the merchant, the operator revokes the mode's keys and issues a new one (D7). A leaked restricted key, which production servers run with, can do none of this. |
 | Sanctions | Phala's software does not assist in moving blocked assets. A deposit from a sanctioned address is `rejected(sanctioned)`; the sweep builder never includes its address and never builds a flush to a sanctioned treasury; refund destinations are screened (D5). The contracts cannot freeze anything: public `flush` can still move such funds, only to the merchant's treasury, and the merchant's own compliance applies. A treasury that becomes sanctioned (screened when set and daily) pauses the account's `quotes` and `settlement`. The operator screens the merchant, its owners, and its jurisdiction in due diligence (D8). |
 | SSRF | All webhook egress goes through Stripe's [smokescreen](https://github.com/stripe/smokescreen) (a compose sidecar), the only IP filter: it refuses addresses that are not publicly routable. The service itself checks only the scheme (`https`, `http` in test mode), the port (443, 80 in test mode), and follows no redirects (Stripe counts 3xx as failure); 20 s timeout. |
 | EIP-1271 and SIWE details | D10. |
@@ -622,8 +666,9 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   `settlement/{acct}/{live|test}/v1`. The service stores no secret; the merchant holds a public
   key. Rotation bumps the version and sends both signatures during the overlap (the spec's
   multi-signature rotation): the merchant rolls with `POST /v1/account/webhook_keys/roll
-  {expires_in}` (at most 7 days, as an API key roll), and the previous version is kept in
-  `retiring_webhook_keys` until it expires.
+  {expires_in}` (at most 7 days, as an API key roll; at least 48 hours in live mode), and the
+  previous version is kept in `retiring_webhook_keys` until it expires. The roll's own notice is
+  signed by the previous version whenever it is delivered (launch hardening amendment).
 - **Attestation.** `GET /v1/attestation?nonce=…`, authenticated with the account's key, returns
   the TDX quote with `report_data = sha256(nonce ‖ account_id ‖ livemode ‖ account public key)`,
   length-prefixed and listing every signing version (architecture §14 has the exact bytes).
@@ -675,7 +720,9 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
 - **Pause** scopes per account (`quotes`, `settlement`, `refunds`) and per route; the operator
   uses them for abuse and incidents. A merchant pauses and resumes its own `quotes` through
   `POST /v1/account/pause|resume`, for emergencies such as a leaked key during a treasury
-  time-lock: no new addresses are issued while paused.
+  time-lock: no new addresses are issued while paused. Crediting pauses per treasury (merchant
+  and operator, launch hardening amendment) hold deposits to the forwarders of one compromised
+  treasury.
 - **No signup abuse surface.** Accounts exist only after operator due diligence; test mode moves
   no money and costs Phala no gas.
 
@@ -857,7 +904,7 @@ citing old numbers are corrected by the PR that next touches them.
 | 9 | Refunds | ✓ | 4 | |
 | 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | in review |
 | 11 | Deploy, docs, staging reset | ✓ | 1–10 | |
-| 12 | Restricted keys | | 5 | |
+| 12 | Restricted keys | ✓ (launch hardening) | 5 | in review |
 | 13 | Account closure | | 5 | |
 
 **PR 4 — chain-sourced sweeps.** Index factory events at finality, whoever sent them, for known
@@ -917,7 +964,8 @@ product-key compromise, rejected funds at treasury, refund execution; add mercha
 and Safe Transaction Builder), reversal handling, restore notice. HUMAN-ONLY, listed not
 executed: staging reset (`deploy/README.md`, "Staging reset") and factory deployments.
 
-**PR 12 — restricted keys** and **PR 13 — account closure** follow §7 and §13.
+**PR 12 — restricted keys** follows §7 and the launch hardening amendment; **PR 13 — account
+closure** follows §13.
 
 **Phala Cloud** (monorepo draft PR, after the launch set) integrates like any merchant. The
 operator creates Phala Cloud's account (`charges_enabled`, due diligence noting it is Phala's

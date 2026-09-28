@@ -25,9 +25,10 @@ class TreasuryList:
 
     Example:
         {'data': [{'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'canceled_at': None, 'cancellation_reason':
-            None, 'chain_id': 1, 'created': 1790467200, 'effective_at': 1790467200, 'id':
-            'trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9', 'kind': 'contract', 'livemode': False, 'object': 'treasury',
-            'replaced_at': None, 'status': 'active'}], 'has_more': False, 'object': 'list', 'url': '/v1/treasuries'}
+            None, 'chain_id': 1, 'created': 1790467200, 'crediting_paused': False, 'crediting_paused_by': [],
+            'effective_at': 1790467200, 'id': 'trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9', 'kind': 'contract', 'livemode': False,
+            'object': 'treasury', 'replaced_at': None, 'status': 'active'}], 'has_more': False, 'object': 'list', 'url':
+            '/v1/treasuries'}
 
     Attributes:
         data (list[Treasury]): The mode's treasuries, newest first.

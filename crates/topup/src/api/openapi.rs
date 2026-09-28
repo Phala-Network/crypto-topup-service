@@ -65,7 +65,10 @@ const MERCHANT_TAGS: &[(&str, &str)] = &[
         "webhook_endpoints",
         "Where events are delivered, with delivery health.",
     ),
-    ("api_keys", "Your secret keys: create, roll, revoke."),
+    (
+        "api_keys",
+        "Your secret and restricted keys: create, roll, revoke.",
+    ),
     (
         "account",
         "Your account: settings, pauses, webhook signing keys.",
@@ -95,7 +98,8 @@ pub(super) fn merchant(openapi: &OpenApi) -> Value {
         "api_key": {
             "type": "http",
             "scheme": "bearer",
-            "description": "A secret key, `Authorization: Bearer ppay_sk_test_…` or \
+            "description": "A restricted key, `Authorization: Bearer ppay_rk_test_…` or \
+                            `ppay_rk_live_…`, or a secret key, `ppay_sk_test_…` or \
                             `ppay_sk_live_…`; the key selects the account and the mode. HTTP Basic \
                             is not accepted.",
         }
@@ -240,9 +244,14 @@ fn merchant_description() -> String {
          attestation. The [integration guide](https://github.com/Phala-Network/phala-pay/blob/main/docs/integration.md) \
          walks through an integration end to end.\n\n\
          # Authentication\n\n\
-         Send a secret key as `Authorization: Bearer ppay_sk_test_…` (test mode) or \
-         `ppay_sk_live_…` (live mode). The key selects the account and the mode; every object \
-         carries `livemode`, and a key never sees the other mode's objects.\n\n\
+         Send an API key as `Authorization: Bearer ppay_rk_test_…` (test mode) or \
+         `ppay_rk_live_…` (live mode). A restricted key (`ppay_rk_`, \
+         [Stripe](https://docs.stripe.com/keys#limit-access)) holds only the permissions it was \
+         created with and never manages keys, treasuries, webhook endpoints, webhook keys, or \
+         account settings: run production with one. A secret key (`ppay_sk_`) holds every \
+         permission; keep it offline, for administration. The key selects the account and the \
+         mode; every object carries `livemode`, and a key never sees the other mode's \
+         objects.\n\n\
          # Request ids\n\n\
          Every response carries `Request-Id: req_…` \
          ([Stripe](https://docs.stripe.com/api/request_ids)). Quote it when you contact support. \

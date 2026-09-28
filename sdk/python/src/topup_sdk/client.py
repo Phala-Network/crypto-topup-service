@@ -1,6 +1,8 @@
-"""Retrying wrapper over the generated `topup_client` package, authenticated with a secret key.
+"""Retrying wrapper over the generated `topup_client` package, authenticated with an API key.
 
-Every request sends `Authorization: Bearer ppay_sk_…`; the key selects the account and the mode.
+Every request sends `Authorization: Bearer ppay_sk_…` (a secret key) or `ppay_rk_…` (a restricted
+key, which holds only the permissions it was created with); the key selects the account and the
+mode. Run production servers with a restricted key and keep secret keys for administration.
 Every operation exposed here is idempotent on the service side, so the wrapper retries transport
 failures, transient statuses, and `409 idempotency_key_in_use`:
 
@@ -22,13 +24,19 @@ brackets, values of up to 500 characters. On an update a key set to `""` is unse
 `metadata=""` unsets every key. A quote's metadata is copied to the deposit that pays it. Do not
 store sensitive information in it.
 
-With a pinned `forwarder`, the `(factory, implementation)` pair of the attested deployment,
-every quote and deposit address is recomputed before it is returned: an open quote's address from
-the quote's `treasury`, the account, the customer, and the quote id; every network of an active
-deposit address from its `treasury` and salt inputs. A mismatch raises `AddressMismatchError`
-rather than return an address the merchant did not derive. `treasuries`, the merchant's own
-treasury per chain, additionally pins the treasury each address pays: an address over any other
-treasury, or on a chain without a pinned one, is refused.
+Every quote and deposit address is recomputed before it is returned from the pins the merchant
+configures itself: `account` (its `acct_` id), `forwarder` (the `(factory, implementation)` pair of
+the attested deployment), and `treasuries` (its own treasury per chain, as it proved them). An open
+quote's address is derived from the pinned treasury of its chain, the account, the customer, and
+the quote id; every network of an active deposit address from its chain's pinned treasury and salt
+inputs. The response's `treasury` is never trusted: a compromised service could return another
+treasury with its matching address. A mismatch, a response naming another treasury, or a chain
+without a pinned treasury raises `AddressMismatchError` rather than return an address the merchant
+did not derive.
+
+In live mode the check is mandatory and fails closed: without `account`, `forwarder`, and
+`treasuries`, every address check raises. In test mode, without `forwarder` nothing is checked,
+and without `treasuries` the response's treasury is used with an `UnpinnedTreasuryWarning`.
 
 `Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
 until the deposit is final and appears under `list_deposits`, and a reorg can remove it.
@@ -38,6 +46,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal, TypeVar
@@ -94,6 +103,8 @@ from topup_client.api.treasuries import (
     create_treasury_challenge,
     get_treasury,
     list_treasuries,
+    pause_treasury,
+    resume_treasury,
 )
 from topup_client.api.webhook_endpoints import (
     create_webhook_endpoint,
@@ -154,7 +165,7 @@ from topup_client.types import UNSET, Response, Unset
 
 from .addresses import deposit_address, quote_address, same_address
 from .attestation import verify_attestation_binding
-from .errors import AddressMismatchError, ApiError
+from .errors import AddressMismatchError, ApiError, UnpinnedTreasuryWarning
 from .signing import sf_string
 
 T = TypeVar("T")
@@ -163,20 +174,23 @@ T = TypeVar("T")
 # `Idempotent-Replayed`, which is not retried again.
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
-SECRET_KEY_PREFIXES = ("ppay_sk_test_", "ppay_sk_live_")
+API_KEY_PREFIXES = ("ppay_sk_test_", "ppay_sk_live_", "ppay_rk_test_", "ppay_rk_live_")
+LIVE_KEY_PREFIXES = ("ppay_sk_live_", "ppay_rk_live_")
 
 Metadata = Mapping[str, str] | Literal[""]
 """A `metadata` parameter: string pairs, where `""` unsets a key, or `""` to unset every key."""
 
 
 class TopupClient:
-    """Merchant API client authenticated with a secret key, `ppay_sk_test_…` or `ppay_sk_live_…`.
+    """Merchant API client authenticated with an API key: a secret key (`ppay_sk_test_…`,
+    `ppay_sk_live_…`) or a restricted key (`ppay_rk_test_…`, `ppay_rk_live_…`).
 
-    `forwarder` is the `(factory, implementation)` pair pinned from the attested deployment, as
-    the webhook keys are; given it, quotes and deposit addresses are recomputed before they are
-    returned, and `treasuries` (`{chain_id: treasury}`) pins the treasury each may pay. The check
-    needs the account id (`acct_…`): pass `account`, or the client reads it once from
-    `GET /v1/account`.
+    `account` (`acct_…`), `forwarder` (the `(factory, implementation)` pair pinned from the attested
+    deployment, as the webhook keys are), and `treasuries` (`{chain_id: treasury}`, your own
+    treasury per chain) are the pins every quote and deposit address is recomputed from before it
+    is returned. A live key requires all three: an address check without them raises
+    `AddressMismatchError`. In test mode `account` is read once from `GET /v1/account` when not
+    given, and an unpinned treasury falls back to the response's with a warning.
     """
 
     def __init__(
@@ -195,11 +209,17 @@ class TopupClient:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        if not api_key.startswith(SECRET_KEY_PREFIXES):
-            raise ValueError("an API key is a secret key, ppay_sk_test_… or ppay_sk_live_…")
+        if not api_key.startswith(API_KEY_PREFIXES):
+            raise ValueError(
+                "an API key is a secret key, ppay_sk_test_… or ppay_sk_live_…, or a restricted "
+                "key, ppay_rk_test_… or ppay_rk_live_…"
+            )
         if treasuries is not None and forwarder is None:
             raise ValueError("pinning treasuries needs the forwarder to recompute addresses")
+        self.livemode = api_key.startswith(LIVE_KEY_PREFIXES)
+        """Whether the key is a live key, which requires every address pin."""
         self._account = account
+        self._account_pinned = account is not None
         self.forwarder = forwarder
         self.treasuries = None if treasuries is None else dict(treasuries)
         self._max_attempts = max_attempts
@@ -230,11 +250,13 @@ class TopupClient:
         """Returns the key's account, in the key's mode."""
         return self._call(lambda: get_account.sync_detailed(client=self._client), AccountObject)
 
-    def roll_webhook_key(self, *, expires_in: int = 0) -> AccountObject:
+    def roll_webhook_key(self, *, expires_in: int = 172_800) -> AccountObject:
         """Rolls this mode's webhook signing key: the next version signs from now on, and the
-        current one keeps signing beside it for `expires_in` seconds (at most 7 days; `0` stops it
-        at once). Pin the new public key from `attestation` before the old one expires. Retries
-        reuse one `Idempotency-Key`, so they never roll twice."""
+        current one keeps signing beside it for `expires_in` seconds: 48 hours (the default) to 7
+        days in live mode, so a leaked key cannot cut off the key you pinned; test mode also
+        accepts `0`, which stops it at once. The roll's `account.updated` notice is signed by the
+        retiring key too. Pin the new public key from `attestation` before the old one expires.
+        Retries reuse one `Idempotency-Key`, so they never roll twice."""
         key = _idempotency_key(None)
         body = RollWebhookKeyRequest(expires_in=expires_in)
         return self._call(
@@ -622,7 +644,7 @@ class TopupClient:
         return response
 
     def list_api_keys(self, *, page_size: int = 100) -> list[ApiKeyObject]:
-        """The secret keys of this key's account and mode, newest first, without their secrets,
+        """The API keys of this key's account and mode, newest first, without their secrets,
         from every page."""
         return list(
             self._paginate(
@@ -636,10 +658,21 @@ class TopupClient:
             )
         )
 
-    def create_api_key(self, *, name: str = "") -> ApiKeyObject:
-        """Creates a secret key of this mode; its `secret` is in this response only."""
+    def create_api_key(
+        self, *, name: str = "", permissions: Sequence[str] | None = None
+    ) -> ApiKeyObject:
+        """Creates a key of this mode; its `secret` is in this response only. Without
+        `permissions` it is a secret key; with them a restricted key (`ppay_rk_…`) holding only
+        those permissions, such as `quotes.write` or `deposits.read`, where a `write` includes
+        its `read`. A restricted key never manages keys, treasuries, webhook endpoints, webhook
+        keys, or account settings: run production servers with one and keep secret keys
+        offline. Needs a secret key."""
         key = _idempotency_key(None)
-        body = CreateApiKeyRequest(name=name)
+        body = (
+            CreateApiKeyRequest(name=name)
+            if permissions is None
+            else CreateApiKeyRequest(name=name, type_="restricted", permissions=list(permissions))
+        )
         return self._call(
             lambda: create_api_key.sync_detailed(
                 client=self._client, body=body, idempotency_key=key
@@ -648,14 +681,15 @@ class TopupClient:
         )
 
     def get_api_key(self, api_key_id: str) -> ApiKeyObject:
-        """One secret key of this mode, without its secret."""
+        """One API key of this mode, without its secret."""
         return self._call(
             lambda: get_api_key.sync_detailed(api_key_id, client=self._client), ApiKeyObject
         )
 
     def roll_api_key(self, api_key_id: str, *, expires_in: int = 0) -> ApiKeyObject:
-        """Replaces a key with a new one, returned with its `secret`; the old key keeps working
-        for `expires_in` seconds (at most 7 days; `0` revokes it at once)."""
+        """Replaces a key with a new one of the same kind and permissions, returned with its
+        `secret`; the old key keeps working for `expires_in` seconds (at most 7 days; `0`
+        revokes it at once)."""
         key = _idempotency_key(None)
         body = RollApiKeyRequest(expires_in=expires_in)
         return self._call(
@@ -868,6 +902,29 @@ class TopupClient:
             Treasury,
         )
 
+    def pause_treasury(self, treasury_id: str) -> Treasury:
+        """Pauses crediting of deposits to every forwarder over the treasury, for an incident such
+        as a compromised former treasury: they stay `pending`, and no `deposit.credited` is sent,
+        until `resume_treasury`. Announced as `treasury.updated`. Needs a secret key."""
+        key = _idempotency_key(None)
+        return self._call(
+            lambda: pause_treasury.sync_detailed(
+                treasury_id, client=self._client, idempotency_key=key
+            ),
+            Treasury,
+        )
+
+    def resume_treasury(self, treasury_id: str) -> Treasury:
+        """Lifts your crediting pause of the treasury; the deposits it held are credited. An
+        operator's pause stays in `crediting_paused_by`."""
+        key = _idempotency_key(None)
+        return self._call(
+            lambda: resume_treasury.sync_detailed(
+                treasury_id, client=self._client, idempotency_key=key
+            ),
+            Treasury,
+        )
+
     def get_balance(self) -> Balance:
         """What the account's forwarders hold, per chain and token."""
         return self._call(lambda: get_balance.sync_detailed(client=self._client), Balance)
@@ -931,16 +988,20 @@ class TopupClient:
 
     def _checked(self, quote: Quote) -> Quote:
         """Raises unless an open quote's address is the one derived from the pinned forwarder
-        over the quote's treasury, and that treasury is the pinned one of its chain."""
-        if self.forwarder is None or quote.status != "open":
+        and account over the pinned treasury of its chain, and the quote names that treasury."""
+        if quote.status != "open":
             return quote
-        self._check_treasury(quote.chain_id, quote.treasury, f"quote {quote.id}")
-        factory, implementation = self.forwarder
+        where = f"quote {quote.id}"
+        pins = self._pins(where)
+        if pins is None:
+            return quote
+        factory, implementation, account = pins
+        treasury = self._treasury(quote.chain_id, quote.treasury, where)
         derived = quote_address(
             factory,
             implementation,
-            quote.treasury,
-            account=self.account_id(),
+            treasury,
+            account=account,
             client_reference_id=quote.client_reference_id,
             quote_id=quote.id,
         )
@@ -950,20 +1011,23 @@ class TopupClient:
 
     def _checked_deposit_address(self, address: DepositAddress) -> DepositAddress:
         """Raises unless every network of an active deposit address is the address derived from
-        the pinned forwarder over that network's treasury, and each treasury is the pinned one
-        of its chain. A retired address may pay a treasury since replaced, so it is not
+        the pinned forwarder and account over the pinned treasury of its chain, and the network
+        names that treasury. A retired address may pay a treasury since replaced, so it is not
         checked."""
-        if self.forwarder is None or address.status != "active":
+        if address.status != "active":
             return address
-        factory, implementation = self.forwarder
+        pins = self._pins(f"deposit address {address.id}")
+        if pins is None:
+            return address
+        factory, implementation, account = pins
         for network in address.networks:
             where = f"deposit address {address.id} on chain {network.chain_id}"
-            self._check_treasury(network.chain_id, network.treasury, where)
+            treasury = self._treasury(network.chain_id, network.treasury, where)
             derived = deposit_address(
                 factory,
                 implementation,
-                network.treasury,
-                account=self.account_id(),
+                treasury,
+                account=account,
                 livemode=address.livemode,
                 client_reference_id=address.client_reference_id,
                 version=address.version,
@@ -972,12 +1036,37 @@ class TopupClient:
                 raise AddressMismatchError(f"{where} is not one the account can derive")
         return address
 
-    def _check_treasury(self, chain_id: int, treasury: str, where: str) -> None:
+    def _pins(self, where: str) -> tuple[str, str, str] | None:
+        """The pinned `(factory, implementation, account)` an address is derived from; `None`
+        to skip the check, only in test mode without a pinned forwarder. A live key fails
+        closed without its pins: the account must be pinned too, not read from the service."""
+        if self.livemode and (
+            self.forwarder is None or self.treasuries is None or not self._account_pinned
+        ):
+            raise AddressMismatchError(
+                f"{where}: live mode requires the pinned account, forwarder, and treasuries"
+            )
+        if self.forwarder is None:
+            return None
+        factory, implementation = self.forwarder
+        return factory, implementation, self.account_id()
+
+    def _treasury(self, chain_id: int, treasury: str, where: str) -> str:
+        """The treasury an address of `chain_id` is derived from: the pinned one, never the
+        response's, which must name it. Only in test mode without pinned treasuries is the
+        response's used, with a warning."""
         if self.treasuries is None:
-            return
+            warnings.warn(
+                f"{where}: no pinned treasuries; the service's treasury {treasury} is trusted "
+                "(test mode only)",
+                UnpinnedTreasuryWarning,
+                stacklevel=4,
+            )
+            return treasury
         pinned = self.treasuries.get(chain_id)
         if pinned is None or not same_address(pinned, treasury):
             raise AddressMismatchError(f"{where} pays a treasury that is not the pinned one")
+        return pinned
 
     def _call(self, operation: Callable[[], Response[Any]], expected: type[T]) -> T:
         attempt = 1

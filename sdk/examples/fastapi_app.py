@@ -12,9 +12,10 @@ fulfillment.
 Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
     PHALA_PAY_API_BASE=https://pay.example.com \\
-    PHALA_PAY_SECRET_KEY=ppay_sk_test_... \\
+    PHALA_PAY_SECRET_KEY=ppay_rk_test_... (a restricted key: quotes, deposits, events) \\
     PHALA_PAY_ACCOUNT=acct_... \\
     PHALA_PAY_FORWARDER=<factory>,<implementation> of the attested deployment \\
+    PHALA_PAY_TREASURIES=<chain_id>:<your treasury>,... as you proved them \\
     PHALA_PAY_WEBHOOK_KEYS=<your account's webhook public key in this mode, pinned from \\
         GET /v1/attestation; comma-separated while a rotation overlaps> \\
     uvicorn --factory fastapi_app:app_from_env
@@ -158,10 +159,19 @@ def create_app(
 def app_from_env() -> FastAPI:
     secret_key = os.environ["PHALA_PAY_SECRET_KEY"]
     factory, implementation = os.environ["PHALA_PAY_FORWARDER"].split(",")
+    treasuries = {
+        int(chain_id): treasury.strip()
+        for chain_id, treasury in (
+            entry.split(":", 1)
+            for entry in os.environ["PHALA_PAY_TREASURIES"].split(",")
+            if entry.strip()
+        )
+    }
     pay = PhalaPay(
         os.environ["PHALA_PAY_API_BASE"],
         secret_key,
         forwarder=(factory.strip(), implementation.strip()),
+        treasuries=treasuries,
         account=os.environ["PHALA_PAY_ACCOUNT"],
     )
     return create_app(
@@ -169,7 +179,7 @@ def app_from_env() -> FastAPI:
         [key.strip() for key in os.environ["PHALA_PAY_WEBHOOK_KEYS"].split(",") if key.strip()],
         os.environ.get("DATABASE", "topups.sqlite3"),
         account=os.environ["PHALA_PAY_ACCOUNT"],
-        livemode=secret_key.startswith("ppay_sk_live_"),
+        livemode=secret_key.startswith(("ppay_sk_live_", "ppay_rk_live_")),
         chain_id=int(os.environ.get("PHALA_PAY_CHAIN_ID", "11155111")),
         asset=os.environ.get("PHALA_PAY_ASSET", "pha"),
     )

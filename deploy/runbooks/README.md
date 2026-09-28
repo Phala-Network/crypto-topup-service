@@ -14,7 +14,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Deposit view, admin-signed `GET /v1/admin/deposits/{id}` (`dep_…` or the UUID) | the deposit as its account sees it, with `admin`: the processing `state`, route, transition timeline (each step's evidence), and webhook `events` (`id`, `type`, `delivered_at`). The merchant finds deposits with its own `GET /v1/deposits?tx_hash=…` or `?client_reference_id=…` |
 | Attestation, `GET /v1/attestation?nonce=`, with an account's API key | that account's webhook keys in the key's mode ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
-| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`. Merchants manage their webhook endpoints and resend their events themselves |
+| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; a treasury's crediting `pause`/`resume`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`. Merchants manage their webhook endpoints and resend their events themselves |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
 Database rows the API does not expose (reconciliation findings, `flushed` and `flush_failures`,
@@ -73,6 +73,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
 | A merchant's refund stays `pending` or `failed` | Not a platform action: the merchant pays refunds from the treasury of the deposit's address and attaches the transaction with `POST /v1/refunds/{id}/mark_paid`; a `failed` refund's `failure_reason` says why ([integration guide, §3](../../docs/integration.md#3-refunds)) |
 | A merchant's treasury change, or a pending `treasury.created` it did not request | [Treasury change](treasury-change.md) |
+| A treasury reported compromised: hold its payments uncredited | [Treasury crediting pause](treasury-credit-pause.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
 | Payment sent on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
 | Any customer-impacting incident | [Incident communication](incident-communication.md) |
@@ -102,3 +103,4 @@ in its current form against a CVM.
 | Wrong-network deposit | — | not exercised; every step is human-only | — |
 | API key compromise and key recovery | 2026-09-28, local | partial: the merchant roll and the operator recovery in the API tests `keys_authenticate_by_bearer_and_expire_or_revoke` and `operator_onboards_accounts_enables_live_mode_and_recovers_keys`; the contact verification not exercised | design PR 5 |
 | Route or chain retirement | — | not exercised; the upgrade is human-only | — |
+| Treasury crediting pause | 2026-09-28, local | partial: merchant and operator pause and resume, and the held deposit, in the API test `crediting_pauses_per_treasury_and_resumes`; the contact verification not exercised | launch hardening |

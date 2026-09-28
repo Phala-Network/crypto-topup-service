@@ -75,21 +75,22 @@ export interface Forwarder {
   implementation: string;
 }
 
-/** Recomputes a quote's address from the pinned forwarder and the quote's `treasury`. */
+/** The address of a quote over `treasury`, which you pin yourself (see `verifyQuoteAddress`). */
 export function quoteAddress(
   forwarder: Forwarder,
-  quote: { treasury: string; client_reference_id: string; id: string },
+  quote: { client_reference_id: string; id: string },
+  treasury: string,
   account: string,
 ): Address {
   return forwarderAddress(
     forwarder.factory,
     forwarder.implementation,
-    quote.treasury,
+    treasury,
     quoteSalt(account, quote.client_reference_id, quote.id),
   );
 }
 
-/** Recomputes a deposit address on the network whose treasury is `treasury`. */
+/** A deposit address on the network whose treasury is `treasury`, which you pin yourself. */
 export function depositAddress(
   forwarder: Forwarder,
   address: { livemode: boolean; client_reference_id: string; version: number },
@@ -102,4 +103,121 @@ export function depositAddress(
     treasury,
     depositAddressSalt(account, address.livemode, address.client_reference_id, address.version),
   );
+}
+
+/** An address the service returned is not the one your pins derive: show nothing to pay. */
+export class AddressMismatchError extends Error {
+  override readonly name = "AddressMismatchError";
+}
+
+/**
+ * What every address is recomputed from, configured on your server and never read from the
+ * service: your account id (`acct_…`), the forwarder `factory` and `implementation` of the
+ * attested deployment, and `treasuries`, your own treasury per chain id as you proved it. A
+ * compromised service could return another treasury with the address that really derives from
+ * it, so the response's `treasury` is never trusted.
+ *
+ * Live mode requires `treasuries`: without the chain's treasury the check fails closed. In test
+ * mode an unpinned chain falls back to the response's treasury with a console warning.
+ */
+export interface AddressPins extends Forwarder {
+  account: string;
+  treasuries?: Readonly<Record<number, string>> | undefined;
+}
+
+/**
+ * The treasury an address on `chainId` must pay: the pinned one, which the response must name.
+ */
+function pinnedTreasury(
+  pins: AddressPins,
+  livemode: boolean,
+  chainId: number,
+  treasury: string,
+  where: string,
+): string {
+  const pinned = pins.treasuries?.[chainId];
+  if (pinned === undefined) {
+    if (livemode) {
+      throw new AddressMismatchError(`${where}: live mode requires your pinned treasury of chain ${chainId}`);
+    }
+    console.warn(
+      `${where}: no pinned treasury of chain ${chainId}; the service's ${treasury} is trusted (test mode only)`,
+    );
+    return treasury;
+  }
+  if (!sameAddress(pinned, treasury)) {
+    throw new AddressMismatchError(`${where} pays a treasury that is not the pinned one`);
+  }
+  return pinned;
+}
+
+function requirePins(pins: AddressPins, where: string): void {
+  for (const field of ["account", "factory", "implementation"] as const) {
+    if (typeof pins[field] !== "string" || pins[field] === "") {
+      throw new AddressMismatchError(`${where}: the pinned ${field} is missing`);
+    }
+  }
+}
+
+function sameAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Recomputes an open quote's address from your pins and returns it, the `expectedAddress` to
+ * pass to `<Checkout>`. Throws `AddressMismatchError` unless the quote names your pinned
+ * treasury of its chain and its address derives from it; in live mode also when the chain has no
+ * pinned treasury.
+ */
+export function verifyQuoteAddress(
+  pins: AddressPins,
+  quote: {
+    id: string;
+    livemode: boolean;
+    chain_id: number;
+    treasury: string;
+    address: string;
+    client_reference_id: string;
+  },
+): Address {
+  const where = `quote ${quote.id}`;
+  requirePins(pins, where);
+  const treasury = pinnedTreasury(pins, quote.livemode, quote.chain_id, quote.treasury, where);
+  const derived = quoteAddress(pins, quote, treasury, pins.account);
+  if (!sameAddress(derived, quote.address)) {
+    throw new AddressMismatchError(`${where} has an address the account cannot derive`);
+  }
+  return derived;
+}
+
+/**
+ * Recomputes every network of an active deposit address from your pins and returns the address,
+ * the same on every network. Throws `AddressMismatchError` as `verifyQuoteAddress` does, for any
+ * network.
+ */
+export function verifyDepositAddress(
+  pins: AddressPins,
+  address: {
+    id: string;
+    livemode: boolean;
+    client_reference_id: string;
+    version: number;
+    networks: readonly { chain_id: number; treasury: string; address: string }[];
+  },
+): Address {
+  requirePins(pins, `deposit address ${address.id}`);
+  let first: Address | undefined;
+  for (const network of address.networks) {
+    const where = `deposit address ${address.id} on chain ${network.chain_id}`;
+    const treasury = pinnedTreasury(pins, address.livemode, network.chain_id, network.treasury, where);
+    const derived = depositAddress(pins, address, treasury, pins.account);
+    if (!sameAddress(derived, network.address)) {
+      throw new AddressMismatchError(`${where} is not one the account can derive`);
+    }
+    first ??= derived;
+  }
+  if (first === undefined) {
+    throw new AddressMismatchError(`deposit address ${address.id} has no network`);
+  }
+  return first;
 }

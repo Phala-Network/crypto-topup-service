@@ -92,6 +92,45 @@ pub enum Permission {
 }
 
 impl Permission {
+    /// Every permission, in the order of the enum.
+    pub const ALL: [Self; 19] = [
+        Self::AccountRead,
+        Self::AccountWrite,
+        Self::QuotesRead,
+        Self::QuotesWrite,
+        Self::DepositsRead,
+        Self::DepositsWrite,
+        Self::DepositAddressesRead,
+        Self::DepositAddressesWrite,
+        Self::RefundsRead,
+        Self::RefundsWrite,
+        Self::ApiKeysRead,
+        Self::ApiKeysWrite,
+        Self::TreasuryRead,
+        Self::TreasuryWrite,
+        Self::EndpointsRead,
+        Self::EndpointsWrite,
+        Self::EventsRead,
+        Self::SweepsRead,
+        Self::ForwardersRead,
+    ];
+
+    /// The permission of `code`, such as `quotes.write`.
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|permission| permission.code() == code)
+    }
+
+    /// The `read` permission of the same resource, which a `write` grant includes as Stripe's
+    /// restricted keys do; `None` for a `read` permission or a resource without one.
+    #[must_use]
+    pub fn read_of_write(self) -> Option<Self> {
+        let resource = self.code().strip_suffix(".write")?;
+        Self::parse(&format!("{resource}.read"))
+    }
+
     /// The permission's code in the authorization table.
     #[must_use]
     pub const fn code(self) -> &'static str {
@@ -125,7 +164,8 @@ impl Permission {
 pub enum Principal {
     /// A secret API key, which holds every API permission.
     SecretKey,
-    /// A restricted API key, limited further by its own grants (design PR 12).
+    /// A restricted API key, limited further by its own grants (design PR 12). The table never
+    /// grants it `api_keys.write`, `treasury.write`, `endpoints.write`, or `account.write`.
     RestrictedKey,
 }
 
@@ -138,6 +178,22 @@ impl Principal {
             Self::RestrictedKey => "key:restricted",
         }
     }
+}
+
+/// The permissions the authorization table grants to `principal`.
+pub async fn grants<'e>(
+    executor: impl PgExecutor<'e>,
+    principal: Principal,
+) -> Result<Vec<Permission>, sqlx::Error> {
+    let codes: Vec<String> =
+        sqlx::query_scalar("SELECT permission FROM permissions WHERE principal = $1")
+            .bind(principal.code())
+            .fetch_all(executor)
+            .await?;
+    Ok(codes
+        .iter()
+        .filter_map(|code| Permission::parse(code))
+        .collect())
 }
 
 /// Whether the authorization table grants `permission` to `principal`.

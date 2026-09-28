@@ -15,7 +15,6 @@ use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, 
 use topup_core::deposit::{DepositState, RetryError, StepOutcome};
 use topup_core::identity::{credited_event_id, event_id};
 use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
-use uuid::Uuid;
 
 use crate::db::{Deposit, EventObject, OutboxEvent};
 use crate::pause::{self, PauseScopeSources};
@@ -177,10 +176,11 @@ impl ScreenStep {
 
     async fn pause_scopes(
         &self,
-        customer_id: Uuid,
+        deposit: &Deposit,
         route: &str,
     ) -> Result<Option<PauseScopeSources>, sqlx::Error> {
-        pause::customer_pause_scopes(&self.pool, customer_id, route).await
+        pause::customer_pause_scopes(&self.pool, deposit.customer_id, route, deposit.address_id)
+            .await
     }
 }
 
@@ -200,7 +200,7 @@ impl Step for ScreenStep {
         let Some(screening_route) = self.routes.get(&key) else {
             return invariant_result("unknown_deposit_route", deposit.block_number);
         };
-        let pause_scopes = match self.pause_scopes(deposit.customer_id, route).await {
+        let pause_scopes = match self.pause_scopes(deposit, route).await {
             Ok(Some(pauses)) => pauses,
             Ok(None) => return invariant_result("customer_not_found", deposit.block_number),
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
@@ -231,6 +231,7 @@ fn credited_event(deposit: &Deposit) -> Result<OutboxEvent, &'static str> {
         next_attempt_at: Utc::now(),
         actor: crate::db::SYSTEM_ACTOR.to_owned(),
         request: None,
+        signing_key_version: None,
     })
 }
 
@@ -253,6 +254,7 @@ fn screening_evidence(
             "customer": pause_scopes.customer,
             "account": pause_scopes.account,
             "route": pause_scopes.route,
+            "treasury": pause_scopes.treasury,
         },
     })
 }
@@ -267,6 +269,7 @@ fn rejected_event(deposit: &Deposit) -> OutboxEvent {
         next_attempt_at: Utc::now(),
         actor: crate::db::SYSTEM_ACTOR.to_owned(),
         request: None,
+        signing_key_version: None,
     }
 }
 
@@ -301,6 +304,7 @@ mod tests {
     use topup_core::deposit::{RejectReason, StepOutcome, WaitReason};
     use topup_core::money::AtomicAmount;
     use topup_core::screening::SanctionsAnswer;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -377,7 +381,7 @@ mod tests {
         let customer = customer.iter().map(ToString::to_string).collect::<Vec<_>>();
         let account = account.iter().map(ToString::to_string).collect::<Vec<_>>();
         let route = route.iter().map(ToString::to_string).collect::<Vec<_>>();
-        PauseScopeSources::from_codes(&customer, &account, &route).expect("valid pause scopes")
+        PauseScopeSources::from_codes(&customer, &account, &route, &[]).expect("valid pause scopes")
     }
 
     #[tokio::test]

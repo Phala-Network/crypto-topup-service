@@ -95,6 +95,15 @@ events and in endpoints' `enabled_events`, adds `webhook_endpoints.last_attempt_
 `last_attempt_status` (the endpoint's delivery health), and indexes undelivered deliveries by event
 for `GET /v1/events?delivery_success=false`. Its down migration restores the grants and names.
 
+`20261016200000_funds_direction` (the design's "launch hardening" amendment) issues restricted
+keys: it removes `account.write` and `endpoints.write` from `key:restricted` in `permissions`
+(restricted keys never manage keys, treasuries, webhook endpoints, webhook keys, or account
+settings) and checks that `api_keys.permissions` is a JSON array. It adds
+`treasuries.crediting_paused_by` (`merchant`, `operator`), the per-treasury crediting pause that
+holds deposits to forwarders over the address, and `events.signing_key_version`, the retired
+webhook key version that signs a key roll's `account.updated` whenever it is delivered. Its down
+migration revokes restricted keys.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`

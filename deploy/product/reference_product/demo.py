@@ -795,7 +795,7 @@ def _mask(value: Any) -> Any:
 def _redact_key(authorization: str) -> str:
     """`Bearer ppay_sk_test_…`: the scheme and the key's prefix, never the key."""
     _, _, key = authorization.partition(" ")
-    for prefix in ("ppay_sk_test_", "ppay_sk_live_"):
+    for prefix in ("ppay_sk_test_", "ppay_sk_live_", "ppay_rk_test_", "ppay_rk_live_"):
         if key.startswith(prefix):
             return f"Bearer {prefix}…"
     return "Bearer …"

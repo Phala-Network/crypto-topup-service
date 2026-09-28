@@ -9,6 +9,21 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed (breaking; nothing is live)
 
+- Launch hardening (docs/design/multi-tenant.md, "launch hardening" amendment):
+  - Restricted keys: `POST /v1/api_keys {"type": "restricted", "permissions": [...]}` issues a
+    `ppay_rk_{test,live}_` key holding only those permissions (a `write` includes its `read`);
+    `api_key` objects gain `permissions`. Restricted keys can no longer be granted `account.write`
+    or `endpoints.write`: keys, treasuries, webhook endpoints, webhook keys, and account settings
+    need a secret key.
+  - `POST /v1/account/webhook_keys/roll`: in live mode `expires_in` is 172800 (48 hours) to 604800;
+    `0` is refused there. The default is 172800 (was `0`). The roll's `account.updated` is signed
+    by the retiring key too, whenever it is delivered.
+  - Treasuries gain `crediting_paused` and `crediting_paused_by`; `POST /v1/treasuries/{id}/pause`
+    and `/resume` (secret key), and the admin `POST
+    /v1/admin/accounts/{account}/treasuries/{treasury}/pause|resume {reason}`, hold deposits to
+    every forwarder over a treasury `pending` without `deposit.credited` until resumed; each change
+    is `treasury.updated`.
+
 - API conformance with Stripe (docs/design/multi-tenant.md, "API conformance" amendment):
   - Business-state failures are `400` (`deposit_not_final`, `deposit_not_refundable`,
     `quote_unexpected_state`, `quote_payment_received`, `quote_window_closed`, `paused`,

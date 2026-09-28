@@ -520,6 +520,7 @@ async fn seed_mode_event(
             next_attempt_at: Utc::now() - Duration::seconds(1),
             actor: topup::db::SYSTEM_ACTOR.to_owned(),
             request: None,
+            signing_key_version: None,
         },
         None,
     )
@@ -1000,7 +1001,7 @@ async fn a_rolled_key_signs_beside_the_new_one_until_its_overlap_ends() -> Resul
         &context.app_pool,
         &RouteSet::default(),
         scope,
-        Duration::hours(1),
+        Duration::hours(48),
         &actor,
     )
     .await?;
@@ -1047,6 +1048,75 @@ async fn a_rolled_key_signs_beside_the_new_one_until_its_overlap_ends() -> Resul
 
     old.stop().await;
     new.stop().await;
+    context.cleanup().await
+}
+
+/// A live roll keeps the old key signing for at least the 48-hour treasury time-lock, and the
+/// roll's own `account.updated` is signed by the key it retires whenever it is delivered: a
+/// receiver that pinned only the old key verifies the notice even after the overlap, but no later
+/// event.
+#[tokio::test]
+async fn a_roll_notice_is_signed_by_the_retired_key_even_after_the_overlap() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let pinned_old = ReferenceReceiver::start(
+        signer.key(account, true, 1),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    seed_account(&context.app_pool, account, &pinned_old.url).await?;
+    let live = topup::tenancy::Scope::new(account, true);
+    let actor =
+        topup::audit::Actor::api_key(topup::ids::format(topup::ids::API_KEY, Uuid::new_v4()));
+    let routes = RouteSet::default();
+    let roll = |scope, overlap| {
+        topup::webhook_keys::roll(&context.app_pool, &routes, scope, overlap, &actor)
+    };
+    for too_short in [Duration::zero(), Duration::hours(47)] {
+        ensure!(
+            matches!(
+                roll(live, too_short).await,
+                Err(topup::webhook_keys::WebhookKeyError::InvalidExpiry)
+            ),
+            "a live roll with {too_short} of overlap must be refused"
+        );
+    }
+    // Test mode may still stop the old key at once.
+    roll(topup::tenancy::Scope::new(account, false), Duration::zero()).await?;
+
+    roll(live, Duration::hours(48)).await?;
+    let version: Option<i32> = sqlx::query_scalar(
+        "SELECT signing_key_version FROM events \
+         WHERE account_id = $1 AND livemode AND type = 'account.updated'",
+    )
+    .bind(account)
+    .fetch_one(&context.app_pool)
+    .await?;
+    ensure!(version == Some(1), "{version:?}");
+    // The overlap ends before the notice is delivered, as for an endpoint down for two days.
+    sqlx::query("UPDATE retiring_webhook_keys SET expires_at = now() - interval '1 second'")
+        .execute(&context.app_pool)
+        .await?;
+    let later = Uuid::new_v4();
+    seed_account_event(&context.app_pool, account, later).await?;
+
+    let delivery = worker(&context.app_pool, signer)?;
+    drain(&delivery).await?;
+    ensure!(types(&pinned_old).await == ["account.updated"]);
+    ensure!(!pinned_old.ids().await.contains(&evt(later)));
+    ensure!(
+        pinned_old
+            .signatures()
+            .await
+            .iter()
+            .all(|signature| signature.split(' ').count() == 2)
+    );
+
+    pinned_old.stop().await;
     context.cleanup().await
 }
 

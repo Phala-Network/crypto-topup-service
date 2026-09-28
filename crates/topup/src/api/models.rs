@@ -892,6 +892,14 @@ pub struct AccountPauseRequest {
     pub reason: String,
 }
 
+/// Administrative pause or resume of crediting to one treasury of an account.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminTreasuryPauseRequest {
+    /// Why, for the audit log and the `treasury.updated` event's audit row.
+    pub reason: String,
+}
+
 /// Administrative pause or resume of one customer of an account.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct CustomerPauseRequest {
@@ -910,12 +918,14 @@ pub struct ApiKeyObject {
     pub object: String,
     /// The key's mode.
     pub livemode: bool,
-    /// `secret`; `restricted` keys come later.
+    /// `secret`, holding every permission, or `restricted`, holding only `permissions`.
     #[serde(rename = "type")]
     pub key_type: String,
     /// The key's label.
     pub name: String,
-    /// The whole key, `ppay_sk_…`, shown once. Store it in a secret manager.
+    /// A restricted key's permissions, such as `quotes.write`; `null` for a secret key.
+    pub permissions: Option<Vec<String>>,
+    /// The whole key, `ppay_sk_…` or `ppay_rk_…`, shown once. Store it in a secret manager.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
     /// The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.
@@ -951,6 +961,18 @@ pub struct CreateApiKeyRequest {
     /// The key's label, at most 200 characters.
     #[serde(default)]
     pub name: String,
+    /// `secret`, the default, or `restricted` (Stripe's restricted keys): a key that holds only
+    /// `permissions`.
+    #[serde(default, rename = "type")]
+    pub key_type: Option<String>,
+    /// A restricted key's permissions, required with `type: restricted`: codes such as
+    /// `quotes.write` or `deposits.read`, where a `write` includes its `read`. Grantable:
+    /// `account.read`, `api_keys.read`, `quotes.*`, `deposit_addresses.*`, `deposits.*`,
+    /// `refunds.*`, `events.read`, `endpoints.read`, `treasury.read`, `sweeps.read`,
+    /// `forwarders.read`. Keys, treasuries, webhook endpoints, webhook keys, and account settings
+    /// are managed only with a secret key.
+    #[serde(default)]
+    pub permissions: Option<Vec<String>>,
 }
 
 /// `POST /v1/api_keys/{id}/roll` body.
@@ -1043,6 +1065,12 @@ pub struct Treasury {
     /// Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named
     /// the address when the change was due to apply, so it never applied).
     pub cancellation_reason: Option<String>,
+    /// Whether crediting of deposits to forwarders over this address is paused: they stay
+    /// `pending` and no `deposit.credited` is sent until it resumes.
+    pub crediting_paused: bool,
+    /// Who paused crediting: `merchant` (`POST /v1/treasuries/{id}/pause`) and, or, `operator`.
+    /// Each lifts only its own pause.
+    pub crediting_paused_by: Vec<String>,
 }
 
 /// `GET /v1/treasuries` response.
@@ -1270,13 +1298,27 @@ pub struct WebhookKeyVersion {
 }
 
 /// `POST /v1/account/webhook_keys/roll` body.
-#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RollWebhookKeyRequest {
-    /// Seconds the current key keeps signing beside the new one, up to 604800 (7 days); 0, the
-    /// default, stops it at once.
-    #[serde(default)]
+    /// Seconds the current key keeps signing beside the new one: 172800 (48 hours, the treasury
+    /// time-lock) to 604800 (7 days) in live mode, 0 to 604800 in test mode, where 0 stops it at
+    /// once. Default 172800.
+    #[serde(default = "default_webhook_key_overlap")]
     pub expires_in: u32,
+}
+
+impl Default for RollWebhookKeyRequest {
+    fn default() -> Self {
+        Self {
+            expires_in: default_webhook_key_overlap(),
+        }
+    }
+}
+
+/// The default overlap of a webhook key roll: the shortest a live roll accepts, 48 hours.
+const fn default_webhook_key_overlap() -> u32 {
+    172_800
 }
 
 /// A webhook endpoint (design D11): where the account's events of one mode are delivered, signed

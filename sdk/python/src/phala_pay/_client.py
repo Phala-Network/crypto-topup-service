@@ -39,23 +39,28 @@ from ._webhook import Webhook
 
 
 class PhalaPay:
-    """A client for one account and mode, authenticated with its secret key.
+    """A client for one account and mode, authenticated with its API key.
 
         pay = PhalaPay(
             api_base="https://pay.example.com",
             api_key=os.environ["PHALA_PAY_KEY"],
+            account="acct_…",
             forwarder=(FACTORY, IMPLEMENTATION),
+            treasuries={1: "0x…your treasury on Ethereum"},
         )
         quote = pay.quotes.create(client_reference_id="team-42", amount=2500,
                                   chain_id=11155111, asset="pha")
         return {"client_secret": quote.client_secret, "expected_address": quote.address}
 
-    `api_key` is a secret key, `ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account
-    and the mode. `forwarder`, the `(factory, implementation)` pair pinned from the attested
-    deployment, is required: every quote and deposit address is recomputed from it before it is
-    returned, and one the account cannot derive raises `AddressMismatchError` (fail closed).
-    `treasuries` (`{chain_id: treasury}`) additionally pins the treasury each may pay. `account`
-    (`acct_…`) saves the one `GET /v1/account` the check otherwise makes.
+    `api_key` is a restricted key (`ppay_rk_…`, recommended for a production server) or a secret
+    key (`ppay_sk_…`, for administration); the key selects the account and the mode. Every quote
+    and deposit address is recomputed before it is returned from pins you configure yourself:
+    `forwarder`, the `(factory, implementation)` pair pinned from the attested deployment;
+    `treasuries` (`{chain_id: treasury}`), your own treasury per chain; and `account` (`acct_…`).
+    The service's `treasury` is never trusted, and an address you cannot derive raises
+    `AddressMismatchError` (fail closed). A live key requires all three pins: without them every
+    address check raises. In test mode `account` is read from `GET /v1/account` when not given,
+    and without `treasuries` the service's treasury is used with an `UnpinnedTreasuryWarning`.
 
     Requests that fail with a transport error, `429` (after its `Retry-After`), or `5xx` are
     retried with backoff; `POST`s reuse one `Idempotency-Key` across retries, so a retry never
@@ -140,9 +145,9 @@ class AccountResource:
         """Lifts your own `quotes` pause; an operator's pause stays."""
         return self._client.resume_quotes()
 
-    def roll_webhook_key(self, *, expires_in: int = 0) -> AccountObject:
+    def roll_webhook_key(self, *, expires_in: int = 172_800) -> AccountObject:
         """Rolls this mode's webhook signing key; the old one signs beside it for `expires_in`
-        seconds (at most 7 days)."""
+        seconds: 48 hours (the default) to 7 days live, `0` to 7 days in test mode."""
         return self._client.roll_webhook_key(expires_in=expires_in)
 
 
@@ -437,14 +442,27 @@ class Treasuries:
         """Cancels a pending treasury change before it applies."""
         return self._client.cancel_treasury(treasury_id)
 
+    def pause(self, treasury_id: str) -> Treasury:
+        """Pauses crediting of deposits to every forwarder over the treasury, for an incident
+        such as a compromised former treasury: they stay `pending` until `resume`."""
+        return self._client.pause_treasury(treasury_id)
+
+    def resume(self, treasury_id: str) -> Treasury:
+        """Lifts your crediting pause; an operator's pause stays."""
+        return self._client.resume_treasury(treasury_id)
+
 
 class ApiKeys:
     def __init__(self, client: TopupClient) -> None:
         self._client = client
 
-    def create(self, *, name: str = "") -> ApiKeyObject:
-        """A new secret key of this mode; its `secret` is in this response only."""
-        return self._client.create_api_key(name=name)
+    def create(self, *, name: str = "", permissions: Sequence[str] | None = None) -> ApiKeyObject:
+        """A new key of this mode; its `secret` is in this response only. With `permissions`
+        (such as `["quotes.write", "deposit_addresses.write", "deposits.read", "events.read",
+        "refunds.read", "account.read"]`) it is a restricted key, `ppay_rk_…`, which never
+        manages keys, treasuries, webhook endpoints, webhook keys, or account settings: run
+        production with one and keep the secret key offline."""
+        return self._client.create_api_key(name=name, permissions=permissions)
 
     def retrieve(self, api_key_id: str) -> ApiKeyObject:
         return self._client.get_api_key(api_key_id)
@@ -454,7 +472,8 @@ class ApiKeys:
         return self._client.list_api_keys()
 
     def roll(self, api_key_id: str, *, expires_in: int = 0) -> ApiKeyObject:
-        """A replacement key with its `secret`; the old one works for `expires_in` seconds."""
+        """A replacement key of the same kind and permissions with its `secret`; the old one
+        works for `expires_in` seconds."""
         return self._client.roll_api_key(api_key_id, expires_in=expires_in)
 
     def revoke(self, api_key_id: str) -> ApiKeyObject:

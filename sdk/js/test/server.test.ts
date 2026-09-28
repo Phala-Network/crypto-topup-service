@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  AddressMismatchError,
   WebhookSignatureError,
   batchChecksum,
   constructEvent,
@@ -13,6 +14,9 @@ import {
   quoteSalt,
   quoteAddress,
   safeBatch,
+  verifyDepositAddress,
+  verifyQuoteAddress,
+  type AddressPins,
   type BatchFile,
 } from "../src/server/index.js";
 
@@ -43,8 +47,8 @@ describe("address recomputation", () => {
       expect(forwarderAddress(vectors.factory, vectors.implementation, vector.treasury, vector.salt)).toBe(
         vector.predicted_address,
       );
-      const quote = { treasury: vector.treasury, client_reference_id: vector.client_reference_id, id: vector.quote_id };
-      expect(quoteAddress(forwarder, quote, vector.account)).toBe(vector.predicted_address);
+      const quote = { client_reference_id: vector.client_reference_id, id: vector.quote_id };
+      expect(quoteAddress(forwarder, quote, vector.treasury, vector.account)).toBe(vector.predicted_address);
     }
   });
 
@@ -55,6 +59,91 @@ describe("address recomputation", () => {
         vector.predicted_address,
       );
     }
+  });
+});
+
+describe("address verification from your own pins", () => {
+  const [vector] = vectors.quote;
+  if (vector === undefined) throw new Error("no quote vector");
+  const pins: AddressPins = { ...forwarder, account: vector.account, treasuries: { 1: vector.treasury } };
+  const quote = {
+    id: vector.quote_id,
+    livemode: true,
+    chain_id: 1,
+    treasury: vector.treasury,
+    address: vector.predicted_address,
+    client_reference_id: vector.client_reference_id,
+  };
+  const attacker = "0x" + "ee".repeat(20);
+  // A compromised service returns an attacker's treasury and the address that really derives
+  // from it, so recomputing over the response's treasury would pass.
+  const spoofed = {
+    ...quote,
+    treasury: attacker,
+    address: quoteAddress(forwarder, { client_reference_id: vector.client_reference_id, id: vector.quote_id }, attacker, vector.account),
+  };
+
+  it("returns the address derived from the pinned treasury", () => {
+    expect(verifyQuoteAddress(pins, quote)).toBe(vector.predicted_address);
+  });
+
+  it("refuses a spoofed treasury with its valid address", () => {
+    expect(() => verifyQuoteAddress(pins, spoofed)).toThrow(AddressMismatchError);
+    // Naming the pinned treasury while showing the attacker's address fails too.
+    expect(() => verifyQuoteAddress(pins, { ...spoofed, treasury: vector.treasury })).toThrow(
+      /cannot derive/,
+    );
+  });
+
+  it("fails closed in live mode without the chain's pinned treasury", () => {
+    for (const treasuries of [undefined, {}, { 10: vector.treasury }]) {
+      expect(() => verifyQuoteAddress({ ...pins, treasuries }, spoofed)).toThrow(/live mode requires/);
+      expect(() => verifyQuoteAddress({ ...pins, treasuries }, quote)).toThrow(/live mode requires/);
+    }
+    expect(() => verifyQuoteAddress({ ...pins, account: "" }, quote)).toThrow(/pinned account/);
+  });
+
+  it("trusts the response's treasury only in test mode, with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(verifyQuoteAddress({ ...pins, treasuries: undefined }, { ...spoofed, livemode: false })).toBe(
+        spoofed.address,
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("test mode only"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("checks every network of a deposit address", () => {
+    const [deposit] = vectors.deposit_address;
+    if (deposit === undefined) throw new Error("no deposit address vector");
+    const addressPins: AddressPins = {
+      ...forwarder,
+      account: deposit.account,
+      treasuries: { 1: deposit.treasury, 8453: deposit.treasury },
+    };
+    const network = { treasury: deposit.treasury, address: deposit.predicted_address };
+    const address = {
+      id: "da_1",
+      livemode: true,
+      client_reference_id: deposit.client_reference_id,
+      version: deposit.version,
+      networks: [
+        { chain_id: 1, ...network },
+        { chain_id: 8453, ...network },
+      ],
+    };
+    const live = { ...address, livemode: deposit.livemode };
+    expect(verifyDepositAddress(addressPins, live)).toBe(deposit.predicted_address);
+    const forged = {
+      ...live,
+      networks: [{ chain_id: 1, ...network }, { chain_id: 8453, treasury: attacker, address: deposit.predicted_address }],
+    };
+    expect(() => verifyDepositAddress(addressPins, forged)).toThrow(/chain 8453 pays a treasury/);
+    expect(() =>
+      verifyDepositAddress({ ...addressPins, treasuries: { 1: deposit.treasury } }, { ...address, livemode: true }),
+    ).toThrow(AddressMismatchError);
   });
 });
 

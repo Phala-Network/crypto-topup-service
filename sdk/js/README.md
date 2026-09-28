@@ -218,11 +218,17 @@ quote's `payment_uri`, after checking that it pays exactly `amount_atomic` to `a
 
 ## Server helpers
 
-`@phala/pay/server` is for your backend and takes no secret key (call the API itself with your
-secret key from the backend only, never the browser):
+`@phala/pay/server` is for your backend and takes no API key (call the API itself with a
+restricted key, `ppay_rk_…`, from the backend only, never the browser):
 
 ```ts
-import { constructEvent, flushTransactions, safeBatch } from "@phala/pay/server";
+import { constructEvent, flushTransactions, safeBatch, verifyQuoteAddress } from "@phala/pay/server";
+
+// Your pins, configured on your server and never read from the service. The address is derived
+// from your treasury, not the quote's: a mismatch throws AddressMismatchError, and in live mode a
+// chain without a pinned treasury fails closed.
+const pins = { account: "acct_…", factory: FACTORY, implementation: IMPLEMENTATION, treasuries: { 1: TREASURY } };
+const expectedAddress = verifyQuoteAddress(pins, quote); // pass it to <Checkout expectedAddress>
 
 // Standard Webhooks v1a (ed25519, WebCrypto: Node 20+, Deno, Bun, edge runtimes). Fails closed
 // unless the signature verifies with a pinned key and the event is your account's in this mode.
@@ -236,8 +242,9 @@ const calls = flushTransactions(forwarders, PHA);
 const batchFile = safeBatch(1, TREASURY_SAFE, calls); // Safe Transaction Builder JSON
 ```
 
+`verifyDepositAddress(pins, address)` checks every network of a deposit address the same way.
 `quoteAddress`, `depositAddress`, `forwarderAddress`, `quoteSalt`, and `depositAddressSalt`
-recompute addresses from the pinned `(factory, implementation)`, as the Python SDK does.
+recompute an address offline from a treasury you pass, as the Python SDK does.
 
 ## Development
 

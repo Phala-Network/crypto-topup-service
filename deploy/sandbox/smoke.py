@@ -61,7 +61,8 @@ class Integration:
 
     def livemode(self) -> bool:
         """The mode of the product's API key, and so of its webhooks."""
-        return Path(self.api_key_file).read_text(encoding="ascii").startswith("ppay_sk_live_")
+        key = Path(self.api_key_file).read_text(encoding="ascii")
+        return key.startswith(("ppay_sk_live_", "ppay_rk_live_"))
 
     def client(self) -> TopupClient:
         """A client of the product's account (`product_slug`, `acct_…`) with its secret key; with

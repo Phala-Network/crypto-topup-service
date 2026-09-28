@@ -94,15 +94,18 @@ def sync_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[AccountObject | ErrorResponse]:
     """Rolls the webhook signing key of the key's mode: the next version signs every delivery from
-    now on, and the current one keeps signing beside it for `expires_in` seconds (at most 7 days),
-    so every delivery carries one `v1a` signature per key until then; `0`, the default, stops it
-    at once. Fetch and verify the new public key with `GET /v1/attestation`, pin it next to the
-    old one, and drop the old one when it expires. Announced as `account.updated`.
+    now on, and the current one keeps signing beside it for `expires_in` seconds, so every
+    delivery carries one `v1a` signature per key until then. The overlap is 48 hours (the default,
+    the treasury time-lock) to 7 days in live mode, so a leaked key cannot cut off the key you
+    pinned; test mode also accepts `0`, which stops it at once. The roll is announced as
+    `account.updated`, signed by the retiring key as well even after its overlap. Fetch and verify
+    the new public key with `GET /v1/attestation`, pin it next to the old one, and drop the old one
+    when it expires.
 
     Args:
         idempotency_key (None | str | Unset):
         body (RollWebhookKeyRequest): `POST /v1/account/webhook_keys/roll` body. Example:
-            {'expires_in': 86400}.
+            {'expires_in': 172800}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -131,15 +134,18 @@ def sync(
     idempotency_key: None | str | Unset = UNSET,
 ) -> AccountObject | ErrorResponse | None:
     """Rolls the webhook signing key of the key's mode: the next version signs every delivery from
-    now on, and the current one keeps signing beside it for `expires_in` seconds (at most 7 days),
-    so every delivery carries one `v1a` signature per key until then; `0`, the default, stops it
-    at once. Fetch and verify the new public key with `GET /v1/attestation`, pin it next to the
-    old one, and drop the old one when it expires. Announced as `account.updated`.
+    now on, and the current one keeps signing beside it for `expires_in` seconds, so every
+    delivery carries one `v1a` signature per key until then. The overlap is 48 hours (the default,
+    the treasury time-lock) to 7 days in live mode, so a leaked key cannot cut off the key you
+    pinned; test mode also accepts `0`, which stops it at once. The roll is announced as
+    `account.updated`, signed by the retiring key as well even after its overlap. Fetch and verify
+    the new public key with `GET /v1/attestation`, pin it next to the old one, and drop the old one
+    when it expires.
 
     Args:
         idempotency_key (None | str | Unset):
         body (RollWebhookKeyRequest): `POST /v1/account/webhook_keys/roll` body. Example:
-            {'expires_in': 86400}.
+            {'expires_in': 172800}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -163,15 +169,18 @@ async def asyncio_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[AccountObject | ErrorResponse]:
     """Rolls the webhook signing key of the key's mode: the next version signs every delivery from
-    now on, and the current one keeps signing beside it for `expires_in` seconds (at most 7 days),
-    so every delivery carries one `v1a` signature per key until then; `0`, the default, stops it
-    at once. Fetch and verify the new public key with `GET /v1/attestation`, pin it next to the
-    old one, and drop the old one when it expires. Announced as `account.updated`.
+    now on, and the current one keeps signing beside it for `expires_in` seconds, so every
+    delivery carries one `v1a` signature per key until then. The overlap is 48 hours (the default,
+    the treasury time-lock) to 7 days in live mode, so a leaked key cannot cut off the key you
+    pinned; test mode also accepts `0`, which stops it at once. The roll is announced as
+    `account.updated`, signed by the retiring key as well even after its overlap. Fetch and verify
+    the new public key with `GET /v1/attestation`, pin it next to the old one, and drop the old one
+    when it expires.
 
     Args:
         idempotency_key (None | str | Unset):
         body (RollWebhookKeyRequest): `POST /v1/account/webhook_keys/roll` body. Example:
-            {'expires_in': 86400}.
+            {'expires_in': 172800}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -198,15 +207,18 @@ async def asyncio(
     idempotency_key: None | str | Unset = UNSET,
 ) -> AccountObject | ErrorResponse | None:
     """Rolls the webhook signing key of the key's mode: the next version signs every delivery from
-    now on, and the current one keeps signing beside it for `expires_in` seconds (at most 7 days),
-    so every delivery carries one `v1a` signature per key until then; `0`, the default, stops it
-    at once. Fetch and verify the new public key with `GET /v1/attestation`, pin it next to the
-    old one, and drop the old one when it expires. Announced as `account.updated`.
+    now on, and the current one keeps signing beside it for `expires_in` seconds, so every
+    delivery carries one `v1a` signature per key until then. The overlap is 48 hours (the default,
+    the treasury time-lock) to 7 days in live mode, so a leaked key cannot cut off the key you
+    pinned; test mode also accepts `0`, which stops it at once. The roll is announced as
+    `account.updated`, signed by the retiring key as well even after its overlap. Fetch and verify
+    the new public key with `GET /v1/attestation`, pin it next to the old one, and drop the old one
+    when it expires.
 
     Args:
         idempotency_key (None | str | Unset):
         body (RollWebhookKeyRequest): `POST /v1/account/webhook_keys/roll` body. Example:
-            {'expires_in': 86400}.
+            {'expires_in': 172800}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
