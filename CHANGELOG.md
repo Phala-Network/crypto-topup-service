@@ -596,3 +596,8 @@ happens only from two-provider finalized data.
   `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block
   scanning change, routes in token mode (the default) never saw such transfers: the missing-deposit
   check now reads every issued address's transfers of any token in both modes.
+- A webhook endpoint's `pending_deliveries` and `oldest_pending_at`, and the admin daily report's
+  `failing_webhook_endpoints`, no longer count the notice of a URL change still pending at the
+  endpoint's former URL: it is not a delivery to the endpoint as it is now, so a former URL that
+  was taken down no longer makes the endpoint look unhealthy. The notice is still retried until
+  delivered.

@@ -492,3 +492,39 @@ async fn events_are_resent_and_endpoints_tested_through_the_api() -> Result<()> 
 
     context.cleanup().await
 }
+
+/// The notice of a URL change goes to the former URL (`crates/topup/src/webhook_endpoints.rs`). Until
+/// it is delivered it is pending, but not in the endpoint's backlog: a former URL the merchant
+/// took down must not leave the endpoint looking unhealthy.
+#[tokio::test]
+async fn a_notice_to_a_former_url_is_not_in_the_endpoints_backlog() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let harness = Harness::new(pool)?;
+    let (_, _, test) = account(pool, "merchant").await?;
+    let created = harness.create(&test, "http://old.example/hooks").await?;
+    ensure!(created.status == StatusCode::OK, "{}", created.body);
+    let path = format!("/v1/webhook_endpoints/{}", id(&created));
+    let before = harness.get(&path, &test).await?.body["pending_deliveries"].clone();
+
+    let moved = harness
+        .post(&path, &json!({ "url": "http://new.example/hooks" }), &test)
+        .await?;
+    ensure!(moved.status == StatusCode::OK, "{}", moved.body);
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_deliveries \
+         WHERE url = 'http://old.example/hooks' AND delivered_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    ensure!(notices == 1);
+    let after = harness.get(&path, &test).await?;
+    ensure!(
+        after.body["pending_deliveries"] == before,
+        "{} vs {before}",
+        after.body
+    );
+    Ok(())
+}
