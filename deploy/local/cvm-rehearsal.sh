@@ -471,7 +471,7 @@ sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
     TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 PRODUCT_RPC_URL=http://anvil:8545 \
-        PRODUCT_DOMAIN=pay.phala.com PRODUCT_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
+        PRODUCT_DOMAIN=pay-demo-api.phala.com PRODUCT_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
         PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
         "$root/deploy/product/render-compose.sh" "$tmp/product-source.yml" >"$tmp/product.yml"
 }

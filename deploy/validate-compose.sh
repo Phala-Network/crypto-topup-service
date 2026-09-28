@@ -237,7 +237,8 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
 # The reference-product CVM (deploy/product), rendered as Deploy (target `product`) does: it reads
 # exactly the names of its env example, which become its allowed_envs, carries its settings in the
 # attested config, mounts no host path but the dstack socket, and publishes only dstack-ingress on
-# 443 (tls-alpn-01, forwarding to product:8089, serving the host of its public URL).
+# 443 (tls-alpn-01, forwarding to product:8089, serving the host of its public URL). Its demo API
+# allows only the website's origin, https://pay.phala.com; the product serves no page.
 PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
     TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
     PRODUCT_DOMAIN=product.example PRODUCT_GATEWAY_DOMAIN=gateway.dstack.example \
@@ -261,11 +262,12 @@ jq -e "$ingress"'([.services[].volumes[]? | select(.type == "bind") | .source]
         | $ingress.CHALLENGE_TYPE == "tls-alpn-01" and $ingress.TARGET_ENDPOINT == "product:8089"
         and (.configs.product_config.content | fromjson
             | .public_url == "https://\($ingress.DOMAIN)"
-            and .service_url == "https://topup.example" and .rpc_url == "https://rpc.example"))' \
+            and .service_url == "https://topup.example" and .rpc_url == "https://rpc.example"
+            and .web_origin == "https://pay.phala.com"))' \
     "$rendered" >/dev/null || {
     echo "the product compose must bind-mount only the dstack socket into dstack-ingress, publish only" \
         "dstack-ingress on 443 (tls-alpn-01, forwarding to product:8089, serving the host of its" \
-        "public URL), and carry its settings" >&2
+        "public URL), carry its settings, and allow only the website's origin" >&2
     exit 1
 }
 

@@ -1,0 +1,22 @@
+// pay.phala.com: the page built from this directory, served by a Worker with static assets only (no
+// Worker script). Cloudflare Workers Builds deploys it from this repository (deploy/README.md,
+// "Website"): root directory deploy/product/web, build command `npm run build:cloudflare`, then
+// the default `npx wrangler deploy`, or `npx wrangler versions upload` on other branches. Workers
+// Builds ignores a `build` section here, so there is none.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "phala-pay-web",
+  "compatibility_date": "2026-09-26",
+  "assets": {
+    "directory": "./dist",
+    // One page at `/` and its assets, with no client-side routes: any other path is a real 404,
+    // not the page (which "single-page-application" would serve).
+    "not_found_handling": "none"
+  },
+  "routes": [{ "pattern": "pay.phala.com", "custom_domain": true }],
+  // The site is served only on its custom domain: no second copy at *.workers.dev.
+  "workers_dev": false,
+  // A branch build's uploaded version keeps a public preview URL on workers.dev, to review the page
+  // before it ships. Its demo API calls fail by design: the API allows only https://pay.phala.com.
+  "preview_urls": true
+}

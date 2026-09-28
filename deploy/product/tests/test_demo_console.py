@@ -1,5 +1,5 @@
-"""The Phala Pay demo's API: account cookies, request policy, the pins, both collection methods,
-refunds, sweeps, and the timeline's and ledger's states."""
+"""The Phala Pay demo's API: CORS for the website, account cookies, request policy, the pins, both
+collection methods, refunds, sweeps, and the timeline's and ledger's states."""
 
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ CONFIG = ProductConfig(
     treasury="0x" + "cc" * 20,
     token="0x" + "44" * 20,
     token_symbol="PHA",  # noqa: S106 - an asset symbol, not a secret
-    public_url="https://acme.example",
+    public_url="https://api.acme.example",
+    web_origin="https://acme.example",
 )
+WEBSITE = {"Origin": "https://acme.example"}
 
 
 def _quote(customer: str = "acct", **fields: Any) -> dict[str, Any]:
@@ -245,18 +247,11 @@ def _rpc(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
-    # The built website's layout (deploy/product/web/dist).
-    (tmp_path / "index.html").write_text("<!doctype html><title>Phala Pay</title>")
-    (tmp_path / "assets").mkdir()
-    (tmp_path / "assets" / "index-0a1b2c.js").write_text("export {};")
-    (tmp_path / "assets" / "geist-latin-3d4e5f.woff2").write_bytes(b"wOF2")
-    (tmp_path / "secret.txt").write_text("not served")
     (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
     service = Service()
     console = DemoConsole(
         replace(CONFIG, api_key_file=str(tmp_path / "product.key")),
         ProductLedger(),
-        tmp_path,
         recorder=ApiRecorder(httpx.MockTransport(service)),
         http=httpx.Client(transport=httpx.MockTransport(_rpc)),
         clock=lambda: NOW,
@@ -265,14 +260,16 @@ def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
 
 
 def _account(console: DemoConsole) -> str:
-    response = console.handle("GET", "/api/account", {}, b"")
+    response = console.handle("GET", "/api/account", WEBSITE, b"")
     assert response.status == HTTPStatus.OK
+    # Host-only (no Domain) on the API's origin, sent with the same-site website's requests.
     cookie = response.headers["set-cookie"]
-    assert "Path=/;" in cookie
-    assert "HttpOnly" in cookie
-    assert "SameSite=Strict" in cookie
-    assert "Secure" in cookie
-    return cookie.split(";")[0]
+    name, *attributes = cookie.split("; ")
+    assert re.fullmatch(r"demo_account=demo-[0-9a-f]{24}", name)
+    assert sorted(attributes) == sorted(
+        ["Path=/", f"Max-Age={30 * 86_400}", "HttpOnly", "SameSite=Lax", "Secure"]
+    )
+    return name
 
 
 def _customer(cookie: str) -> str:
@@ -486,58 +483,95 @@ def test_requests_need_the_cookie_and_posts_need_json(demo: tuple[DemoConsole, S
     assert status == HTTPStatus.NOT_FOUND
 
 
-def test_serves_the_page_at_the_root(demo: tuple[DemoConsole, Service]) -> None:
+def test_the_website_origin_reads_the_api_with_credentials(
+    demo: tuple[DemoConsole, Service],
+) -> None:
     console, _ = demo
-    assert console.handles("/")
-    page = console.handle("GET", "/", {}, b"")
-    assert page.status == HTTPStatus.OK
-    assert page.body == b"<!doctype html><title>Phala Pay</title>"
-    assert page.headers["content-type"] == "text/html; charset=utf-8"
-    assert page.headers["cache-control"] == "no-cache"
-    assert page.headers["referrer-policy"] == "no-referrer"
-    assert page.headers["x-content-type-options"] == "nosniff"
-    csp = page.headers["content-security-policy"]
-    assert csp.startswith("default-src 'none'; script-src 'self';")
-    assert "connect-src 'self' http://service.test;" in csp
-    # The bundled typeface, and no other font origin.
-    assert "; font-src 'self'; " in csp
-    # Its assets, by content hash; nothing else at the root is the website's.
-    asset = console.handle("GET", "/assets/index-0a1b2c.js", {}, b"")
-    assert asset.status == HTTPStatus.OK
-    assert asset.headers["cache-control"] == "public, max-age=31536000"
-    assert "content-security-policy" not in asset.headers
-    font = console.handle("GET", "/assets/geist-latin-3d4e5f.woff2", {}, b"")
-    assert font.status == HTTPStatus.OK
-    assert font.headers["content-type"] == "font/woff2"
-    assert font.body == b"wOF2"
-    assert console.handle("POST", "/", {}, b"").status == HTTPStatus.METHOD_NOT_ALLOWED
-    for path in ["/index.html", "/secret.txt", "/webhooks", "/healthz", "/accounts/x"]:
+    cors = {
+        "access-control-allow-origin": "https://acme.example",
+        "access-control-allow-credentials": "true",
+        "vary": "Origin",
+    }
+    cookie = _account(console)
+    ok = console.handle("GET", "/api/account", {**WEBSITE, "Cookie": cookie}, b"")
+    assert ok.status == HTTPStatus.OK
+    assert {key: ok.headers[key] for key in cors} == cors
+    # Errors too, so the page can read their codes.
+    for response in (
+        console.handle("GET", f"/api/quotes/{QUOTE}", WEBSITE, b""),
+        console.handle("GET", "/api/unknown", {**WEBSITE, "Cookie": cookie}, b""),
+        console.handle("POST", "/api/quotes", {**WEBSITE, "Cookie": cookie}, b"amount=1"),
+    ):
+        assert response.status >= HTTPStatus.BAD_REQUEST
+        assert {key: response.headers[key] for key in cors} == cors
+
+
+def test_answers_the_preflight_of_the_website_only(demo: tuple[DemoConsole, Service]) -> None:
+    console, _ = demo
+    request = {
+        **WEBSITE,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    }
+    preflight = console.handle("OPTIONS", "/api/quotes", request, b"")
+    assert preflight.status == HTTPStatus.NO_CONTENT
+    assert preflight.body == b""
+    assert preflight.headers == {
+        "access-control-allow-origin": "https://acme.example",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-methods": "GET, POST",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "600",
+        "vary": "Origin",
+    }
+    for origin in (
+        "https://evil.example",
+        "http://acme.example",
+        "https://acme.example.evil",
+        "null",
+    ):
+        other = console.handle("OPTIONS", "/api/quotes", {**request, "Origin": origin}, b"")
+        assert other.headers == {"vary": "Origin"}
+
+
+def test_other_origins_get_no_cors_headers(demo: tuple[DemoConsole, Service]) -> None:
+    console, _ = demo
+    for headers in ({"Origin": "https://evil.example"}, {"Origin": "null"}, {}):
+        response = console.handle("GET", "/api/account", headers, b"")
+        assert not any(key.startswith("access-control-") for key in response.headers)
+        assert response.headers["vary"] == "Origin"
+    assert console.cors("https://evil.example") == {"vary": "Origin"}
+
+
+def test_serves_only_the_api(demo: tuple[DemoConsole, Service]) -> None:
+    console, _ = demo
+    assert console.handles("/api/account")
+    # The website is on Cloudflare: the API's origin serves no page and no asset.
+    for path in ["/", "/index.html", "/assets/index-0a1b2c.js", "/demo/", "/webhooks", "/healthz"]:
         assert not console.handles(path)
-
-
-def test_serves_only_the_built_page(demo: tuple[DemoConsole, Service]) -> None:
-    console, _ = demo
-    for path in [
-        "/assets/../secret.txt",
-        "/assets/secret.txt",
-        "/api/../secret.txt",
-        "/api/unknown",
-        "/api/assets/index-0a1b2c.js",
-    ]:
+        assert console.handle("GET", path, WEBSITE, b"").status == HTTPStatus.NOT_FOUND
+    for path in ["/api/../index.html", "/api/unknown", "/api/assets/index-0a1b2c.js"]:
         assert console.handle("GET", path, {}, b"").status in (
             HTTPStatus.NOT_FOUND,
             HTTPStatus.UNAUTHORIZED,
         )
 
 
-def test_the_old_demo_paths_are_gone(demo: tuple[DemoConsole, Service]) -> None:
-    console, _ = demo
-    assert console.handles("/api/account")
-    assert console.handle("GET", "/api/account", {}, b"").status == HTTPStatus.OK
-    # The demo is on the page at `/`: no separate page and no redirect, like any unknown path.
-    for path in ["/demo", "/demo/", "/demo/api/account"]:
-        assert not console.handles(path)
-        assert console.handle("GET", path, {}, b"").status == HTTPStatus.NOT_FOUND
+def test_the_config_requires_the_website_origin() -> None:
+    for origin in (
+        "https://pay.phala.com/",
+        "https://pay.phala.com/app",
+        "http://pay.phala.com",
+        "https://Pay.phala.com",
+        "https://*.phala.com",
+        "*",
+    ):
+        with pytest.raises(ValueError, match="web_origin"):
+            replace(CONFIG, web_origin=origin)
+    for origin in ("https://pay.phala.com", "https://pay.phala.com:8443", "http://127.0.0.1:4173"):
+        assert replace(CONFIG, web_origin=origin).web_origin == origin
+    with pytest.raises(ValueError, match="web_origin"):
+        DemoConsole(replace(CONFIG, web_origin=None), ProductLedger())
 
 
 def test_the_config_requires_an_account_id() -> None:

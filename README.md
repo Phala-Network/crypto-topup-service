@@ -20,7 +20,8 @@ First route: Ethereum Mainnet PHA, for Phala Cloud's account first. Further asse
 added through route files; further merchants are accounts, not configuration.
 
 **Website and live demo:** [pay.phala.com](https://pay.phala.com/), one page with the working
-demo, a cloud console's billing page on Sepolia with test PHA, run by the staging reference product
+demo, a cloud console's billing page on Sepolia with test PHA; the page is served by Cloudflare and
+its demo is run by the staging reference product
 ([deploy/README.md](deploy/README.md#staging-reference-product)).
 
 ## Flow

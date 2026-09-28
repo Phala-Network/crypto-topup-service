@@ -112,6 +112,7 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
             setting[${pair%%=*}]=$(jq -r --arg key "${pair#*=}" '.[$key] // "" | strings' "$tmp/config.json")
         done
         account=$(jq -r '.account // "" | strings' "$tmp/config.json")
+        web_origin=$(jq -r '.web_origin // "" | strings' "$tmp/config.json")
     else
         fail "the compose's product_config is not a JSON object"
     fi
@@ -139,6 +140,9 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
         [[ "${setting[$name]-}" =~ $origin_pattern ]] ||
             fail "$name must be https://HOST[:PORT] in lowercase with no path"
     done
+    # The website's origin, the only one the demo's API allows (deploy/README.md, "Website").
+    [[ "${web_origin-}" =~ $origin_pattern && "$web_origin" != "${setting[PRODUCT_PUBLIC_URL]-}" ]] ||
+        fail "the product config's web_origin must be the website's https://HOST, not PRODUCT_PUBLIC_URL"
     if [[ "${setting[INGRESS_GATEWAY_DOMAIN]}" == *.invalid ]]; then
         echo "note: PRODUCT_GATEWAY_DOMAIN is provisional; the CVM's gateway replaces it after provisioning"
     fi

@@ -1,6 +1,8 @@
-// The product's demo API (deploy/product/reference_product/demo.py). The browser only talks to the
-// product, which sends every service request itself with its API key, and to the service's public
-// quote and deposit address views, which the SDK components read with a client secret.
+// The product's demo API (deploy/product/reference_product/demo.py), at its own origin, fixed at
+// build time: VITE_DEMO_API_ORIGIN (.env.production; the e2e builds against its local product). The
+// browser only talks to the product, which sends every service request itself with its API key, and
+// to the service's public quote and deposit address views, which the SDK components read with a
+// client secret.
 
 import type { DepositAddressDetails } from "@phala/pay";
 
@@ -226,9 +228,11 @@ export class ApiError extends Error {
   }
 }
 
-// Relative to the page, which the product serves at `{public_url}/`: the API is `{public_url}/api/`.
+const API = `${import.meta.env.VITE_DEMO_API_ORIGIN}/api/`;
+
+// Cross-origin with the visitor's demo account cookie, which the API allows only for the website.
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`api/${path}`, { credentials: "same-origin", ...init });
+  const response = await fetch(`${API}${path}`, { credentials: "include", ...init });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const code = isRecord(body) && typeof body["code"] === "string" ? body["code"] : "error";

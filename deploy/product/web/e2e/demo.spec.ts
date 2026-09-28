@@ -183,7 +183,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(trust).toContainText("e2e0000000000000000000000000000000000001");
   await expect(product.getByTestId("balance")).toHaveText("$0.00");
   const [cookie] = await context.cookies();
-  expect(cookie).toMatchObject({ name: "demo_account", httpOnly: true, sameSite: "Strict" });
+  expect(cookie).toMatchObject({ name: "demo_account", path: "/", httpOnly: true, sameSite: "Lax" });
 
   // The payer mints test PHA from the wallet, as the testnet notice offers.
   const testnet = page.getByRole("note", { name: "Testnet demo" });
@@ -339,11 +339,11 @@ test("a deposit address: one verified address, any amount credited at spot, then
 
   // Before it is final, the service's finality watch proves the transaction dropped (here, the
   // stand-in's test hook): deposit.reversed takes the credit back.
-  const deposit = await page.evaluate(async () => {
-    const response = await fetch("api/deposit_address");
+  const deposit = await page.evaluate(async (api) => {
+    const response = await fetch(`${api}/api/deposit_address`, { credentials: "include" });
     return ((await response.json()) as { deposit_address: { payments: { deposit: string }[] } }).deposit_address
       .payments[0]?.deposit;
-  });
+  }, env("API_URL"));
   const reversed = await fetch(`${env("SERVICE_URL")}/_test/deposits/${deposit ?? ""}/reverse`, { method: "POST" });
   expect(reversed.status).toBe(200);
 
@@ -372,12 +372,13 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
   const page = await first.newPage();
   await page.goto(env("SITE_URL"));
   await expect(page.getByTestId("balance")).toHaveText("$0.00");
-  const created = await page.evaluate(async () => {
+  const created = await page.evaluate(async (api) => {
     const statuses: number[] = [];
     let quote = "";
     for (let i = 0; i < 4; i += 1) {
-      const response = await fetch("api/quotes", {
+      const response = await fetch(`${api}/api/quotes`, {
         method: "POST",
+        credentials: "include",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ amount: 500 }),
       });
@@ -386,27 +387,48 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
       quote ||= body.quote ?? "";
     }
     return { statuses, quote };
-  });
+  }, env("API_URL"));
   expect(created.statuses).toEqual([200, 200, 200, 429]);
-  // The demo is on the page and its API at `/api/`: the old `/demo/` paths are unknown.
-  for (const path of ["demo", "demo/", "demo/api/account"]) {
-    expect((await fetch(`${env("SITE_URL")}${path}`)).status).toBe(404);
+  // The API's origin serves only the API: no page, and the old `/demo/` paths are unknown.
+  for (const path of ["", "index.html", "demo", "demo/", "demo/api/account"]) {
+    expect((await fetch(`${env("API_URL")}/${path}`)).status).toBe(404);
   }
+  // Another origin's page cannot read the API, even with the visitor's cookie.
+  const elsewhere = await first.newPage();
+  await elsewhere.goto(`${env("SERVICE_URL")}/evidences/quote.json`);
+  const refused = await elsewhere.evaluate(async (api) => {
+    try {
+      await fetch(`${api}/api/account`, { credentials: "include" });
+      return "read";
+    } catch {
+      return "refused";
+    }
+  }, env("API_URL"));
+  expect(refused).toBe("refused");
 
   const second = await browser.newContext();
   const other = await second.newPage();
   await other.goto(env("SITE_URL"));
   await expect(other.getByTestId("balance")).toHaveText("$0.00");
-  const statuses = await other.evaluate(async (quote) => {
-    const post = (path: string, body: unknown) =>
-      fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return [
-      (await fetch(`api/quotes/${quote}`)).status,
-      (await fetch(`api/deposits/dep_${"0".repeat(32)}`)).status,
-      (await post(`api/refunds/re_${"0".repeat(32)}/cancel`, {})).status,
-      (await post(`api/refunds/re_${"0".repeat(32)}/mark_paid`, { transaction_hash: `0x${"ab".repeat(32)}` })).status,
-    ];
-  }, created.quote);
+  const statuses = await other.evaluate(
+    async ({ api, quote }) => {
+      const get = (path: string) => fetch(`${api}/api/${path}`, { credentials: "include" });
+      const post = (path: string, body: unknown) =>
+        fetch(`${api}/api/${path}`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      return [
+        (await get(`quotes/${quote}`)).status,
+        (await get(`deposits/dep_${"0".repeat(32)}`)).status,
+        (await post(`refunds/re_${"0".repeat(32)}/cancel`, {})).status,
+        (await post(`refunds/re_${"0".repeat(32)}/mark_paid`, { transaction_hash: `0x${"ab".repeat(32)}` })).status,
+      ];
+    },
+    { api: env("API_URL"), quote: created.quote },
+  );
   expect(statuses).toEqual([404, 404, 404, 404]);
   await first.close();
   await second.close();

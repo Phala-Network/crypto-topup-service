@@ -1,0 +1,5 @@
+# Dependencies whose install scripts pnpm may run. esbuild's and workerd's (wrangler's) only check
+# the platform binary that their optional dependency already provides.
+allowBuilds:
+  esbuild: false
+  workerd: false
