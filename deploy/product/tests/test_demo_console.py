@@ -245,7 +245,12 @@ def _rpc(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
-    (tmp_path / "index.html").write_text("<!doctype html>")
+    # The built website's layout (deploy/product/web/dist).
+    (tmp_path / "index.html").write_text("<!doctype html><title>Phala Pay</title>")
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "index.html").write_text("<!doctype html><title>Demo</title>")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "landing-0a1b2c.js").write_text("export {};")
     (tmp_path / "secret.txt").write_text("not served")
     (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
     service = Service()
@@ -481,11 +486,43 @@ def test_requests_need_the_cookie_and_posts_need_json(demo: tuple[DemoConsole, S
     assert status == HTTPStatus.NOT_FOUND
 
 
+def test_serves_the_landing_page_at_the_root(demo: tuple[DemoConsole, Service]) -> None:
+    console, _ = demo
+    assert console.handles("/")
+    landing = console.handle("GET", "/", {}, b"")
+    assert landing.status == HTTPStatus.OK
+    assert landing.body == b"<!doctype html><title>Phala Pay</title>"
+    assert landing.headers["content-type"] == "text/html; charset=utf-8"
+    # The same security headers as the demo page.
+    page = console.handle("GET", "/demo/", {}, b"")
+    assert page.body == b"<!doctype html><title>Demo</title>"
+    for header in ["content-security-policy", "referrer-policy", "x-content-type-options"]:
+        assert landing.headers[header] == page.headers[header]
+    assert landing.headers["cache-control"] == page.headers["cache-control"] == "no-cache"
+    csp = landing.headers["content-security-policy"]
+    assert csp.startswith("default-src 'none'; script-src 'self';")
+    # Their shared assets, by content hash; nothing else at the root is the website's.
+    asset = console.handle("GET", "/assets/landing-0a1b2c.js", {}, b"")
+    assert asset.status == HTTPStatus.OK
+    assert asset.headers["cache-control"] == "public, max-age=31536000"
+    assert "content-security-policy" not in asset.headers
+    assert console.handle("POST", "/", {}, b"").status == HTTPStatus.METHOD_NOT_ALLOWED
+    assert console.handle("GET", "/assets/../secret.txt", {}, b"").status == HTTPStatus.NOT_FOUND
+    for path in ["/index.html", "/secret.txt", "/webhooks", "/healthz", "/accounts/x"]:
+        assert not console.handles(path)
+
+
 def test_serves_only_the_built_page(demo: tuple[DemoConsole, Service]) -> None:
     console, _ = demo
     page = console.handle("GET", "/demo/", {}, b"")
     assert "connect-src 'self' http://service.test;" in page.headers["content-security-policy"]
-    for path in ["/demo/secret.txt", "/demo/../config.json", "/demo/api/unknown"]:
+    for path in [
+        "/demo/secret.txt",
+        "/demo/../config.json",
+        "/demo/api/unknown",
+        "/demo/assets/landing-0a1b2c.js",
+        "/assets/secret.txt",
+    ]:
         assert console.handle("GET", path, {}, b"").status in (
             HTTPStatus.NOT_FOUND,
             HTTPStatus.UNAUTHORIZED,

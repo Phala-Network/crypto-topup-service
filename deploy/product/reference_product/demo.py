@@ -1,8 +1,9 @@
-"""The Phala Pay demo: a cloud console's "Billing → Add credits" page, served on staging.
+"""The Phala Pay website and demo: a cloud console's "Billing → Add credits" page, on staging.
 
-With `demo_dir` configured, the product serves the built page of deploy/product/web at
-`{public_url}/demo/` and its JSON API at `{public_url}/demo/api/`. It shows both ways to collect
-a payment, as the product's backend runs them with its API key:
+With `demo_dir` configured, the product serves the built website of deploy/product/web: its
+landing page at exactly `{public_url}/`, their shared assets at `{public_url}/assets/`, the demo
+page at `{public_url}/demo/`, and the demo's JSON API at `{public_url}/demo/api/`. The demo shows
+both ways to collect a payment, as the product's backend runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, the ledger lines behind it, and its payments;
@@ -209,7 +210,8 @@ class DemoConsole:
     ) -> None:
         self.config = config
         self.ledger = ledger
-        self.base = urlsplit(config.public_url).path.rstrip("/") + "/demo"
+        self.root = urlsplit(config.public_url).path.rstrip("/")
+        self.base = self.root + "/demo"
         root = Path(demo_dir)
         # Only files present at startup are served, by exact name: no request path is resolved.
         self.files = {
@@ -217,8 +219,9 @@ class DemoConsole:
             for file in root.rglob("*")
             if file.is_file() and file.suffix in CONTENT_TYPES
         }
-        if "index.html" not in self.files:
-            raise ValueError(f"{root} has no built demo page (index.html)")
+        for page in ("index.html", "demo/index.html"):
+            if page not in self.files:
+                raise ValueError(f"{root} has no built website page ({page})")
         service = urlsplit(config.service_url)
         # The page reads the public quote and deposit address views from the service, and sends
         # the visitor's own wallet requests through the wallet's provider (no network access).
@@ -252,15 +255,21 @@ class DemoConsole:
 
     def handles(self, target: str) -> bool:
         path = urlsplit(target).path
-        return path == self.base or path.startswith(self.base + "/")
+        return path in (self.root + "/", self.base) or path.startswith(
+            (self.root + "/assets/", self.base + "/")
+        )
 
     def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         path = urlsplit(target).path
+        if path == self.root + "/":
+            return self._static(method, "index.html")
+        if path.startswith(self.root + "/assets/"):
+            return self._static(method, path.removeprefix(self.root + "/"))
         if path == self.base:
             return Response(HTTPStatus.MOVED_PERMANENTLY, headers={"location": self.base + "/"})
         name = path.removeprefix(self.base + "/")
         if not name.startswith("api/"):
-            return self._static(method, name)
+            return self._static(method, "demo/" + (name or "index.html"))
         lowered = {key.lower(): value for key, value in headers.items()}
         try:
             return self._api(method, name.removeprefix("api/"), lowered, body)
@@ -344,16 +353,17 @@ class DemoConsole:
     def _static(self, method: str, name: str) -> Response:
         if method != "GET":
             return Response(HTTPStatus.METHOD_NOT_ALLOWED)
-        name = name or "index.html"
         content = self.files.get(name)
         if content is None:
             return Response(HTTPStatus.NOT_FOUND)
+        page = name.endswith(".html")
         headers = {
             "content-type": CONTENT_TYPES[Path(name).suffix],
             "x-content-type-options": "nosniff",
-            "cache-control": "no-cache" if name == "index.html" else "public, max-age=31536000",
+            # Pages name their assets by content hash: those never change, the pages may.
+            "cache-control": "no-cache" if page else "public, max-age=31536000",
         }
-        if name == "index.html":
+        if page:
             headers["content-security-policy"] = self.csp
             headers["referrer-policy"] = "no-referrer"
         return Response(HTTPStatus.OK, content, headers)

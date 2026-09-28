@@ -1,5 +1,10 @@
+import { CircleAlert } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { isAddress, parseUnits } from "viem";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import {
   cancelRefund,
   createRefund,
@@ -9,7 +14,7 @@ import {
   type Refund,
   type Timeline,
 } from "./api.js";
-import { ExplorerLink, describe } from "./common.js";
+import { Detail, Details, ExplorerLink, StatusBadge, Subsection, describe } from "./common.js";
 import { statusLabel, tokens } from "./format.js";
 import { errorMessage, transferTokens } from "./testTokens.js";
 
@@ -33,9 +38,8 @@ export function Refunds({
   const symbol = account.token.symbol;
   const refundable = deposit.final && (deposit.status === "credited" || deposit.status === "rejected");
   return (
-    <section className="subsection" aria-labelledby="refunds-title">
-      <h3 id="refunds-title">Refunds</h3>
-      <p className="muted small">
+    <Subsection title="Refunds" id="refunds-title">
+      <p className="text-muted-foreground">
         The merchant refunds from its own treasury: declare the refund, pay it from the treasury{" "}
         <ExplorerLink account={account} kind="address" value={account.treasury} /> that this
         deposit's address pays, then attach the transaction. Phala Pay verifies it once the
@@ -47,20 +51,20 @@ export function Refunds({
       {refundable ? (
         <RefundForm deposit={deposit} symbol={symbol} onCreated={onChanged} />
       ) : (
-        <p className="small" data-testid="refund-unavailable">
+        <p data-testid="refund-unavailable">
           {deposit.status === "reversed"
             ? "A reversed deposit cannot be refunded."
             : "Refunds need a final deposit (the service answers 400 deposit_not_final before)."}
         </p>
       )}
       {timeline.refunds.length > 0 && (
-        <ul className="refunds" aria-label="Refunds of this deposit">
+        <ul className="flex flex-col gap-3" aria-label="Refunds of this deposit">
           {timeline.refunds.map((refund) => (
             <RefundItem key={refund.id} refund={refund} account={account} onChanged={onChanged} />
           ))}
         </ul>
       )}
-    </section>
+    </Subsection>
   );
 }
 
@@ -99,38 +103,33 @@ function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: 
     );
   };
   return (
-    <form className="refund-form" onSubmit={submit} aria-label="Declare a refund">
-      <div className="field">
-        <label htmlFor={amountId}>
+    <form className="flex flex-col gap-3" onSubmit={submit} aria-label="Declare a refund">
+      <Field>
+        <FieldLabel htmlFor={amountId}>
           Amount ({symbol}, at most {tokens(remaining.toString(), symbol)})
-        </label>
-        <input
+        </FieldLabel>
+        <Input
           id={amountId}
-          className="input"
           inputMode="decimal"
           placeholder="10"
           value={amount}
           onChange={(event) => setAmount(event.target.value)}
         />
-      </div>
-      <div className="field">
-        <label htmlFor={destinationId}>Destination address (the payer's, by default)</label>
-        <input
+      </Field>
+      <Field>
+        <FieldLabel htmlFor={destinationId}>Destination address (the payer's, by default)</FieldLabel>
+        <Input
           id={destinationId}
-          className="input mono"
+          className="font-mono text-xs md:text-xs"
           spellCheck={false}
           value={destination}
           onChange={(event) => setDestination(event.target.value)}
         />
-      </div>
-      <button type="submit" className="secondary" disabled={state.pending}>
+      </Field>
+      <Button type="submit" variant="outline" className="self-start" disabled={state.pending}>
         {state.pending ? "Declaring…" : "Declare refund"}
-      </button>
-      {state.error !== null && (
-        <p className="alert small" role="alert">
-          {state.error}
-        </p>
-      )}
+      </Button>
+      {state.error !== null && <ErrorAlert text={state.error} />}
     </form>
   );
 }
@@ -168,89 +167,89 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
   };
   const transfer = refund.transfer;
   return (
-    <li className="refund" data-testid="refund" data-refund={refund.id} data-status={refund.status}>
-      <div className="refund-head">
-        <span className="mono" title={refund.id}>
+    <li
+      className="flex flex-col gap-2 rounded-lg border p-3"
+      data-testid="refund"
+      data-refund={refund.id}
+      data-status={refund.status}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono" title={refund.id}>
           {refund.id.slice(0, 11)}…
         </span>
-        <span className={`badge ${refund.status}`}>{statusLabel(refund.status)}</span>
+        <StatusBadge status={refund.status}>{statusLabel(refund.status)}</StatusBadge>
       </div>
-      <p className="small">
+      <p>
         {tokens(refund.amount_atomic, symbol)} to{" "}
         <ExplorerLink account={account} kind="address" value={refund.destination_address} />
       </p>
       {transfer !== null && (
         <>
-          <div className="instruction" data-testid="refund-transfer">
-            <p className="small">
+          <div className="flex flex-col gap-2" data-testid="refund-transfer">
+            <p>
               <strong>Pay exactly this transfer from the treasury</strong>, then attach its hash:
             </p>
-            <dl className="details">
-              <div>
-                <dt>From (treasury)</dt>
-                <dd className="mono">{transfer.from}</dd>
-              </div>
-              <div>
-                <dt>Token contract</dt>
-                <dd className="mono">{transfer.token}</dd>
-              </div>
-              <div>
-                <dt>To</dt>
-                <dd className="mono">{transfer.to}</dd>
-              </div>
-              <div>
-                <dt>Amount</dt>
-                <dd>
-                  {tokens(transfer.amount_atomic, symbol)} (<span className="mono">{transfer.amount_atomic}</span>)
-                </dd>
-              </div>
-              <div>
-                <dt>Calldata</dt>
-                <dd className="mono">{transfer.data}</dd>
-              </div>
-            </dl>
+            <Details>
+              <Detail label="From (treasury)" className="font-mono">
+                {transfer.from}
+              </Detail>
+              <Detail label="Token contract" className="font-mono">
+                {transfer.token}
+              </Detail>
+              <Detail label="To" className="font-mono">
+                {transfer.to}
+              </Detail>
+              <Detail label="Amount">
+                {tokens(transfer.amount_atomic, symbol)} (<span className="font-mono">{transfer.amount_atomic}</span>)
+              </Detail>
+              <Detail label="Calldata" className="font-mono">
+                {transfer.data}
+              </Detail>
+            </Details>
           </div>
-          <form className="refund-form" onSubmit={markPaid} aria-label={`Mark refund ${refund.id} paid`}>
-            <div className="field">
-              <label htmlFor={hashId}>Transaction hash of the payment</label>
-              <input
+          <form className="flex flex-col gap-3" onSubmit={markPaid} aria-label={`Mark refund ${refund.id} paid`}>
+            <Field>
+              <FieldLabel htmlFor={hashId}>Transaction hash of the payment</FieldLabel>
+              <Input
                 id={hashId}
-                className="input mono"
+                className="font-mono text-xs md:text-xs"
                 spellCheck={false}
                 placeholder="0x…"
                 value={hash}
                 onChange={(event) => setHash(event.target.value)}
               />
-            </div>
-            <div className="field">
-              <label htmlFor={indexId}>Receipt log index (optional, when one transaction pays several refunds)</label>
-              <input
+            </Field>
+            <Field>
+              <FieldLabel htmlFor={indexId}>
+                Receipt log index (optional, when one transaction pays several refunds)
+              </FieldLabel>
+              <Input
                 id={indexId}
-                className="input"
                 inputMode="numeric"
                 value={logIndex}
                 onChange={(event) => setLogIndex(event.target.value)}
               />
-            </div>
-            <div className="actions">
-              <button type="submit" className="secondary" disabled={state.pending !== null}>
+            </Field>
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" variant="outline" disabled={state.pending !== null}>
                 {state.pending === "mark" ? "Submitting…" : "Mark paid"}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className="ghost"
+                variant="ghost"
                 disabled={state.pending !== null}
                 onClick={() => run("cancel", () => cancelRefund(refund.id))}
               >
                 {state.pending === "cancel" ? "Canceling…" : "Cancel refund"}
-              </button>
+              </Button>
             </div>
           </form>
-          <p className="muted small">
+          <p className="text-muted-foreground">
             Not the treasury?{" "}
-            <button
+            <Button
               type="button"
-              className="link"
+              variant="link"
+              className="h-auto p-0 text-xs text-foreground underline"
               disabled={state.pending !== null}
               onClick={() => {
                 setState({ pending: "wallet", error: null });
@@ -265,35 +264,40 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
               }}
             >
               {state.pending === "wallet" ? "Confirm in your wallet…" : "Pay it from my wallet instead"}
-            </button>{" "}
+            </Button>{" "}
             and mark that transaction paid to see verification fail.
           </p>
         </>
       )}
       {refund.status === "pending" && refund.transaction_hash !== null && (
-        <p className="small" role="status">
+        <p role="status">
           Marked paid with <ExplorerLink account={account} kind="tx" value={refund.transaction_hash} />. Verifying once
           the transaction is final (about 15 minutes on Sepolia); the amount stays reserved meanwhile.
         </p>
       )}
       {refund.status === "succeeded" && (
-        <p className="small success" role="status">
+        <p className="text-success" role="status">
           Succeeded: the service verified the treasury's transfer at finality and sent{" "}
           <code>deposit.refunded</code>, which took the refunded share back from the balance.
         </p>
       )}
       {refund.status === "failed" && (
-        <p className="small danger" role="status">
+        <p className="text-destructive" role="status">
           Failed: <code>{refund.failure_reason}</code>. {refund.failure_explanation} Its reservation of the
           deposit is released; declare a new refund and pay it from the treasury.
         </p>
       )}
-      {refund.status === "canceled" && <p className="muted small">Canceled before any payment was attached.</p>}
-      {state.error !== null && (
-        <p className="alert small" role="alert">
-          {state.error}
-        </p>
-      )}
+      {refund.status === "canceled" && <p className="text-muted-foreground">Canceled before any payment was attached.</p>}
+      {state.error !== null && <ErrorAlert text={state.error} />}
     </li>
+  );
+}
+
+function ErrorAlert({ text }: { text: string }) {
+  return (
+    <Alert variant="destructive">
+      <CircleAlert aria-hidden="true" />
+      <AlertDescription className="text-xs">{text}</AlertDescription>
+    </Alert>
   );
 }

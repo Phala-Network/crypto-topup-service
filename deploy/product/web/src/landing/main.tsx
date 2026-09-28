@@ -1,13 +1,13 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App.js";
-import "./index.css";
+import "../index.css";
+import { Landing } from "./Landing.js";
 
 const root = document.getElementById("root");
 if (root !== null) {
   createRoot(root).render(
     <StrictMode>
-      <App />
+      <Landing />
     </StrictMode>,
   );
 }

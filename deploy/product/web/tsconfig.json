@@ -12,7 +12,8 @@
     "isolatedModules": true,
     "skipLibCheck": true,
     "types": ["node"],
-    "noEmit": true
+    "noEmit": true,
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src", "e2e", "*.config.ts"]
 }
