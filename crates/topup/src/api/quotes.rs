@@ -2,9 +2,8 @@
 
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
-use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
 use uuid::Uuid;
@@ -114,15 +113,20 @@ pub(crate) async fn get_config(
     request_body = CreateQuoteRequest,
     responses(
         (status = 200, description = "OK", body = Quote),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
-            status = 409,
-            description = "`exposure_cap_exceeded`, `paused`, `chain_frozen`, \
-                           `treasury_not_set`, or `idempotency_key_in_use`",
+            status = 400,
+            description = "Bad Request, `amount_too_small`, `amount_too_large`, \
+                           `exposure_cap_exceeded`, `paused`, `chain_frozen`, or \
+                           `treasury_not_set`",
             body = ErrorResponse
         ),
-        (status = 429, description = "Too Many Requests", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (
+            status = 429,
+            description = "`rate_limit`, or `customer_rate_limit`: the customer's quotes per \
+                           minute; retry after `Retry-After` seconds",
+            body = ErrorResponse
+        ),
         (status = 503, description = "Service Unavailable", body = ErrorResponse)
     ),
     security(("api_key" = [])),
@@ -169,7 +173,7 @@ pub(crate) async fn create_quote(
     if has_quotes_pause(&merchant.account, &customer, &route_scopes) {
         return Err(ApiError::paused("quotes are paused"));
     }
-    let lock = locks::create(
+    let (lock, client_secret) = locks::create(
         &state.pool,
         &state.rate_lock_quotes,
         &merchant.account,
@@ -180,7 +184,9 @@ pub(crate) async fn create_quote(
     )
     .await
     .map_err(map_error)?;
-    respond_with_client_secret(&state, lock).await
+    let mut quote = quote_object(&mut *state.pool.acquire().await?, &state.routes, lock).await?;
+    quote.client_secret = Some(client_secret);
+    Ok(Json(quote))
 }
 
 #[utoipa::path(
@@ -280,9 +286,10 @@ pub(crate) async fn list_quotes(
         ),
         (error, _) => map_error(error),
     })?;
+    let mut connection = state.pool.acquire().await?;
     let mut data = Vec::with_capacity(locks.len());
     for lock in locks {
-        data.push(quote_object(&state.pool, &state.routes, lock).await?);
+        data.push(quote_object(&mut connection, &state.routes, lock).await?);
     }
     Ok(Json(QuoteList {
         object: "list".to_owned(),
@@ -328,19 +335,26 @@ pub(crate) async fn update_quote(
     let scope = merchant.scope;
     if !metadata::update(
         &state.pool,
+        &state.routes,
         Object::Quote,
         scope,
         quote,
         request.metadata.as_ref(),
+        &merchant.actor(),
     )
     .await?
     {
         return Err(ApiError::not_found());
     }
-    find_quote(&state.pool, &state.routes, scope, quote)
-        .await?
-        .ok_or_else(ApiError::not_found)
-        .map(Json)
+    find_quote(
+        &mut *state.pool.acquire().await?,
+        &state.routes,
+        scope,
+        quote,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)
+    .map(Json)
 }
 
 #[utoipa::path(
@@ -392,10 +406,7 @@ pub(crate) async fn get_quote(
             Ok(quote) => Json(QuoteView::Client(Box::new(quote))).into_response(),
             Err(error) => error.into_response(),
         };
-        response.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static("*"),
-        );
+        super::allow_cross_origin(&mut response);
         return response;
     };
     let quote = async {
@@ -409,7 +420,8 @@ pub(crate) async fn get_quote(
             .map_err(map_error)?
             .ok_or_else(ApiError::not_found)?;
         let consumed_by = lock.consumed_by;
-        let mut quote = quote_object(&state.pool, &state.routes, lock).await?;
+        let mut quote =
+            quote_object(&mut *state.pool.acquire().await?, &state.routes, lock).await?;
         if expand.contains(&"deposit")
             && let Some(deposit) = consumed_by
         {
@@ -441,9 +453,10 @@ async fn client_quote(
                 .is_some_and(|rest| rest.starts_with("_secret_"))
         })
         .ok_or_else(ApiError::not_found)?;
-    if !state.client_reads.allow(quote) {
-        return Err(ApiError::rate_limited());
-    }
+    state
+        .client_reads
+        .allow(quote)
+        .map_err(ApiError::client_reads_limited)?;
     let lock = locks::get_by_client_secret(&state.pool, client_secret)
         .await
         .map_err(map_error)?
@@ -456,7 +469,8 @@ async fn client_quote(
             tracing::error!(route = %lock.route, "quote route is not loaded");
             ApiError::internal()
         })?;
-    let payment = super::pending::quote_payment(&state.pool, route, &lock).await?;
+    let payment =
+        super::pending::quote_payment(&mut *state.pool.acquire().await?, route, &lock).await?;
     let (payment_status, confirmations) = match payment {
         // A reversed deposit is no payment; the page says so rather than ask for one again.
         None if address_has_reversed_deposit(&state.pool, lock.address_id).await? => {
@@ -526,7 +540,7 @@ async fn address_has_reversed_deposit(pool: &PgPool, address_id: Uuid) -> ApiRes
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
         (
-            status = 409,
+            status = 400,
             description = "`quote_payment_received`: the address already received a payment; \
                            `quote_window_closed`: past `expires_at`; `quote_unexpected_state`: \
                            complete or expired",
@@ -547,26 +561,22 @@ pub(crate) async fn cancel_quote(
         .require(&state.pool, Permission::QuotesWrite)
         .await?;
     let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
-    let lock = locks::cancel(&state.pool, merchant.scope, &merchant.actor(), quote)
-        .await
-        .map_err(map_error)?;
+    let lock = locks::cancel(
+        &state.pool,
+        &state.routes,
+        merchant.scope,
+        &merchant.actor(),
+        quote,
+    )
+    .await
+    .map_err(map_error)?;
     respond(&state, lock).await
 }
 
 async fn respond(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
-    quote_object(&state.pool, &state.routes, lock)
+    quote_object(&mut *state.pool.acquire().await?, &state.routes, lock)
         .await
         .map(Json)
-}
-
-/// Responds to `POST /v1/quotes` with a newly issued client secret.
-async fn respond_with_client_secret(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
-    let client_secret = locks::issue_client_secret(&state.pool, lock.id)
-        .await
-        .map_err(map_error)?;
-    let mut quote = quote_object(&state.pool, &state.routes, lock).await?;
-    quote.client_secret = Some(client_secret);
-    Ok(Json(quote))
 }
 
 fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
@@ -581,20 +591,23 @@ fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
 
 /// Returns the scope's quote `id`.
 pub(crate) async fn find_quote(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     routes: &RouteSet,
     scope: Scope,
     id: Uuid,
 ) -> ApiResult<Option<Quote>> {
-    match locks::get(pool, scope, id).await.map_err(map_error)? {
-        Some(lock) => quote_object(pool, routes, lock).await.map(Some),
+    match locks::get(&mut *connection, scope, id)
+        .await
+        .map_err(map_error)?
+    {
+        Some(lock) => quote_object(connection, routes, lock).await.map(Some),
         None => Ok(None),
     }
 }
 
 /// The API representation of a quote.
 pub(crate) async fn quote_object(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     routes: &RouteSet,
     lock: RateLock,
 ) -> ApiResult<Quote> {
@@ -607,7 +620,7 @@ pub(crate) async fn quote_object(
             tracing::error!(route = %lock.route, "quote route is not loaded");
             ApiError::internal()
         })?;
-    let payment = super::pending::quote_payment(pool, route, &lock).await?;
+    let payment = super::pending::quote_payment(connection, route, &lock).await?;
     let payment_uri = payment_uri(route, &lock);
     Ok(Quote {
         id: locks::quote_id(lock.id),
@@ -665,7 +678,7 @@ fn map_error(error: RateLockError) -> ApiError {
         RateLockError::PricingUnavailable => {
             ApiError::service_unavailable("validated pricing is unavailable")
         }
-        RateLockError::RateLimited => ApiError::rate_limited(),
+        RateLockError::RateLimited { retry_after } => ApiError::customer_quote_limit(retry_after),
         RateLockError::TreasuryNotSet => ApiError::treasury_not_set(),
         error @ RateLockError::ExposureCap { .. } => ApiError::exposure_cap(error.to_string()),
         RateLockError::NotFound => ApiError::not_found(),

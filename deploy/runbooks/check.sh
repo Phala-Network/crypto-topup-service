@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks every shell command in the runbooks against the current-source `topup` CLI and the
-# committed OpenAPI document, then proves the checker rejects a deliberately wrong fixture.
+# committed OpenAPI documents, then proves the checker rejects a deliberately wrong fixture.
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -44,11 +44,13 @@ describe_command() {
 describe_command ""
 mv "$tmp/commands." "$tmp/commands.root"
 
+# The merchant API's and the operator's admin API's operations.
 jq -r '
   .paths | to_entries[] | .key as $path
   | .value | keys[] | select(. != "parameters")
   | ascii_upcase + " " + $path
-' "$root/crates/topup/openapi.json" | sort -u > "$tmp/openapi.operations"
+' "$root/crates/topup/openapi.json" "$root/crates/topup/openapi.admin.json" \
+    | sort -u > "$tmp/openapi.operations"
 
 # Joins backslash continuations and prints one line per shell command, skipping heredoc bodies.
 extract_commands() {
@@ -316,7 +318,7 @@ expected=(
     'unknown topup subcommand: restore'
     'unknown API operation: POST /v1/admin/not-a-route'
     'unknown API operation: GET /v1/admin/routes/r/pause'
-    'unknown API operation: DELETE /v1/admin/report/daily'
+    'unknown API operation: DELETE /v1/admin/reports/daily'
     'unknown API operation: PUT /v1/admin/products'
 )
 for message in "${expected[@]}"; do
@@ -333,5 +335,5 @@ if (( $(wc -l < "$tmp/negative.out") != ${#expected[@]} )); then
 fi
 
 echo "runbook CLI references match current-source topup --help"
-echo "runbook API references match crates/topup/openapi.json"
+echo "runbook API references match crates/topup/openapi.json and openapi.admin.json"
 echo "negative fixture failed with exactly ${#expected[@]} expected errors"

@@ -33,6 +33,54 @@ reports `seen` or `recorded`, and deposit addresses carry the same `payments` wi
 `client_secret` (Stripe's CustomerSession) for the customer's page. `<Checkout expectedAddress>` is
 required.
 
+**Amendment of 2026-09-28 (API conformance).** An audit against Stripe's documented conventions,
+checked on 2026-09-28 against the linked pages, is applied; nothing was live, so the API changed
+without aliases:
+
+1. *Event snapshots* ([Event object](https://docs.stripe.com/api/events/object): an event's data
+   is rendered when it is created and does not change). Every event's `data.object` is rendered
+   in the transaction that changes its object, after the change, by one path, and the service's
+   database role can no longer update or delete events. Events carry
+   `request: {id, idempotency_key}` (`null` for the service's workers), and every `*.updated`
+   event (`account`, `api_key`, `refund`, `treasury`, `webhook_endpoint`) carries
+   `data.previous_attributes`, diffed from the object rendered before the change in the same
+   transaction.
+2. *Events.* `refund.created` and `refund.updated` join `refund.failed` and `deposit.refunded`,
+   and refund creation, `mark_paid`, and cancel are audited and announced; `quote.canceled` is
+   added. The treasury events are named after their top-level resource (`/v1/treasuries`):
+   `treasury.created` (every proven treasury, `pending` or at once `active`), `treasury.updated`
+   (a pending one took effect, or was replaced), `treasury.canceled`; they stay account events,
+   delivered whatever an endpoint subscribes to.
+3. *Delivery health, visible without a dashboard* (retries never stop, §11): endpoints report
+   `pending_deliveries`, `oldest_pending_at`, and `last_attempt {at, status_code}`;
+   `GET /v1/events` takes `delivery_success` and `types[]`
+   ([list events](https://docs.stripe.com/api/events/list)); the operator's daily report lists
+   endpoints failing longer than `failing_for_hours` (24).
+4. *Statuses and codes* ([errors](https://docs.stripe.com/api/errors)): a request that cannot
+   succeed in the objects' current state is `400` (`deposit_not_final`, `quote_unexpected_state`,
+   `paused`, `treasury_not_set`, `*_cap_exceeded`, …); `409` is only `idempotency_key_in_use`;
+   the generic `conflict` code is removed; a customer's quote-creation and rotation limits are
+   `429 customer_rate_limit`, apart from the API's `429 rate_limit`; every `429` carries
+   `Retry-After`; every error carries `doc_url`. The admin API's `signature_replayed` is `401`,
+   an authentication failure.
+5. *Request ids* ([request IDs](https://docs.stripe.com/api/request_ids)): `Request-Id: req_…`
+   replaces `x-request-id`, and an event names the request that caused it.
+6. *Idempotency* ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)): the
+   result is saved once the handler starts executing, `500`s included, and replayed; a request
+   that failed validation (`parameter_*`), was rate limited, or met `503 unavailable` is not
+   saved and runs again. A quote and its `client_secret` are created in one transaction, so a
+   retry never creates a second quote.
+7. *Quote salt tag*: `"quote"`, as D3 says (the code used `"lock"`).
+8. *Admin paths* are snake_case plural resources: `/v1/admin/reconciliation_blocks/{key}/lift`
+   and `/v1/admin/reports/daily`.
+9. *OpenAPI*: single-value `object` enums, `servers`, `tags`, an example of every object and body,
+   `status` fields kept plain strings (the SDKs give `Literal` hints), `limit`/`starting_after`/
+   `ending_before` on every list and `created[gt|gte|lt|lte]` wherever `created` filters; the admin
+   API is `openapi.admin.json`, out of the merchant SDK.
+10. *API reference*: built from `openapi.json` with Redoc (`@redocly/cli`, pinned by lockfile) and
+    published to GitHub Pages from `main`; its `Errors` section has one heading per code, the
+    target of `doc_url`.
+
 ## 1. Context
 
 Before this design (architecture before PR 1): a **product** was the tenant, registered by the
@@ -216,7 +264,7 @@ own wallet, and Greenfield's `POST /api/v1/payouts/{payoutId}/mark-paid` records
 [BTCPay payouts](https://docs.btcpayserver.org/Payouts/)):
 
 1. `POST /v1/refunds {deposit, amount_atomic, destination_address}` → Refund `pending`; requires
-   the deposit to be `final` (`409 deposit_not_final` otherwise) and refundable, the amount to fit
+   the deposit to be `final` (`400 deposit_not_final` otherwise) and refundable, the amount to fit
    its unrefunded remainder (reserved), and `destination_address` to pass sanctions screening.
 2. After paying, `POST /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}`. At `finalized`
    (refunds need no speed), both providers must show a `Transfer` of the deposit's token with
@@ -296,7 +344,7 @@ instructions "create or retrieve"; it also adds the address's network on a chain
 (the same address when the treasury is the same) and replaces a network whose treasury changed
 (below). Rotation retires the address (`retired`, `retired_at`) and issues the next version, a new
 address on every network; a retired address cannot be rotated again
-(`409 deposit_address_retired`). `metadata` follows D15: the create request's is merged into the
+(`400 deposit_address_retired`). `metadata` follows D15: the create request's is merged into the
 returned address's (as an update would, so repeating a create is harmless),
 `POST /v1/deposit_addresses/{id}` merges into an active or retired address's, a rotation carries
 it to the next version, and each deposit to the address starts with a copy, as a quote's deposit
@@ -358,17 +406,17 @@ whose treasury is no longer the effective one, so a missed update is repaired on
 treasury changed back to an earlier one makes that network current again). **A superseded network
 is kept as retired for that chain: it keeps being watched and credited, and its funds reach the old
 treasury**, which the forwarder's clone argument fixes for good, and a refund of its deposit is
-paid from that old treasury (D5). Merchants learn of the change through `account.treasury.pending`
+paid from that old treasury (D5). Merchants learn of the change through `treasury.created`
 and `.updated` (D10) and must keep control of an old treasury while customers may still pay an old
 address. Retired versions likewise keep paying the treasuries they were issued for.
 
 **Limits.** Active deposit addresses per account and mode are capped (default 100 000 live,
 1 000 test; the operator raises it in `account_limits.max_active_deposit_addresses`):
-`409 deposit_address_cap_exceeded`; with one address per customer this is a cap on customers with
-an address. A customer may rotate 10 times per rolling hour (`429 rate_limit`). No new address or
+`400 deposit_address_cap_exceeded`; with one address per customer this is a cap on customers with
+an address. A customer may rotate 10 times per rolling hour (`429 customer_rate_limit`). No new address or
 network is issued while `quotes` is paused for the account or the customer (§12); a chain frozen by
 reconciliation, or whose every route is paused for `quotes`, gets no new network, and a new address
-or rotation is refused (`409 chain_frozen`, or `paused`) only when no chain can take one. Existing
+or rotation is refused (`400 chain_frozen`, or `paused`) only when no chain can take one. Existing
 networks, reads, and crediting keep working.
 
 ## 6. Tenant model and names (D6)
@@ -482,7 +530,7 @@ a Stripe-hosted Dashboard" (`controller.stripe_dashboard.type = none`,
 | Webhook forgery across tenants | Per-account, per-mode keys (D11): an event signed for account A never verifies at account B, so one merchant cannot replay its own `deposit.credited` to another. |
 | Where funds go | Fixed per address (treasury arg). The service sends no transactions and has no contract role. |
 | Compromised service | Cannot move funds; could issue new addresses for a wrong treasury or sign unbacked events. The SDK always recomputes each quote's address from `(factory, implementation, treasury, salt)` and fails closed on a mismatch; `<Checkout>` renders only the `expected_address` the merchant backend passes after that check. Pinning expected treasuries in the SDK is optional hardening. |
-| Leaked secret key | The holder could change the live treasury, but only after the 48 h time-lock (D10); the change is announced at once as `account.treasury.pending` to every enabled live endpoint, whatever its `enabled_events`, and the merchant cancels it through the API, pauses `quotes`, and rolls its keys. Endpoint changes are announced to the changed endpoint first (§11), so the holder cannot silence the notice unseen. If the holder races the merchant, the operator revokes the mode's keys and issues a new one (D7). |
+| Leaked secret key | The holder could change the live treasury, but only after the 48 h time-lock (D10); the change is announced at once as `treasury.created` to every enabled live endpoint, whatever its `enabled_events`, and the merchant cancels it through the API, pauses `quotes`, and rolls its keys. Endpoint changes are announced to the changed endpoint first (§11), so the holder cannot silence the notice unseen. If the holder races the merchant, the operator revokes the mode's keys and issues a new one (D7). |
 | Sanctions | Phala's software does not assist in moving blocked assets. A deposit from a sanctioned address is `rejected(sanctioned)`; the sweep builder never includes its address and never builds a flush to a sanctioned treasury; refund destinations are screened (D5). The contracts cannot freeze anything: public `flush` can still move such funds, only to the merchant's treasury, and the merchant's own compliance applies. A treasury that becomes sanctioned (screened when set and daily) pauses the account's `quotes` and `settlement`. The operator screens the merchant, its owners, and its jurisdiction in due diligence (D8). |
 | SSRF | All webhook egress goes through Stripe's [smokescreen](https://github.com/stripe/smokescreen) (a compose sidecar), the only IP filter: it refuses addresses that are not publicly routable. The service itself checks only the scheme (`https`, `http` in test mode), the port (443, 80 in test mode), and follows no redirects (Stripe counts 3xx as failure); 20 s timeout. |
 | EIP-1271 and SIWE details | D10. |
@@ -542,11 +590,12 @@ flowchart TD
   [TimelockController](https://docs.openzeppelin.com/contracts/5.x/api/governance#TimelockController))
   and cancellable with `POST /v1/treasuries/{id}/cancel`. Quotes use the old treasury until it
   applies; existing forwarders keep theirs forever. Test-mode changes apply at once.
-- **Notices are events.** `account.treasury.pending` (a change was requested; carries
-  `effective_at`), `account.treasury.updated` (a treasury took effect), and
-  `account.treasury.canceled`, named after Stripe's `account.external_account.updated` for payout
-  destinations ([event types](https://docs.stripe.com/api/events/types)). They are delivered to
-  every enabled endpoint of the mode regardless of `enabled_events` (§11).
+- **Notices are events.** `treasury.created` (a treasury was proven: `pending` with
+  `effective_at`, or at once `active`), `treasury.updated` (a pending treasury took effect, or a
+  newer one replaced it), and `treasury.canceled`, named after the top-level `/v1/treasuries`
+  resource as Stripe names events after their object
+  ([event types](https://docs.stripe.com/api/events/types); API conformance amendment). They are
+  delivered to every enabled endpoint of the mode regardless of `enabled_events` (§11).
 
 ### D12: go-live gate
 
@@ -613,7 +662,8 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
 
 - **Rate limits** per account and mode: 100 requests/s live, 25 test, Stripe's numbers
   ([rate limits](https://docs.stripe.com/rate-limits)); a 500/s platform test-mode ceiling;
-  per-customer limits as today. `429 rate_limit`.
+  per-customer limits as today. `429 rate_limit`, and `429 customer_rate_limit` for a customer's
+  own limits, each with `Retry-After`.
 - **Caps** are per account and per mode only: open quotes (default 1 000 live, 100 test), active
   deposit addresses (default 100 000 live, 1 000 test; §5a), open amount per customer and per
   account *(policy)*, max deposit (route). There is no global cap: the
@@ -775,8 +825,10 @@ POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   
   same rules; updates take the key's `Scope` like every write, and deposits gain
   `deposits.write`. The service never reads it; merchants must not store sensitive data in it.
 - There is one public origin, the API's; no cookies, no second domain, no dashboard CSP.
-- Errors adopt Stripe's codes (`api_key_expired`, `livemode_mismatch`, `testmode_charges_only`,
-  `rate_limit`, `resource_missing`, type `idempotency_error`); `signature_*` errors stay admin-only.
+- Errors adopt Stripe's codes and statuses (`api_key_expired`, `livemode_mismatch`,
+  `testmode_charges_only`, `rate_limit`, `resource_missing`, type `idempotency_error`, `doc_url`;
+  business-state failures `400`, only `idempotency_key_in_use` `409`; API conformance amendment);
+  `signature_*` errors stay admin-only.
 
 ## 16. Plan
 
@@ -827,7 +879,8 @@ other mode; an event for A fails verification with B's key.
 
 **PR 7 — treasuries.** Challenge and proof endpoints; SIWE and EIP-1271 verification (both
 providers, `finalized`, ERC-6492 refused), nonce binding and expiry, 48 h time-lock with cancel
-through the API, `account.treasury.pending|updated|canceled` events, screening; quotes take the
+through the API, `treasury.created|updated|canceled` events (named `account.treasury.*` until the
+API conformance amendment), screening; quotes take the
 effective treasury; supersede the chain's network of every deposit address of the account when a
 change takes effect on that chain, keeping the old network credited (§5a). Tests: EOA, deployed Safe with an off-chain Safe message and with
 `SignMessageLib`, undeployed Safe, expired message, reused nonce, cancel during the lock.

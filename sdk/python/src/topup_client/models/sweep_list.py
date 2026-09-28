@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.sweep_list_object import check_sweep_list_object
+from ..models.sweep_list_object import SweepListObject
 from typing import cast
 
 if TYPE_CHECKING:
@@ -21,16 +23,25 @@ T = TypeVar("T", bound="SweepList")
 class SweepList:
     """A page of sweeps, newest first (<https://docs.stripe.com/api/pagination>).
 
+    Example:
+        {'data': [{'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount_atomic': '202510000000000000000',
+            'asset': 'PHA', 'block_number': 21000420, 'chain_id': 1, 'created': 1790560800, 'forwarder':
+            'fwd_5c7e9a1b3d2f44c6e8a0b2d4f6c8e0a2', 'id': 'sw_1e3c5a7b9d0f42e4c6a8b0d2f4e6a8c0', 'livemode': False,
+            'log_index': 7, 'object': 'sweep', 'token': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'treasury':
+            '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'tx_hash':
+            '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}], 'has_more': False, 'object': 'list',
+            'url': '/v1/sweeps'}
+
     Attributes:
         data (list[Sweep]): The sweeps.
         has_more (bool): Whether more sweeps follow in the direction of this page.
-        object_ (str): Always `list`.
+        object_ (SweepListObject): Always `list`.
         url (str): The list's path, `/v1/sweeps`.
     """
 
     data: list[Sweep]
     has_more: bool
-    object_: str
+    object_: SweepListObject
     url: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -44,7 +55,7 @@ class SweepList:
 
         has_more = self.has_more
 
-        object_ = self.object_
+        object_: str = self.object_
 
         url = self.url
 
@@ -75,7 +86,7 @@ class SweepList:
 
         has_more = d.pop("has_more")
 
-        object_ = d.pop("object")
+        object_ = check_sweep_list_object(d.pop("object"))
 
         url = d.pop("url")
 

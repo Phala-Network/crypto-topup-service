@@ -10,7 +10,7 @@ tied to a customer, raw payloads, or internal reason codes.
 ## First steps
 
 1. Collect the facts: `curl -fsS "$BASE_URL/healthz"`, the daily report
-   (`admin GET /v1/admin/report/daily`), the open Sentry issues, and the scopes you paused.
+   (`admin GET /v1/admin/reports/daily`), the open Sentry issues, and the scopes you paused.
 2. **HUMAN-ONLY:** assign incident commander, operations lead, communications lead, and scribe;
    publish an initial status update within the organizational target.
 

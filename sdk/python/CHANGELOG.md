@@ -8,11 +8,25 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Changed (breaking)
 
+- API conformance with Stripe (docs/design/multi-tenant.md, "API conformance"): business-state
+  failures such as `deposit_not_final`, `quote_unexpected_state`, `paused`, `treasury_not_set`,
+  and `*_cap_exceeded` are `400` (only `idempotency_key_in_use` is `409`); per-customer limits are
+  `429 customer_rate_limit`; every `429` carries `Retry-After`, which the client waits.
+- `ApiError.request_id` reads only `Request-Id`; `X-Request-Id` is no longer sent. `ApiError`
+  gains `doc_url` and `retry_after`.
+- A response the service saved for an `Idempotency-Key` (now every executed request, even a
+  `500`) arrives `Idempotent-Replayed` and is raised, not retried.
+- A quote's address salt is `keccak256(abi.encode(account, client_reference_id, "quote",
+  quote_id))` (design D3; it was tagged `"lock"`): `topup_sdk.quote_salt` replaces `lock_salt`.
+- Treasury events are `treasury.created`, `treasury.updated`, and `treasury.canceled` (were
+  `account.treasury.pending|updated|canceled`).
+- The generated client has no admin API (the operator's is `openapi.admin.json`); every object's
+  `object` is a `Literal` (`literal_enums`), and so is `ErrorDetail.type_`.
+
 - The API's name for your customer is `client_reference_id` everywhere: `pay.quotes.create(
   client_reference_id=…)`, `pay.deposits.list(client_reference_id=…)`, `Quote`/`Deposit`
   `.client_reference_id`, `CreditedDeposit.client_reference_id`, and `topup-sdk send-test-event
-  --client-reference-id`. `lock_salt(account, client_reference_id, quote_id)` names its parameters
-  so (the salt is unchanged).
+  --client-reference-id`.
 - `PhalaPay(…, forwarder=(factory, implementation))` is required and a pair: every quote is
   recomputed over its own `treasury` and every deposit address network over its own, failing
   closed with `AddressMismatchError`; the optional `treasuries={chain_id: treasury}` pins the
@@ -26,12 +40,23 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Added
 
+- Events are snapshots with their cause: `Event.request` (`EventRequest`: the `Request-Id` and
+  `Idempotency-Key` of the request that caused it, `None` for the service's workers) and
+  `EventData.previous_attributes` on `*.updated` events; new events `refund.created`,
+  `refund.updated`, and `quote.canceled`.
+- `pay.events.list(types=, delivery_success=, created_gt=, created_gte=, created_lt=,
+  created_lte=)`, `pay.deposits.list(created_gt=, created_lt=)`, and every page of
+  `pay.api_keys.list()` and `pay.treasuries.list()`. Webhook endpoints carry
+  `pending_deliveries`, `oldest_pending_at`, and `last_attempt`.
+- `Literal` hints: `phala_pay.QuoteStatus`, `DepositStatus`, `DepositAddressStatus`,
+  `RefundStatus`, `TreasuryStatus`, `ApiKeyStatus`, `WebhookEndpointStatus`, `PaymentStatus`, and
+  `EventType`.
 - `pay.account` (`retrieve`, `update(confirmation_policies=)`, `pause_quotes`, `resume_quotes`,
   `roll_webhook_key`), `pay.api_keys`, `pay.webhook_endpoints`, `pay.events` (`list`, `retrieve`,
   `resend`), `pay.treasuries` (`challenge`, `create`, `set_eoa`, `list`, `retrieve`, `cancel`),
   `pay.balance`, `pay.sweeps`, `pay.forwarders`, `pay.quotes.list`, `pay.refunds.list`, and
   `pay.export_account(directory)`, with the matching `TopupClient` methods.
-- `ApiError.request_id`, read from the response's `Request-Id` (or `X-Request-Id`).
+- `ApiError.request_id`, read from the response's `Request-Id`.
 - Offline sweeping: `topup_sdk.flush_transaction(factory, treasury, salts, token)`,
   `flush_transactions(forwarders, token)`, `safe_batch(chain_id, safe, calls)` writing the Safe
   Transaction Builder's `BatchFile` JSON with the app's checksum, `write_safe_batch`, and

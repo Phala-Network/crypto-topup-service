@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from topup_sdk import attestation_report_data, credited_event_id, sign_webhook
-from topup_sdk.addresses import deposit_id, forwarder_address, lock_salt
+from topup_sdk.addresses import deposit_id, forwarder_address, quote_salt
 
 LOG = logging.getLogger("fake_service")
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -224,7 +224,7 @@ class FakeTopup:
             self.args.factory,
             self.args.implementation,
             self.args.treasury,
-            lock_salt(self.args.product, account, quote_id),
+            quote_salt(self.args.product, account, quote_id),
         )
         atomic = str(amount * 4 * 10**16)  # cents / 100 / 0.25 USD per token * 10**18
         now = int(time.time())
@@ -370,7 +370,15 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
 
         def error(self, status: HTTPStatus) -> None:
             code = "resource_missing" if status == HTTPStatus.NOT_FOUND else "api_error"
-            body = {"error": {"type": "invalid_request_error", "code": code, "message": code}}
+            doc_url = f"https://phala-network.github.io/phala-pay/#section/Errors/{code}"
+            body = {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": code,
+                    "message": code,
+                    "doc_url": doc_url,
+                }
+            }
             self.send(status, body, cors=True)
 
         def send(self, status: HTTPStatus, body: dict[str, Any], *, cors: bool = False) -> None:

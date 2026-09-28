@@ -155,7 +155,7 @@ impl ToSchema for MetadataClear {}
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Quote {
     /// `qt_` id. The quote's address salt is `keccak256(abi.encode(account,
-    /// client_reference_id, "lock", id))` with the types `(string, string, string, string)`,
+    /// client_reference_id, "quote", id))` with the types `(string, string, string, string)`,
     /// where `account` is your `acct_` id.
     pub id: String,
     /// Always `quote`.
@@ -1178,6 +1178,34 @@ pub struct DailyReportResponse {
     pub reconciliation: Option<ReconciliationRoundReport>,
     /// Active reconciliation blocks in `block_key` order.
     pub reconciliation_blocks: Vec<ReconciliationBlockReport>,
+    /// The threshold of `failing_webhook_endpoints`, in hours.
+    pub failing_for_hours: u32,
+    /// Enabled webhook endpoints of any account whose oldest undelivered event is older than
+    /// `failing_for_hours`, oldest first. Deliveries are retried until delivered and never given
+    /// up on, so each has failed that long; contact the account (docs/integration.md,
+    /// "Delivery health").
+    pub failing_webhook_endpoints: Vec<FailingWebhookEndpoint>,
+}
+
+/// A webhook endpoint failing for longer than the daily report's threshold.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FailingWebhookEndpoint {
+    /// Endpoint id, `we_…`.
+    pub id: String,
+    /// The endpoint's account, `acct_…`.
+    pub account: String,
+    /// The endpoint's mode.
+    pub livemode: bool,
+    /// Where it listens.
+    pub url: String,
+    /// Deliveries to it not delivered yet.
+    pub pending_deliveries: i64,
+    /// Creation time of its oldest undelivered event.
+    pub oldest_pending_at: DateTime<Utc>,
+    /// Its latest delivery attempt.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// That attempt's HTTP status; `null` when no response arrived.
+    pub last_attempt_status: Option<u16>,
 }
 
 /// Administrative route pause response.
@@ -1264,7 +1292,8 @@ pub struct WebhookEndpointObject {
     /// Where events are delivered.
     pub url: String,
     /// The event types delivered, or `["*"]` for all. Account events (`account.*`, `api_key.*`,
-    /// `webhook_endpoint.*`) are delivered to every enabled endpoint whatever this lists.
+    /// `treasury.*`, `webhook_endpoint.*`) are delivered to every enabled endpoint whatever this
+    /// lists.
     pub enabled_events: Vec<String>,
     /// `enabled` or `disabled`.
     pub status: String,
@@ -1281,6 +1310,26 @@ pub struct WebhookEndpointObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(required = false)]
     pub deleted: Option<bool>,
+    /// Deliveries to the endpoint not delivered yet. They are retried with backoff (capped at an
+    /// hour) until delivered and are never given up on; a count that keeps growing means the
+    /// endpoint is failing: fix it, then list what it missed with
+    /// `GET /v1/events?delivery_success=false`.
+    pub pending_deliveries: i64,
+    /// Creation time of the oldest event not delivered to the endpoint yet, Unix seconds; `null`
+    /// when none is pending.
+    pub oldest_pending_at: Option<i64>,
+    /// The latest delivery attempt to the endpoint; `null` before the first.
+    pub last_attempt: Option<DeliveryAttempt>,
+}
+
+/// A delivery attempt to a webhook endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
+pub struct DeliveryAttempt {
+    /// When it was made, Unix seconds.
+    pub at: i64,
+    /// The endpoint's HTTP status; `null` when no response arrived (a timeout, a refused
+    /// connection, or a URL the egress proxy refused).
+    pub status_code: Option<u16>,
 }
 
 /// A page of webhook endpoints, newest first (<https://docs.stripe.com/api/pagination>).
@@ -1370,12 +1419,39 @@ pub struct EventObjectResponse {
     pub created: i64,
     /// Who caused it: an API key id (`key_…`), `admin` (the operator), or `system`.
     pub actor: String,
-    /// `{"object": …}`, the object's API representation when the event was first delivered or
-    /// read, never re-rendered; `webhook_endpoint.updated` adds `previous_attributes`.
-    #[schema(value_type = Object)]
-    pub data: serde_json::Value,
+    /// The API request that caused the event; `null` when the service's own workers did (a
+    /// payment credited, a quote expired, a time-locked treasury applied).
+    pub request: Option<EventRequest>,
+    /// The object when the event happened: `object` is its API representation, rendered in the
+    /// same transaction as the change and never changed afterwards, so it can differ from a later
+    /// `GET` of the object. `*.updated` events add `previous_attributes`, the former values of
+    /// the fields that changed (<https://docs.stripe.com/api/events/object>).
+    pub data: EventData,
     /// Deliveries to webhook endpoints that are neither delivered nor stopped.
     pub pending_webhooks: i64,
+}
+
+/// An event's `data`.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct EventData {
+    /// The object's API representation when the event was created: a deposit, quote, refund,
+    /// API key, treasury, webhook endpoint, or the account, as its `GET` returned it then.
+    #[schema(value_type = Object)]
+    pub object: serde_json::Value,
+    /// On `*.updated` events: the fields that changed, with their values before the change (a
+    /// changed `metadata` holds only its changed keys; a field that was added is `null`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>, required = false)]
+    pub previous_attributes: Option<serde_json::Value>,
+}
+
+/// The API request that caused an event (<https://docs.stripe.com/api/events/object>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct EventRequest {
+    /// The request's `Request-Id`, `req_…`.
+    pub id: String,
+    /// The `Idempotency-Key` the request sent; `null` when it sent none.
+    pub idempotency_key: Option<String>,
 }
 
 /// A page of events, newest first (<https://docs.stripe.com/api/pagination>).

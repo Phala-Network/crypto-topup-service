@@ -65,6 +65,11 @@ def _parse_response(
 
         return response_409
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if response.status_code == 503:
         response_503 = ErrorResponse.from_dict(response.json())
 
@@ -99,14 +104,22 @@ def sync_detailed(
     block on both of the service's RPC providers. The address is screened against sanctions lists.
 
      The chain's first treasury, and any test-mode change, applies at once. A later live change is
-    `pending` for 48 hours (`account.treasury.pending`), then applies
-    (`account.treasury.updated`) unless canceled first: new quotes and deposit address networks
-    then pay it, while addresses issued before keep paying the former treasury and are still
-    credited. Treasury events go to every enabled webhook endpoint of the mode.
+    `pending` for 48 hours, then applies (`treasury.updated`) unless canceled first: new quotes and
+    deposit address networks then pay it, while addresses issued before keep paying the former
+    treasury, which becomes `replaced` (`treasury.updated`), and are still credited. Every new
+    treasury is announced as `treasury.created`; treasury events go to every enabled webhook
+    endpoint of the mode.
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryRequest): `POST /v1/treasuries` body.
+        body (CreateTreasuryRequest): `POST /v1/treasuries` body. Example: {'chain_id': 1,
+            'message': 'pay-api.phala.com wants you to sign in with your Ethereum
+            account:\\n0x936c1991f8dA9a919fa11b557a3514719f5A4504\\n\\nSet this address as the test
+            mode treasury of acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10 on Phala Pay.\\n\\nURI:
+            https://pay-api.phala.com\\nVersion: 1\\nChain ID: 1\\nNonce: Kq3nV8xZt2mP6wRa\\nIssued
+            At: 2026-09-28T12:00:00Z\\nExpiration Time: 2026-09-28T12:10:00Z', 'signature': '0x5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e1b'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -140,14 +153,22 @@ def sync(
     block on both of the service's RPC providers. The address is screened against sanctions lists.
 
      The chain's first treasury, and any test-mode change, applies at once. A later live change is
-    `pending` for 48 hours (`account.treasury.pending`), then applies
-    (`account.treasury.updated`) unless canceled first: new quotes and deposit address networks
-    then pay it, while addresses issued before keep paying the former treasury and are still
-    credited. Treasury events go to every enabled webhook endpoint of the mode.
+    `pending` for 48 hours, then applies (`treasury.updated`) unless canceled first: new quotes and
+    deposit address networks then pay it, while addresses issued before keep paying the former
+    treasury, which becomes `replaced` (`treasury.updated`), and are still credited. Every new
+    treasury is announced as `treasury.created`; treasury events go to every enabled webhook
+    endpoint of the mode.
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryRequest): `POST /v1/treasuries` body.
+        body (CreateTreasuryRequest): `POST /v1/treasuries` body. Example: {'chain_id': 1,
+            'message': 'pay-api.phala.com wants you to sign in with your Ethereum
+            account:\\n0x936c1991f8dA9a919fa11b557a3514719f5A4504\\n\\nSet this address as the test
+            mode treasury of acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10 on Phala Pay.\\n\\nURI:
+            https://pay-api.phala.com\\nVersion: 1\\nChain ID: 1\\nNonce: Kq3nV8xZt2mP6wRa\\nIssued
+            At: 2026-09-28T12:00:00Z\\nExpiration Time: 2026-09-28T12:10:00Z', 'signature': '0x5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e1b'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -176,14 +197,22 @@ async def asyncio_detailed(
     block on both of the service's RPC providers. The address is screened against sanctions lists.
 
      The chain's first treasury, and any test-mode change, applies at once. A later live change is
-    `pending` for 48 hours (`account.treasury.pending`), then applies
-    (`account.treasury.updated`) unless canceled first: new quotes and deposit address networks
-    then pay it, while addresses issued before keep paying the former treasury and are still
-    credited. Treasury events go to every enabled webhook endpoint of the mode.
+    `pending` for 48 hours, then applies (`treasury.updated`) unless canceled first: new quotes and
+    deposit address networks then pay it, while addresses issued before keep paying the former
+    treasury, which becomes `replaced` (`treasury.updated`), and are still credited. Every new
+    treasury is announced as `treasury.created`; treasury events go to every enabled webhook
+    endpoint of the mode.
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryRequest): `POST /v1/treasuries` body.
+        body (CreateTreasuryRequest): `POST /v1/treasuries` body. Example: {'chain_id': 1,
+            'message': 'pay-api.phala.com wants you to sign in with your Ethereum
+            account:\\n0x936c1991f8dA9a919fa11b557a3514719f5A4504\\n\\nSet this address as the test
+            mode treasury of acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10 on Phala Pay.\\n\\nURI:
+            https://pay-api.phala.com\\nVersion: 1\\nChain ID: 1\\nNonce: Kq3nV8xZt2mP6wRa\\nIssued
+            At: 2026-09-28T12:00:00Z\\nExpiration Time: 2026-09-28T12:10:00Z', 'signature': '0x5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e1b'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -215,14 +244,22 @@ async def asyncio(
     block on both of the service's RPC providers. The address is screened against sanctions lists.
 
      The chain's first treasury, and any test-mode change, applies at once. A later live change is
-    `pending` for 48 hours (`account.treasury.pending`), then applies
-    (`account.treasury.updated`) unless canceled first: new quotes and deposit address networks
-    then pay it, while addresses issued before keep paying the former treasury and are still
-    credited. Treasury events go to every enabled webhook endpoint of the mode.
+    `pending` for 48 hours, then applies (`treasury.updated`) unless canceled first: new quotes and
+    deposit address networks then pay it, while addresses issued before keep paying the former
+    treasury, which becomes `replaced` (`treasury.updated`), and are still credited. Every new
+    treasury is announced as `treasury.created`; treasury events go to every enabled webhook
+    endpoint of the mode.
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryRequest): `POST /v1/treasuries` body.
+        body (CreateTreasuryRequest): `POST /v1/treasuries` body. Example: {'chain_id': 1,
+            'message': 'pay-api.phala.com wants you to sign in with your Ethereum
+            account:\\n0x936c1991f8dA9a919fa11b557a3514719f5A4504\\n\\nSet this address as the test
+            mode treasury of acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10 on Phala Pay.\\n\\nURI:
+            https://pay-api.phala.com\\nVersion: 1\\nChain ID: 1\\nNonce: Kq3nV8xZt2mP6wRa\\nIssued
+            At: 2026-09-28T12:00:00Z\\nExpiration Time: 2026-09-28T12:10:00Z', 'signature': '0x5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5
+            e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e1b'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

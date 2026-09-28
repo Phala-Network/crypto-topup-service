@@ -22,6 +22,11 @@ class ErrorResponse:
     """Machine-readable error envelope returned by every API failure, Stripe's error object
     (<https://docs.stripe.com/api/errors>).
 
+        Example:
+            {'error': {'code': 'deposit_not_final', 'doc_url': 'https://phala-network.github.io/phala-
+                pay/#section/Errors/deposit_not_final', 'message': 'the deposit is not final yet; request the refund once it is
+                (about 15 minutes after its block on Ethereum)', 'type': 'invalid_request_error'}}
+
         Attributes:
             error (ErrorDetail): Stable error fields safe to expose to callers.
     """

@@ -10,10 +10,10 @@
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgConnection, PgPool};
 use topup_core::WebhookKeyId;
-use uuid::Uuid;
 
 use crate::audit::{self, Actor};
 use crate::db::{self, EventObject, NewOutboxEvent};
+use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 
 /// The longest overlap a roll may keep the previous key signing: 7 days, as an API key roll.
@@ -123,6 +123,7 @@ pub async fn active(
 /// `account.updated` in the scope's mode, signed by every key still signing.
 pub async fn roll(
     pool: &PgPool,
+    routes: &RouteSet,
     scope: Scope,
     expires_in: Duration,
     actor: &Actor,
@@ -131,6 +132,7 @@ pub async fn roll(
         return Err(WebhookKeyError::InvalidExpiry);
     }
     let mut transaction = pool.begin().await?;
+    let object = EventObject::Account(scope.account_id());
     let (account, current) = sqlx::query_as::<_, (String, i32)>(
         "SELECT public_id, (webhook_key_version ->> $2)::integer FROM accounts \
          WHERE id = $1 FOR UPDATE",
@@ -140,6 +142,7 @@ pub async fn roll(
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or(WebhookKeyError::NotFound)?;
+    let before = db::render(&mut transaction, routes, scope, object).await?;
     let next = current
         .checked_add(1)
         .filter(|next| *next <= 999_999_999)
@@ -198,19 +201,8 @@ pub async fn roll(
         },
     )
     .await?;
-    db::enqueue_in(
-        &mut transaction,
-        &NewOutboxEvent {
-            id: Uuid::new_v4(),
-            event_type: "account.updated".to_owned(),
-            account_id: scope.account_id(),
-            livemode: scope.livemode(),
-            object: EventObject::Account(scope.account_id()),
-            next_attempt_at: Utc::now(),
-            actor: crate::api_keys::event_actor(actor),
-        },
-    )
-    .await?;
+    let event = NewOutboxEvent::new("account.updated", scope, object, actor);
+    db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     let keys = active(&mut transaction, scope)
         .await?
         .ok_or(WebhookKeyError::NotFound)?;

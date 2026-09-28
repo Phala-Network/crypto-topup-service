@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from reference_product.config import ProductConfig
 from reference_product.demo import ApiRecorder, DemoConsole
 from reference_product.ledger import ProductLedger
-from topup_sdk import forwarder_address, lock_salt
+from topup_sdk import forwarder_address, quote_salt
 
 NOW = 1_790_000_000
 QUOTE = "qt_" + "0c" * 16
@@ -39,7 +39,7 @@ CONFIG = ProductConfig(
 
 def _quote(account: str = "acct", **fields: Any) -> dict[str, Any]:
     address = forwarder_address(
-        CONFIG.factory, CONFIG.implementation, CONFIG.treasury, lock_salt("acme", account, QUOTE)
+        CONFIG.factory, CONFIG.implementation, CONFIG.treasury, quote_salt("acme", account, QUOTE)
     )
     return {
         "id": QUOTE,

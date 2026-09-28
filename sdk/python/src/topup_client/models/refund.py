@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.refund_object import check_refund_object
+from ..models.refund_object import RefundObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -24,6 +26,14 @@ class Refund:
     """A refund of (part of) a deposit to the customer, which the merchant pays from the treasury of
     the deposit's address and attaches with `mark_paid` (design D5).
 
+        Example:
+            {'amount_atomic': '202510000000000000000', 'created': 1790557200, 'deposit':
+                'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'destination_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a',
+                'failure_reason': None, 'id': 're_3c9e7a1b5d2f4a6c8e0b1d3f5a7c9e02', 'livemode': False, 'log_index': 41,
+                'metadata': {'ticket': 'support-311'}, 'object': 'refund', 'status': 'pending', 'transaction_hash':
+                '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c', 'treasury':
+                '0x936c1991f8da9a919fa11b557a3514719f5a4504'}
+
         Attributes:
             amount_atomic (str): Token amount in base units, as a decimal string.
             created (int): Request time, Unix seconds.
@@ -33,7 +43,7 @@ class Refund:
             livemode (bool): Whether the refund was requested with a live key.
             metadata (RefundMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when
                 none.
-            object_ (str): Always `refund`.
+            object_ (RefundObject): Always `refund`.
             status (str): `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
                 final), `failed` (the attached transaction does not pay the refund; see
                 `failure_reason`), or `canceled`.
@@ -56,7 +66,7 @@ class Refund:
     id: str
     livemode: bool
     metadata: RefundMetadata
-    object_: str
+    object_: RefundObject
     status: str
     treasury: str
     failure_reason: None | str | Unset = UNSET
@@ -86,7 +96,7 @@ class Refund:
 
         metadata = self.metadata.to_dict()
 
-        object_ = self.object_
+        object_: str = self.object_
 
         status = self.status
 
@@ -166,7 +176,7 @@ class Refund:
 
         metadata = RefundMetadata.from_dict(d.pop("metadata"))
 
-        object_ = d.pop("object")
+        object_ = check_refund_object(d.pop("object"))
 
         status = d.pop("status")
 

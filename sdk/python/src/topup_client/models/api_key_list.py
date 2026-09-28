@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.api_key_list_object import ApiKeyListObject
+from ..models.api_key_list_object import check_api_key_list_object
 from typing import cast
 
 if TYPE_CHECKING:
@@ -21,16 +23,22 @@ T = TypeVar("T", bound="ApiKeyList")
 class ApiKeyList:
     """`GET /v1/api_keys` response.
 
+    Example:
+        {'data': [{'created': 1790467200, 'expires_at': None, 'id': 'key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1', 'last_used':
+            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'redacted':
+            'ppay_sk_test_…Yz4x', 'secret': None, 'status': 'active', 'type': 'secret'}], 'has_more': False, 'object':
+            'list', 'url': '/v1/api_keys'}
+
     Attributes:
         data (list[ApiKeyObject]): The mode's keys, newest first.
         has_more (bool): Always `false`: every key of the mode is listed.
-        object_ (str): Always `list`.
+        object_ (ApiKeyListObject): Always `list`.
         url (str): The list's path, `/v1/api_keys`.
     """
 
     data: list[ApiKeyObject]
     has_more: bool
-    object_: str
+    object_: ApiKeyListObject
     url: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -44,7 +52,7 @@ class ApiKeyList:
 
         has_more = self.has_more
 
-        object_ = self.object_
+        object_: str = self.object_
 
         url = self.url
 
@@ -75,7 +83,7 @@ class ApiKeyList:
 
         has_more = d.pop("has_more")
 
-        object_ = d.pop("object")
+        object_ = check_api_key_list_object(d.pop("object"))
 
         url = d.pop("url")
 

@@ -68,6 +68,11 @@ def _parse_response(
 
         return response_409
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -99,7 +104,8 @@ def sync_detailed(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (ResendEventRequest): `POST /v1/events/{id}/resend` body.
+        body (ResendEventRequest): `POST /v1/events/{id}/resend` body. Example:
+            {'webhook_endpoint': 'we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -136,7 +142,8 @@ def sync(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (ResendEventRequest): `POST /v1/events/{id}/resend` body.
+        body (ResendEventRequest): `POST /v1/events/{id}/resend` body. Example:
+            {'webhook_endpoint': 'we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -168,7 +175,8 @@ async def asyncio_detailed(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (ResendEventRequest): `POST /v1/events/{id}/resend` body.
+        body (ResendEventRequest): `POST /v1/events/{id}/resend` body. Example:
+            {'webhook_endpoint': 'we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -203,7 +211,8 @@ async def asyncio(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (ResendEventRequest): `POST /v1/events/{id}/resend` body.
+        body (ResendEventRequest): `POST /v1/events/{id}/resend` body. Example:
+            {'webhook_endpoint': 'we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1'}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

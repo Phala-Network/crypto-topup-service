@@ -97,6 +97,7 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
 
             let pump = Pump::new(
                 context.app_pool.clone(),
+                Arc::default(),
                 Arc::new(wait_steps().with_confirmed(Box::new(step))),
                 PumpConfig::default(),
             )?;
@@ -131,7 +132,7 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             ensure!(rejected_evidence["oracle"] == format!("{:#x}", Address::repeat_byte(9)));
 
             // Each event names its account, mode, and deposit; its data, the deposit's API
-            // representation, is rendered when it is first delivered.
+            // representation, is rendered in the transaction that records the transition.
             for (deposit, event_type, id) in [
                 (
                     sanctioned_id,
@@ -157,7 +158,15 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
                         .as_deref()
                         == Some("deposit")
                 );
-                ensure!(event.try_get::<Value, _>("payload")? == serde_json::json!({}));
+                // The deposit as the transition left it, rendered with it.
+                let payload = event.try_get::<Value, _>("payload")?;
+                let status = if event_type == "deposit.rejected" {
+                    "rejected"
+                } else {
+                    "credited"
+                };
+                ensure!(payload["object"]["status"] == status, "{payload}");
+                ensure!(payload["object"]["object"] == "deposit", "{payload}");
             }
             Ok(())
         })

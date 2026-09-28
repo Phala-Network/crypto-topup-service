@@ -603,7 +603,6 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let delivery_workers = [false, true].map(|livemode| {
         topup::outbox::DeliveryWorker::new(
             pool.clone(),
-            Arc::clone(&routes),
             Arc::clone(&signer),
             livemode,
             delivery_config.clone(),
@@ -638,21 +637,28 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         Box::new(screen_step),
         Box::new(topup::steps::sweep::SweepStep),
     ));
-    let pump = Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config)
-        .context("invalid pump configuration")?;
+    let pump = Pump::new(
+        pool.clone(),
+        Arc::clone(&routes),
+        Arc::<StepSet>::clone(&steps),
+        pump_config,
+    )
+    .context("invalid pump configuration")?;
     let refund_reader = |index| {
         topup::refunds::EvmRefundChainReader::from_routes(&routes, index)
             .context("failed to configure refund verification chain reader")
     };
     let refund_worker = topup::refunds::RefundVerificationWorker::new(
         pool.clone(),
+        Arc::clone(&routes),
         refund_reader(0)?,
         refund_reader(1)?,
         topup::refunds::RefundVerificationConfig::default(),
     );
-    let finality_watch = topup::finality::FinalityWatch::from_routes(pool.clone(), &routes)
-        .map_err(anyhow::Error::msg)
-        .context("failed to configure the finality watch")?;
+    let finality_watch =
+        topup::finality::FinalityWatch::from_routes(pool.clone(), Arc::clone(&routes))
+            .map_err(anyhow::Error::msg)
+            .context("failed to configure the finality watch")?;
     let mut tasks = ServiceTasks::new();
     let state = topup::api::AppState {
         pool: pool.clone(),
@@ -722,7 +728,8 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         age_alerter.run(cancellation).await;
     });
     tasks.spawn("backup monitor", topup::observability::monitor_backup);
-    let expiry_worker = topup::locks::ExpiryWorker::new(pool.clone(), Duration::from_secs(5));
+    let expiry_worker =
+        topup::locks::ExpiryWorker::new(pool.clone(), Arc::clone(&routes), Duration::from_secs(5));
     tasks.spawn("rate-lock expiry worker", |cancellation| async move {
         expiry_worker.run(cancellation).await;
     });

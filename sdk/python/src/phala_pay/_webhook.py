@@ -21,19 +21,32 @@ class SignatureVerificationError(SignatureError):
 
 @dataclass(frozen=True)
 class EventData:
-    """`object` is the resource as it was when the event happened: a `Deposit` for `deposit.*`,
-    a `Quote` for `quote.*`, a `Refund` for `refund.*`, and the raw object for any other type."""
+    """`object` is the resource as it was when the event happened, rendered with the change and
+    never re-rendered: a `Deposit` for `deposit.*`, a `Quote` for `quote.*`, a `Refund` for
+    `refund.*`, and the raw object for any other type. `previous_attributes`, on `*.updated`
+    events, holds the former values of the fields that changed."""
 
     object: Deposit | Quote | Refund | dict[str, Any]
+    previous_attributes: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EventRequest:
+    """The API request that caused an event: its `Request-Id` and the `Idempotency-Key` it sent."""
+
+    id: str
+    idempotency_key: str | None
 
 
 @dataclass(frozen=True)
 class Event:
-    """A verified event of `account` in one mode, such as `deposit.credited`,
-    `deposit.rejected`, `deposit.reversed`, `deposit.refunded`, `refund.failed`, `quote.expired`,
-    or an account event (`account.updated`, `account.treasury.*`, `api_key.*`,
-    `webhook_endpoint.*`). Its `id` is stable across retries and replays; process each id once.
-    Claw back the credit of a `deposit.reversed` deposit as for `deposit.refunded`."""
+    """A verified event of `account` in one mode (`EventType` lists them), such as
+    `deposit.credited`, `deposit.rejected`, `deposit.reversed`, `deposit.refunded`,
+    `refund.created`, `refund.updated`, `refund.failed`, `quote.canceled`, `quote.expired`, or an
+    account event (`account.updated`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`). Its `id`
+    is stable across retries and replays; process each id once. Claw back the credit of a
+    `deposit.reversed` deposit as for `deposit.refunded`. `request` is the API request that
+    caused it, or `None` when the service's own workers did."""
 
     id: str
     account: str
@@ -41,6 +54,7 @@ class Event:
     type: str
     created: int
     data: EventData
+    request: EventRequest | None = None
 
     @property
     def deposit(self) -> Deposit:
@@ -124,14 +138,26 @@ class Webhook:
             raise SignatureVerificationError("webhook event is for another account")
         if livemode != expected_livemode:
             raise SignatureVerificationError("webhook event is for the other mode")
+        previous = data.get("previous_attributes")
         return Event(
             event_id,
             account,
             livemode,
             event_type,
             created,
-            EventData(_resource(event_type, data["object"])),
+            EventData(
+                _resource(event_type, data["object"]),
+                previous if isinstance(previous, dict) else None,
+            ),
+            _request(envelope.get("request")),
         )
+
+
+def _request(value: object) -> EventRequest | None:
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+        return None
+    key = value.get("idempotency_key")
+    return EventRequest(value["id"], key if isinstance(key, str) else None)
 
 
 def _resource(event_type: str, value: dict[str, Any]) -> Deposit | Quote | Refund | dict[str, Any]:

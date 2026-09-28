@@ -338,6 +338,7 @@ async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
         let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
         let pump = Pump::new(
             pool.clone(),
+            Arc::default(),
             Arc::new(StepSet::new(step(), step(), step())),
             PumpConfig::default(),
         )?;
@@ -1093,6 +1094,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
         let step = || Box::new(AdvanceStep(Arc::clone(&calls))) as Box<dyn Step>;
         let pump = Pump::new(
             pool.clone(),
+            Arc::default(),
             Arc::new(StepSet::new(step(), step(), step())),
             PumpConfig::default(),
         )?;

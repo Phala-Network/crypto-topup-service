@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.client_deposit_address_object import check_client_deposit_address_object
+from ..models.client_deposit_address_object import ClientDepositAddressObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -29,7 +31,7 @@ class ClientDepositAddress:
             livemode (bool): Whether the address is in live mode; a test-mode page should say so.
             networks (list[ClientDepositAddressNetwork]): The address on each supported network, with the tokens it takes
                 there.
-            object_ (str): Always `deposit_address`.
+            object_ (ClientDepositAddressObject): Always `deposit_address`.
             payments (list[ClientDepositAddressPayment]): Payments to the address in the last 24 hours, newest first, at
                 most 10: display only,
                 never a reason to deliver anything.
@@ -40,7 +42,7 @@ class ClientDepositAddress:
     id: str
     livemode: bool
     networks: list[ClientDepositAddressNetwork]
-    object_: str
+    object_: ClientDepositAddressObject
     payments: list[ClientDepositAddressPayment]
     status: str
     address: None | str | Unset = UNSET
@@ -59,7 +61,7 @@ class ClientDepositAddress:
             networks_item = networks_item_data.to_dict()
             networks.append(networks_item)
 
-        object_ = self.object_
+        object_: str = self.object_
 
         payments = []
         for payments_item_data in self.payments:
@@ -108,7 +110,7 @@ class ClientDepositAddress:
 
             networks.append(networks_item)
 
-        object_ = d.pop("object")
+        object_ = check_client_deposit_address_object(d.pop("object"))
 
         payments = []
         _payments = d.pop("payments")

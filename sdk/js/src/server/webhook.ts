@@ -21,7 +21,17 @@ export interface WebhookEvent {
   /** Such as `deposit.credited`; claw back a `deposit.reversed` deposit's credit. */
   type: string;
   created: number;
+  /** Who caused it: an API key id (`key_…`), `admin`, or `system`. */
   actor?: string;
+  /**
+   * The API request that caused it, with the `Idempotency-Key` it sent; `null` when the
+   * service's own workers did (a payment credited, a quote expired).
+   */
+  request?: { id: string; idempotency_key: string | null } | null;
+  /**
+   * `object` is the object as it was when the event happened, never re-rendered; `*.updated`
+   * events add `previous_attributes`, the former values of what changed.
+   */
   data: { object: Record<string, unknown>; previous_attributes?: Record<string, unknown> };
 }
 

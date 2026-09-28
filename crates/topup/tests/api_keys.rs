@@ -562,7 +562,7 @@ async fn merchants_manage_their_keys_and_cannot_lock_themselves_out() -> Result<
                 None,
             )
             .await?;
-        ensure!(last.status == StatusCode::CONFLICT);
+        ensure!(last.status == StatusCode::BAD_REQUEST);
         ensure!(last.body["error"]["code"] == "last_api_key");
 
         let long_name = "n".repeat(201);
@@ -630,7 +630,7 @@ async fn merchants_manage_their_keys_and_cannot_lock_themselves_out() -> Result<
                 None,
             )
             .await?;
-        ensure!(again.status == StatusCode::CONFLICT);
+        ensure!(again.status == StatusCode::BAD_REQUEST);
         ensure!(again.body["error"]["code"] == "api_key_inactive");
 
         // With other active keys, a key may revoke itself; revoking twice returns it unchanged.
@@ -773,13 +773,36 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
         ensure!(other_mode.status == StatusCode::OK && other_mode.body["livemode"] == true);
         ensure!(!other_mode.headers.contains_key("idempotent-replayed"));
 
-        // A refused request is replayed as refused.
+        // A request that failed validation did not execute and is not saved (Stripe): the same
+        // key then runs a corrected request.
         let long = json!({"name": "n".repeat(201)});
         let refused = create(long.clone(), key.clone(), "retry-2").await?;
         ensure!(refused.status == StatusCode::BAD_REQUEST);
+        ensure!(refused.body["error"]["code"] == "parameter_invalid");
         let refused_again = create(long, key.clone(), "retry-2").await?;
         ensure!(refused_again.status == StatusCode::BAD_REQUEST);
-        ensure!(refused_again.headers["idempotent-replayed"] == "true");
+        ensure!(!refused_again.headers.contains_key("idempotent-replayed"));
+        let corrected = create(json!({"name": "b"}), key.clone(), "retry-2").await?;
+        ensure!(corrected.status == StatusCode::OK, "{}", corrected.body);
+
+        // A request that executed and failed is saved and replayed as it failed.
+        let revoked = corrected.body["id"].as_str().context("id")?.to_owned();
+        let revoke = harness
+            .merchant(Method::DELETE, &format!("/v1/api_keys/{revoked}"), None, &key, None)
+            .await?;
+        ensure!(revoke.status == StatusCode::OK, "{}", revoke.body);
+        let roll = format!("/v1/api_keys/{revoked}/roll");
+        let inactive = harness
+            .merchant(Method::POST, &roll, Some(&json!({})), &key, Some("retry-3"))
+            .await?;
+        ensure!(inactive.status == StatusCode::BAD_REQUEST, "{}", inactive.body);
+        ensure!(inactive.body["error"]["code"] == "api_key_inactive");
+        let replayed = harness
+            .merchant(Method::POST, &roll, Some(&json!({})), &key, Some("retry-3"))
+            .await?;
+        ensure!(replayed.status == StatusCode::BAD_REQUEST);
+        ensure!(replayed.headers["idempotent-replayed"] == "true");
+        ensure!(replayed.body == inactive.body);
 
         // A request still running holds its key; one that never finished frees it after a
         // minute; after 24 hours a key may be used for anything.

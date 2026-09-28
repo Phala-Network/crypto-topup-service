@@ -230,6 +230,7 @@ fn credited_event(deposit: &Deposit) -> Result<OutboxEvent, &'static str> {
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
         actor: crate::db::SYSTEM_ACTOR.to_owned(),
+        request: None,
     })
 }
 
@@ -265,6 +266,7 @@ fn rejected_event(deposit: &Deposit) -> OutboxEvent {
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
         actor: crate::db::SYSTEM_ACTOR.to_owned(),
+        request: None,
     }
 }
 

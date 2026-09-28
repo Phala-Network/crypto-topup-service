@@ -19,7 +19,7 @@ observation once. Safe repairs raise no alert. By check:
 
 1. Read the finding's `subjects`, `expected`, and `observed` from the Sentry event.
 2. For `error` check-ins, read `reconciliation.failed_checks` in the daily report
-   (`admin GET /v1/admin/report/daily`); a failed check is usually an RPC error: check both
+   (`admin GET /v1/admin/reports/daily`); a failed check is usually an RPC error: check both
    providers first.
 
 ## Decide

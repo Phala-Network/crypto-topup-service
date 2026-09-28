@@ -16,6 +16,14 @@ T = TypeVar("T", bound="CreateTreasuryRequest")
 class CreateTreasuryRequest:
     """`POST /v1/treasuries` body.
 
+    Example:
+        {'chain_id': 1, 'message': 'pay-api.phala.com wants you to sign in with your Ethereum
+            account:\\n0x936c1991f8dA9a919fa11b557a3514719f5A4504\\n\\nSet this address as the test mode treasury of
+            acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10 on Phala Pay.\\n\\nURI: https://pay-api.phala.com\\nVersion: 1\\nChain ID:
+            1\\nNonce: Kq3nV8xZt2mP6wRa\\nIssued At: 2026-09-28T12:00:00Z\\nExpiration Time: 2026-09-28T12:10:00Z',
+            'signature': '0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
+            5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e1b'}
+
     Attributes:
         chain_id (int): The treasury's chain, the challenge's.
         message (str): The challenge's `message`, unchanged.

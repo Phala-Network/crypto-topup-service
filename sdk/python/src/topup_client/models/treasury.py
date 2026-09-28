@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.treasury_object import check_treasury_object
+from ..models.treasury_object import TreasuryObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -20,6 +22,11 @@ class Treasury:
     """An account's treasury of one chain and mode (design D10): the only address the forwarders
     issued over it can pay.
 
+        Example:
+            {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'canceled_at': None, 'cancellation_reason': None,
+                'chain_id': 1, 'created': 1790467200, 'effective_at': 1790467200, 'id': 'trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9',
+                'kind': 'contract', 'livemode': False, 'object': 'treasury', 'replaced_at': None, 'status': 'active'}
+
         Attributes:
             address (str): The treasury address.
             chain_id (int): EVM chain identifier.
@@ -30,7 +37,7 @@ class Treasury:
             kind (str): `eoa` (an EIP-191 signature recovered to the address) or `contract` (a deployed
                 contract's EIP-1271 approval).
             livemode (bool): The mode.
-            object_ (str): Always `treasury`.
+            object_ (TreasuryObject): Always `treasury`.
             status (str): `pending` (a live change waiting for `effective_at`; cancel it with
                 `POST /v1/treasuries/{id}/cancel`), `active` (the chain's current treasury: new quotes and
                 deposit address networks pay it), `replaced` (a former treasury; addresses issued over it
@@ -49,7 +56,7 @@ class Treasury:
     id: str
     kind: str
     livemode: bool
-    object_: str
+    object_: TreasuryObject
     status: str
     canceled_at: int | None | Unset = UNSET
     cancellation_reason: None | str | Unset = UNSET
@@ -71,7 +78,7 @@ class Treasury:
 
         livemode = self.livemode
 
-        object_ = self.object_
+        object_: str = self.object_
 
         status = self.status
 
@@ -134,7 +141,7 @@ class Treasury:
 
         livemode = d.pop("livemode")
 
-        object_ = d.pop("object")
+        object_ = check_treasury_object(d.pop("object"))
 
         status = d.pop("status")
 

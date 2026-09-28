@@ -7,7 +7,7 @@ import {
   retrieveDepositAddress,
   type DepositAddressPayment,
 } from "../deposit-address.js";
-import { CheckoutError } from "../checkout.js";
+import { CheckoutError, pollDelay } from "../checkout.js";
 import { depositAddressTransfer, type DepositAddressDetails } from "../payment.js";
 import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
 import { Field } from "./Field.js";
@@ -161,6 +161,7 @@ function usePayments(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     const load = async () => {
+      let failure: CheckoutError | null = null;
       try {
         const view = await retrieveDepositAddress({ clientSecret, apiBase });
         failures = 0;
@@ -173,9 +174,10 @@ function usePayments(
         if (error instanceof CheckoutError && error.code === "invalid_client_secret") {
           return;
         }
+        failure = error instanceof CheckoutError ? error : null;
       }
       if (!stopped) {
-        timer = setTimeout(() => void load(), Math.min(interval * 2 ** failures, 30_000));
+        timer = setTimeout(() => void load(), pollDelay(interval, failures, failure));
       }
     };
     void load();

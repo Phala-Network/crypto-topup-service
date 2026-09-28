@@ -19,10 +19,12 @@
 //! refused, as is a contract that is not deployed on the chain: the treasury must exist there.
 //! The message is rendered and parsed by the `siwe` crate and the signature recovered by Alloy.
 //!
-//! **Changes.** The first treasury of a chain, and every test-mode change, applies at once. A later
-//! live change applies [`TIME_LOCK`] after it is proven (`account.treasury.pending`), unless the
-//! merchant cancels it first (`account.treasury.canceled`); a leaked key therefore cannot redirect
-//! new payments unseen. When a treasury applies (`account.treasury.updated`) the chain's network of
+//! **Changes.** The first treasury of a chain, and every test-mode change, applies at once
+//! (`treasury.created`, `current`). A later live change is created `pending`
+//! (`treasury.created`) and applies [`TIME_LOCK`] after it is proven (`treasury.updated`), unless
+//! the merchant cancels it first (`treasury.canceled`); a leaked key therefore cannot redirect
+//! new payments unseen. The treasury it replaces becomes `replaced` (`treasury.updated`). When a
+//! treasury applies the chain's network of
 //! every deposit address of the account and mode is replaced by a forwarder over it, in the same
 //! transaction; the replaced forwarders stay watched and credited and keep paying the old treasury,
 //! which the forwarder's clone argument fixes for good. Quotes and new networks take the chain's
@@ -75,11 +77,7 @@ const ERC6492_MAGIC_SUFFIX: [u8; 32] = [
 
 /// The treasury event types. They are account security events: delivered to every enabled
 /// endpoint of the mode whatever its `enabled_events` (design §11).
-pub const EVENT_TYPES: [&str; 3] = [
-    "account.treasury.pending",
-    "account.treasury.updated",
-    "account.treasury.canceled",
-];
+pub const EVENT_TYPES: [&str; 3] = ["treasury.created", "treasury.updated", "treasury.canceled"];
 
 /// The public id of a treasury, `trs_` and the hex of its id.
 #[must_use]
@@ -725,14 +723,15 @@ pub async fn submit(
     .execute(&mut *transaction)
     .await?;
     if immediate {
-        apply(&mut transaction, routes, scope, id, now, actor).await?;
+        apply(&mut transaction, routes, scope, id, now, actor, None).await?;
     } else {
         record(
             &mut transaction,
             scope,
             id,
+            None,
             actor,
-            "account.treasury.pending",
+            "treasury.created",
             &format!("applies at {}", effective_at.to_rfc3339()),
         )
         .await?;
@@ -777,7 +776,7 @@ pub async fn cancel(
 
 /// Applies every pending treasury whose time-lock ended by `now`, one transaction each, and
 /// returns how many applied. Each is screened again first: a treasury a sanctions list now names
-/// is canceled instead (`cancellation_reason: sanctioned`, `account.treasury.canceled`), and one
+/// is canceled instead (`cancellation_reason: sanctioned`, `treasury.canceled`), and one
 /// that cannot be screened now, or whose chain has no current route to screen it with, stays
 /// pending until a later pass.
 pub async fn apply_due(
@@ -854,7 +853,17 @@ pub async fn apply_due(
                 .bind(now)
                 .execute(&mut *transaction)
                 .await?;
-            apply(&mut transaction, routes, scope, id, now, &actor).await?;
+            let before = snapshot(&mut transaction, scope, id).await?;
+            apply(
+                &mut transaction,
+                routes,
+                scope,
+                id,
+                now,
+                &actor,
+                Some(&before),
+            )
+            .await?;
             applied = applied.saturating_add(1);
         }
         transaction.commit().await?;
@@ -925,6 +934,7 @@ pub async fn rescreen_due(
                 );
                 crate::pause::mutate_account_scopes_in(
                     &mut transaction,
+                    routes,
                     account_id,
                     crate::pause::PauseOwner::Operator,
                     &["quotes", "settlement"],
@@ -963,8 +973,10 @@ fn parse_chain_address(chain_id: i64, address: &str) -> Result<(u64, Address), T
 }
 
 /// Makes treasury `id` its chain's current one: the former one is replaced, the chain's network of
-/// every deposit address of the scope is replaced by a forwarder over it, and
-/// `account.treasury.updated` is sent. The caller holds the scope's exclusive lock.
+/// every deposit address of the scope is replaced by a forwarder over it, and events are sent:
+/// `treasury.created` for a treasury that applies as it is submitted, `treasury.updated` with
+/// `pending` (`before`, its representation until now) for one whose time-lock ended, and
+/// `treasury.updated` for the replaced one. The caller holds the scope's exclusive lock.
 async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     routes: &RouteSet,
@@ -972,24 +984,35 @@ async fn apply(
     id: Uuid,
     now: DateTime<Utc>,
     actor: &Actor,
+    before: Option<&serde_json::Value>,
 ) -> Result<(), TreasuryError> {
     let (chain_id, address): (i64, String) =
         sqlx::query_as("SELECT chain_id, address FROM treasuries WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_one(&mut **transaction)
             .await?;
-    let replaced = sqlx::query(
-        "UPDATE treasuries SET replaced_at = $4 \
+    let former: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM treasuries \
          WHERE account_id = $1 AND livemode = $2 AND chain_id = $3 \
-           AND applied_at IS NOT NULL AND replaced_at IS NULL",
+           AND applied_at IS NOT NULL AND replaced_at IS NULL \
+         FOR UPDATE",
     )
     .bind(scope.account_id())
     .bind(scope.livemode())
     .bind(chain_id)
-    .bind(now)
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let former = match former {
+        Some(former) => Some((former, snapshot(transaction, scope, former).await?)),
+        None => None,
+    };
+    if let Some((former, _)) = &former {
+        sqlx::query("UPDATE treasuries SET replaced_at = $2 WHERE id = $1")
+            .bind(former)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+    }
     sqlx::query("UPDATE treasuries SET applied_at = $2 WHERE id = $1")
         .bind(id)
         .bind(now)
@@ -1004,7 +1027,7 @@ async fn apply(
         Some(route) => {
             let chain = ChainContracts::of(route).with_treasury(treasury);
             let moved = deposit_addresses::replace_networks(transaction, scope, chain).await?;
-            if replaced == 0 {
+            if former.is_none() {
                 String::new()
             } else {
                 format!(
@@ -1023,18 +1046,42 @@ async fn apply(
             String::new()
         }
     };
-    record(
-        transaction,
-        scope,
-        id,
-        actor,
-        "account.treasury.updated",
-        &reason,
-    )
-    .await
+    let event_type = if before.is_some() {
+        "treasury.updated"
+    } else {
+        "treasury.created"
+    };
+    record(transaction, scope, id, before, actor, event_type, &reason).await?;
+    if let Some((former, before)) = former {
+        record(
+            transaction,
+            scope,
+            former,
+            Some(&before),
+            actor,
+            "treasury.updated",
+            &format!("replaced by {}", public_id(id)),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
-/// Cancels pending treasury `id` for `reason`, with its audit row and `account.treasury.canceled`.
+/// The API representation of the scope's treasury `id`, as an event's `data.object`.
+async fn snapshot(
+    connection: &mut PgConnection,
+    scope: Scope,
+    id: Uuid,
+) -> Result<serde_json::Value, TreasuryError> {
+    let treasury = get_in(connection, scope, id)
+        .await?
+        .ok_or(TreasuryError::DatabaseInvariant)?;
+    Ok(crate::db::to_object(&crate::api::treasury_object(
+        &treasury,
+    ))?)
+}
+
+/// Cancels pending treasury `id` for `reason`, with its audit row and `treasury.canceled`.
 async fn mark_canceled(
     transaction: &mut Transaction<'_, Postgres>,
     scope: Scope,
@@ -1054,18 +1101,21 @@ async fn mark_canceled(
         transaction,
         scope,
         id,
+        None,
         actor,
-        "account.treasury.canceled",
+        "treasury.canceled",
         note,
     )
     .await
 }
 
-/// The audit row and event of a change to treasury `id`.
+/// The audit row and event of a change to treasury `id`; `before` is its representation before
+/// an update, for `previous_attributes`.
 async fn record(
     transaction: &mut Transaction<'_, Postgres>,
     scope: Scope,
     id: Uuid,
+    before: Option<&serde_json::Value>,
     actor: &Actor,
     event_type: &str,
     reason: &str,
@@ -1081,17 +1131,19 @@ async fn record(
         },
     )
     .await?;
-    crate::db::enqueue_in(
+    let object = snapshot(transaction, scope, id).await?;
+    let event = crate::db::NewOutboxEvent::new(
+        event_type,
+        scope,
+        crate::db::EventObject::Treasury(id),
+        actor,
+    );
+    crate::db::enqueue_rendered_in(
         transaction,
-        &crate::db::NewOutboxEvent {
-            id: Uuid::new_v4(),
-            event_type: event_type.to_owned(),
-            account_id: scope.account_id(),
-            livemode: scope.livemode(),
-            object: crate::db::EventObject::Treasury(id),
-            next_attempt_at: Utc::now(),
-            actor: event_actor(actor),
-        },
+        &event,
+        &crate::db::event_data(object, before),
+        None,
+        true,
     )
     .await?;
     Ok(())
@@ -1162,7 +1214,8 @@ pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<Treasur
     get_in(&mut connection, scope, id).await
 }
 
-async fn get_in(
+/// The scope's treasury `id`, read on `connection`.
+pub(crate) async fn get_in(
     connection: &mut PgConnection,
     scope: Scope,
     id: Uuid,
@@ -1186,21 +1239,45 @@ pub struct ListFilter {
     pub status: Option<Status>,
 }
 
-/// The scope's treasuries, newest first, at most `limit`, and whether more match.
+/// A page of the scope's treasuries, newest first, at most `limit`, and whether more follow in its
+/// direction (Stripe's cursor pagination): `cursor` is the treasury the page starts after (or, with
+/// `before`, ends before); `NotFound` for a cursor outside the scope.
 pub async fn list(
     pool: &PgPool,
     scope: Scope,
     filter: ListFilter,
     limit: i64,
+    cursor: Option<(Uuid, bool)>,
 ) -> Result<(Vec<Treasury>, bool), TreasuryError> {
+    let before = cursor.is_some_and(|(_, before)| before);
+    let cursor = match cursor {
+        Some((id, _)) => Some(
+            sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+                "SELECT created_at, id FROM treasuries \
+                 WHERE id = $1 AND account_id = $2 AND livemode = $3",
+            )
+            .bind(id)
+            .bind(scope.account_id())
+            .bind(scope.livemode())
+            .fetch_optional(pool)
+            .await?
+            .ok_or(TreasuryError::NotFound)?,
+        ),
+        None => None,
+    };
     let mut query = SELECT.to_owned();
     if let Some(status) = filter.status {
         query.push_str(" AND ");
         query.push_str(status.condition());
     }
-    query.push_str(
-        " AND ($3::bigint IS NULL OR chain_id = $3) ORDER BY created_at DESC, id DESC LIMIT $4",
-    );
+    query.push_str(" AND ($3::bigint IS NULL OR chain_id = $3)");
+    query.push_str(if before {
+        " AND ($5::timestamptz IS NULL OR (created_at, id) > ($5, $6)) \
+         ORDER BY created_at ASC, id ASC LIMIT $4"
+    } else {
+        " AND ($5::timestamptz IS NULL OR (created_at, id) < ($5, $6)) \
+         ORDER BY created_at DESC, id DESC LIMIT $4"
+    });
     let chain_id = filter
         .chain_id
         .map(i64::try_from)
@@ -1211,11 +1288,16 @@ pub async fn list(
         .bind(scope.livemode())
         .bind(chain_id)
         .bind(limit.saturating_add(1))
+        .bind(cursor.map(|(created_at, _)| created_at))
+        .bind(cursor.map(|(_, id)| id))
         .fetch_all(pool)
         .await?;
     let limit = usize::try_from(limit).map_err(|_| TreasuryError::DatabaseInvariant)?;
     let has_more = rows.len() > limit;
     rows.truncate(limit);
+    if before {
+        rows.reverse();
+    }
     let treasuries = rows
         .into_iter()
         .map(TreasuryRow::into_treasury)

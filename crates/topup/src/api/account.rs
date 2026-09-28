@@ -45,10 +45,7 @@ pub(crate) async fn get_account(
     merchant
         .require(&state.pool, Permission::AccountRead)
         .await?;
-    find_account(&state.pool, &state.routes, merchant.scope)
-        .await?
-        .map(Json)
-        .ok_or_else(ApiError::internal)
+    current_account(&state, merchant.scope).await
 }
 
 #[utoipa::path(
@@ -86,12 +83,16 @@ pub(crate) async fn update_account(
         .await?;
     if let Some(policies) = request.confirmation_policies {
         let changes = validate_policies(&state.routes, merchant.scope, &policies)?;
-        set_policies(&state.pool, merchant.scope, &changes, &merchant.actor()).await?;
+        set_policies(
+            &state.pool,
+            &state.routes,
+            merchant.scope,
+            &changes,
+            &merchant.actor(),
+        )
+        .await?;
     }
-    find_account(&state.pool, &state.routes, merchant.scope)
-        .await?
-        .map(Json)
-        .ok_or_else(ApiError::internal)
+    current_account(&state, merchant.scope).await
 }
 
 #[utoipa::path(
@@ -173,6 +174,7 @@ async fn self_pause(
     let mut transaction = state.pool.begin().await?;
     crate::pause::mutate_account_scopes_in(
         &mut transaction,
+        &state.routes,
         merchant.scope.account_id(),
         PauseOwner::Merchant,
         &["quotes"],
@@ -187,10 +189,7 @@ async fn self_pause(
     .await?
     .ok_or_else(ApiError::internal)?;
     transaction.commit().await?;
-    find_account(&state.pool, &state.routes, merchant.scope)
-        .await?
-        .map(Json)
-        .ok_or_else(ApiError::internal)
+    current_account(state, merchant.scope).await
 }
 
 /// Checks each policy against its chain's route floor: a chain of the key's mode, a value of
@@ -248,11 +247,14 @@ fn validate_policies(
 /// key's mode, whose chains they are.
 async fn set_policies(
     pool: &PgPool,
+    routes: &RouteSet,
     scope: Scope,
     changes: &BTreeMap<u64, Option<Confirmations>>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = pool.begin().await?;
+    let object = crate::db::EventObject::Account(scope.account_id());
+    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let mut changed = false;
     for (&chain_id, value) in changes {
         let chain_id = i64::try_from(chain_id).map_err(|_| ApiError::internal())?;
@@ -305,34 +307,23 @@ async fn set_policies(
             },
         )
         .await?;
-        crate::db::enqueue_in(
-            &mut transaction,
-            &crate::db::NewOutboxEvent {
-                id: Uuid::new_v4(),
-                event_type: "account.updated".to_owned(),
-                account_id: scope.account_id(),
-                livemode: scope.livemode(),
-                object: crate::db::EventObject::Account(scope.account_id()),
-                next_attempt_at: Utc::now(),
-                actor: crate::api_keys::event_actor(actor),
-            },
-        )
-        .await?;
+        let event = crate::db::NewOutboxEvent::new("account.updated", scope, object, actor);
+        crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     }
     transaction.commit().await?;
     Ok(())
 }
 
 /// The confirmations the account requires, by chain, across both modes.
-pub(crate) async fn confirmation_policies(
-    pool: &PgPool,
+pub(crate) async fn confirmation_policies<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     account_id: Uuid,
 ) -> Result<BTreeMap<u64, Confirmations>, ApiError> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
         "SELECT chain_id, required FROM confirmation_policies WHERE account_id = $1",
     )
     .bind(account_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
     rows.into_iter()
         .map(|(chain_id, required)| {
@@ -380,6 +371,7 @@ pub(crate) async fn roll_webhook_key(
         .await?;
     webhook_keys::roll(
         &state.pool,
+        &state.routes,
         merchant.scope,
         Duration::seconds(i64::from(request.expires_in)),
         &merchant.actor(),
@@ -393,10 +385,7 @@ pub(crate) async fn roll_webhook_key(
         WebhookKeyError::NotFound | WebhookKeyError::VersionExhausted => ApiError::internal(),
         WebhookKeyError::Database(error) => error.into(),
     })?;
-    find_account(&state.pool, &state.routes, merchant.scope)
-        .await?
-        .map(Json)
-        .ok_or_else(ApiError::internal)
+    current_account(&state, merchant.scope).await
 }
 
 #[utoipa::path(
@@ -483,10 +472,19 @@ async fn active_keys(pool: &PgPool, scope: Scope) -> Result<Option<WebhookKeys>,
     webhook_keys::active(&mut connection, scope).await
 }
 
+/// The scope's account as `GET /v1/account` returns it.
+async fn current_account(state: &AppState, scope: Scope) -> Result<Json<AccountObject>, ApiError> {
+    let mut connection = state.pool.acquire().await?;
+    find_account(&mut connection, &state.routes, scope)
+        .await?
+        .map(Json)
+        .ok_or_else(ApiError::internal)
+}
+
 /// The API representation of the scope's account: its policies of the chains of the scope's
 /// mode, and the operator's and its own pauses.
 pub(crate) async fn find_account(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     routes: &RouteSet,
     scope: Scope,
 ) -> Result<Option<AccountObject>, ApiError> {
@@ -498,12 +496,12 @@ pub(crate) async fn find_account(
          FROM accounts WHERE id = $1",
     )
     .bind(scope.account_id())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     let Some((id, name, charges_enabled, paused_scopes, created)) = row else {
         return Ok(None);
     };
-    let webhook_keys = active_keys(pool, scope)
+    let webhook_keys = webhook_keys::active(&mut *connection, scope)
         .await?
         .map(|keys| {
             keys.versions
@@ -519,7 +517,7 @@ pub(crate) async fn find_account(
         .current_in(scope.livemode())
         .map(|route| route.chain.chain_id)
         .collect::<std::collections::BTreeSet<_>>();
-    let confirmation_policies = confirmation_policies(pool, scope.account_id())
+    let confirmation_policies = confirmation_policies(&mut *connection, scope.account_id())
         .await?
         .into_iter()
         .filter(|(chain_id, _)| chains.contains(chain_id))

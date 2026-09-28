@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
-use chrono::Utc;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use topup_core::screening::PauseScopes;
 use uuid::Uuid;
 
 use crate::audit::{self, Actor};
+use crate::tenancy::Scope;
 
 pub(crate) struct PauseScopeSources {
     pub(crate) customer: PauseScopes,
@@ -84,8 +84,11 @@ pub(crate) enum PauseOwner {
 /// audit row naming `reason` and, when the scopes changed, an `account.updated` event in each mode
 /// the account uses (test, and live once enabled). Returns the scopes of `owner`, or `None` for an
 /// unknown account.
+// The pause's operands and its audit context; a struct of them would only rename the call sites.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mutate_account_scopes_in(
     transaction: &mut Transaction<'_, Postgres>,
+    routes: &crate::routes::RouteSet,
     account_id: Uuid,
     owner: PauseOwner,
     scopes: &[&str],
@@ -138,30 +141,26 @@ pub(crate) async fn mutate_account_scopes_in(
     if updated == before {
         return Ok(Some(updated));
     }
-    sqlx::query(update)
-        .bind(account_id)
-        .bind(&updated)
-        .execute(&mut **transaction)
-        .await?;
     let modes: &[bool] = if charges_enabled {
         &[false, true]
     } else {
         &[false]
     };
+    let object = crate::db::EventObject::Account(account_id);
+    let mut previous = Vec::with_capacity(modes.len());
     for &livemode in modes {
-        crate::db::enqueue_in(
-            transaction,
-            &crate::db::NewOutboxEvent {
-                id: Uuid::new_v4(),
-                event_type: "account.updated".to_owned(),
-                account_id,
-                livemode,
-                object: crate::db::EventObject::Account(account_id),
-                next_attempt_at: Utc::now(),
-                actor: crate::api_keys::event_actor(actor),
-            },
-        )
+        let scope = Scope::new(account_id, livemode);
+        previous.push(crate::db::render(transaction, routes, scope, object).await?);
+    }
+    sqlx::query(update)
+        .bind(account_id)
+        .bind(&updated)
+        .execute(&mut **transaction)
         .await?;
+    for (&livemode, before) in modes.iter().zip(&previous) {
+        let scope = Scope::new(account_id, livemode);
+        let event = crate::db::NewOutboxEvent::new("account.updated", scope, object, actor);
+        crate::db::enqueue_in(transaction, routes, &event, Some(before)).await?;
     }
     Ok(Some(updated))
 }

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use alloy_primitives::Address as EvmAddress;
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
-use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
 use chrono::{DateTime, TimeDelta, Utc};
 use rand::TryRng as _;
@@ -54,16 +53,14 @@ const MAX_LIMIT: i64 = 100;
     request_body = CreateDepositAddressRequest,
     responses(
         (status = 200, description = "OK", body = DepositAddress),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
-            status = 409,
-            description = "`deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new \
-                           address and every chain is frozen or paused), `treasury_not_set` \
-                           (no treasury on any chain that takes one), or \
-                           `idempotency_key_in_use`",
+            status = 400,
+            description = "Bad Request, `deposit_address_cap_exceeded`, `paused`, `chain_frozen` \
+                           (a new address and every chain is frozen or paused), or \
+                           `treasury_not_set` (no treasury on any chain that takes one)",
             body = ErrorResponse
-        )
+        ),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "deposit_addresses"
@@ -206,10 +203,7 @@ pub(crate) async fn get_deposit_address(
             Ok(address) => Json(DepositAddressView::Client(Box::new(address))).into_response(),
             Err(error) => error.into_response(),
         };
-        response.headers_mut().insert(
-            header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static("*"),
-        );
+        super::allow_cross_origin(&mut response);
         return response;
     };
     let address = async {
@@ -265,10 +259,12 @@ pub(crate) async fn update_deposit_address(
     let id = ids::parse(ids::DEPOSIT_ADDRESS, &id).ok_or_else(ApiError::not_found)?;
     if !metadata::update(
         &state.pool,
+        &state.routes,
         Object::DepositAddress,
         merchant.scope,
         id,
         request.metadata.as_ref(),
+        &merchant.actor(),
     )
     .await?
     {
@@ -300,13 +296,18 @@ pub(crate) async fn update_deposit_address(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
         (
-            status = 409,
+            status = 400,
             description = "`deposit_address_retired`: already rotated; `paused`, \
-                           `chain_frozen` (every chain is frozen or paused), \
-                           `treasury_not_set`, or `idempotency_key_in_use`",
+                           `chain_frozen` (every chain is frozen or paused), or \
+                           `treasury_not_set`",
             body = ErrorResponse
         ),
-        (status = 429, description = "Too Many Requests: the customer's rotation limit", body = ErrorResponse)
+        (
+            status = 429,
+            description = "`rate_limit`, or `customer_rate_limit`: the customer's rotations per \
+                           hour; retry after `Retry-After` seconds",
+            body = ErrorResponse
+        )
     ),
     security(("api_key" = [])),
     tag = "deposit_addresses"
@@ -546,9 +547,10 @@ async fn client_deposit_address(
                 .is_some_and(|rest| rest.starts_with("_secret_"))
         })
         .ok_or_else(ApiError::not_found)?;
-    if !state.client_reads.allow(address_id) {
-        return Err(ApiError::rate_limited());
-    }
+    state
+        .client_reads
+        .allow(address_id)
+        .map_err(ApiError::client_reads_limited)?;
     // The secret authenticates for its address's account and mode, as an API key does for its
     // own; the scope comes from the stored row, never from the request.
     let owner: Option<(Uuid, bool)> = sqlx::query_as(
@@ -800,7 +802,9 @@ fn map_error(error: DepositAddressError) -> ApiError {
         error @ DepositAddressError::CapReached(_) => {
             ApiError::deposit_address_cap(error.to_string())
         }
-        DepositAddressError::RateLimited => ApiError::rotation_rate_limited(),
+        DepositAddressError::RateLimited { retry_after } => {
+            ApiError::customer_rotation_limit(retry_after)
+        }
         DepositAddressError::NoChain => ApiError::paused("new addresses are paused"),
         DepositAddressError::NoTreasury => ApiError::treasury_not_set(),
         DepositAddressError::InvalidInput(message) => ApiError::bad_request(message),

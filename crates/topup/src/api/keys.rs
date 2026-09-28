@@ -2,7 +2,7 @@
 //! of the requesting key's account and mode with a secret key. A test key never reaches live keys.
 
 use axum::Json;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 
@@ -13,36 +13,57 @@ use crate::tenancy::Permission;
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, ApiPath};
+use super::extract::{ApiJson, ApiPath, query_pairs};
 use super::idempotency::ContainsSecret;
 use super::models::{ApiKeyList, ApiKeyObject, CreateApiKeyRequest, RollApiKeyRequest};
+use super::pagination::Page;
 
 type ApiResult<T> = Result<T, ApiError>;
 
 #[utoipa::path(
     get,
     path = "/v1/api_keys",
+    params(
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`key_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`key_` id: the page before it")
+    ),
     responses(
         (status = 200, description = "OK", body = ApiKeyList),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "api_keys"
 )]
-/// The keys of the requesting key's account and mode, newest first, without their secrets.
+/// The keys of the requesting key's account and mode, newest first, without their secrets, with
+/// Stripe's cursor pagination.
 pub(crate) async fn list_api_keys(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    RawQuery(query): RawQuery,
 ) -> ApiResult<Json<ApiKeyList>> {
     merchant
         .require(&state.pool, Permission::ApiKeysRead)
         .await?;
-    let keys = api_keys::list(&state.pool, merchant.scope).await?;
+    let mut page = Page::default();
+    for (name, value) in query_pairs(query.as_deref()) {
+        if !page.accept(&name, &value, ids::API_KEY)? {
+            return Err(
+                ApiError::unknown_param(format!("unknown parameter {name}")).with_param(name)
+            );
+        }
+    }
+    let cursor = page.cursor.map(|id| (id, page.before));
+    let (keys, has_more) = api_keys::list(&state.pool, merchant.scope, page.limit, cursor)
+        .await
+        .map_err(map_error)?
+        .ok_or_else(|| page.unknown_cursor("API key"))?;
     Ok(Json(ApiKeyList {
         object: "list".to_owned(),
         url: "/v1/api_keys".to_owned(),
-        has_more: false,
+        has_more,
         data: keys.iter().map(|key| api_key_object(key, None)).collect(),
     }))
 }
@@ -134,10 +155,9 @@ pub(crate) async fn create_api_key(
     request_body = RollApiKeyRequest,
     responses(
         (status = 200, description = "OK: the new key with its `secret`, shown once", body = ApiKeyObject),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 400, description = "Bad Request, or `api_key_inactive`: revoked or already rolled", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 409, description = "`api_key_inactive`: revoked or already rolled", body = ErrorResponse)
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "api_keys"
@@ -176,7 +196,7 @@ pub(crate) async fn roll_api_key(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
         (
-            status = 409,
+            status = 400,
             description = "`last_api_key`: the mode's last key that is neither revoked nor \
                            expiring; create or roll a key first",
             body = ErrorResponse

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import httpx
@@ -27,6 +27,14 @@ from topup_client.models import (
 from topup_sdk import TopupClient, export_account, sign_treasury_challenge
 from topup_sdk.client import Metadata
 
+from ._types import (
+    DepositAddressStatus,
+    DepositStatus,
+    EventType,
+    QuoteStatus,
+    RefundStatus,
+    TreasuryStatus,
+)
 from ._webhook import Webhook
 
 
@@ -49,9 +57,11 @@ class PhalaPay:
     `treasuries` (`{chain_id: treasury}`) additionally pins the treasury each may pay. `account`
     (`acct_…`) saves the one `GET /v1/account` the check otherwise makes.
 
-    Requests that fail with a transport error, `429`, or `5xx` are retried with backoff; `POST`s
-    reuse one `Idempotency-Key` across retries, so a retry never creates a second object. A
-    failed request raises `ApiError` with the service's `code`, `param`, and `request_id`.
+    Requests that fail with a transport error, `429` (after its `Retry-After`), or `5xx` are
+    retried with backoff; `POST`s reuse one `Idempotency-Key` across retries, so a retry never
+    creates a second object, and a response the service saved for the key (even a `500`) is
+    returned as it was, not retried. A failed request raises `ApiError` with the service's
+    `code`, `param`, `doc_url`, and `request_id`.
     """
 
     def __init__(
@@ -186,7 +196,7 @@ class Quotes:
         return self._client.get_quote(quote_id)
 
     def list(
-        self, *, client_reference_id: str | None = None, status: str | None = None
+        self, *, client_reference_id: str | None = None, status: QuoteStatus | None = None
     ) -> Iterator[Quote]:
         """Yields every matching quote, newest first, fetching pages as it goes."""
         return self._client.list_quotes(client_reference_id=client_reference_id, status=status)
@@ -220,21 +230,25 @@ class Deposits:
         client_reference_id: str | None = None,
         quote: str | None = None,
         deposit_address: str | None = None,
-        status: str | None = None,
+        status: DepositStatus | None = None,
         tx_hash: str | None = None,
+        created_gt: int | None = None,
         created_gte: int | None = None,
+        created_lt: int | None = None,
         created_lte: int | None = None,
         expand: list[str] | None = None,
     ) -> Iterator[Deposit]:
-        """Yields every matching deposit, newest first, fetching pages as it goes. `status` is
-        `pending`, `credited`, `rejected`, or `reversed`."""
+        """Yields every matching deposit, newest first, fetching pages as it goes. `created_*`
+        are Unix seconds (Stripe's `created[gt|gte|lt|lte]`)."""
         return self._client.list_deposits(
             client_reference_id=client_reference_id,
             quote=quote,
             deposit_address=deposit_address,
             status=status,
             tx_hash=tx_hash,
+            created_gt=created_gt,
             created_gte=created_gte,
+            created_lt=created_lt,
             created_lte=created_lte,
             expand=expand,
         )
@@ -280,7 +294,7 @@ class DepositAddresses:
         self,
         *,
         client_reference_id: str | None = None,
-        status: str | None = None,
+        status: DepositAddressStatus | None = None,
     ) -> Iterator[DepositAddress]:
         """Yields every matching deposit address, newest first, fetching pages as it goes."""
         return self._client.list_deposit_addresses(
@@ -339,7 +353,9 @@ class Refunds:
         """Merges `metadata` into the refund's."""
         return self._client.update_refund(refund_id, metadata=metadata)
 
-    def list(self, *, deposit: str | None = None, status: str | None = None) -> Iterator[Refund]:
+    def list(
+        self, *, deposit: str | None = None, status: RefundStatus | None = None
+    ) -> Iterator[Refund]:
         """Yields every matching refund, newest first, fetching pages as it goes."""
         return self._client.list_refunds(deposit=deposit, status=status)
 
@@ -411,7 +427,9 @@ class Treasuries:
     def retrieve(self, treasury_id: str) -> Treasury:
         return self._client.get_treasury(treasury_id)
 
-    def list(self, *, chain_id: int | None = None, status: str | None = None) -> list[Treasury]:
+    def list(
+        self, *, chain_id: int | None = None, status: TreasuryStatus | None = None
+    ) -> list[Treasury]:
         """The treasuries of this mode, newest first."""
         return self._client.list_treasuries(chain_id=chain_id, status=status)
 
@@ -505,6 +523,29 @@ class Events:
         """Delivers the event again to one enabled endpoint."""
         return self._client.resend_event(event_id, webhook_endpoint=webhook_endpoint)
 
-    def list(self, *, type: str | None = None) -> Iterator[EventObjectResponse]:
-        """Yields events, newest first; `type` filters, such as `deposit.reversed`."""
-        return self._client.list_events(type=type)
+    def list(
+        self,
+        *,
+        type: EventType | str | None = None,
+        types: Sequence[EventType | str] | None = None,
+        delivery_success: bool | None = None,
+        created_gt: int | None = None,
+        created_gte: int | None = None,
+        created_lt: int | None = None,
+        created_lte: int | None = None,
+    ) -> Iterator[EventObjectResponse]:
+        """Yields events, newest first. `type` filters by one type, such as `deposit.reversed`,
+        or a group, `deposit.*`; `types` by up to 20. `delivery_success=False` yields the events
+        a webhook endpoint has not received: its `pending_deliveries`, `oldest_pending_at`, and
+        `last_attempt` say whether it is keeping up; resend the missed events once it is fixed.
+        `data.object` is the object as it was when the event happened; `*.updated` events carry
+        `data.previous_attributes`, and events caused by your requests their `request`."""
+        return self._client.list_events(
+            type=type,
+            types=types,
+            delivery_success=delivery_success,
+            created_gt=created_gt,
+            created_gte=created_gte,
+            created_lt=created_lt,
+            created_lte=created_lte,
+        )

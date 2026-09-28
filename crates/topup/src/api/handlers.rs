@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::http::header;
 use axum::response::Response;
 use topup_core::screening::PauseScope;
@@ -14,6 +14,7 @@ use crate::db::Customer;
 use crate::tenancy::Scope;
 
 use super::AppState;
+use super::auth::AdminActor;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
@@ -25,6 +26,9 @@ use super::models::{
 use super::repository::{self, IssuedAccount};
 
 type ApiResult<T> = Result<T, ApiError>;
+
+/// The daily report lists webhook endpoints failing for longer than this, by default.
+const DEFAULT_FAILING_FOR_HOURS: u32 = 24;
 
 #[utoipa::path(
     post,
@@ -44,6 +48,7 @@ type ApiResult<T> = Result<T, ApiError>;
 /// only in this response; send it to the contact, who rolls it on receipt. Audited.
 pub(crate) async fn create_account(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<CreateAccountRequest>,
 ) -> ApiResult<Json<AccountResponse>> {
     let name = request.name.trim();
@@ -63,7 +68,7 @@ pub(crate) async fn create_account(
             due_diligence: to_json(&request.due_diligence)?,
             charges_enabled: request.charges_enabled,
         },
-        &admin_actor(&state),
+        &actor,
         &request.reason,
     )
     .await?;
@@ -89,6 +94,7 @@ pub(crate) async fn create_account(
 /// not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 pub(crate) async fn update_account(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(account): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateAccountRequest>,
 ) -> ApiResult<Json<AccountResponse>> {
@@ -99,13 +105,14 @@ pub(crate) async fn update_account(
     validate_reason(&request.reason)?;
     let account = repository::update_account(
         &state.pool,
+        &state.routes,
         account_id,
         &repository::AccountChanges {
             charges_enabled: request.charges_enabled,
             restricted: request.restricted,
             contact: request.contact.as_ref().map(to_json).transpose()?,
         },
-        &admin_actor(&state),
+        &actor,
         &request.reason,
     )
     .await?;
@@ -132,6 +139,7 @@ pub(crate) async fn update_account(
 /// `api_key.*` events with actor `admin`.
 pub(crate) async fn issue_api_key(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(account): ApiPath<String>,
     ApiJson(request): ApiJson<IssueApiKeyRequest>,
 ) -> ApiResult<Response> {
@@ -143,7 +151,7 @@ pub(crate) async fn issue_api_key(
         Scope::new(account_id, request.livemode),
         &request.name,
         request.revoke_existing,
-        &admin_actor(&state),
+        &actor,
         &request.reason,
     )
     .await
@@ -193,10 +201,11 @@ pub(crate) async fn admin_get_deposit(
 /// abusive account or a sanctioned treasury. Audited, and announced as `account.updated`.
 pub(crate) async fn pause_account(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(account): ApiPath<String>,
     ApiJson(request): ApiJson<AccountPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &account, request, true).await
+    mutate_account_scopes(&state, &actor, &account, request, true).await
 }
 
 #[utoipa::path(
@@ -212,10 +221,11 @@ pub(crate) async fn pause_account(
 /// reviewed. Audited, and announced as `account.updated`.
 pub(crate) async fn resume_account(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(account): ApiPath<String>,
     ApiJson(request): ApiJson<AccountPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &account, request, false).await
+    mutate_account_scopes(&state, &actor, &account, request, false).await
 }
 
 #[utoipa::path(
@@ -233,10 +243,19 @@ pub(crate) async fn resume_account(
 /// Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 pub(crate) async fn pause_customer(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath((account, client_reference_id)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_customer_scopes(&state, &account, &client_reference_id, request, true).await
+    mutate_customer_scopes(
+        &state,
+        &actor,
+        &account,
+        &client_reference_id,
+        request,
+        true,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -254,16 +273,25 @@ pub(crate) async fn pause_customer(
 /// Resumes scopes of one customer of an account.
 pub(crate) async fn resume_customer(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath((account, client_reference_id)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_customer_scopes(&state, &account, &client_reference_id, request, false).await
+    mutate_customer_scopes(
+        &state,
+        &actor,
+        &account,
+        &client_reference_id,
+        request,
+        false,
+    )
+    .await
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/routes/{r}/pause",
-    params(("r" = String, Path)),
+    path = "/v1/admin/routes/{route}/pause",
+    params(("route" = String, Path, description = "Route name, as in the route file")),
     request_body = PauseRequest,
     responses((status = 200, description = "OK", body = RoutePauseResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
@@ -271,16 +299,17 @@ pub(crate) async fn resume_customer(
 )]
 pub(crate) async fn pause_route(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(route): ApiPath<String>,
     ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<RoutePauseResponse>> {
-    mutate_route_scopes(&state, &route, request, true).await
+    mutate_route_scopes(&state, &actor, &route, request, true).await
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/routes/{r}/resume",
-    params(("r" = String, Path)),
+    path = "/v1/admin/routes/{route}/resume",
+    params(("route" = String, Path, description = "Route name, as in the route file")),
     request_body = PauseRequest,
     responses((status = 200, description = "OK", body = RoutePauseResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
@@ -288,10 +317,11 @@ pub(crate) async fn pause_route(
 )]
 pub(crate) async fn resume_route(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(route): ApiPath<String>,
     ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<RoutePauseResponse>> {
-    mutate_route_scopes(&state, &route, request, false).await
+    mutate_route_scopes(&state, &actor, &route, request, false).await
 }
 
 #[utoipa::path(
@@ -308,18 +338,19 @@ pub(crate) async fn resume_route(
 )]
 pub(crate) async fn nudge_deposit(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(deposit_id): ApiPath<String>,
 ) -> ApiResult<Json<NudgeResponse>> {
     let deposit_id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &deposit_id)
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(
-        repository::nudge_deposit(&state.pool, deposit_id, &admin_actor(&state)).await?,
+        repository::nudge_deposit(&state.pool, deposit_id, &actor).await?,
     ))
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/reconciliation-blocks/{block_key}/lift",
+    path = "/v1/admin/reconciliation_blocks/{block_key}/lift",
     params(("block_key" = String, Path, description = "`chain:{chain_id}` or `address:{address_id}`, as listed in the daily report")),
     request_body = AdminReasonRequest,
     responses(
@@ -332,18 +363,14 @@ pub(crate) async fn nudge_deposit(
 )]
 pub(crate) async fn lift_reconciliation_block(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiPath(block_key): ApiPath<String>,
     ApiJson(request): ApiJson<AdminReasonRequest>,
 ) -> ApiResult<Json<ReconciliationBlockLiftResponse>> {
     validate_reason(&request.reason)?;
     Ok(Json(
-        repository::lift_reconciliation_block(
-            &state.pool,
-            &block_key,
-            &admin_actor(&state),
-            &request.reason,
-        )
-        .await?,
+        repository::lift_reconciliation_block(&state.pool, &block_key, &actor, &request.reason)
+            .await?,
     ))
 }
 
@@ -373,16 +400,49 @@ pub(crate) async fn metrics() -> ([(header::HeaderName, &'static str); 1], Strin
 
 #[utoipa::path(
     get,
-    path = "/v1/admin/report/daily",
-    responses((status = 200, description = "OK", body = DailyReportResponse)),
+    path = "/v1/admin/reports/daily",
+    params(
+        (
+            "failing_for_hours" = Option<u32>, Query,
+            description = "List webhook endpoints whose oldest undelivered event is older than \
+                           this many hours, 1 to 720; default 24"
+        )
+    ),
+    responses(
+        (status = 200, description = "OK", body = DailyReportResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse)
+    ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
+/// Platform health: per-route deposit, refund, and exposure metrics, reconciliation, and the
+/// webhook endpoints failing for longer than `failing_for_hours`.
 pub(crate) async fn daily_report(
     State(state): State<AppState>,
+    RawQuery(query): RawQuery,
 ) -> ApiResult<Json<DailyReportResponse>> {
-    let mut report =
-        repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
+    let mut failing_for_hours = DEFAULT_FAILING_FOR_HOURS;
+    for (name, value) in super::extract::query_pairs(query.as_deref()) {
+        if name != "failing_for_hours" {
+            return Err(
+                ApiError::unknown_param(format!("unknown parameter {name}")).with_param(name)
+            );
+        }
+        failing_for_hours = value
+            .parse::<u32>()
+            .ok()
+            .filter(|hours| (1..=720).contains(hours))
+            .ok_or_else(|| {
+                ApiError::invalid_param("failing_for_hours", "failing_for_hours must be 1 to 720")
+            })?;
+    }
+    let mut report = repository::daily_report(
+        &state.pool,
+        state.routes.routes(),
+        chrono::Utc::now(),
+        failing_for_hours,
+    )
+    .await?;
     report.reconciliation = crate::observability::reconciliation().map(Into::into);
     Ok(Json(report))
 }
@@ -399,6 +459,7 @@ pub(super) async fn ensure_customer(
 
 async fn mutate_account_scopes(
     state: &AppState,
+    actor: &Actor,
     account: &str,
     request: AccountPauseRequest,
     pause: bool,
@@ -412,11 +473,12 @@ async fn mutate_account_scopes(
     let mut transaction = state.pool.begin().await?;
     let updated = crate::pause::mutate_account_scopes_in(
         &mut transaction,
+        &state.routes,
         account_id,
         crate::pause::PauseOwner::Operator,
         &scopes,
         pause,
-        &admin_actor(state),
+        actor,
         &request.reason,
     )
     .await?
@@ -429,6 +491,7 @@ async fn mutate_account_scopes(
 
 async fn mutate_customer_scopes(
     state: &AppState,
+    actor: &Actor,
     account: &str,
     client_reference_id: &str,
     request: CustomerPauseRequest,
@@ -443,14 +506,8 @@ async fn mutate_customer_scopes(
     )
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let updated = repository::mutate_customer_scopes(
-        &state.pool,
-        &customer,
-        &scopes,
-        pause,
-        &admin_actor(state),
-    )
-    .await?;
+    let updated =
+        repository::mutate_customer_scopes(&state.pool, &customer, &scopes, pause, actor).await?;
     Ok(Json(PauseResponse {
         paused_scopes: updated,
     }))
@@ -458,6 +515,7 @@ async fn mutate_customer_scopes(
 
 async fn mutate_route_scopes(
     state: &AppState,
+    actor: &Actor,
     route: &str,
     request: PauseRequest,
     pause: bool,
@@ -472,8 +530,7 @@ async fn mutate_route_scopes(
     }
     let scopes = validate_scopes(request.scopes)?;
     let updated =
-        repository::mutate_route_scopes(&state.pool, route, &scopes, pause, &admin_actor(state))
-            .await?;
+        repository::mutate_route_scopes(&state.pool, route, &scopes, pause, actor).await?;
     Ok(Json(RoutePauseResponse {
         route: route.to_owned(),
         paused_scopes: updated,
@@ -581,8 +638,4 @@ fn validate_contact(contact: &Contact) -> ApiResult<()> {
 
 fn parse_account_id(id: &str) -> ApiResult<Uuid> {
     crate::ids::parse(crate::ids::ACCOUNT, id).ok_or_else(ApiError::not_found)
-}
-
-fn admin_actor(state: &AppState) -> Actor {
-    Actor::admin(state.admin_key.kid.clone())
 }

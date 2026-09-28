@@ -16,6 +16,9 @@ T = TypeVar("T", bound="CreateTreasuryChallengeRequest")
 class CreateTreasuryChallengeRequest:
     """`POST /v1/treasuries/challenge` body.
 
+    Example:
+        {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'chain_id': 1}
+
     Attributes:
         address (str): The treasury address to prove: an EOA, or a contract deployed on the chain such as a Safe.
         chain_id (int): The chain of the treasury: a chain of the key's mode (`GET /v1/config`).

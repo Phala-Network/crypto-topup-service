@@ -38,6 +38,7 @@ use uuid::Uuid;
 use crate::db::{self, EventObject, NewOutboxEvent};
 use crate::routes::RouteSet;
 use crate::scanner::FinalizedHeads;
+use crate::tenancy::Scope;
 
 /// Delay before a failed pass is retried without a new `finalized` advance.
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -118,12 +119,13 @@ pub struct WatchStats {
 /// The finality watch over every configured chain.
 pub struct FinalityWatch {
     pool: PgPool,
+    routes: Arc<RouteSet>,
     chains: BTreeMap<u64, WatchChain>,
 }
 
 impl FinalityWatch {
     /// Watches every configured chain on its first two providers.
-    pub fn from_routes(pool: PgPool, routes: &RouteSet) -> Result<Self, String> {
+    pub fn from_routes(pool: PgPool, routes: Arc<RouteSet>) -> Result<Self, String> {
         let mut chains = BTreeMap::new();
         for chain_id in routes.chain_ids() {
             let reader = |index| -> Result<Arc<dyn WatchReader>, String> {
@@ -140,17 +142,28 @@ impl FinalityWatch {
                 },
             );
         }
-        Ok(Self { pool, chains })
+        Ok(Self {
+            pool,
+            routes,
+            chains,
+        })
     }
 
-    /// Watches one chain with injected readers, for tests.
-    pub fn single<R1, R2>(pool: PgPool, chain_id: u64, primary: R1, secondary: R2) -> Self
+    /// Watches one chain with injected readers, for tests; `routes` render event objects.
+    pub fn single<R1, R2>(
+        pool: PgPool,
+        routes: Arc<RouteSet>,
+        chain_id: u64,
+        primary: R1,
+        secondary: R2,
+    ) -> Self
     where
         R1: ChainReader + Send + Sync + 'static,
         R2: ChainReader + Send + Sync + 'static,
     {
         Self {
             pool,
+            routes,
             chains: BTreeMap::from([(
                 chain_id,
                 WatchChain {
@@ -333,7 +346,7 @@ impl FinalityWatch {
                 })
             }
             Verdict::Reverse(evidence) => {
-                let reversed = reverse_deposit(&self.pool, deposit, evidence).await?;
+                let reversed = reverse_deposit(&self.pool, &self.routes, deposit, evidence).await?;
                 if reversed {
                     tracing::warn!(
                         tags.alert = "TopupDepositReversed",
@@ -624,6 +637,7 @@ async fn record_evidence(
 /// that rule whole should one ever be pending.
 async fn reverse_deposit(
     pool: &PgPool,
+    routes: &RouteSet,
     deposit: &WatchedDeposit,
     evidence: Value,
 ) -> Result<bool, FinalityError> {
@@ -659,33 +673,22 @@ async fn reverse_deposit(
         &evidence,
     )
     .await?;
-    sqlx::query(
-        r#"
-        UPDATE refunds
-        SET status = 'canceled', updated_at = now()
-        WHERE deposit_id = $1 AND status = 'pending'
-        "#,
+    let scope = Scope::new(account_id, livemode);
+    let pending_refunds: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM refunds WHERE deposit_id = $1 AND status = 'pending' ORDER BY id FOR UPDATE",
     )
     .bind(deposit.id)
-    .execute(&mut *transaction)
+    .fetch_all(&mut *transaction)
     .await?;
-    if matches!(
-        transition.from,
-        DepositState::Credited | DepositState::Rejected
-    ) {
-        db::enqueue_in(
-            &mut transaction,
-            &NewOutboxEvent {
-                id: reversed_event_id(deposit.id),
-                event_type: "deposit.reversed".to_owned(),
-                account_id,
-                livemode,
-                object: EventObject::Deposit(deposit.id),
-                next_attempt_at: Utc::now(),
-                actor: crate::db::SYSTEM_ACTOR.to_owned(),
-            },
-        )
-        .await?;
+    for refund in pending_refunds {
+        let object = EventObject::Refund(refund);
+        let before = db::render(&mut transaction, routes, scope, object).await?;
+        sqlx::query("UPDATE refunds SET status = 'canceled', updated_at = now() WHERE id = $1")
+            .bind(refund)
+            .execute(&mut *transaction)
+            .await?;
+        let event = NewOutboxEvent::system(Uuid::new_v4(), "refund.updated", scope, object);
+        db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     }
     let reopened = sqlx::query(
         r#"
@@ -705,19 +708,27 @@ async fn reverse_deposit(
         && row.try_get::<String, _>("status")? == "expired"
     {
         let quote_id: Uuid = row.try_get("id")?;
-        db::enqueue_in(
-            &mut transaction,
-            &NewOutboxEvent {
-                id: event_id("quote.expired", quote_id),
-                event_type: "quote.expired".to_owned(),
-                account_id,
-                livemode,
-                object: EventObject::Quote(quote_id),
-                next_attempt_at: Utc::now(),
-                actor: crate::db::SYSTEM_ACTOR.to_owned(),
-            },
-        )
-        .await?;
+        let event = NewOutboxEvent::system(
+            event_id("quote.expired", quote_id),
+            "quote.expired",
+            scope,
+            EventObject::Quote(quote_id),
+        );
+        db::enqueue_in(&mut transaction, routes, &event, None).await?;
+    }
+    // Rendered last, so the object shows the deposit, its refunds, and its quote as the reversal
+    // leaves them.
+    if matches!(
+        transition.from,
+        DepositState::Credited | DepositState::Rejected
+    ) {
+        let event = NewOutboxEvent::system(
+            reversed_event_id(deposit.id),
+            "deposit.reversed",
+            scope,
+            EventObject::Deposit(deposit.id),
+        );
+        db::enqueue_in(&mut transaction, routes, &event, None).await?;
     }
     transaction.commit().await?;
     Ok(true)

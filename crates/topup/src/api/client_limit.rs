@@ -42,9 +42,21 @@ impl Default for ClientReadLimiter {
 }
 
 impl ClientReadLimiter {
-    /// Counts one read of `quote`; `false` means the read is over a limit and must be refused.
-    pub fn allow(&self, quote: Uuid) -> bool {
-        self.allow_at(Instant::now(), quote)
+    /// Counts one read of `quote`; `Err` holds the seconds until the window ends, for a read over a
+    /// limit that must be refused.
+    pub fn allow(&self, quote: Uuid) -> Result<(), u64> {
+        let now = Instant::now();
+        if self.allow_at(now, quote) {
+            return Ok(());
+        }
+        let window = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let left = WINDOW.saturating_sub(now.saturating_duration_since(window.started));
+        Err(left
+            .as_secs()
+            .saturating_add(u64::from(left.subsec_nanos() > 0)))
     }
 
     fn allow_at(&self, now: Instant, quote: Uuid) -> bool {

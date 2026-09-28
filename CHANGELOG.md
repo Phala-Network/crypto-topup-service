@@ -9,6 +9,36 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed (breaking; nothing is live)
 
+- API conformance with Stripe (docs/design/multi-tenant.md, "API conformance" amendment):
+  - Business-state failures are `400` (`deposit_not_final`, `deposit_not_refundable`,
+    `quote_unexpected_state`, `quote_payment_received`, `quote_window_closed`, `paused`,
+    `chain_frozen`, `treasury_not_set`, `treasury_change_pending`, `treasury_unchanged`,
+    `treasury_unexpected_state`, `exposure_cap_exceeded`, `deposit_address_cap_exceeded`,
+    `webhook_endpoint_cap_exceeded`, `webhook_endpoint_disabled`, `deposit_address_retired`,
+    `refund_unexpected_state`, `transfer_already_used`, `api_key_inactive`, `last_api_key`); `409`
+    is only `idempotency_key_in_use`. The unused generic `conflict` code is gone. The admin API's
+    `signature_replayed` is `401`.
+  - A customer's quote-creation and deposit address rotation limits are `429 customer_rate_limit`
+    (was `rate_limit`); every `429` carries `Retry-After`.
+  - Every response carries `Request-Id: req_…`, replacing `x-request-id`.
+  - An `Idempotency-Key` saves the result of every request that started executing, `500`s
+    included, and replays it; a request that failed validation (`parameter_*`), was rate limited,
+    or met `503 unavailable` is not saved. Validation failures were saved before, `500`s were not.
+  - Event `data.object` is rendered in the transaction of the change, not at the first delivery or
+    read, and never changes.
+  - Treasury events are `treasury.created` (every proven treasury, pending or at once active),
+    `treasury.updated` (a pending treasury took effect, or was replaced), and `treasury.canceled`,
+    replacing `account.treasury.pending|updated|canceled`; stored events and endpoints'
+    `enabled_events` are renamed.
+  - A quote's address salt is `keccak256(abi.encode(account, client_reference_id, "quote",
+    quote_id))` (was tagged `"lock"`).
+  - Admin paths: `POST /v1/admin/reconciliation_blocks/{block_key}/lift` and
+    `GET /v1/admin/reports/daily` (were `reconciliation-blocks` and `report/daily`); a route pause
+    names its path parameter `{route}`.
+  - The OpenAPI document `openapi.json` is the merchant API only; the admin API is
+    `openapi.admin.json` (also served at `/openapi.admin.json`). Each object's `object` is a
+    single-value enum.
+
 - API vocabulary (docs/design/multi-tenant.md §16 PR 10, and the Stripe-conventions audit): the
   merchant's customer is `client_reference_id` everywhere (`POST /v1/quotes`, quotes, deposits,
   `GET /v1/deposits?client_reference_id=`, and the admin path
@@ -26,6 +56,21 @@ webhook receivers must ignore unknown fields. The format follows
 - `livemode` and `metadata` are required on every object in the OpenAPI document.
 
 ### Added
+
+- Events carry `request: {id, idempotency_key}` (the request that caused them; `null` for the
+  service's workers), and every `*.updated` event `data.previous_attributes`. New events
+  `refund.created`, `refund.updated` (marked paid, canceled, succeeded, failed, metadata), and
+  `quote.canceled`.
+- Delivery health: webhook endpoints report `pending_deliveries`, `oldest_pending_at`, and
+  `last_attempt {at, status_code}`; `GET /v1/events` takes `delivery_success` and `types[]`; the
+  admin daily report lists `failing_webhook_endpoints` older than `failing_for_hours` (24).
+- Error objects carry `doc_url`, the code's section of the API reference
+  (<https://phala-network.github.io/phala-pay/>), built with Redoc from `openapi.json` and
+  published from `main`.
+- `GET /v1/api_keys` and `GET /v1/treasuries` take `limit`, `starting_after`, and `ending_before`;
+  `GET /v1/deposits` takes `created[gt]` and `created[lt]` beside `created[gte]` and
+  `created[lte]`, all compared at whole seconds.
+- The OpenAPI documents have `servers`, `tags`, and an example of every object and body.
 
 - `POST /v1/account {confirmation_policies}` requires, per chain, a confirmation stricter than the
   route's floor (a depth, `safe`, or `finalized`), applied to every deposit not credited yet;

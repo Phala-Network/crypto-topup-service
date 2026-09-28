@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.balance_object import BalanceObject
+from ..models.balance_object import check_balance_object
 from typing import cast
 
 if TYPE_CHECKING:
@@ -22,14 +24,19 @@ class Balance:
     """The account's balance held in its forwarders, in the key's mode (Stripe's Balance): what
     payments put there and no finalized `Flushed` event has moved to a treasury yet.
 
+        Example:
+            {'livemode': False, 'object': 'balance', 'unswept': [{'amount_atomic': '202510000000000000000', 'asset': 'PHA',
+                'chain_id': 1, 'final_amount_atomic': '202510000000000000000', 'token':
+                '0x6c5ba91642f10282b576d91922ae6448c9d52f4e'}]}
+
         Attributes:
             livemode (bool): The mode.
-            object_ (str): Always `balance`.
+            object_ (BalanceObject): Always `balance`.
             unswept (list[BalanceAmount]): One entry per chain and token held.
     """
 
     livemode: bool
-    object_: str
+    object_: BalanceObject
     unswept: list[BalanceAmount]
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -38,7 +45,7 @@ class Balance:
 
         livemode = self.livemode
 
-        object_ = self.object_
+        object_: str = self.object_
 
         unswept = []
         for unswept_item_data in self.unswept:
@@ -64,7 +71,7 @@ class Balance:
         d = dict(src_dict)
         livemode = d.pop("livemode")
 
-        object_ = d.pop("object")
+        object_ = check_balance_object(d.pop("object"))
 
         unswept = []
         _unswept = d.pop("unswept")

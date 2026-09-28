@@ -137,7 +137,7 @@ contract ForwarderFactory {                            // no roles, no admin, no
   most `NATIVE_SEND_GAS` and copy no return data, so a treasury cannot consume the batch's gas;
   the factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
   refused.
-- `salt = keccak256(abi.encode(account, client_reference_id, "lock", quote_id))`, where `account`
+- `salt = keccak256(abi.encode(account, client_reference_id, "quote", quote_id))`, where `account`
   is the merchant's `acct_…` id, `client_reference_id` its customer's identifier, and `quote_id` the
   service-assigned `qt_…` id. A deposit address's salt is `keccak256(abi.encode(account,
   livemode, client_reference_id, "deposit_address", version))`, types `(string, bool, string,
@@ -277,13 +277,15 @@ refunds       id, account_id, livemode, chain_id, deposit_id, amount_atomic, des
               metadata jsonb, created_at   -- paid by the merchant from the address's treasury
               UNIQUE (chain_id, tx_hash, log_index) among pending and succeeded refunds
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
-              (enabled|disabled), disabled_reason (failing|gone), description, metadata jsonb,
-              created_at, deleted_at   -- at most 16 not deleted per account and mode
+              (enabled|disabled), disabled_reason (gone), description, metadata jsonb,
+              created_at, deleted_at, last_attempt_at, last_attempt_status
+              -- at most 16 not deleted per account and mode; last_attempt_*: delivery health
 events        id (evt_…), account_id, livemode, type,
-              object_type (deposit|quote|api_key|account|refund|webhook_endpoint),
-              object_id, actor (key_… | admin | system), data jsonb, created
-              -- data: the object, rendered at the first delivery attempt or read; endpoint
-              -- events store a snapshot when they happen
+              object_type (deposit|quote|api_key|account|refund|treasury|webhook_endpoint),
+              object_id, actor (key_… | admin | system), request_id (req_…),
+              idempotency_key, data jsonb, created
+              -- data: {object, previous_attributes?}, rendered in the transaction of the change
+              -- and never changed: the service may only insert events
 webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, created_at, delivered_at,
               failed_at, url (an endpoint's notice of its own change), response jsonb
               PRIMARY KEY (event_id, endpoint_id)   -- one per endpoint of the event's scope that takes it
@@ -515,8 +517,8 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   never reported as expired. Exposure stays reserved until finality, about 15 minutes after
   `expires_at`, and longer while the scanner is stalled (§16). Until then the API
   shows the quote `open` past `expires_at`, and cancellation is refused once the window has
-  closed (`409 quote_window_closed`). A quote whose address has received any payment, even a
-  rejected one, can no longer be cancelled (`409 quote_payment_received`).
+  closed (`400 quote_window_closed`). A quote whose address has received any payment, even a
+  rejected one, can no longer be cancelled (`400 quote_payment_received`).
 - Exposure counters sum `credit_minor` across routes, so every route must use the same
   `unit_decimals`; the service refuses to load routes that differ.
 - A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
@@ -540,15 +542,15 @@ same, in the same transaction, for that chain's network of every address of the 
 active or retired (below). Superseded networks and retired versions stay watched, are still
 credited, and keep paying their old treasury, which the forwarder's clone argument fixes for good;
 a refund of their deposits is paid from that old treasury. A network is issued only on a chain
-where the account has a treasury (`409 treasury_not_set` when no issuable chain has one). Active addresses are capped per account and mode
+where the account has a treasury (`400 treasury_not_set` when no issuable chain has one). Active addresses are capped per account and mode
 (`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000 test;
-`409 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
-(`429 rate_limit`), none is issued while `quotes` is paused, and a frozen chain gets no new
+`400 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
+(`429 customer_rate_limit`, with `Retry-After`), none is issued while `quotes` is paused, and a frozen chain gets no new
 network.
 
 **Treasuries** ([design D10](design/multi-tenant.md#d10-treasury-proof-and-changes)). Each
 account sets one treasury per chain and mode through the API; quotes and new deposit address
-networks pay the chain's current one (`409 treasury_not_set` without one), and each `addresses`
+networks pay the chain's current one (`400 treasury_not_set` without one), and each `addresses`
 row keeps the treasury it was issued over, so a quote created before a change keeps its address.
 `POST /v1/treasuries/challenge {chain_id, address}` issues an EIP-4361 message: `domain` is the
 authority of `TOPUP_PUBLIC_ORIGIN` and `URI` the origin, the statement names the account and mode,
@@ -572,11 +574,12 @@ change is due (a listed one is canceled, `cancellation_reason: sanctioned`, inst
 and daily while current: a listed current treasury pauses the account's `quotes` and `settlement`
 (audited, `account.updated`, alert `TopupTreasurySanctioned`) until the operator resumes them with
 `POST /v1/admin/accounts/{acct}/resume` after review. The chain's first treasury and every
-test-mode change apply at once; a later live change is `pending` for 48 hours
-(`account.treasury.pending`), cancellable with `POST /v1/treasuries/{id}/cancel`
-(`account.treasury.canceled`), and then applied by the time-lock worker
-(`account.treasury.updated`), which replaces the chain's deposit address networks as above; one
-change waits per chain (`409 treasury_change_pending`). The treasury events are account security
+test-mode change apply at once (`treasury.created`, `active`); a later live change is `pending`
+for 48 hours (`treasury.created`), cancellable with `POST /v1/treasuries/{id}/cancel`
+(`treasury.canceled`), and then applied by the time-lock worker (`treasury.updated`, and
+`treasury.updated` for the treasury it replaces), which replaces the chain's deposit address
+networks as above; one
+change waits per chain (`400 treasury_change_pending`). The treasury events are account security
 events: delivered to every enabled endpoint of the mode whatever its `enabled_events`, signed with
 the account's key of that mode like every event.
 
@@ -621,7 +624,7 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
                    "{id}.{timestamp}.{raw body}">, one entry per key during a rotation
 
 { "id": "<webhook-id>", "object": "event", "account": "acct_…", "livemode": true,
-  "type": "deposit.credited", "created": 1790409590,
+  "type": "deposit.credited", "created": 1790409590, "actor": "system", "request": null,
   "data": { "object": { "id": "dep_…", "object": "deposit", "livemode": true,
                         "client_reference_id": "<customer>",
                         "quote": "qt_…", "status": "credited", "amount": 1234,
@@ -629,9 +632,11 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 ```
 
 - The screen step writes the event in the transaction that moves the deposit `confirmed →
-  credited` (§7), seconds after the transfer reaches the route's confirmation (§8). The outbox row names the product and the deposit; `data.object`, the deposit
-  as `GET /v1/deposits/{id}` returns it, is rendered on the first delivery attempt and stored,
-  so retries and resends send the same body. `amount` is the quoted credit when `price_source`
+  credited` (§7), seconds after the transfer reaches the route's confirmation (§8). The outbox row names the account and the deposit; `data.object`, the deposit
+  as `GET /v1/deposits/{id}` returns it, is rendered in that same transaction, after every write
+  of the transition, and never changed (Stripe: an event's data is rendered when it is created,
+  <https://docs.stripe.com/api/events/object>), so every endpoint, retry, resend, and read gets
+  the same body. `amount` is the quoted credit when `price_source`
   is `quote`, otherwise the spot credit at finality (§9). `quote` is the receiving address's
   quote, also when a late or wrong-amount payment was valued at spot.
 - A credited deposit whose transaction leaves the chain before finality (§7) is `reversed`, and
@@ -654,7 +659,10 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
   its queue; test and live events have separate delivery workers
   (`topup-outbox-test`, `topup-outbox-live`), so test traffic cannot delay live deliveries
   (design §9). An undelivered event raises the outbox age warning after 24 hours. The daily
-  report counts undelivered `deposit.credited` per route.
+  report counts undelivered `deposit.credited` per route and lists every enabled endpoint whose
+  oldest undelivered event is older than `failing_for_hours` (24 by default). The merchant sees
+  the same health on its endpoint objects (`pending_deliveries`, `oldest_pending_at`,
+  `last_attempt`) and lists what an endpoint missed with `GET /v1/events?delivery_success=false`.
 - Every delivery leaves through the smokescreen sidecar (`TOPUP_WEBHOOK_PROXY`), the only filter
   of the addresses a merchant's URL may reach: it refuses loopback, private, link-local and cloud
   metadata, CGNAT, and IPv4-embedding IPv6 addresses, and IPv4-mapped IPv6 as the IPv4 it maps
@@ -708,14 +716,15 @@ knows it. Where it departs, the last column says why.
 | Ids | Prefixed opaque ids | `qt_`, `dep_`, `re_`, `evt_` and the 32 hex digits of a UUID; the deposit and event UUIDs are UUIDv5, so they stay recomputable (§0, §11) |
 | Amounts | Integer minor units, lowercase currency ([currencies](https://docs.stripe.com/currencies)) | `amount` in US cents with `currency: "usd"`; token amounts are decimal strings (`amount_atomic`), since 18-decimal values exceed JSON's safe integers |
 | Timestamps | Unix seconds | Same: `created`, `expires_at`, `valued_at` |
-| Lists ([pagination](https://docs.stripe.com/api/pagination)) | `{object: "list", url, has_more, data}`, newest first; `limit` 1–100, `starting_after` or `ending_before` | Same |
+| Lists ([pagination](https://docs.stripe.com/api/pagination)) | `{object: "list", url, has_more, data}`, newest first; `limit` 1–100, `starting_after` or `ending_before`; `created[gt\|gte\|lt\|lte]` | Same on every list; `created` bounds on deposits and events |
 | Expansion ([expanding](https://docs.stripe.com/api/expanding_objects)) | `expand[]`, depth ≤ 4 | `expand[]` for a deposit's `quote`, a quote's `deposit`, and a refund's `deposit`; depth 1 |
-| Errors ([errors](https://docs.stripe.com/api/errors)) | `{error: {type, code, message, param, doc_url}}` | `{error: {type, code, message, param}}`; `type` is `invalid_request_error`, `idempotency_error`, or `api_error` |
+| Errors ([errors](https://docs.stripe.com/api/errors)) | `{error: {type, code, message, param, doc_url}}`; `400` for a request that cannot succeed, `409` for a conflict with another request (an idempotency key in use), `429` with `Retry-After` | Same; `doc_url` points at the code's section of the API reference |
+| Request ids ([request IDs](https://docs.stripe.com/api/request_ids)) | `Request-Id: req_…` on every response; an event's `request` names it | Same |
 | Metadata ([metadata](https://docs.stripe.com/api/metadata)) | `metadata` on updatable objects: ≤ 50 string pairs, keys ≤ 40 characters without `[`/`]`, values ≤ 500; merged on update, `""` unsets a key, `metadata=""` unsets all | Same on quotes, deposits, and refunds, as JSON; a deposit starts with a copy of its quote's (below) |
 | Updates | `POST /v1/{object}/{id}` with the updatable parameters | Same, for `metadata` only |
-| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | Same, per account and mode; a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
+| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h; the result is saved once the endpoint starts executing, `500`s included, but not a validation failure | Same, per account and mode (`429` and `503` are not saved either); a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
-| Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", account, livemode, type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures by the account's key per mode, asymmetric, so the merchant holds only a public key |
+| Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", account, livemode, type, created, request, data: {object, previous_attributes}}`, `data` rendered when the event is created; `Stripe-Signature` | Same body, plus `actor`; Standard Webhooks `v1a` signatures by the account's key per mode, asymmetric, so the merchant holds only a public key |
 | Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; every object and event carries `livemode` |
 | Onboarding | Connect accounts created through the API, `stripe_dashboard.type = none` | The operator creates every account after offline due diligence; there is no dashboard (design D8) |
 
@@ -727,7 +736,8 @@ and mode, from the key alone, and every query filters on both (design D13); the 
 table then grants the key kind's permissions. A live key of an account the operator has not
 enabled for live mode is `403 testmode_charges_only`. Requests are rate-limited per account and
 mode in the process, 100 per second live and 25 test, with a 500 per second test-mode ceiling
-across accounts (`429 rate_limit`). Every `POST` is idempotent by `Idempotency-Key` (above). A
+across accounts (`429 rate_limit`, `Retry-After: 1`). Every response carries `Request-Id: req_…`,
+and an event a request causes records it with the request's `Idempotency-Key`. Every `POST` is idempotent by `Idempotency-Key` (above). A
 request for another account's object, or for the same account's object in the other mode,
 answers `404` as for a missing one.
 
@@ -788,8 +798,8 @@ GET    /v1/admin/deposits/{id}            the Deposit with `admin`: state, route
 POST   /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
-POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
-GET    /v1/admin/report/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
+POST   /v1/admin/reconciliation_blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
+GET    /v1/admin/reports/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
 ```
 
@@ -820,7 +830,7 @@ cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and
 route's `confirmations` (a depth such as `"2"`, `"safe"`, or `"finalized"`), the typical credit
 time (`typical_credit_seconds`: 30 at depth 2), and the typical finality time; plus `max_open_amount_per_account`, the per-account open exposure cap,
 which also bounds any single quote. The remaining exposure is not served: a quote above it fails
-with `409 exposure_cap_exceeded`, whose message states the remaining amount. The forwarder factory
+with `400 exposure_cap_exceeded`, whose message states the remaining amount. The forwarder factory
 and implementation are not served: the product pins them from the attested deployment, like its
 webhook keys, because the service cannot vouch for its own addresses.
 
@@ -830,7 +840,7 @@ payment, deposit, client_secret, metadata}`. `exchange_rate` is the locked price
 places. `status` is `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`
 (Checkout Session's and PaymentIntent's names; the database keeps `consumed` and `cancelled`).
 `chain_id` and `asset` are required, so a second route for the same asset is not a breaking change.
-Cancel returns `canceled`, also on a repeat, and refuses with `409 quote_payment_received`,
+Cancel returns `canceled`, also on a repeat, and refuses with `400 quote_payment_received`,
 `quote_window_closed`, or `quote_unexpected_state` (complete or expired).
 
 `payment` (display only, §8) is the payment the page should show, chosen by the §9 consumption
@@ -854,9 +864,10 @@ payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `conf
 route's confirmation, being valued and screened), `credited`, `rejected` (the reason is not
 exposed), or `reversed`. No account,
 price, deposit id, or transaction hash. Every such response, errors included, allows any
-origin (`Access-Control-Allow-Origin: *`); the secret is the bearer. A secret that is not the
-quote's is `404`. These reads are limited in the process to 120 per quote and 6 000 in total per
-minute (`429 rate_limit`).
+origin (`Access-Control-Allow-Origin: *`) and exposes `Request-Id` and `Retry-After`; the secret
+is the bearer. A secret that is not the quote's is `404`. These reads are limited in the process
+to 120 per quote and 6 000 in total per minute (`429 rate_limit`, `Retry-After` the rest of the
+minute).
 
 **Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
 status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
@@ -895,8 +906,8 @@ pays the refund from and attaches with `mark_paid`. At `finalized`, both provide
 `Transfer` of the deposit's token from that treasury to the destination for exactly the amount, in
 a log no other refund holds; then `succeeded` and `deposit.refunded`, otherwise `failed` with
 `failure_reason` and the reservation released. An ineligible deposit is
-`409 deposit_not_refundable`; one that is not final yet, and so could still be reversed, is
-`409 deposit_not_final`; an amount above the remainder is `400 amount_too_large`; a sanctioned
+`400 deposit_not_refundable`; one that is not final yet, and so could still be reversed, is
+`400 deposit_not_final`; an amount above the remainder is `400 amount_too_large`; a sanctioned
 destination is `400 destination_sanctioned`. A reversed deposit is not refundable.
 
 **Errors.** Codes are stable; messages are not.
@@ -908,31 +919,43 @@ destination is `400 destination_sanctioned`. A reversed deposit is not refundabl
 | 401 | `invalid_request_error` | `api_key_missing`, `api_key_invalid`, `api_key_expired`; `signature_invalid` (admin) |
 | 403 | `invalid_request_error` | `testmode_charges_only`, `permission_denied` |
 | 404 | `invalid_request_error` | `resource_missing` |
-| 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry) |
-| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_address_cap_exceeded`, `deposit_address_retired`, `deposit_not_refundable`, `deposit_not_final`, `refund_unexpected_state`, `transfer_already_used`, `paused`, `chain_frozen` |
-| 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; quote creations and deposit address rotations per customer; quote reads by `client_secret`) |
+| 400 | `invalid_request_error` | the business-state failures: `api_key_inactive`, `last_api_key`, `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_address_cap_exceeded`, `deposit_address_retired`, `deposit_not_refundable`, `deposit_not_final`, `refund_unexpected_state`, `transfer_already_used`, `paused`, `chain_frozen`, `treasury_not_set`, `treasury_*`, `webhook_endpoint_cap_exceeded`, `webhook_endpoint_disabled` |
+| 401 | `invalid_request_error` | `signature_replayed` (admin: the signature was already used) |
+| 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry); the only `409` |
+| 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; reads of a public view by `client_secret`), `customer_rate_limit` (quote creations per minute and deposit address rotations per hour of one customer); each with `Retry-After` |
 | 503 | `api_error` | `unavailable` (no fresh price, database unavailable) |
 | 500 | `api_error` | `internal_error` |
 
-The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, with the same
-`Idempotency-Key`.
+Every error carries `doc_url`, the code's section of the API reference
+(`https://phala-network.github.io/phala-pay/#section/Errors/<code>`), built from the committed
+`openapi.json` with Redoc and published by `.github/workflows/api-reference.yml`. The SDK retries
+`429` (after `Retry-After`), `5xx`, transport errors, and `idempotency_key_in_use`, with the same
+`Idempotency-Key`, and raises a response marked `Idempotent-Replayed` as it is.
 
 **Events** (Standard Webhooks, signed with the account's webhook key in the event's mode) are
 Stripe's Event object, `{id: "evt_…", object: "event", account, livemode, type, created, actor,
-data: {object}}`; every object carries `livemode`, and `actor` names who caused the event (an API
-key id, `admin`, or `system`). The SDK's `construct_event` fails closed unless a
+request, data: {object, previous_attributes}}`; every object carries `livemode`, `actor` names who
+caused the event (an API key id, `admin`, or `system`), and `request` the API request that did,
+`{id: "req_…", idempotency_key}`, or `null` for the service's workers. The SDK's `construct_event` fails closed unless a
 signature verifies with a pinned key and `account` and `livemode` are the receiver's: `deposit.credited`,
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
 refund) carry the deposit, `refund.failed` (the attached transaction is final but does not pay the
-refund; one per refund) the refund with its `failure_reason`, `quote.expired` the quote, and
-`account.treasury.pending`, `.updated`, and `.canceled` the treasury (§9; random event ids, like
-`api_key.*`). `data.object` is the object as the API returns it, rendered on the first
-delivery attempt (or read through `GET /v1/events`) and stored, so every retry and resend sends
-the same body. Every event id is
+refund; one per refund) the refund with its `failure_reason`, `refund.created` and
+`refund.updated` (requested, marked paid, canceled, succeeded, failed, or its metadata changed)
+the refund, `quote.canceled` and `quote.expired` the quote, and `treasury.created`, `.updated`,
+and `.canceled` the treasury (§9; random event ids, like `api_key.*`). `data.object` is the object
+as the API returns it, rendered in the transaction that changes it, after all its writes, by one
+path (`db::enqueue_in`, over `db::enqueue_rendered_in`), and never changed: the service's role may
+insert events but not update or delete them, so every endpoint, retry, resend, and read gets the
+same body, however the object changes later. Every `*.updated` event (`account.updated`,
+`api_key.updated`, `refund.updated`, `treasury.updated`, `webhook_endpoint.updated`) carries
+`data.previous_attributes`: the object's representation before the change, rendered in the same
+transaction, diffed field by field (a changed object field such as `metadata` holds only its
+changed keys; an added field is `null`). The system-caused event ids are
 `uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded` and
 `refund.failed`, so a
-re-emission after a restore deduplicates for every type. `deposit.credited` is the fulfillment
+re-emission after a restore deduplicates them. `deposit.credited` is the fulfillment
 event (§11) and `deposit.reversed` claws it back like `deposit.refunded`; the others are
 informational and never change balances. Nothing is sent before the route's confirmation: the
 checkout page reads the quote's `payment`. The outbox does not order events, so
@@ -941,19 +964,24 @@ state (the deposit or quote they fetch), never on event order. Object changes ar
 receivers must ignore unknown fields.
 
 **Account events** (`account.updated`, `api_key.created|updated|revoked`,
-`webhook_endpoint.created|updated|deleted`, and design PR 7's `account.treasury.*`) are the
+`webhook_endpoint.created|updated|deleted`, and `treasury.created|updated|canceled`) are the
 account's security notices and reach every enabled endpoint of the mode whatever its
 `enabled_events`, GitHub's `meta` precedent (design §11). A change to an endpoint is announced to
 that endpoint first, at the URL it had before, even when the change disables or deletes it, so a
 leaked key cannot redirect or silence an endpoint unseen; `webhook_endpoint.updated` carries the
 replaced values in `data.previous_attributes`. `GET /v1/events` lists every event of the mode,
-filterable by `type` (or a group, `deposit.*`) and `created`: the merchant's notifications and its
-audit log (design §13). `POST /v1/webhook_endpoints/{id}/test` sends `webhook_endpoint.test` to
+filterable by `type` (or a group, `deposit.*`), `types[]` (up to 20), `delivery_success`, and
+`created[gt|gte|lt|lte]`: the merchant's notifications and its audit log (design §13). `POST /v1/webhook_endpoints/{id}/test` sends `webhook_endpoint.test` to
 one endpoint. Endpoint URLs are `https` on port 443, or in test mode also `http` on 80; the
 egress proxy decides which addresses they may reach (§11).
 
-OpenAPI comes from `utoipa`; the SDKs are generated from it and ship with a runnable integration
-example, a signing helper, and a versioning and deprecation policy. A sandbox (Sepolia, test
+OpenAPI comes from `utoipa`, finished in `api/openapi.rs` (servers, tags, the reference's
+introduction with one section per error code, a single-value `enum` on each `object`, and an
+example of every object and body; statuses stay plain strings so a new value never breaks a
+client). There are two documents: `crates/topup/openapi.json`, the merchant API the SDKs are
+generated from and the reference is built from, and `openapi.admin.json`, the operator's; both
+are also served (`/openapi.json`, `/openapi.admin.json`). The SDKs ship with a runnable
+integration example, a signing helper, and a versioning and deprecation policy. A sandbox (Sepolia, test
 token, product credentials, scripted late/under/over/rejected scenarios) is available to
 integrators before mainnet.
 
@@ -1061,7 +1089,7 @@ and at most 32 s of backoff per read. Any other failure, or a refusal outlasting
 fails only its check and withholds the round's heartbeat; the next round runs it again.
 
 A block (`freeze chain`) stays until an operator lifts it with the
-admin-signed `POST /v1/admin/reconciliation-blocks/{block_key}/lift {reason}` once the cause is
+admin-signed `POST /v1/admin/reconciliation_blocks/{block_key}/lift {reason}` once the cause is
 investigated and signed off; the daily report lists active blocks. Lifting is manual: the service
 does not re-check first, and a finding that still reproduces blocks again on the next round. The
 lift writes `audit` with the reason and the removed block in the same transaction.
@@ -1191,7 +1219,7 @@ which are stable across releases; a production CVM exposes no logs or shell. `to
 |---|---|
 | Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's one persistent address for every supported token on every chain (the same wherever the treasury is the same), rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
-| Refunds | Only a final deposit is refunded (`409 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
+| Refunds | Only a final deposit is refunded (`400 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | The merchant pays its own sweep gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sweep, and open quote exposure up to the caps. |
@@ -1216,7 +1244,7 @@ monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconci
 any stopped loop; a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and
 age, unflushed balance, open lock exposure, undelivered `deposit.credited` events and their age,
 reconciliation) is in the daily admin
-report (`GET /v1/admin/report/daily`); RPC calls per provider, chain, and method are counters in
+report (`GET /v1/admin/reports/daily`); RPC calls per provider, chain, and method are counters in
 the admin-signed `GET /v1/admin/metrics` (Prometheus text), read on demand since no collector
 runs. Log lines and their spans (`deposit_id`, `chain_id`,
 `state`, `attempt`) serve local stacks.

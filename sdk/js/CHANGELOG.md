@@ -8,6 +8,10 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Changed (breaking)
 
+- `quoteSalt(account, clientReferenceId, quoteId)` replaces `lockSalt`: a quote's address salt is
+  tagged `"quote"` (design D3; it was `"lock"`), so `quoteAddress` recomputes the service's
+  addresses again.
+
 - `<Checkout expectedAddress>` is required, as are `expectedAddress` in `createCheckout`,
   `useCheckout`, `PhalaPay.checkout(clientSecret, { expectedAddress })`, and the second argument of
   `retrieveQuote`/`PhalaPay.retrieveQuote`: the address your backend recomputed. A quote naming
@@ -18,6 +22,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Added
 
+- `CheckoutError.requestId` (the failed response's `Request-Id`) and, for `rate_limited`,
+  `retryAfter` (its `Retry-After`, in seconds), which `createCheckout` and `<DepositAddress>` wait
+  before reading again.
+- `WebhookEvent.request` (the request that caused the event, or `null` for the service's
+  workers) and the documented `data.previous_attributes` of `*.updated` events.
+
 - `<DepositAddress clientSecret apiBase pollInterval?>` follows the address's payments and shows
   each within about a block of arriving ("1.5 PHA received on Sepolia, 1 confirmation"), then
   credited, rejected, or reversed; `retrieveDepositAddress`, `parseClientDepositAddress`, and
@@ -25,7 +35,7 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 - `@phala/pay/server`, which takes no secret key: `constructEvent(payload, headers, publicKeys,
   { expectedAccount, expectedLivemode })` verifies Standard Webhooks `v1a` deliveries with
   WebCrypto (Node 20+, Deno, Bun, edge runtimes), failing closed for another account or mode;
-  `forwarderAddress`, `lockSalt`, `depositAddressSalt`, `quoteAddress`, and `depositAddress`
+  `forwarderAddress`, `quoteSalt`, `depositAddressSalt`, `quoteAddress`, and `depositAddress`
   recompute addresses; `flushTransaction`, `flushTransactions`, `safeBatch`, and `batchChecksum`
   build sweeps offline, with the Transaction Builder's `BatchFile` type.
 
@@ -54,6 +64,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Added
 
+- `CheckoutError.requestId` (the failed response's `Request-Id`) and, for `rate_limited`,
+  `retryAfter` (its `Retry-After`, in seconds), which `createCheckout` and `<DepositAddress>` wait
+  before reading again.
+- `WebhookEvent.request` (the request that caused the event, or `null` for the service's
+  workers) and the documented `data.previous_attributes` of `*.updated` events.
+
 - `<Checkout onChange>`: called once per status change with `{ status, quote, error }`, like
   Stripe Elements' `onChange`, so the page can react to `seen` or `confirming` without its own
   polling.
@@ -66,6 +82,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 ## [0.1.1] - 2026-09-27
 
 ### Added
+
+- `CheckoutError.requestId` (the failed response's `Request-Id`) and, for `rate_limited`,
+  `retryAfter` (its `Retry-After`, in seconds), which `createCheckout` and `<DepositAddress>` wait
+  before reading again.
+- `WebhookEvent.request` (the request that caused the event, or `null` for the service's
+  workers) and the documented `data.previous_attributes` of `*.updated` events.
 
 - `appearance.variables.accessibleColorOnColorPrimary` (`--pp-accessible-color-on-color-primary`,
   default `#ffffff`): the color of text on a `colorPrimary` background, such as the pay button's
@@ -81,6 +103,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 ## [0.1.0] - 2026-09-27
 
 ### Added
+
+- `CheckoutError.requestId` (the failed response's `Request-Id`) and, for `rate_limited`,
+  `retryAfter` (its `Retry-After`, in seconds), which `createCheckout` and `<DepositAddress>` wait
+  before reading again.
+- `WebhookEvent.request` (the request that caused the event, or `null` for the service's
+  workers) and the documented `data.previous_attributes` of `*.updated` events.
 
 - `PhalaPay({ apiBase })`: `retrieveQuote(clientSecret)` reads a quote's public view
   (`GET /v1/quotes/{id}?client_secret=…`) and `checkout(clientSecret)` follows it, exposing the

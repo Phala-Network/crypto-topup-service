@@ -617,7 +617,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("deposits", OPERATIONAL),
     ("refunds", OPERATIONAL),
     ("webhook_endpoints", OPERATIONAL),
-    ("events", OPERATIONAL),
+    ("events", &["SELECT", "INSERT"]),
     ("webhook_deliveries", OPERATIONAL),
     ("idempotency_keys", OPERATIONAL),
     ("retiring_webhook_keys", OPERATIONAL),
@@ -894,6 +894,7 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
             let mut transaction = context.app_pool.begin().await?;
             let result = db::apply_transition(
                 &mut transaction,
+                &topup::routes::RouteSet::default(),
                 id,
                 DepositState::Detected,
                 claimed.lease_token.context("claim must have a token")?,
@@ -927,6 +928,7 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
             let mut transaction = context.app_pool.begin().await?;
             db::apply_transition(
                 &mut transaction,
+                &topup::routes::RouteSet::default(),
                 id,
                 DepositState::Detected,
                 claimed.lease_token.context("claim must have a token")?,
@@ -977,6 +979,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
             ensure!(
                 db::apply_transition(
                     &mut transaction,
+                    &topup::routes::RouteSet::default(),
                     id,
                     DepositState::Detected,
                     Uuid::new_v4(),
@@ -1004,6 +1007,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
+                    request: None,
                 },
                 OutboxEvent {
                     id: Uuid::new_v4(),
@@ -1013,12 +1017,14 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
+                    request: None,
                 },
             ];
             let mut transaction = context.app_pool.begin().await?;
             ensure!(
                 db::apply_transition(
                     &mut transaction,
+                    &topup::routes::RouteSet::default(),
                     id,
                     DepositState::Detected,
                     claimed.lease_token.context("claim must have a token")?,
@@ -1050,11 +1056,13 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                 object: EventObject::Deposit(object),
                 next_attempt_at: Utc::now(),
                 actor: topup::db::SYSTEM_ACTOR.to_owned(),
+                request: None,
             });
             let mut transaction = context.app_pool.begin().await?;
             ensure!(
                 db::apply_transition(
                     &mut transaction,
+                    &topup::routes::RouteSet::default(),
                     id,
                     DepositState::Detected,
                     claimed.lease_token.context("claim must have a token")?,

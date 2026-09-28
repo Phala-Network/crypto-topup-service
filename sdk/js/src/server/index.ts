@@ -14,7 +14,7 @@ export {
   depositAddress,
   depositAddressSalt,
   forwarderAddress,
-  lockSalt,
+  quoteSalt,
   quoteAddress,
   type Forwarder,
 } from "./addresses.js";

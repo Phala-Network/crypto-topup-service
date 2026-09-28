@@ -11,8 +11,8 @@ from topup_sdk.addresses import (
     deposit_address_salt,
     deposit_id,
     forwarder_address,
-    lock_salt,
     quote_address,
+    quote_salt,
     same_address,
     to_checksum_address,
 )
@@ -25,24 +25,22 @@ VECTORS: dict[str, Any] = json.loads(
 )
 
 
-@pytest.mark.parametrize("vector", VECTORS["lock"], ids=lambda vector: vector["lock_ref"])
-def test_lock_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]) -> None:
-    salt = lock_salt(vector["product_slug"], vector["external_id"], vector["lock_ref"])
+@pytest.mark.parametrize("vector", VECTORS["quote"], ids=lambda vector: vector["quote_id"])
+def test_quote_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]) -> None:
+    salt = quote_salt(vector["account"], vector["client_reference_id"], vector["quote_id"])
     assert "0x" + salt.hex() == vector["salt"]
     address = forwarder_address(
         VECTORS["factory"], VECTORS["implementation"], vector["treasury"], salt
     )
     assert address == vector["predicted_address"]
-    # The vectors' names predate the API's: product_slug is the account, external_id the
-    # quote's client_reference_id, and lock_ref its id.
     assert (
         quote_address(
             VECTORS["factory"],
             VECTORS["implementation"],
             vector["treasury"],
-            account=vector["product_slug"],
-            client_reference_id=vector["external_id"],
-            quote_id=vector["lock_ref"],
+            account=vector["account"],
+            client_reference_id=vector["client_reference_id"],
+            quote_id=vector["quote_id"],
         )
         == vector["predicted_address"]
     )

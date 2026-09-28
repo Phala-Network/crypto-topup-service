@@ -61,19 +61,17 @@ async fn insert_rejected_event(
             .bind(id)
             .fetch_one(&mut **transaction)
             .await?;
-    super::outbox::enqueue_in(
-        transaction,
-        &super::outbox::NewOutboxEvent {
-            id: event_id("deposit.rejected", id),
-            event_type: "deposit.rejected".to_owned(),
-            account_id,
-            livemode,
-            object: super::outbox::EventObject::Deposit(id),
-            next_attempt_at: Utc::now(),
-            actor: crate::db::SYSTEM_ACTOR.to_owned(),
-        },
-    )
-    .await
+    let event = super::outbox::NewOutboxEvent::system(
+        event_id("deposit.rejected", id),
+        "deposit.rejected",
+        crate::tenancy::Scope::new(account_id, livemode),
+        super::outbox::EventObject::Deposit(id),
+    );
+    // A deposit is born rejected only for an asset without a route, so its representation reads
+    // no route and none are needed to render it.
+    debug_assert!(deposit.route.is_none());
+    let no_routes = crate::routes::RouteSet::default();
+    super::outbox::enqueue_in(transaction, &no_routes, &event, None).await
 }
 
 /// Returns the last completely committed block for a chain.

@@ -60,6 +60,16 @@ def _parse_response(
 
         return response_403
 
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -90,7 +100,8 @@ def sync_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body.
+        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body. Example:
+            {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'chain_id': 1}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -125,7 +136,8 @@ def sync(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body.
+        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body. Example:
+            {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'chain_id': 1}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -155,7 +167,8 @@ async def asyncio_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body.
+        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body. Example:
+            {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'chain_id': 1}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -188,7 +201,8 @@ async def asyncio(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body.
+        body (CreateTreasuryChallengeRequest): `POST /v1/treasuries/challenge` body. Example:
+            {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'chain_id': 1}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

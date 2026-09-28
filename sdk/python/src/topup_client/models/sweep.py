@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.sweep_object import check_sweep_object
+from ..models.sweep_object import SweepObject
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -31,7 +33,7 @@ class Sweep:
             id (str): Sweep id, `sw_…`.
             livemode (bool): The mode.
             log_index (int): Block-wide index of the `Flushed` log.
-            object_ (str): Always `sweep`.
+            object_ (SweepObject): Always `sweep`.
             token (str): The token contract.
             treasury (str): The treasury paid, fixed in the forwarder's address.
             tx_hash (str): The flush transaction.
@@ -47,7 +49,7 @@ class Sweep:
     id: str
     livemode: bool
     log_index: int
-    object_: str
+    object_: SweepObject
     token: str
     treasury: str
     tx_hash: str
@@ -73,7 +75,7 @@ class Sweep:
 
         log_index = self.log_index
 
-        object_ = self.object_
+        object_: str = self.object_
 
         token = self.token
 
@@ -132,7 +134,7 @@ class Sweep:
 
         log_index = d.pop("log_index")
 
-        object_ = d.pop("object")
+        object_ = check_sweep_object(d.pop("object"))
 
         token = d.pop("token")
 

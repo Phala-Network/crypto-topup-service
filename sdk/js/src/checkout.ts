@@ -34,16 +34,59 @@ export type CheckoutErrorCode =
   | "invalid_response"
   | "api_error";
 
+export interface CheckoutErrorOptions extends ErrorOptions {
+  /** The failed response's `Request-Id`, `req_…`, to quote to support. */
+  requestId?: string;
+  /** For `rate_limited`: the seconds the service asked to wait (`Retry-After`). */
+  retryAfter?: number;
+}
+
 export class CheckoutError extends Error {
   override readonly name = "CheckoutError";
+  /** The failed response's `Request-Id`, when the service answered. */
+  readonly requestId: string | undefined;
+  /** For `rate_limited`: the seconds to wait before the next read. */
+  readonly retryAfter: number | undefined;
 
   constructor(
     readonly code: CheckoutErrorCode,
     message: string,
-    options?: ErrorOptions,
+    options?: CheckoutErrorOptions,
   ) {
     super(message, options);
+    this.requestId = options?.requestId;
+    this.retryAfter = options?.retryAfter;
   }
+}
+
+/**
+ * The error of a failed read of a public view, with the response's `Request-Id` and, on `429`,
+ * its `Retry-After`.
+ */
+export function responseError(response: Response, notFound: string): CheckoutError {
+  const header = response.headers.get("request-id");
+  const requestId = header === null ? {} : { requestId: header };
+  if (response.status === 404) {
+    return new CheckoutError("invalid_client_secret", notFound, requestId);
+  }
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get("retry-after"));
+    return new CheckoutError("rate_limited", "too many status requests", {
+      ...requestId,
+      ...(Number.isFinite(seconds) && seconds > 0 ? { retryAfter: seconds } : {}),
+    });
+  }
+  return new CheckoutError(
+    "api_error",
+    `the payment service answered ${response.status}`,
+    requestId,
+  );
+}
+
+/** The delay before the next read after `failures` failed ones, at least what `error` asks. */
+export function pollDelay(interval: number, failures: number, error: CheckoutError | null): number {
+  const backoff = failures === 0 ? interval : Math.min(interval * 2 ** failures, MAX_BACKOFF);
+  return Math.max(backoff, (error?.retryAfter ?? 0) * 1000);
 }
 
 export interface CheckoutState {
@@ -105,14 +148,8 @@ export async function retrieveQuote(options: RetrieveQuoteOptions): Promise<Clie
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   // A simple GET with no custom headers, so the browser sends no CORS preflight.
   const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
-  if (response.status === 404) {
-    throw new CheckoutError("invalid_client_secret", "the quote or its client secret is unknown");
-  }
-  if (response.status === 429) {
-    throw new CheckoutError("rate_limited", "too many status requests");
-  }
   if (!response.ok) {
-    throw new CheckoutError("api_error", `the payment service answered ${response.status}`);
+    throw responseError(response, "the quote or its client secret is unknown");
   }
   let quote: ClientQuote;
   try {
@@ -236,7 +273,7 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
     if (finished()) {
       return;
     }
-    const delay = failures === 0 ? interval : Math.min(interval * 2 ** failures, MAX_BACKOFF);
+    const delay = pollDelay(interval, failures, state.error);
     timer = setTimeout(() => {
       void refresh().then(schedule);
     }, delay);

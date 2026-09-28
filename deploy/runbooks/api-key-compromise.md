@@ -11,7 +11,7 @@ and manage the mode's keys. It cannot move funds: forwarders pay only the treasu
 only as `deposit.credited` events the service signs and delivers to the account's webhook
 endpoints, and a refund succeeds only once the merchant pays it from its treasury.
 It can also prove a new live treasury, but that change waits 48 hours, is announced at once as
-`account.treasury.pending` to every enabled endpoint of the mode whatever its subscriptions, and
+`treasury.created` to every enabled endpoint of the mode whatever its subscriptions, and
 the merchant cancels it with `POST /v1/treasuries/{id}/cancel` ([Treasury change](treasury-change.md)).
 
 ## The merchant rolls the key

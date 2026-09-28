@@ -63,6 +63,16 @@ def _parse_response(
 
         return response_404
 
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -96,7 +106,8 @@ def sync_detailed(
         body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
             /v1/refunds/{id}`, and
             `POST /v1/deposit_addresses/{id}` body: the
-            object's updatable parameters, of which `metadata` is the one.
+            object's updatable parameters, of which `metadata` is the one. Example: {'metadata':
+            {'note': '', 'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -135,7 +146,8 @@ def sync(
         body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
             /v1/refunds/{id}`, and
             `POST /v1/deposit_addresses/{id}` body: the
-            object's updatable parameters, of which `metadata` is the one.
+            object's updatable parameters, of which `metadata` is the one. Example: {'metadata':
+            {'note': '', 'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -169,7 +181,8 @@ async def asyncio_detailed(
         body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
             /v1/refunds/{id}`, and
             `POST /v1/deposit_addresses/{id}` body: the
-            object's updatable parameters, of which `metadata` is the one.
+            object's updatable parameters, of which `metadata` is the one. Example: {'metadata':
+            {'note': '', 'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -206,7 +219,8 @@ async def asyncio(
         body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
             /v1/refunds/{id}`, and
             `POST /v1/deposit_addresses/{id}` body: the
-            object's updatable parameters, of which `metadata` is the one.
+            object's updatable parameters, of which `metadata` is the one. Example: {'metadata':
+            {'note': '', 'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

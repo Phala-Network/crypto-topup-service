@@ -34,7 +34,7 @@ export function quote(overrides: Partial<ClientQuote> = {}): ClientQuote {
 }
 
 /** A `fetch` answering each call with the next response, repeating the last one. */
-export function fakeFetch(...responses: (ClientQuote | number | Error)[]) {
+export function fakeFetch(...responses: (ClientQuote | number | Error | (() => Response))[]) {
   const calls: string[] = [];
   let index = 0;
   const fetch = (input: RequestInfo | URL): Promise<Response> => {
@@ -46,6 +46,9 @@ export function fakeFetch(...responses: (ClientQuote | number | Error)[]) {
     }
     if (typeof next === "number") {
       return Promise.resolve(new Response("{}", { status: next }));
+    }
+    if (typeof next === "function") {
+      return Promise.resolve(next());
     }
     return Promise.resolve(Response.json(next));
   };

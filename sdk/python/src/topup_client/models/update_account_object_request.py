@@ -22,6 +22,9 @@ T = TypeVar("T", bound="UpdateAccountObjectRequest")
 class UpdateAccountObjectRequest:
     """`POST /v1/account` body; parameters not sent are left unchanged.
 
+    Example:
+        {'confirmation_policies': [{'chain_id': 1, 'confirmations': '12'}]}
+
     Attributes:
         confirmation_policies (list[ConfirmationPolicy] | None | Unset): The confirmations to require, per chain; chains
             not listed keep theirs.

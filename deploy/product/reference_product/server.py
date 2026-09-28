@@ -34,7 +34,7 @@ from topup_sdk import (
     verify_attestation_binding,
     verify_request,
 )
-from topup_sdk.addresses import forwarder_address, lock_salt
+from topup_sdk.addresses import forwarder_address, quote_salt
 from topup_sdk.ids import DEPOSIT, object_id, parse_id
 
 from .config import (
@@ -377,7 +377,7 @@ def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
         config.factory,
         config.implementation,
         config.treasury,
-        lock_salt(config.product_slug, team, quote_id),
+        quote_salt(config.product_slug, team, quote_id),
     )
 
 

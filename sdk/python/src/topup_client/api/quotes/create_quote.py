@@ -98,7 +98,9 @@ def sync_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateQuoteRequest): `POST /v1/quotes` body.
+        body (CreateQuoteRequest): `POST /v1/quotes` body. Example: {'amount': 2500, 'asset':
+            'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'currency': 'usd', 'metadata':
+            {'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -131,7 +133,9 @@ def sync(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateQuoteRequest): `POST /v1/quotes` body.
+        body (CreateQuoteRequest): `POST /v1/quotes` body. Example: {'amount': 2500, 'asset':
+            'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'currency': 'usd', 'metadata':
+            {'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -159,7 +163,9 @@ async def asyncio_detailed(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateQuoteRequest): `POST /v1/quotes` body.
+        body (CreateQuoteRequest): `POST /v1/quotes` body. Example: {'amount': 2500, 'asset':
+            'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'currency': 'usd', 'metadata':
+            {'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -190,7 +196,9 @@ async def asyncio(
 
     Args:
         idempotency_key (None | str | Unset):
-        body (CreateQuoteRequest): `POST /v1/quotes` body.
+        body (CreateQuoteRequest): `POST /v1/quotes` body. Example: {'amount': 2500, 'asset':
+            'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'currency': 'usd', 'metadata':
+            {'order_id': 'ord_1001'}}.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

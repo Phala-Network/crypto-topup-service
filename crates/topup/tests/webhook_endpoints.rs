@@ -317,7 +317,7 @@ async fn a_mode_has_at_most_sixteen_endpoints() -> Result<()> {
     let over = harness
         .create(&live, "https://merchant.example/hooks/16")
         .await?;
-    ensure!(over.status == StatusCode::CONFLICT);
+    ensure!(over.status == StatusCode::BAD_REQUEST);
     ensure!(
         over.body["error"]["code"] == "webhook_endpoint_cap_exceeded",
         "{}",
@@ -483,7 +483,7 @@ async fn events_are_resent_and_endpoints_tested_through_the_api() -> Result<()> 
             &live,
         )
         .await?;
-    ensure!(disabled.status == StatusCode::CONFLICT);
+    ensure!(disabled.status == StatusCode::BAD_REQUEST);
     ensure!(
         disabled.body["error"]["code"] == "webhook_endpoint_disabled",
         "{}",

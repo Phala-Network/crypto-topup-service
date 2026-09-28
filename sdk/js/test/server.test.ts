@@ -10,7 +10,7 @@ import {
   flushTransaction,
   flushTransactions,
   forwarderAddress,
-  lockSalt,
+  quoteSalt,
   quoteAddress,
   safeBatch,
   type BatchFile,
@@ -23,7 +23,7 @@ const vectors = JSON.parse(
 ) as {
   factory: string;
   implementation: string;
-  lock: { product_slug: string; external_id: string; lock_ref: string; salt: `0x${string}`; treasury: string; predicted_address: string }[];
+  quote: { account: string; client_reference_id: string; quote_id: string; salt: `0x${string}`; treasury: string; predicted_address: string }[];
   deposit_address: {
     account: string;
     livemode: boolean;
@@ -37,13 +37,14 @@ const forwarder = { factory: vectors.factory, implementation: vectors.implementa
 
 describe("address recomputation", () => {
   it("reproduces the contract vectors of quotes", () => {
-    for (const vector of vectors.lock) {
-      expect(lockSalt(vector.product_slug, vector.external_id, vector.lock_ref)).toBe(vector.salt);
+    expect(vectors.quote.length).toBeGreaterThan(0);
+    for (const vector of vectors.quote) {
+      expect(quoteSalt(vector.account, vector.client_reference_id, vector.quote_id)).toBe(vector.salt);
       expect(forwarderAddress(vectors.factory, vectors.implementation, vector.treasury, vector.salt)).toBe(
         vector.predicted_address,
       );
-      const quote = { treasury: vector.treasury, client_reference_id: vector.external_id, id: vector.lock_ref };
-      expect(quoteAddress(forwarder, quote, vector.product_slug)).toBe(vector.predicted_address);
+      const quote = { treasury: vector.treasury, client_reference_id: vector.client_reference_id, id: vector.quote_id };
+      expect(quoteAddress(forwarder, quote, vector.account)).toBe(vector.predicted_address);
     }
   });
 

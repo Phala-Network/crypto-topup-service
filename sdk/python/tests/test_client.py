@@ -88,9 +88,9 @@ class FakeService:
 
 def _error(status: int, code: str, **fields: str) -> httpx.Response:
     error_type = "api_error" if status >= 500 else "invalid_request_error"
-    return httpx.Response(
-        status, json={"error": {"type": error_type, "code": code, "message": code, **fields}}
-    )
+    doc_url = f"https://phala-network.github.io/phala-pay/#section/Errors/{code}"
+    body = {"type": error_type, "code": code, "message": code, "doc_url": doc_url, **fields}
+    return httpx.Response(status, json={"error": body})
 
 
 def _client(
@@ -347,11 +347,12 @@ def test_a_pinned_treasury_is_the_only_one_a_quote_may_pay() -> None:
         TopupClient("http://service.test", API_KEY, treasuries={1: TREASURY})
 
 
-def test_errors_carry_the_request_id() -> None:
+def test_errors_carry_the_request_id_and_doc_url() -> None:
     def respond(request: httpx.Request, count: int) -> httpx.Response:
-        header = "request-id" if count == 1 else "x-request-id"
         response = _error(404, "resource_missing")
-        response.headers[header] = f"req_{count}"
+        response.headers["request-id"] = f"req_{count}"
+        # The pre-Stripe name is not read.
+        response.headers["x-request-id"] = "req_old"
         return response
 
     with _client(FakeService(respond)) as client:
@@ -360,6 +361,44 @@ def test_errors_carry_the_request_id() -> None:
                 client.get_refund(REFUND_ID)
             assert raised.value.request_id == expected
             assert expected in str(raised.value)
+            assert raised.value.doc_url == (
+                "https://phala-network.github.io/phala-pay/#section/Errors/resource_missing"
+            )
+
+
+def test_a_rate_limit_is_retried_after_its_retry_after() -> None:
+    slept: list[float] = []
+
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        if count == 1:
+            response = _error(429, "customer_rate_limit")
+            response.headers["retry-after"] = "7"
+            return response
+        return httpx.Response(200, json=REFUND)
+
+    service = FakeService(respond)
+    client = TopupClient(
+        "http://service.test:8080",
+        API_KEY,
+        transport=httpx.MockTransport(service),
+        sleep=slept.append,
+    )
+    with client:
+        assert client.get_refund(REFUND_ID).id == REFUND_ID
+    assert slept == [7.0]
+
+
+def test_a_replayed_failure_is_not_retried() -> None:
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        response = _error(500, "internal_error")
+        response.headers["idempotent-replayed"] = "true"
+        return response
+
+    service = FakeService(respond)
+    with _client(service) as client, pytest.raises(ApiError) as raised:
+        client.cancel_refund(REFUND_ID)
+    assert raised.value.status_code == 500
+    assert len(service.requests) == 1
 
 
 def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:

@@ -57,7 +57,7 @@ async fn an_eoa_proves_its_first_treasury_with_siwe_and_it_applies_at_once() -> 
             let signer = PrivateKeySigner::random();
             // No treasury yet: nothing can be issued.
             let (status, body) = fixture.quote(&fixture.live_key, 1).await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "treasury_not_set");
 
             let challenge = fixture
@@ -101,15 +101,19 @@ async fn an_eoa_proves_its_first_treasury_with_siwe_and_it_applies_at_once() -> 
             ensure!(status == StatusCode::OK, "{quote}");
             ensure!(quote["treasury"] == format!("{:#x}", signer.address()));
             let (status, _) = fixture.quote(&fixture.live_key, OTHER_CHAIN).await?;
-            ensure!(status == StatusCode::CONFLICT);
+            ensure!(status == StatusCode::BAD_REQUEST);
             let address = fixture.deposit_address(&fixture.live_key, "team-1").await?;
             ensure!(chain_ids(&address) == vec![1], "{address}");
 
             // The account security event carries the account and mode and reaches an endpoint
             // that subscribes to other events only.
-            let events = fixture.events("account.treasury.updated").await?;
+            // A first treasury is created active, with nothing to replace.
+            let events = fixture.events("treasury.created").await?;
             ensure!(events == vec![(fixture.account.id, true, "treasury".to_owned())]);
-            ensure!(fixture.deliveries("account.treasury.updated").await? == 1);
+            ensure!(fixture.deliveries("treasury.created").await? == 1);
+            ensure!(fixture.events("treasury.updated").await?.is_empty());
+            let data = fixture.event_data("treasury.created").await?;
+            ensure!(data[0]["object"]["status"] == "active", "{data:?}");
             Ok(())
         })
     })
@@ -270,16 +274,17 @@ async fn a_live_change_waits_48_hours_then_moves_that_chains_deposit_addresses()
             let lock = pending["effective_at"].as_i64().context("effective_at")?
                 - pending["created"].as_i64().context("created")?;
             ensure!(lock == TIME_LOCK.num_seconds(), "{lock}");
-            ensure!(fixture.events("account.treasury.pending").await?.len() == 1);
-            ensure!(fixture.deliveries("account.treasury.pending").await? == 1);
+            // Two first treasuries created active, and the pending change.
+            ensure!(fixture.events("treasury.created").await?.len() == 3);
+            ensure!(fixture.deliveries("treasury.created").await? == 3);
             // Only one change waits per chain, and the current treasury is not a change.
             let (status, body) = fixture.prove(&fixture.live_key, 1, &next).await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "treasury_change_pending");
             let (status, body) = fixture
                 .prove(&fixture.live_key, OTHER_CHAIN, &first)
                 .await?;
-            ensure!(body["error"]["code"] == "treasury_unchanged" && status.as_u16() == 409);
+            ensure!(body["error"]["code"] == "treasury_unchanged" && status.as_u16() == 400);
 
             // Until it applies, quotes and addresses keep paying the current treasury.
             let (_, quote) = fixture.quote(&fixture.live_key, 1).await?;
@@ -313,7 +318,33 @@ async fn a_live_change_waits_48_hours_then_moves_that_chains_deposit_addresses()
                 .filter_map(|treasury| treasury["status"].as_str())
                 .collect();
             ensure!(statuses == vec!["active", "replaced"], "{list}");
-            ensure!(fixture.events("account.treasury.updated").await?.len() == 3);
+            // The change applies, and the treasury it replaces is `replaced`, each with the
+            // status it left in `previous_attributes`.
+            let updated = fixture.event_data("treasury.updated").await?;
+            ensure!(updated.len() == 2, "{updated:?}");
+            let statuses: Vec<(&Value, &Value)> = updated
+                .iter()
+                .map(|data| {
+                    (
+                        &data["object"]["status"],
+                        &data["previous_attributes"]["status"],
+                    )
+                })
+                .collect();
+            ensure!(
+                statuses.contains(&(&json!("active"), &json!("pending")))
+                    && statuses.contains(&(&json!("replaced"), &json!("active"))),
+                "{updated:?}"
+            );
+            // The pending change's own `treasury.created` still shows it pending.
+            let created = fixture.event_data("treasury.created").await?;
+            ensure!(
+                created
+                    .iter()
+                    .any(|data| data["object"]["id"] == pending["id"]
+                        && data["object"]["status"] == "pending"),
+                "{created:?}"
+            );
 
             let after = fixture.deposit_address(&fixture.live_key, "team-1").await?;
             ensure!(
@@ -375,12 +406,12 @@ async fn a_pending_change_can_be_canceled_during_the_lock() -> Result<()> {
                 .await?;
             ensure!(status == StatusCode::OK, "{canceled}");
             ensure!(canceled["status"] == "canceled" && canceled["canceled_at"].is_i64());
-            ensure!(fixture.events("account.treasury.canceled").await?.len() == 1);
-            ensure!(fixture.deliveries("account.treasury.canceled").await? == 1);
+            ensure!(fixture.events("treasury.canceled").await?.len() == 1);
+            ensure!(fixture.deliveries("treasury.canceled").await? == 1);
             let (status, body) = fixture
                 .post(&fixture.live_key, &cancel, Value::Null)
                 .await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "treasury_unexpected_state");
             // It never applies; the current treasury stays.
             let later = Utc::now() + TIME_LOCK + Duration::hours(1);
@@ -428,14 +459,13 @@ async fn a_change_to_a_treasury_sanctioned_by_its_effective_time_is_canceled_not
                 canceled["cancellation_reason"] == "sanctioned",
                 "{canceled}"
             );
-            let events = fixture.events("account.treasury.canceled").await?;
+            let events = fixture.events("treasury.canceled").await?;
             ensure!(events == vec![(fixture.account.id, true, "treasury".to_owned())]);
-            ensure!(fixture.deliveries("account.treasury.canceled").await? == 1);
-            let actor: String = sqlx::query_scalar(
-                "SELECT actor FROM events WHERE type = 'account.treasury.canceled'",
-            )
-            .fetch_one(&fixture.pool)
-            .await?;
+            ensure!(fixture.deliveries("treasury.canceled").await? == 1);
+            let actor: String =
+                sqlx::query_scalar("SELECT actor FROM events WHERE type = 'treasury.canceled'")
+                    .fetch_one(&fixture.pool)
+                    .await?;
             ensure!(actor == "system");
             // The current treasury stays; quotes keep paying it.
             let (_, quote) = fixture.quote(&fixture.live_key, 1).await?;
@@ -514,7 +544,7 @@ async fn a_daily_rescreen_pauses_quotes_and_settlement_of_an_account_with_a_sanc
             let updated = fixture.events("account.updated").await?;
             ensure!(updated.len() == 2, "{updated:?}");
             let (status, body) = fixture.quote(&fixture.live_key, 1).await?;
-            ensure!(status == StatusCode::CONFLICT && body["error"]["code"] == "paused");
+            ensure!(status == StatusCode::BAD_REQUEST && body["error"]["code"] == "paused");
 
             // The operator lifts the pause after review, through the admin API.
             let request = |path: &str| -> Result<_> {
@@ -569,8 +599,10 @@ async fn test_mode_changes_apply_at_once() -> Result<()> {
             let after = fixture.deposit_address(&fixture.test_key, "team-1").await?;
             ensure!(after["id"] == before["id"] && after["address"] != before["address"]);
             ensure!(networks(&after)?[0]["treasury"] == format!("{:#x}", next.address()));
-            let events = fixture.events("account.treasury.updated").await?;
+            let events = fixture.events("treasury.created").await?;
             ensure!(events.len() == 2 && events.iter().all(|(_, livemode, _)| !livemode));
+            let replaced = fixture.events("treasury.updated").await?;
+            ensure!(replaced.len() == 1 && !replaced[0].1);
             // A test key does not reach live chains.
             let (status, body) = fixture
                 .post(
@@ -1270,6 +1302,16 @@ impl Fixture {
         .bind(event_type)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// The `data` of each `event_type` event, oldest first.
+    async fn event_data(&self, event_type: &str) -> Result<Vec<Value>> {
+        Ok(
+            sqlx::query_scalar("SELECT data FROM events WHERE type = $1 ORDER BY created, id")
+                .bind(event_type)
+                .fetch_all(&self.pool)
+                .await?,
+        )
     }
 
     /// Deliveries of `event_type` events, each to the endpoint of its own mode.

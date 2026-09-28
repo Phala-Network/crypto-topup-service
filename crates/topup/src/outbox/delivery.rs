@@ -16,9 +16,9 @@ use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{Event, SignedWebhook, webhook_id};
+use crate::audit::RequestRef;
 use crate::db::EventObject;
 use crate::jitter::{JitterSource, OsJitter};
-use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use crate::webhook_endpoints;
 
@@ -92,6 +92,7 @@ struct ClaimedEvent {
     account: String,
     event_type: String,
     actor: String,
+    request: Option<RequestRef>,
     data: Value,
     object: Option<EventObject>,
     attempts: i32,
@@ -158,7 +159,6 @@ impl Outcome {
 /// endpoint costs at most its `endpoint_concurrency` slots and one claim per slot per backoff.
 pub struct DeliveryWorker<S> {
     pool: PgPool,
-    routes: Arc<RouteSet>,
     client: Client,
     signer: Arc<S>,
     livemode: bool,
@@ -174,7 +174,6 @@ where
     /// timeout, and every request sent through `config.proxy`.
     pub fn new(
         pool: PgPool,
-        routes: Arc<RouteSet>,
         signer: Arc<S>,
         livemode: bool,
         config: DeliveryConfig,
@@ -193,7 +192,6 @@ where
         let client = builder.build().map_err(DeliveryError::Client)?;
         Ok(Self {
             pool,
-            routes,
             client,
             signer,
             livemode,
@@ -385,7 +383,8 @@ where
             RETURNING delivery.event_id, delivery.endpoint_id,
                       COALESCE(delivery.url, endpoint.url) AS url,
                       delivery.url IS NOT NULL AS notice, event.account_id, account.public_id,
-                      event.livemode, event.type, event.actor, event.data, event.object_type,
+                      event.livemode, event.type, event.actor, event.request_id,
+                      event.idempotency_key, event.data, event.object_type,
                       event.object_id, delivery.attempts,
                       event.created, delivery.next_attempt_at
             "#,
@@ -398,6 +397,8 @@ where
         rows.iter()
             .map(|row| {
                 let object_type: String = row.try_get("object_type")?;
+                let request_id: Option<String> = row.try_get("request_id")?;
+                let idempotency_key: Option<String> = row.try_get("idempotency_key")?;
                 Ok(ClaimedEvent {
                     id: row.try_get("event_id")?,
                     endpoint_id: row.try_get("endpoint_id")?,
@@ -407,6 +408,10 @@ where
                     account: row.try_get("public_id")?,
                     event_type: row.try_get("type")?,
                     actor: row.try_get("actor")?,
+                    request: request_id.map(|id| RequestRef {
+                        id,
+                        idempotency_key,
+                    }),
                     data: row.try_get("data")?,
                     object: EventObject::from_parts(&object_type, row.try_get("object_id")?),
                     attempts: row.try_get("attempts")?,
@@ -459,9 +464,9 @@ where
         }
     }
 
-    /// Renders, signs, and sends the event; no database connection is held during the request.
+    /// Signs and sends the recorded event; no database connection is held during the request.
     async fn send(&self, event: &ClaimedEvent) -> Result<Outcome, DeliveryError> {
-        let (webhook_id, body) = match self.event_body(event).await? {
+        let (webhook_id, body) = match Self::event_body(event) {
             Ok(rendered) => rendered,
             Err(error) => return Ok(Outcome::internal(error)),
         };
@@ -520,26 +525,13 @@ where
         })
     }
 
-    /// Returns the `webhook-id` and body. The event's `data` is rendered on its first attempt at
-    /// any endpoint (or first read) and stored, so every endpoint, retry, and resend sends it
-    /// unchanged.
-    async fn event_body(
-        &self,
-        event: &ClaimedEvent,
-    ) -> Result<Result<(String, Vec<u8>), &'static str>, DeliveryError> {
-        let data = match super::envelope::event_data(
-            &self.pool,
-            &self.routes,
-            event.scope,
-            event.id,
-            event.object,
-            &event.data,
-        )
-        .await?
-        {
-            Ok(data) => data,
-            Err(error) => return Ok(Err(error)),
-        };
+    /// Returns the `webhook-id` and body. The event's `data` was rendered when the event was
+    /// recorded, so every endpoint, retry, and resend sends it unchanged.
+    fn event_body(event: &ClaimedEvent) -> Result<(String, Vec<u8>), &'static str> {
+        if event.data.get("object").is_none() {
+            return Err("missing_object");
+        }
+        let data = event.data.clone();
         let id = webhook_id(event.id);
         let envelope = Event {
             id: id.clone(),
@@ -549,17 +541,30 @@ where
             event_type: event.event_type.clone(),
             created: event.created_at.timestamp(),
             actor: event.actor.clone(),
+            request: event.request.clone(),
             data,
         };
-        Ok(serde_json::to_vec(&envelope)
+        serde_json::to_vec(&envelope)
             .map(|body| (id, body))
-            .map_err(|_| "envelope_serialization"))
+            .map_err(|_| "envelope_serialization")
     }
 
     /// Records the outcome under the claim's lease. A failure is retried with backoff, forever; a
     /// `410 Gone` stops the delivery and disables its endpoint, except for an endpoint's own notice
     /// sent to its previous URL, which only stops.
     async fn record(&self, event: &ClaimedEvent, outcome: Outcome) -> Result<(), DeliveryError> {
+        match &outcome {
+            Outcome::Delivered(response) => {
+                let status = response.get("status").and_then(Value::as_u64);
+                record_attempt(&self.pool, event, status).await?;
+            }
+            Outcome::Failed {
+                status,
+                endpoint_fault: true,
+                ..
+            } => record_attempt(&self.pool, event, status.map(u64::from)).await?,
+            Outcome::Failed { .. } => {}
+        }
         let (status, body, error, endpoint_fault) = match outcome {
             Outcome::Delivered(response) => {
                 mark_delivered(&self.pool, event, &response).await?;
@@ -652,6 +657,27 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
     if config.claim_lease.as_secs() > MAX_POSTGRES_INTERVAL_SECONDS {
         return Err(DeliveryError::InvalidConfig("claim_lease is too large"));
     }
+    Ok(())
+}
+
+/// Records an attempt that reached the network on the endpoint, its delivery health; a notice to
+/// a former URL is not an attempt at the endpoint's current one.
+async fn record_attempt(
+    pool: &PgPool,
+    event: &ClaimedEvent,
+    status: Option<u64>,
+) -> Result<(), sqlx::Error> {
+    if event.notice {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE webhook_endpoints SET last_attempt_at = now(), last_attempt_status = $2 \
+         WHERE id = $1",
+    )
+    .bind(event.endpoint_id)
+    .bind(status.and_then(|status| i32::try_from(status).ok()))
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.error_type import check_error_type
 from ..models.error_type import ErrorType
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,12 +23,14 @@ class ErrorDetail:
 
     Attributes:
         code (str): Stable machine-readable code.
+        doc_url (str): The documentation of `code` in the API reference.
         message (str): Human-readable summary without internal details; it may change.
         type_ (ErrorType): Error category of [`ErrorDetail`].
         param (None | str | Unset): The request parameter the error is about, when there is one.
     """
 
     code: str
+    doc_url: str
     message: str
     type_: ErrorType
     param: None | str | Unset = UNSET
@@ -36,9 +39,11 @@ class ErrorDetail:
     def to_dict(self) -> dict[str, Any]:
         code = self.code
 
+        doc_url = self.doc_url
+
         message = self.message
 
-        type_ = self.type_.value
+        type_: str = self.type_
 
         param: None | str | Unset
         if isinstance(self.param, Unset):
@@ -51,6 +56,7 @@ class ErrorDetail:
         field_dict.update(
             {
                 "code": code,
+                "doc_url": doc_url,
                 "message": message,
                 "type": type_,
             }
@@ -65,9 +71,11 @@ class ErrorDetail:
         d = dict(src_dict)
         code = d.pop("code")
 
+        doc_url = d.pop("doc_url")
+
         message = d.pop("message")
 
-        type_ = ErrorType(d.pop("type"))
+        type_ = check_error_type(d.pop("type"))
 
         def _parse_param(data: object) -> None | str | Unset:
             if data is None:
@@ -80,6 +88,7 @@ class ErrorDetail:
 
         error_detail = cls(
             code=code,
+            doc_url=doc_url,
             message=message,
             type_=type_,
             param=param,

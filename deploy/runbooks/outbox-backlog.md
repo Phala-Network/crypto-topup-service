@@ -1,8 +1,8 @@
 # Outbox backlog
 
 **Trigger:** the `topup-outbox-test` or `topup-outbox-live` monitor missing its check-ins, `outbox delivery poll failed`
-issues, a non-zero `credited_undelivered` in the daily report (`GET /v1/admin/report/daily`), or
-a merchant reporting that webhooks or credits stopped.
+issues, a non-zero `credited_undelivered` or any `failing_webhook_endpoints` in the daily report
+(`GET /v1/admin/reports/daily`), or a merchant reporting that webhooks or credits stopped.
 
 **Impact:** `deposit.credited` is how the merchant learns it owes a credit, so an undelivered one
 means a user not credited yet. Deposit states stay authoritative and deliveries retry with backoff
@@ -16,10 +16,15 @@ whose endpoint keeps failing.
 
 1. Read the error of `outbox delivery poll failed` in Sentry: a database error stops every
    delivery; a receiver's failures do not raise an issue.
-2. With the merchant, from its recorded contact, check its webhook endpoints (`GET
-   /v1/webhook_endpoints`: `status`, `disabled_reason`), TLS, and signature verification. Report
-   `credited_undelivered` and `credited_undelivered_max_age_seconds` per route. The merchant
-   credits only from signed events, so it cannot catch up by fetching state alone.
+2. The daily report's `failing_webhook_endpoints` names each failing endpoint, its account,
+   `pending_deliveries`, `oldest_pending_at`, and `last_attempt_status` (`null`: no response,
+   such as a timeout or a URL the egress proxy refused). With the merchant, from its recorded
+   contact, check its webhook endpoints (`GET /v1/webhook_endpoints`: `status`,
+   `disabled_reason`, and the same `pending_deliveries`, `oldest_pending_at`, `last_attempt`),
+   TLS, and signature verification. Report `credited_undelivered` and
+   `credited_undelivered_max_age_seconds` per route. The merchant credits only from signed
+   events, so it cannot catch up by fetching state alone; `GET /v1/events?delivery_success=false`
+   lists what its endpoints have not received.
 3. For a missing event, the admin deposit view lists each deposit's `events`: `id` (the
    `webhook-id`), `event_type`, and `delivered_at` (`null` while undelivered); the merchant sees
    the same event with `pending_webhooks` in `GET /v1/events`. Delivery attempts are not

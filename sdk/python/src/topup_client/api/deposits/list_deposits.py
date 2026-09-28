@@ -21,7 +21,9 @@ def _get_kwargs(
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
+    createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
+    createdlt: int | Unset = UNSET,
     createdlte: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     starting_after: str | Unset = UNSET,
@@ -41,7 +43,11 @@ def _get_kwargs(
 
     params["tx_hash"] = tx_hash
 
+    params["created[gt]"] = createdgt
+
     params["created[gte]"] = createdgte
+
+    params["created[lt]"] = createdlt
 
     params["created[lte]"] = createdlte
 
@@ -86,6 +92,11 @@ def _parse_response(
 
         return response_401
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -111,7 +122,9 @@ def sync_detailed(
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
+    createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
+    createdlt: int | Unset = UNSET,
     createdlte: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     starting_after: str | Unset = UNSET,
@@ -127,7 +140,9 @@ def sync_detailed(
         deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
+        createdgt (int | Unset):
         createdgte (int | Unset):
+        createdlt (int | Unset):
         createdlte (int | Unset):
         limit (int | Unset):
         starting_after (str | Unset):
@@ -148,7 +163,9 @@ def sync_detailed(
         deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
+        createdgt=createdgt,
         createdgte=createdgte,
+        createdlt=createdlt,
         createdlte=createdlte,
         limit=limit,
         starting_after=starting_after,
@@ -171,7 +188,9 @@ def sync(
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
+    createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
+    createdlt: int | Unset = UNSET,
     createdlte: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     starting_after: str | Unset = UNSET,
@@ -187,7 +206,9 @@ def sync(
         deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
+        createdgt (int | Unset):
         createdgte (int | Unset):
+        createdlt (int | Unset):
         createdlte (int | Unset):
         limit (int | Unset):
         starting_after (str | Unset):
@@ -209,7 +230,9 @@ def sync(
         deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
+        createdgt=createdgt,
         createdgte=createdgte,
+        createdlt=createdlt,
         createdlte=createdlte,
         limit=limit,
         starting_after=starting_after,
@@ -226,7 +249,9 @@ async def asyncio_detailed(
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
+    createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
+    createdlt: int | Unset = UNSET,
     createdlte: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     starting_after: str | Unset = UNSET,
@@ -242,7 +267,9 @@ async def asyncio_detailed(
         deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
+        createdgt (int | Unset):
         createdgte (int | Unset):
+        createdlt (int | Unset):
         createdlte (int | Unset):
         limit (int | Unset):
         starting_after (str | Unset):
@@ -263,7 +290,9 @@ async def asyncio_detailed(
         deposit_address=deposit_address,
         status=status,
         tx_hash=tx_hash,
+        createdgt=createdgt,
         createdgte=createdgte,
+        createdlt=createdlt,
         createdlte=createdlte,
         limit=limit,
         starting_after=starting_after,
@@ -284,7 +313,9 @@ async def asyncio(
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
     tx_hash: str | Unset = UNSET,
+    createdgt: int | Unset = UNSET,
     createdgte: int | Unset = UNSET,
+    createdlt: int | Unset = UNSET,
     createdlte: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     starting_after: str | Unset = UNSET,
@@ -300,7 +331,9 @@ async def asyncio(
         deposit_address (str | Unset):
         status (str | Unset):
         tx_hash (str | Unset):
+        createdgt (int | Unset):
         createdgte (int | Unset):
+        createdlt (int | Unset):
         createdlte (int | Unset):
         limit (int | Unset):
         starting_after (str | Unset):
@@ -323,7 +356,9 @@ async def asyncio(
             deposit_address=deposit_address,
             status=status,
             tx_hash=tx_hash,
+            createdgt=createdgt,
             createdgte=createdgte,
+            createdlt=createdlt,
             createdlte=createdlte,
             limit=limit,
             starting_after=starting_after,

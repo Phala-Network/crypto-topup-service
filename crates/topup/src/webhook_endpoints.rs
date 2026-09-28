@@ -13,15 +13,14 @@
 //! disabled endpoint would drop the merchant's credits silently.
 
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::types::Json;
 use sqlx::{FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::api::metadata::{Metadata, MetadataUpdate};
-use crate::api::models::WebhookEndpointObject;
-use crate::api_keys::event_actor;
+use crate::api::models::{DeliveryAttempt, WebhookEndpointObject};
 use crate::audit::{self, Actor};
 use crate::db::{EventObject, NewOutboxEvent, Notice};
 use crate::ids;
@@ -31,13 +30,9 @@ use crate::tenancy::Scope;
 pub const MAX_ENDPOINTS: i64 = 16;
 
 /// The event types an endpoint may subscribe to in `enabled_events`, besides `*`. Account events
-/// (`account.*`, `api_key.*`, `webhook_endpoint.*`) reach every enabled endpoint whatever it
-/// subscribes to; they are listed so a subscription may name them. `account.treasury.*` are
-/// design PR 7's treasury notices.
+/// (`account.*`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`) reach every enabled endpoint
+/// whatever it subscribes to; they are listed so a subscription may name them.
 pub const EVENT_TYPES: &[&str] = &[
-    "account.treasury.canceled",
-    "account.treasury.pending",
-    "account.treasury.updated",
     "account.updated",
     "api_key.created",
     "api_key.revoked",
@@ -46,8 +41,14 @@ pub const EVENT_TYPES: &[&str] = &[
     "deposit.refunded",
     "deposit.rejected",
     "deposit.reversed",
+    "quote.canceled",
     "quote.expired",
+    "refund.created",
     "refund.failed",
+    "refund.updated",
+    "treasury.canceled",
+    "treasury.created",
+    "treasury.updated",
     "webhook_endpoint.created",
     "webhook_endpoint.deleted",
     "webhook_endpoint.updated",
@@ -81,13 +82,71 @@ pub struct WebhookEndpoint {
     pub created_at: DateTime<Utc>,
     /// Deletion time.
     pub deleted_at: Option<DateTime<Utc>>,
+    /// When a delivery to the endpoint was last attempted.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// The HTTP status of that attempt; `None` when no response arrived.
+    pub last_attempt_status: Option<i32>,
 }
 
 macro_rules! endpoint_columns {
     () => {
         "id, account_id, livemode, url, enabled_events, status, disabled_reason, description, \
-         metadata, created_at, deleted_at"
+         metadata, created_at, deleted_at, last_attempt_at, last_attempt_status"
     };
+}
+
+/// An endpoint's undelivered deliveries: how many, and the creation time of the oldest one's
+/// event.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Backlog {
+    /// Deliveries neither delivered nor stopped; they are retried until delivered.
+    pub pending: i64,
+    /// The creation time of the oldest pending delivery's event.
+    pub oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+/// The backlog of each of `ids`; an endpoint with none is absent.
+pub async fn backlogs<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Backlog>, sqlx::Error> {
+    let rows: Vec<(Uuid, i64, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT delivery.endpoint_id, count(*), min(event.created)
+        FROM webhook_deliveries AS delivery
+        JOIN events AS event ON event.id = delivery.event_id
+        WHERE delivery.endpoint_id = ANY($1)
+          AND delivery.delivered_at IS NULL AND delivery.failed_at IS NULL
+        GROUP BY delivery.endpoint_id
+        "#,
+    )
+    .bind(ids)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, pending, oldest_pending_at)| {
+            (
+                id,
+                Backlog {
+                    pending,
+                    oldest_pending_at,
+                },
+            )
+        })
+        .collect())
+}
+
+/// The endpoint's API representation with its delivery health, read on `connection`.
+pub async fn render(
+    connection: &mut PgConnection,
+    endpoint: &WebhookEndpoint,
+) -> Result<WebhookEndpointObject, sqlx::Error> {
+    let backlog = backlogs(connection, &[endpoint.id])
+        .await?
+        .remove(&endpoint.id)
+        .unwrap_or_default();
+    Ok(endpoint.object(backlog))
 }
 
 impl WebhookEndpoint {
@@ -103,9 +162,9 @@ impl WebhookEndpoint {
         self.status == "enabled" && self.deleted_at.is_none()
     }
 
-    /// The endpoint's API representation.
+    /// The endpoint's API representation, with its `backlog`.
     #[must_use]
-    pub fn object(&self) -> WebhookEndpointObject {
+    pub fn object(&self, backlog: Backlog) -> WebhookEndpointObject {
         WebhookEndpointObject {
             id: self.public_id(),
             object: "webhook_endpoint".to_owned(),
@@ -118,15 +177,46 @@ impl WebhookEndpoint {
             metadata: self.metadata.0.clone(),
             created: self.created_at.timestamp(),
             deleted: self.deleted_at.map(|_| true),
+            pending_deliveries: backlog.pending,
+            oldest_pending_at: backlog.oldest_pending_at.map(|at| at.timestamp()),
+            last_attempt: self.last_attempt_at.map(|at| DeliveryAttempt {
+                at: at.timestamp(),
+                status_code: self
+                    .last_attempt_status
+                    .and_then(|status| u16::try_from(status).ok()),
+            }),
         }
     }
+}
 
-    fn object_value(&self) -> Result<Value, EndpointError> {
-        serde_json::to_value(self.object()).map_err(|error| {
-            tracing::error!(%error, "webhook endpoint serialization failed");
-            EndpointError::Serialization
-        })
+/// The fields of an endpoint's delivery health, which deliveries change, not the merchant.
+const HEALTH_FIELDS: [&str; 3] = ["pending_deliveries", "oldest_pending_at", "last_attempt"];
+
+/// A `webhook_endpoint.updated` event's `data`: `after`, and the fields the change replaced. The
+/// delivery health is not among them: deliveries move it all the time, and it is not what the
+/// update changed.
+fn updated_data(after: Value, before: &Value) -> Value {
+    let mut data = crate::db::event_data(after, Some(before));
+    if let Some(previous) = data
+        .get_mut("previous_attributes")
+        .and_then(Value::as_object_mut)
+    {
+        for field in HEALTH_FIELDS {
+            previous.remove(field);
+        }
     }
+    data
+}
+
+/// The endpoint's API representation with its delivery health, as an event's `data.object`.
+async fn snapshot(
+    connection: &mut PgConnection,
+    endpoint: &WebhookEndpoint,
+) -> Result<Value, EndpointError> {
+    serde_json::to_value(render(connection, endpoint).await?).map_err(|error| {
+        tracing::error!(%error, "webhook endpoint serialization failed");
+        EndpointError::Serialization
+    })
 }
 
 /// A failure to change an endpoint.
@@ -222,7 +312,7 @@ pub async fn create(
     .bind(Json(&endpoint.metadata))
     .fetch_one(&mut *transaction)
     .await?;
-    let data = json!({ "object": created.object_value()? });
+    let data = json!({ "object": snapshot(&mut transaction, &created).await? });
     announce(
         &mut transaction,
         &created,
@@ -323,13 +413,13 @@ pub async fn get(
     .await
 }
 
-/// One endpoint of the scope, deleted or not, for an event's `data`.
-pub async fn get_any(
-    pool: &PgPool,
+/// One endpoint of the scope, deleted or not, rendered for an event's `data`.
+pub async fn find_any(
+    connection: &mut PgConnection,
     scope: Scope,
     id: Uuid,
-) -> Result<Option<WebhookEndpoint>, sqlx::Error> {
-    sqlx::query_as::<_, WebhookEndpoint>(concat!(
+) -> Result<Option<WebhookEndpointObject>, sqlx::Error> {
+    let endpoint = sqlx::query_as::<_, WebhookEndpoint>(concat!(
         "SELECT ",
         endpoint_columns!(),
         " FROM webhook_endpoints WHERE id = $1 AND account_id = $2 AND livemode = $3"
@@ -337,8 +427,12 @@ pub async fn get_any(
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .fetch_optional(pool)
-    .await
+    .fetch_optional(&mut *connection)
+    .await?;
+    match endpoint {
+        Some(endpoint) => render(connection, &endpoint).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Applies `changes` and announces them as `webhook_endpoint.updated`, with the replaced values
@@ -353,6 +447,7 @@ pub async fn update(
 ) -> Result<WebhookEndpoint, EndpointError> {
     let mut transaction = pool.begin().await?;
     let before = locked(&mut transaction, scope, id).await?;
+    let before_object = snapshot(&mut transaction, &before).await?;
     let metadata = match changes.metadata {
         Some(update) => update
             .apply(before.metadata.0.clone())
@@ -383,18 +478,14 @@ pub async fn update(
     .bind(Json(&metadata))
     .fetch_one(&mut *transaction)
     .await?;
-    let previous = previous_attributes(&before.object_value()?, &after.object_value()?);
-    if previous.is_empty() {
+    if after == before {
         transaction.commit().await?;
         return Ok(after);
     }
     if !after.enabled() {
         stop_pending(&mut transaction, id).await?;
     }
-    let data = json!({
-        "object": after.object_value()?,
-        "previous_attributes": previous,
-    });
+    let data = updated_data(snapshot(&mut transaction, &after).await?, &before_object);
     let notice = Notice {
         endpoint_id: id,
         url: before.url.clone(),
@@ -430,7 +521,7 @@ pub async fn delete(
     .fetch_one(&mut *transaction)
     .await?;
     stop_pending(&mut transaction, id).await?;
-    let data = json!({ "object": deleted.object_value()? });
+    let data = json!({ "object": snapshot(&mut transaction, &deleted).await? });
     let notice = Notice {
         endpoint_id: id,
         url: deleted.url.clone(),
@@ -459,7 +550,7 @@ pub async fn send_test(
     let mut transaction = pool.begin().await?;
     let endpoint = locked(&mut transaction, scope, id).await?;
     let event = new_event(&endpoint, TEST_EVENT, actor);
-    let data = json!({ "object": endpoint.object_value()? });
+    let data = json!({ "object": snapshot(&mut transaction, &endpoint).await? });
     let notice = Notice {
         endpoint_id: id,
         url: endpoint.url.clone(),
@@ -540,6 +631,7 @@ pub async fn disable_gone(connection: &mut PgConnection, id: Uuid) -> Result<boo
     let Some(before) = before else {
         return Ok(false);
     };
+    let before_object = snapshot(&mut transaction, &before).await?;
     let after = sqlx::query_as::<_, WebhookEndpoint>(concat!(
         "UPDATE webhook_endpoints SET status = 'disabled', disabled_reason = 'gone' \
          WHERE id = $1 RETURNING ",
@@ -549,10 +641,7 @@ pub async fn disable_gone(connection: &mut PgConnection, id: Uuid) -> Result<boo
     .fetch_one(&mut *transaction)
     .await?;
     stop_pending(&mut transaction, id).await?;
-    let data = json!({
-        "object": after.object_value()?,
-        "previous_attributes": previous_attributes(&before.object_value()?, &after.object_value()?),
-    });
+    let data = updated_data(snapshot(&mut transaction, &after).await?, &before_object);
     announce(
         &mut transaction,
         &after,
@@ -630,27 +719,12 @@ async fn announce(
 }
 
 fn new_event(endpoint: &WebhookEndpoint, event_type: &str, actor: &Actor) -> NewOutboxEvent {
-    NewOutboxEvent {
-        id: Uuid::new_v4(),
-        event_type: event_type.to_owned(),
-        account_id: endpoint.account_id,
-        livemode: endpoint.livemode,
-        object: EventObject::WebhookEndpoint(endpoint.id),
-        next_attempt_at: Utc::now(),
-        actor: event_actor(actor),
-    }
-}
-
-/// Stripe's `previous_attributes`: each top-level field of `before` that `after` changed.
-fn previous_attributes(before: &Value, after: &Value) -> Map<String, Value> {
-    let (Value::Object(before), Value::Object(after)) = (before, after) else {
-        return Map::new();
-    };
-    before
-        .iter()
-        .filter(|(key, value)| after.get(*key) != Some(*value))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
+    NewOutboxEvent::new(
+        event_type,
+        Scope::new(endpoint.account_id, endpoint.livemode),
+        EventObject::WebhookEndpoint(endpoint.id),
+        actor,
+    )
 }
 
 #[cfg(test)]
@@ -658,14 +732,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn previous_attributes_hold_only_changed_fields() {
-        let before = json!({ "url": "https://a.example", "status": "enabled", "created": 1 });
-        let after = json!({ "url": "https://b.example", "status": "enabled", "created": 1 });
+    fn an_update_names_what_it_changed_but_not_the_delivery_health() {
+        let before =
+            json!({"url": "https://a.example", "pending_deliveries": 3, "last_attempt": null});
+        let after = json!({"url": "https://b.example", "pending_deliveries": 0,
+                           "last_attempt": {"at": 1, "status_code": 200}});
         assert_eq!(
-            Value::Object(previous_attributes(&before, &after)),
-            json!({ "url": "https://a.example" })
+            updated_data(after.clone(), &before),
+            json!({"object": after, "previous_attributes": {"url": "https://a.example"}})
         );
-        assert!(previous_attributes(&before, &before).is_empty());
     }
 
     #[test]

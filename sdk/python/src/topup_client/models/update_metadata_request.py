@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -24,6 +25,9 @@ class UpdateMetadataRequest:
     """`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST /v1/refunds/{id}`, and
     `POST /v1/deposit_addresses/{id}` body: the
     object's updatable parameters, of which `metadata` is the one.
+
+        Example:
+            {'metadata': {'note': '', 'order_id': 'ord_1001'}}
 
         Attributes:
             metadata (MetadataClear | MetadataParamType0 | Unset): A `metadata` parameter: an object of string values, where
@@ -42,7 +46,7 @@ class UpdateMetadataRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         field_dict: dict[str, Any] = {}
 
@@ -71,7 +75,7 @@ class UpdateMetadataRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

@@ -53,29 +53,29 @@
       "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
     }
   ],
-  "lock": [
+  "quote": [
     {
-      "external_id": "invoice-2026-0001",
-      "lock_ref": "checkout-0001",
-      "predicted_address": "0x0F45147A02E4c9d91AFF20024e22095536Fd5053",
-      "product_slug": "phala-cloud",
-      "salt": "0x92cbd012f7a5433131d039c37a2988b1d7cd0ddabe0c1703f41074e91d0fffc3",
+      "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+      "client_reference_id": "team-42",
+      "predicted_address": "0xaDd9dD19e5E17C2a010f27fc09D7706986f65AcB",
+      "quote_id": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+      "salt": "0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52",
       "treasury": "0x0000000000000000000000000000000000007EA5"
     },
     {
-      "external_id": "quote-0042",
-      "lock_ref": "rate-lock:builder:0042",
-      "predicted_address": "0x1775C1326aa633546B0b5634aE2bEF0Ba7CBFC9A",
-      "product_slug": "builder",
-      "salt": "0xddb1b76da592b1dca18edacc2398ed44b6971cb4a7817819616e8a07cc2518d7",
+      "account": "acct_9a8b7c6d5e4f40312a1b2c3d4e5f6071",
+      "client_reference_id": "invoice-2026-0001",
+      "predicted_address": "0x6516eEa4893bAc4748ECd31F70EB10229758d325",
+      "quote_id": "qt_0f1e2d3c4b5a49687766554433221100",
+      "salt": "0xdfd860d8422a91d1283c87287c818a088de30cc2c71a40d027d010b7d952661f",
       "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
     },
     {
-      "external_id": "invoice-long-reference",
-      "lock_ref": "lock-ref-0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111-2222222222222222222222222222222222222222222222222222222222222222-3333333333333333333333333333333333333333333333333333333333333333",
-      "predicted_address": "0xfA7bFDCCa0E9d598A0C7032A043D566C87ecc8ea",
-      "product_slug": "enterprise",
-      "salt": "0x783ed98ce1738f83a61c34dd5786bf0fd6b08669dff4fd95f54eac1e4d31aa69",
+      "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+      "client_reference_id": "customer-0000000000000000000000000000000000000000000000000000000000000000-1111111111111111111111111111111111111111111111111111111111111111-2222222222222222222222222222222222222222222222222222222222222222-3333333333333333333333333333333333333333333333333333333333333333",
+      "predicted_address": "0xe70CBb6F22A3bBfab140BeBEa941Ef4692D1f152",
+      "quote_id": "qt_ffffffffffffffffffffffffffffffff",
+      "salt": "0xc76b91a823980273b4fa68dd330b0a818dbbdf9c5b66a5c1abaeeaf6a88dd742",
       "treasury": "0x0000000000000000000000000000000000007EA5"
     }
   ],

@@ -44,7 +44,7 @@ async fn admin_signature_verification_vectors() -> Result<()> {
     let result = async {
         let admin_key = SigningKey::from_bytes(&[9; 32]);
         let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/admin/report/daily".to_owned();
+        let path = "/v1/admin/reports/daily".to_owned();
         let body = serde_json::to_vec(&json!({"external_id": "signed-account"}))?;
         let now = Utc::now().timestamp();
 
@@ -133,7 +133,7 @@ async fn admin_signature_verification_vectors() -> Result<()> {
             .await?;
         ensure!(response.status() == StatusCode::OK);
 
-        let origin_path = format!("{path}?source=checkout");
+        let origin_path = format!("{path}?failing_for_hours=48");
         let response = app
             .clone()
             .oneshot(signed_request_with_options(
@@ -265,7 +265,7 @@ async fn admin_signature_verification_vectors() -> Result<()> {
                 now,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
         ensure!(response_json(response).await?["error"]["code"] == "signature_replayed");
         Ok(())
     }
@@ -284,7 +284,7 @@ async fn admin_target_uri_uses_the_configured_public_origin() -> Result<()> {
     let result = async {
         let admin_key = SigningKey::from_bytes(&[9; 32]);
         let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/admin/report/daily".to_owned();
+        let path = "/v1/admin/reports/daily".to_owned();
         let now = Utc::now().timestamp();
         let request = |external_id: &str, origin: &str| -> Result<_> {
             let mut request = signed_request_with_options(
@@ -423,7 +423,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 &product_key,
             ))
             .await?;
-        ensure!(paused_quote.status() == StatusCode::CONFLICT);
+        ensure!(paused_quote.status() == StatusCode::BAD_REQUEST);
         ensure!(response_json(paused_quote).await?["error"]["code"] == "paused");
 
         let admin_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
@@ -813,7 +813,7 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
                 &product_key,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
         ensure!(response_json(response).await?["error"]["code"] == "chain_frozen");
         // A refused creation leaves no lock or lock address behind.
         let leftovers: i64 = sqlx::query_scalar(
@@ -829,7 +829,7 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
     result.and(cleanup)
 }
 
-/// `POST /v1/admin/reconciliation-blocks/{block_key}/lift` is admin-signed, needs a reason,
+/// `POST /v1/admin/reconciliation_blocks/{block_key}/lift` is admin-signed, needs a reason,
 /// audits the lift with the block it removed, and answers a repeat with the first lift.
 #[tokio::test]
 async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
@@ -869,7 +869,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             .clone()
             .oneshot(admin(
                 Method::GET,
-                "/v1/admin/report/daily",
+                "/v1/admin/reports/daily",
                 Value::Null,
                 now,
             )?)
@@ -881,7 +881,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         ensure!(blocks[0]["scope"] == "chain");
         ensure!(blocks[0]["check"] == "address_derivation");
 
-        let lift = "/v1/admin/reconciliation-blocks/chain:1/lift";
+        let lift = "/v1/admin/reconciliation_blocks/chain:1/lift";
         let reason = json!({"reason": "INC-7: factory confirmed, stored rows restored"});
         let response = app
             .clone()
@@ -903,7 +903,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             .clone()
             .oneshot(admin(
                 Method::POST,
-                "/v1/admin/reconciliation-blocks/chain:2/lift",
+                "/v1/admin/reconciliation_blocks/chain:2/lift",
                 reason.clone(),
                 now + 3,
             )?)
@@ -923,7 +923,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
             .clone()
             .oneshot(admin(
                 Method::POST,
-                "/v1/admin/reconciliation-blocks/chain%3A1/lift",
+                "/v1/admin/reconciliation_blocks/chain%3A1/lift",
                 reason.clone(),
                 now + 5,
             )?)
@@ -965,7 +965,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         let response = app
             .oneshot(admin(
                 Method::GET,
-                "/v1/admin/report/daily",
+                "/v1/admin/reports/daily",
                 Value::Null,
                 now + 7,
             )?)
@@ -1207,21 +1207,25 @@ async fn openapi_snapshot() -> Result<()> {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
     let state = app_state(pool, &admin_key);
-    let actual = topup::api::openapi_json(state)?;
+    let actual = topup::api::openapi_json(state.clone())?;
     let document: Value = serde_json::from_str(&actual)?;
     ensure!(document["info"]["title"] == "Phala Pay API");
     ensure!(document["info"]["version"] == env!("CARGO_PKG_VERSION"));
     ensure!(document["info"]["description"].as_str().is_some());
     assert_query_parameters(&document)?;
-    let path = format!("{}/openapi.json", env!("CARGO_MANIFEST_DIR"));
-    if std::env::var_os("UPDATE_OPENAPI").is_some() {
-        std::fs::write(&path, &actual)?;
+    let admin = topup::api::openapi_admin_json(state)?;
+    ensure!(serde_json::from_str::<Value>(&admin)?["info"]["title"] == "Phala Pay admin API");
+    for (name, actual) in [("openapi.json", actual), ("openapi.admin.json", admin)] {
+        let path = format!("{}/{name}", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var_os("UPDATE_OPENAPI").is_some() {
+            std::fs::write(&path, &actual)?;
+        }
+        let expected = std::fs::read_to_string(&path).context("read committed OpenAPI snapshot")?;
+        ensure!(
+            actual == expected,
+            "{name} drifted; regenerate it with UPDATE_OPENAPI=1 and review it"
+        );
     }
-    let expected = std::fs::read_to_string(&path).context("read committed OpenAPI snapshot")?;
-    ensure!(
-        actual == expected,
-        "openapi.json drifted; regenerate and review it"
-    );
     Ok(())
 }
 
@@ -1318,7 +1322,9 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
             "quote",
             "status",
             "tx_hash",
+            "created[gt]",
             "created[gte]",
+            "created[lt]",
             "created[lte]",
             "limit",
             "starting_after",

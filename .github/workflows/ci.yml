@@ -108,6 +108,14 @@ jobs:
       - uses: ./.github/actions/sdk-js
       - name: Typecheck, lint, unit tests, and build
         run: pnpm run check
+      # The API reference published from main (.github/workflows/api-reference.yml) builds.
+      - name: Build the API reference
+        working-directory: docs/reference
+        env:
+          REDOCLY_TELEMETRY: "off"
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
       # Chromium runs in Playwright's image: the runner lacks its system libraries.
       - name: End-to-end tests on Anvil
         run: pnpm run e2e:docker

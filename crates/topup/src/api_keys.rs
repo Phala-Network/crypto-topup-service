@@ -360,24 +360,77 @@ pub async fn authenticate(
     }))
 }
 
-/// Lists the scope's keys, newest first.
-pub async fn list(pool: &PgPool, scope: Scope) -> Result<Vec<ApiKey>, sqlx::Error> {
-    sqlx::query_as::<_, KeyRow>(concat!(
+/// A page of the scope's keys, newest first, and whether more follow in its direction (Stripe's
+/// cursor pagination): `cursor` is the key the page starts after (or, with `before`, ends before);
+/// `None` for a cursor outside the scope.
+pub async fn list(
+    pool: &PgPool,
+    scope: Scope,
+    limit: i64,
+    cursor: Option<(Uuid, bool)>,
+) -> Result<Option<(Vec<ApiKey>, bool)>, ApiKeyError> {
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(concat!(
         "SELECT ",
         key_columns!(),
-        " FROM api_keys WHERE account_id = $1 AND livemode = $2 ORDER BY created_at DESC, id DESC"
-    ))
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(ApiKey::try_from)
-    .collect()
+        " FROM api_keys WHERE account_id = "
+    ));
+    builder
+        .push_bind(scope.account_id())
+        .push(" AND livemode = ")
+        .push_bind(scope.livemode());
+    let before = cursor.is_some_and(|(_, before)| before);
+    if let Some((id, _)) = cursor {
+        let found: Option<(DateTime<Utc>, Uuid)> = sqlx::query_as(
+            "SELECT created_at, id FROM api_keys WHERE id = $1 AND account_id = $2 AND livemode = $3",
+        )
+        .bind(id)
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_optional(pool)
+        .await?;
+        let Some((created_at, id)) = found else {
+            return Ok(None);
+        };
+        builder
+            .push(if before {
+                " AND (created_at, id) > ("
+            } else {
+                " AND (created_at, id) < ("
+            })
+            .push_bind(created_at)
+            .push(", ")
+            .push_bind(id)
+            .push(")");
+    }
+    builder
+        .push(if before {
+            " ORDER BY created_at ASC, id ASC LIMIT "
+        } else {
+            " ORDER BY created_at DESC, id DESC LIMIT "
+        })
+        .push_bind(limit.saturating_add(1));
+    let mut keys = builder
+        .build_query_as::<KeyRow>()
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(ApiKey::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let has_more = keys.len() > limit;
+    keys.truncate(limit);
+    if before {
+        keys.reverse();
+    }
+    Ok(Some((keys, has_more)))
 }
 
 /// One key of the scope.
-pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<ApiKey>, sqlx::Error> {
+pub async fn get<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    scope: Scope,
+    id: Uuid,
+) -> Result<Option<ApiKey>, sqlx::Error> {
     sqlx::query_as::<_, KeyRow>(concat!(
         "SELECT ",
         key_columns!(),
@@ -386,7 +439,7 @@ pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<ApiKey>
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?
     .map(ApiKey::try_from)
     .transpose()
@@ -431,7 +484,15 @@ pub async fn recover(
         .await?;
         for row in revoked {
             let key = ApiKey::try_from(row)?;
-            record(&mut transaction, &key, actor, "api_key.revoked", reason).await?;
+            record(
+                &mut transaction,
+                &key,
+                None,
+                actor,
+                "api_key.revoked",
+                reason,
+            )
+            .await?;
         }
     }
     let issued = create_in(&mut transaction, scope, name, actor, reason).await?;
@@ -457,7 +518,15 @@ pub(crate) async fn create_in(
         return Err(ApiKeyError::ChargesNotEnabled);
     }
     let issued = insert(transaction, scope, KeyKind::Secret, name, actor).await?;
-    record(transaction, &issued.key, actor, "api_key.created", reason).await?;
+    record(
+        transaction,
+        &issued.key,
+        None,
+        actor,
+        "api_key.created",
+        reason,
+    )
+    .await?;
     Ok(issued)
 }
 
@@ -483,16 +552,25 @@ pub async fn roll(
     record(
         &mut transaction,
         &issued.key,
+        None,
         actor,
         "api_key.created",
         &rolled,
     )
     .await?;
     if expires_in.is_zero() {
-        let old = mark_revoked(&mut transaction, id).await?;
-        record(&mut transaction, &old, actor, "api_key.revoked", &rolled).await?;
+        let revoked = mark_revoked(&mut transaction, id).await?;
+        record(
+            &mut transaction,
+            &revoked,
+            None,
+            actor,
+            "api_key.revoked",
+            &rolled,
+        )
+        .await?;
     } else {
-        let old = sqlx::query_as::<_, KeyRow>(concat!(
+        let expiring = sqlx::query_as::<_, KeyRow>(concat!(
             "UPDATE api_keys SET expires_at = now() + $2 WHERE id = $1 RETURNING ",
             key_columns!()
         ))
@@ -501,7 +579,15 @@ pub async fn roll(
         .fetch_one(&mut *transaction)
         .await?
         .try_into()?;
-        record(&mut transaction, &old, actor, "api_key.updated", &rolled).await?;
+        record(
+            &mut transaction,
+            &expiring,
+            Some(&old),
+            actor,
+            "api_key.updated",
+            &rolled,
+        )
+        .await?;
     }
     transaction.commit().await?;
     Ok(issued)
@@ -548,7 +634,15 @@ pub async fn revoke(
         return Err(ApiKeyError::LastActiveKey);
     }
     let revoked = mark_revoked(&mut transaction, id).await?;
-    record(&mut transaction, &revoked, actor, "api_key.revoked", "").await?;
+    record(
+        &mut transaction,
+        &revoked,
+        None,
+        actor,
+        "api_key.revoked",
+        "",
+    )
+    .await?;
     transaction.commit().await?;
     Ok(revoked)
 }
@@ -599,10 +693,11 @@ pub fn event_actor(actor: &Actor) -> String {
 }
 
 /// Appends the audit row of a change to `key` and its `event_type` event, delivered to the
-/// key's account and mode.
+/// key's account and mode; `before` is the key before an update, for `previous_attributes`.
 async fn record(
     transaction: &mut Transaction<'_, Postgres>,
     key: &ApiKey,
+    before: Option<&ApiKey>,
     actor: &Actor,
     event_type: &str,
     reason: &str,
@@ -618,17 +713,20 @@ async fn record(
         },
     )
     .await?;
-    crate::db::enqueue_in(
+    let render = |key: &ApiKey| crate::db::to_object(&crate::api::api_key_object(key, None));
+    let before = before.map(render).transpose()?;
+    let event = crate::db::NewOutboxEvent::new(
+        event_type,
+        key.scope(),
+        crate::db::EventObject::ApiKey(key.id),
+        actor,
+    );
+    crate::db::enqueue_rendered_in(
         transaction,
-        &crate::db::NewOutboxEvent {
-            id: Uuid::new_v4(),
-            event_type: event_type.to_owned(),
-            account_id: key.account_id,
-            livemode: key.livemode,
-            object: crate::db::EventObject::ApiKey(key.id),
-            next_attempt_at: Utc::now(),
-            actor: event_actor(actor),
-        },
+        &event,
+        &crate::db::event_data(render(key)?, before.as_ref()),
+        None,
+        true,
     )
     .await
 }

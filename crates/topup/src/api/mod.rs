@@ -9,12 +9,15 @@ mod deposit_addresses;
 mod deposits;
 pub(crate) mod error;
 mod events;
+mod examples;
 mod extract;
 mod handlers;
 mod idempotency;
 mod keys;
 pub(crate) mod metadata;
 pub mod models;
+mod openapi;
+mod pagination;
 mod pending;
 mod quotes;
 mod rate_limit;
@@ -39,8 +42,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
-use utoipa::openapi::{Info, OpenApi};
+
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -49,8 +51,10 @@ pub use attestation::{
 };
 pub use auth::VerificationKey;
 pub use client_limit::ClientReadLimiter;
+pub(crate) use keys::api_key_object;
 pub use rate_limit::{ApiRateLimiter, RateLimits};
 pub use topup_adapters::http_signature::PublicOrigin;
+pub(crate) use treasuries::treasury_object;
 
 /// Shared state for all API handlers.
 #[derive(Clone)]
@@ -108,33 +112,34 @@ impl AppState {
     }
 }
 
-/// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
-/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`,
-/// `GET /v1/api_keys/{id}`, `GET /v1/treasuries/{id}`, `GET /v1/webhook_endpoints/{id}`, or
-/// `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not
-/// exist in `scope`; `Err(())` means rendering
-/// failed and was logged.
-pub(crate) async fn event_data(
-    pool: &PgPool,
+/// The API representation of the object an event is about, as `GET /v1/deposits/{id}`,
+/// `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`, `GET /v1/api_keys/{id}`,
+/// `GET /v1/treasuries/{id}`, `GET /v1/webhook_endpoints/{id}`, or `GET /v1/account` returns it to
+/// `scope`, read on `connection` (the transaction recording the event). `Ok(None)` means the
+/// object does not exist in `scope`; `Err(())` means rendering failed and was logged.
+pub(crate) async fn render_object(
+    connection: &mut sqlx::PgConnection,
     routes: &RouteSet,
     scope: Scope,
     object: crate::db::EventObject,
 ) -> Result<Option<serde_json::Value>, ()> {
     let rendered = match object {
-        crate::db::EventObject::Deposit(id) => deposits::find_deposit(pool, routes, scope, id)
-            .await
-            .map(|deposit| deposit.map(serde_json::to_value)),
-        crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, scope, id)
+        crate::db::EventObject::Deposit(id) => {
+            deposits::find_deposit(&mut *connection, routes, scope, id)
+                .await
+                .map(|deposit| deposit.map(serde_json::to_value))
+        }
+        crate::db::EventObject::Quote(id) => quotes::find_quote(connection, routes, scope, id)
             .await
             .map(|quote| quote.map(serde_json::to_value)),
-        crate::db::EventObject::Refund(id) => deposits::find_refund(pool, scope, id)
+        crate::db::EventObject::Refund(id) => deposits::find_refund(&mut *connection, scope, id)
             .await
             .map(|refund| refund.map(serde_json::to_value)),
-        crate::db::EventObject::ApiKey(id) => crate::api_keys::get(pool, scope, id)
+        crate::db::EventObject::ApiKey(id) => crate::api_keys::get(&mut *connection, scope, id)
             .await
             .map(|key| key.map(|key| serde_json::to_value(keys::api_key_object(&key, None))))
             .map_err(error::ApiError::from),
-        crate::db::EventObject::Treasury(id) => crate::treasuries::get(pool, scope, id)
+        crate::db::EventObject::Treasury(id) => crate::treasuries::get_in(connection, scope, id)
             .await
             .map(|treasury| {
                 treasury
@@ -142,20 +147,20 @@ pub(crate) async fn event_data(
             })
             .map_err(|_| error::ApiError::internal()),
         crate::db::EventObject::Account(id) if id == scope.account_id() => {
-            account::find_account(pool, routes, scope)
+            account::find_account(connection, routes, scope)
                 .await
                 .map(|account| account.map(serde_json::to_value))
         }
         crate::db::EventObject::Account(_) => Ok(None),
         crate::db::EventObject::WebhookEndpoint(id) => {
-            crate::webhook_endpoints::get_any(pool, scope, id)
+            crate::webhook_endpoints::find_any(connection, scope, id)
                 .await
-                .map(|endpoint| endpoint.map(|endpoint| serde_json::to_value(endpoint.object())))
+                .map(|endpoint| endpoint.map(serde_json::to_value))
                 .map_err(error::ApiError::from)
         }
     };
     match rendered {
-        Ok(Some(Ok(value))) => Ok(Some(serde_json::json!({ "object": value }))),
+        Ok(Some(Ok(value))) => Ok(Some(value)),
         Ok(None) => Ok(None),
         Ok(Some(Err(error))) => {
             tracing::error!(%error, "event object serialization failed");
@@ -168,9 +173,28 @@ pub(crate) async fn event_data(
     }
 }
 
-/// Builds the authenticated Axum router and its OpenAPI document.
-pub fn router(state: AppState) -> (Router, OpenApi) {
-    let merchant = OpenApiRouter::new()
+/// Lets a payer's page on any origin read a `client_secret` view, with the `Request-Id` and
+/// `Retry-After` of its responses (CORS; the view carries no credentials).
+pub(crate) fn allow_cross_origin(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        axum::http::HeaderValue::from_static("Request-Id, Retry-After"),
+    );
+}
+
+/// The `Idempotency-Key` of a request when it is valid, for the events the request causes.
+pub(crate) fn idempotency_key_of(headers: &axum::http::HeaderMap) -> Option<String> {
+    extract::idempotency_key(headers).ok().flatten()
+}
+
+/// The merchant routes authenticated by a secret key.
+fn merchant_routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
         .routes(routes!(quotes::list_quotes, quotes::create_quote))
         .routes(routes!(quotes::update_quote))
@@ -218,17 +242,18 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(events::list_events))
         .routes(routes!(events::get_event))
         .routes(routes!(events::resend_event))
-        // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            idempotency::idempotent_post,
-        ))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::authenticate_merchant,
-        ));
+}
 
-    let admin = OpenApiRouter::new()
+/// The routes a quote's or deposit address's `client_secret` also reads.
+fn client_secret_routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(quotes::get_quote))
+        .routes(routes!(deposit_addresses::get_deposit_address))
+}
+
+/// The operator's routes, authenticated by RFC 9421 signatures.
+fn admin_routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
         .routes(routes!(handlers::create_account))
         .routes(routes!(handlers::update_account))
         .routes(routes!(handlers::issue_api_key))
@@ -243,64 +268,63 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::daily_report))
         .routes(routes!(handlers::metrics))
+}
+
+/// utoipa's merchant and admin documents, before [`openapi`] finishes them.
+#[cfg(test)]
+fn documents() -> (utoipa::openapi::OpenApi, utoipa::openapi::OpenApi) {
+    let (_, merchant) = merchant_routes()
+        .merge(client_secret_routes())
+        .split_for_parts();
+    let (_, admin) = admin_routes().split_for_parts();
+    (merchant, admin)
+}
+
+/// The finished OpenAPI documents: the merchant API's and the operator's.
+#[derive(Clone, Debug)]
+pub struct ApiDocs {
+    /// `openapi.json`: the merchant API.
+    pub merchant: serde_json::Value,
+    /// `openapi.admin.json`: the admin API.
+    pub admin: serde_json::Value,
+}
+
+/// Builds the Axum router, serving both OpenAPI documents, and the documents.
+pub fn router(state: AppState) -> (Router, ApiDocs) {
+    // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
+    let merchant = merchant_routes()
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::authenticate_admin,
+            idempotency::idempotent_post,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::authenticate_merchant,
         ));
-
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
-    let quote = OpenApiRouter::new()
-        .routes(routes!(quotes::get_quote))
-        .routes(routes!(deposit_addresses::get_deposit_address))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::authenticate_merchant_or_client_secret,
-        ));
-
-    let mut documented = OpenApiRouter::new()
-        .merge(merchant)
-        .merge(quote)
-        .merge(admin);
-    let mut info = Info::new("Phala Pay API", env!("CARGO_PKG_VERSION"));
-    info.description = Some(
-        "Authenticated merchant and administrative API for Phala Pay crypto payments.".to_owned(),
-    );
-    documented.get_openapi_mut().info = info;
-    let components = documented
-        .get_openapi_mut()
-        .components
-        .get_or_insert_default();
-    components.add_security_scheme(
-        "api_key",
-        SecurityScheme::Http(
-            HttpBuilder::new()
-                .scheme(HttpAuthScheme::Bearer)
-                .description(Some(
-                    "A secret key, `Authorization: Bearer ppay_sk_test_…` or `ppay_sk_live_…`; \
-                     the key selects the account and the mode. HTTP Basic is not accepted.",
-                ))
-                .build(),
-        ),
-    );
-    components.add_security_scheme(
-        "http_message_signature",
-        SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
-            "Signature",
-            "The operator's admin API only: an RFC 9421 ed25519 signature over `@method`, \
-             `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is \
-             the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the \
-             request path and query, so sign the public URL you call; `Host` and \
-             `X-Forwarded-*` headers are ignored.",
-        ))),
-    );
-    let documented = documented.route("/healthz", get(healthz));
-    let (router, openapi) = documented.with_state(state).split_for_parts();
-    let document = Arc::new(openapi.clone());
-    let router = router
+    let client_secret = client_secret_routes().route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::authenticate_merchant_or_client_secret,
+    ));
+    let admin = admin_routes().route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::authenticate_admin,
+    ));
+    let (merchant_router, merchant_doc) = merchant.merge(client_secret).split_for_parts();
+    let (admin_router, admin_doc) = admin.split_for_parts();
+    let docs = ApiDocs {
+        merchant: openapi::merchant(&merchant_doc),
+        admin: openapi::admin(&admin_doc),
+    };
+    let router = merchant_router
+        .merge(admin_router)
+        .route("/healthz", get(healthz))
+        .with_state(state)
         .route("/openapi.json", get(serve_openapi))
+        .route("/openapi.admin.json", get(serve_admin_openapi))
         .layer(middleware::from_fn(crate::observability::request_context))
-        .layer(Extension(document));
-    (router, openapi)
+        .layer(Extension(Arc::new(docs.clone())));
+    (router, docs)
 }
 
 /// Builds the router of an instance restored from backup (`TOPUP_SERVICE_ENABLED=read-only`,
@@ -332,14 +356,24 @@ async fn reject_writes(request: Request, next: Next) -> Response {
     }
 }
 
-/// Returns the deterministic pretty-printed OpenAPI snapshot.
+/// The merchant API's deterministic pretty-printed OpenAPI document, `openapi.json`.
 pub fn openapi_json(state: AppState) -> Result<String, serde_json::Error> {
-    let (_, openapi) = router(state);
-    serde_json::to_string_pretty(&openapi).map(|json| format!("{json}\n"))
+    let (_, docs) = router(state);
+    serde_json::to_string_pretty(&docs.merchant).map(|json| format!("{json}\n"))
 }
 
-async fn serve_openapi(Extension(openapi): Extension<Arc<OpenApi>>) -> Json<OpenApi> {
-    Json((*openapi).clone())
+/// The admin API's deterministic pretty-printed OpenAPI document, `openapi.admin.json`.
+pub fn openapi_admin_json(state: AppState) -> Result<String, serde_json::Error> {
+    let (_, docs) = router(state);
+    serde_json::to_string_pretty(&docs.admin).map(|json| format!("{json}\n"))
+}
+
+async fn serve_openapi(Extension(docs): Extension<Arc<ApiDocs>>) -> Json<serde_json::Value> {
+    Json(docs.merchant.clone())
+}
+
+async fn serve_admin_openapi(Extension(docs): Extension<Arc<ApiDocs>>) -> Json<serde_json::Value> {
+    Json(docs.admin.clone())
 }
 
 async fn healthz(
@@ -433,7 +467,13 @@ mod tests {
             .await
             .expect("public request succeeds");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(response.headers().contains_key("x-request-id"));
+        assert!(
+            response
+                .headers()
+                .get("request-id")
+                .and_then(|id| id.to_str().ok())
+                .is_some_and(|id| id.starts_with("req_") && id.len() == 36)
+        );
         let _ = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body reads");

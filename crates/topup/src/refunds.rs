@@ -4,9 +4,9 @@
 //! The merchant pays a refund from the treasury of the deposit's own address; the service sends
 //! nothing. At `finalized`, both providers must show the same receipt with a `Transfer` of the
 //! deposit's token from that treasury to the destination for exactly the amount, in a log no other
-//! refund uses. Then the refund is `succeeded` and `deposit.refunded` is sent; a finalized
-//! transaction that does not pay it makes it `failed` with a `failure_reason`, which releases its
-//! reservation of the deposit, and sends `refund.failed`.
+//! refund uses. Then the refund is `succeeded` (`refund.updated`) and `deposit.refunded` is sent; a
+//! finalized transaction that does not pay it makes it `failed` with a `failure_reason`, which
+//! releases its reservation of the deposit, and sends `refund.updated` and `refund.failed`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
@@ -26,7 +26,9 @@ use topup_core::route::RouteFile;
 use topup_core::screening::SanctionsAnswer;
 use uuid::Uuid;
 
+use crate::db::{EventObject, NewOutboxEvent};
 use crate::routes::RouteSet;
+use crate::tenancy::Scope;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
@@ -271,6 +273,7 @@ pub enum Verification {
 /// PostgreSQL-backed verification of attached refund transactions on two providers.
 pub struct RefundVerificationWorker<A, B> {
     pool: PgPool,
+    routes: Arc<RouteSet>,
     primary: A,
     secondary: B,
     config: RefundVerificationConfig,
@@ -281,15 +284,18 @@ where
     A: RefundChainReader,
     B: RefundChainReader,
 {
-    /// Verifies on provider A (`primary`) and provider B (`secondary`).
+    /// Verifies on provider A (`primary`) and provider B (`secondary`); `routes` render the
+    /// objects of the events it sends.
     pub const fn new(
         pool: PgPool,
+        routes: Arc<RouteSet>,
         primary: A,
         secondary: B,
         config: RefundVerificationConfig,
     ) -> Self {
         Self {
             pool,
+            routes,
             primary,
             secondary,
             config,
@@ -374,7 +380,7 @@ where
         });
         match outcome {
             Ok(log_index) => {
-                if succeed(&self.pool, &check, log_index, &evidence).await? {
+                if succeed(&self.pool, &self.routes, &check, log_index, &evidence).await? {
                     return Ok(Verification::Succeeded);
                 }
                 // Another refund took the log since it was read; the next pass sees it used.
@@ -383,7 +389,7 @@ where
                 Ok(Verification::Waiting)
             }
             Err(reason) => {
-                fail(&self.pool, &check, reason.code(), &evidence).await?;
+                fail(&self.pool, &self.routes, &check, reason.code(), &evidence).await?;
                 tracing::warn!(refund_id = %check.refund_id, reason = reason.code(), "finalized refund transaction does not pay the refund");
                 Ok(Verification::Failed)
             }
@@ -541,15 +547,19 @@ async fn persist_evidence(
     Ok(())
 }
 
-/// Marks the refund `succeeded` with its log and sends `deposit.refunded`; `false` when the refund
-/// is no longer pending or another refund took the log first.
+/// Marks the refund `succeeded` with its log and sends `refund.updated` and `deposit.refunded`;
+/// `false` when the refund is no longer pending or another refund took the log first.
 async fn succeed(
     pool: &PgPool,
+    routes: &RouteSet,
     check: &RefundCheck,
     log_index: u64,
     evidence: &Value,
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    let scope = Scope::new(check.account_id, check.livemode);
+    let object = EventObject::Refund(check.refund_id);
+    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let updated = sqlx::query(
         r#"
         UPDATE refunds
@@ -573,35 +583,36 @@ async fn succeed(
         }
         Err(error) => return Err(error),
     }
+    let updated = NewOutboxEvent::system(Uuid::new_v4(), "refund.updated", scope, object);
+    crate::db::enqueue_in(&mut transaction, routes, &updated, Some(&before)).await?;
     // The event's object is the deposit, with its refunded amount (as Stripe's `charge.refunded`
     // is the charge); its id is derived from the refund, one event per refund.
-    crate::db::enqueue_in(
-        &mut transaction,
-        &crate::db::NewOutboxEvent {
-            id: topup_core::identity::event_id("deposit.refunded", check.refund_id),
-            event_type: "deposit.refunded".to_owned(),
-            account_id: check.account_id,
-            livemode: check.livemode,
-            object: crate::db::EventObject::Deposit(check.deposit_id),
-            next_attempt_at: chrono::Utc::now(),
-            actor: crate::db::SYSTEM_ACTOR.to_owned(),
-        },
-    )
-    .await?;
+    let refunded = NewOutboxEvent::system(
+        topup_core::identity::event_id("deposit.refunded", check.refund_id),
+        "deposit.refunded",
+        scope,
+        EventObject::Deposit(check.deposit_id),
+    );
+    crate::db::enqueue_in(&mut transaction, routes, &refunded, None).await?;
     transaction.commit().await?;
     Ok(true)
 }
 
-/// Marks the refund `failed` and sends `refund.failed` (Stripe's event for a failed refund), whose
-/// object is the refund with its `failure_reason`; the id is derived from the refund, one event per
-/// refund. Nothing is sent when the refund is no longer pending.
+/// Marks the refund `failed` and sends `refund.updated` and `refund.failed` (Stripe's event for a
+/// failed refund), whose object is the refund with its `failure_reason`; the `refund.failed` id is
+/// derived from the refund, one event per refund. Nothing is sent when the refund is no longer
+/// pending.
 async fn fail(
     pool: &PgPool,
+    routes: &RouteSet,
     check: &RefundCheck,
     reason: &str,
     evidence: &Value,
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    let scope = Scope::new(check.account_id, check.livemode);
+    let object = EventObject::Refund(check.refund_id);
+    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let updated = sqlx::query(
         r#"
         UPDATE refunds
@@ -616,19 +627,15 @@ async fn fail(
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() == 1 {
-        crate::db::enqueue_in(
-            &mut transaction,
-            &crate::db::NewOutboxEvent {
-                id: topup_core::identity::event_id("refund.failed", check.refund_id),
-                event_type: "refund.failed".to_owned(),
-                account_id: check.account_id,
-                livemode: check.livemode,
-                object: crate::db::EventObject::Refund(check.refund_id),
-                next_attempt_at: chrono::Utc::now(),
-                actor: crate::db::SYSTEM_ACTOR.to_owned(),
-            },
-        )
-        .await?;
+        let updated = NewOutboxEvent::system(Uuid::new_v4(), "refund.updated", scope, object);
+        crate::db::enqueue_in(&mut transaction, routes, &updated, Some(&before)).await?;
+        let failed = NewOutboxEvent::system(
+            topup_core::identity::event_id("refund.failed", check.refund_id),
+            "refund.failed",
+            scope,
+            object,
+        );
+        crate::db::enqueue_in(&mut transaction, routes, &failed, None).await?;
     }
     transaction.commit().await?;
     Ok(())

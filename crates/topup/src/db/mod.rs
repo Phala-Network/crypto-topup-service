@@ -21,8 +21,8 @@ pub use deposits::{
     release_deposit_lease,
 };
 pub use outbox::{
-    EventObject, NewOutboxEvent, Notice, SYSTEM_ACTOR, enqueue_in, enqueue_rendered_in,
-    is_account_event,
+    EventObject, NewOutboxEvent, Notice, SYSTEM_ACTOR, enqueue_in, enqueue_rendered_in, event_data,
+    is_account_event, previous_attributes, render, to_object,
 };
 pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,

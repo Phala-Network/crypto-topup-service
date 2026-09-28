@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.metadata_clear import check_metadata_clear
 from ..models.metadata_clear import MetadataClear
 from ..types import UNSET, Unset
 from typing import cast
@@ -22,6 +23,9 @@ T = TypeVar("T", bound="UpdateWebhookEndpointRequest")
 @_attrs_define
 class UpdateWebhookEndpointRequest:
     """`POST /v1/webhook_endpoints/{id}` body; parameters not sent are left unchanged.
+
+    Example:
+        {'disabled': False, 'enabled_events': ['*']}
 
     Attributes:
         description (None | str | Unset): A new description; `""` unsets it.
@@ -71,7 +75,7 @@ class UpdateWebhookEndpointRequest:
         elif isinstance(self.metadata, MetadataParamType0):
             metadata = self.metadata.to_dict()
         else:
-            metadata = self.metadata.value
+            metadata = self.metadata
 
         url: None | str | Unset
         if isinstance(self.url, Unset):
@@ -149,7 +153,7 @@ class UpdateWebhookEndpointRequest:
                 pass
             if not isinstance(data, str):
                 raise TypeError()
-            componentsschemas_metadata_param_type_1 = MetadataClear(data)
+            componentsschemas_metadata_param_type_1 = check_metadata_clear(data)
 
             return componentsschemas_metadata_param_type_1
 

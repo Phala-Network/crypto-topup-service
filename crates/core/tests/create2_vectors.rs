@@ -8,14 +8,14 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256};
 use serde::Deserialize;
-use topup_core::address::{deposit_address_salt, forwarder_address, lock_salt};
+use topup_core::address::{deposit_address_salt, forwarder_address, quote_salt};
 
 #[derive(Deserialize)]
 struct Vectors {
     factory: String,
     implementation: String,
     forwarders: Vec<ForwarderVector>,
-    lock: Vec<LockVector>,
+    quote: Vec<QuoteVector>,
     deposit_address: Vec<DepositAddressVector>,
 }
 
@@ -27,10 +27,10 @@ struct ForwarderVector {
 }
 
 #[derive(Deserialize)]
-struct LockVector {
-    product_slug: String,
-    external_id: String,
-    lock_ref: String,
+struct QuoteVector {
+    account: String,
+    client_reference_id: String,
+    quote_id: String,
     treasury: String,
     salt: String,
     predicted_address: String,
@@ -67,9 +67,13 @@ fn reproduces_all_foundry_create2_vectors() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    assert!(!vectors.lock.is_empty());
-    for vector in vectors.lock {
-        let salt = lock_salt(&vector.product_slug, &vector.external_id, &vector.lock_ref);
+    assert!(!vectors.quote.is_empty());
+    for vector in vectors.quote {
+        let salt = quote_salt(
+            &vector.account,
+            &vector.client_reference_id,
+            &vector.quote_id,
+        );
         assert_eq!(salt, B256::from_str(&vector.salt)?);
         assert_eq!(
             forwarder_address(

@@ -10,7 +10,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Surface | What it shows or does |
 |---|---|
 | Sentry | the issue: its `alert` tag and grouping tags (`route`, `state`, `check`, `chain`, `scope`), a `runbook` link, and the log line's fields (for example `deposit_id`, or a finding's `subjects`, `expected`, `observed`); at most one event per issue every 10 minutes. Crons monitors for every loop; an Uptime monitor on `/healthz` |
-| Daily report, admin-signed `GET /v1/admin/report/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic` (what forwarders still hold for merchants to sweep), `open_rate_lock_exposure_atomic`, and `rejected_holds_atomic`; globally `exposure_minor`, the last reconciliation round's `failed_checks`, and the active `reconciliation_blocks` (`block_key`, `scope`, `check`, `reason`) |
+| Daily report, admin-signed `GET /v1/admin/reports/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic` (what forwarders still hold for merchants to sweep), `open_rate_lock_exposure_atomic`, and `rejected_holds_atomic`; globally `exposure_minor`, the last reconciliation round's `failed_checks`, the active `reconciliation_blocks` (`block_key`, `scope`, `check`, `reason`), and `failing_webhook_endpoints`: every enabled endpoint of any account whose oldest undelivered event is older than `failing_for_hours` (default 24; `?failing_for_hours=` 1 to 720), with its `account`, `pending_deliveries`, and `last_attempt_status` ([outbox backlog](outbox-backlog.md)) |
 | Deposit view, admin-signed `GET /v1/admin/deposits/{id}` (`dep_…` or the UUID) | the deposit as its account sees it, with `admin`: the processing `state`, route, transition timeline (each step's evidence), and webhook `events` (`id`, `type`, `delivered_at`). The merchant finds deposits with its own `GET /v1/deposits?tx_hash=…` or `?client_reference_id=…` |
 | Attestation, `GET /v1/attestation?nonce=`, with an account's API key | that account's webhook keys in the key's mode ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
@@ -44,7 +44,7 @@ admin() {
     -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
     --data-binary @/tmp/topup-admin-body "$BASE_URL$2"
 }
-admin GET /v1/admin/report/daily | jq
+admin GET /v1/admin/reports/daily | jq
 admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["settlement"]}'
 ```
 
@@ -57,10 +57,10 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 
 | Alert, monitor, or symptom | Runbook |
 |---|---|
-| `TopupReconciliationMismatch` (`check:address_derivation` or `check:custody_balance`), `409 chain_frozen` | [Chain frozen](chain-frozen.md) |
+| `TopupReconciliationMismatch` (`check:address_derivation` or `check:custody_balance`), `400 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupDepositStateAgeExceeded` (`state:detected` or `state:confirmed`) | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |
-| `TopupLockExposureNearCap`, `409 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
+| `TopupLockExposureNearCap`, `400 exposure_cap_exceeded` | [Lock exposure near cap](lock-exposure-near-cap.md) |
 | `TopupLockExpiryFailing`, `topup-lock-expiry` | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
 | `topup-backup` | [Backup age](backup-age.md) |
@@ -72,7 +72,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | Unswept credited deposits, a `FlushFailed` target | Not a platform alert: the merchant sweeps with its own wallet, and a target whose transfer failed (a token or treasury refusing it) is the merchant's to resolve ([deploy/README.md, "Sweeping"](../README.md#sweeping)) |
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
 | A merchant's refund stays `pending` or `failed` | Not a platform action: the merchant pays refunds from the treasury of the deposit's address and attaches the transaction with `POST /v1/refunds/{id}/mark_paid`; a `failed` refund's `failure_reason` says why ([integration guide, §3](../../docs/integration.md#3-refunds)) |
-| A merchant's treasury change, or an `account.treasury.pending` it did not request | [Treasury change](treasury-change.md) |
+| A merchant's treasury change, or a pending `treasury.created` it did not request | [Treasury change](treasury-change.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
 | Payment sent on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
 | Any customer-impacting incident | [Incident communication](incident-communication.md) |

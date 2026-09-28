@@ -8,6 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..models.attestation_response_object import AttestationResponseObject
+from ..models.attestation_response_object import check_attestation_response_object
 from typing import cast
 
 if TYPE_CHECKING:
@@ -22,10 +24,16 @@ class AttestationResponse:
     """TDX evidence binding a nonce to the webhook public keys of the caller's account in the
     caller's mode (design D11).
 
+        Example:
+            {'account': 'acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10', 'livemode': False, 'object': 'attestation', 'report_data':
+                '9f2c4e6a8b0d1f3a5c7e9b1d3f5a7c9e2b4d6f8a0c1e3a5b7d9f1c3e5a7b9d1f', 'tdx_quote':
+                '040002008100000000000000939a7233f79c4ca9940a0db3957f0607', 'webhook_keys': [{'expires_at': None, 'public_key':
+                '3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29', 'version': 1}]}
+
         Attributes:
             account (str): The caller's account, `acct_…`.
             livemode (bool): The caller's mode; each mode has its own key.
-            object_ (str): Always `attestation`.
+            object_ (AttestationResponseObject): Always `attestation`.
             report_data (str): `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
                 public_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,
                 `livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is
@@ -38,7 +46,7 @@ class AttestationResponse:
 
     account: str
     livemode: bool
-    object_: str
+    object_: AttestationResponseObject
     report_data: str
     tdx_quote: str
     webhook_keys: list[WebhookKeyObject]
@@ -51,7 +59,7 @@ class AttestationResponse:
 
         livemode = self.livemode
 
-        object_ = self.object_
+        object_: str = self.object_
 
         report_data = self.report_data
 
@@ -86,7 +94,7 @@ class AttestationResponse:
 
         livemode = d.pop("livemode")
 
-        object_ = d.pop("object")
+        object_ = check_attestation_response_object(d.pop("object"))
 
         report_data = d.pop("report_data")
 

@@ -17,7 +17,7 @@ Stop new locks and addresses on the route:
 admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes"]}'
 ```
 
-Then, in the daily report (`admin GET /v1/admin/report/daily`), read the route's (for a chain,
+Then, in the daily report (`admin GET /v1/admin/reports/daily`), read the route's (for a chain,
 every route on it) `open_rate_lock_exposure_atomic`, the `detected`, `confirmed`, and `credited` counts of
 `deposits_by_state`, and `credited_undelivered`.
 

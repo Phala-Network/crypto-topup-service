@@ -19,6 +19,8 @@ def _get_kwargs(
     chain_id: int | Unset = UNSET,
     status: str | Unset = UNSET,
     limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
@@ -28,6 +30,10 @@ def _get_kwargs(
     params["status"] = status
 
     params["limit"] = limit
+
+    params["starting_after"] = starting_after
+
+    params["ending_before"] = ending_before
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -58,6 +64,11 @@ def _parse_response(
 
         return response_401
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -81,14 +92,18 @@ def sync_detailed(
     chain_id: int | Unset = UNSET,
     status: str | Unset = UNSET,
     limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> Response[ErrorResponse | TreasuryList]:
-    """The account's treasuries in the key's mode, newest first: each chain's `active` one, and any
-    `pending` change.
+    """The account's treasuries in the key's mode, newest first, with Stripe's cursor pagination: each
+    chain's `active` one, any `pending` change, and the `replaced` and `canceled` ones.
 
     Args:
         chain_id (int | Unset):
         status (str | Unset):
         limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -102,6 +117,8 @@ def sync_detailed(
         chain_id=chain_id,
         status=status,
         limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
     )
 
     response = client.get_httpx_client().request(
@@ -117,14 +134,18 @@ def sync(
     chain_id: int | Unset = UNSET,
     status: str | Unset = UNSET,
     limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> ErrorResponse | TreasuryList | None:
-    """The account's treasuries in the key's mode, newest first: each chain's `active` one, and any
-    `pending` change.
+    """The account's treasuries in the key's mode, newest first, with Stripe's cursor pagination: each
+    chain's `active` one, any `pending` change, and the `replaced` and `canceled` ones.
 
     Args:
         chain_id (int | Unset):
         status (str | Unset):
         limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -139,6 +160,8 @@ def sync(
         chain_id=chain_id,
         status=status,
         limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
     ).parsed
 
 
@@ -148,14 +171,18 @@ async def asyncio_detailed(
     chain_id: int | Unset = UNSET,
     status: str | Unset = UNSET,
     limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> Response[ErrorResponse | TreasuryList]:
-    """The account's treasuries in the key's mode, newest first: each chain's `active` one, and any
-    `pending` change.
+    """The account's treasuries in the key's mode, newest first, with Stripe's cursor pagination: each
+    chain's `active` one, any `pending` change, and the `replaced` and `canceled` ones.
 
     Args:
         chain_id (int | Unset):
         status (str | Unset):
         limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -169,6 +196,8 @@ async def asyncio_detailed(
         chain_id=chain_id,
         status=status,
         limit=limit,
+        starting_after=starting_after,
+        ending_before=ending_before,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -182,14 +211,18 @@ async def asyncio(
     chain_id: int | Unset = UNSET,
     status: str | Unset = UNSET,
     limit: int | Unset = UNSET,
+    starting_after: str | Unset = UNSET,
+    ending_before: str | Unset = UNSET,
 ) -> ErrorResponse | TreasuryList | None:
-    """The account's treasuries in the key's mode, newest first: each chain's `active` one, and any
-    `pending` change.
+    """The account's treasuries in the key's mode, newest first, with Stripe's cursor pagination: each
+    chain's `active` one, any `pending` change, and the `replaced` and `canceled` ones.
 
     Args:
         chain_id (int | Unset):
         status (str | Unset):
         limit (int | Unset):
+        starting_after (str | Unset):
+        ending_before (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -205,5 +238,7 @@ async def asyncio(
             chain_id=chain_id,
             status=status,
             limit=limit,
+            starting_after=starting_after,
+            ending_before=ending_before,
         )
     ).parsed

@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
 use chrono::{DateTime, Utc};
 use sqlx::types::Json as JsonColumn;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgExecutor, Postgres, QueryBuilder};
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
@@ -56,7 +56,9 @@ pub(crate) fn deposit_status(state: &str) -> &'static str {
         ("deposit_address" = Option<String>, Query, description = "Only deposits to this deposit address, `da_…`"),
         ("status" = Option<String>, Query, description = "Only deposits in this status: `pending`, `credited`, `rejected`, or `reversed`"),
         ("tx_hash" = Option<String>, Query, description = "Only deposits in this transaction"),
+        ("created[gt]" = Option<i64>, Query, description = "Created after, Unix seconds"),
         ("created[gte]" = Option<i64>, Query, description = "Created at or after, Unix seconds"),
+        ("created[lt]" = Option<i64>, Query, description = "Created before, Unix seconds"),
         ("created[lte]" = Option<i64>, Query, description = "Created at or before, Unix seconds"),
         ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
         ("starting_after" = Option<String>, Query, description = "`dep_` id: the page after it"),
@@ -112,11 +114,10 @@ pub(crate) async fn list_deposits(
             .push(" AND deposit.tx_hash = ")
             .push_bind(tx_hash.clone());
     }
-    if let Some(from) = filters.created_gte {
-        builder.push(" AND deposit.created_at >= ").push_bind(from);
-    }
-    if let Some(to) = filters.created_lte {
-        builder.push(" AND deposit.created_at <= ").push_bind(to);
+    for (operator, bound) in &filters.created {
+        builder
+            .push(format!(" AND deposit.created_at {operator} "))
+            .push_bind(*bound);
     }
     let (cursor, before) = match (filters.starting_after, filters.ending_before) {
         (Some(_), Some(_)) => {
@@ -258,10 +259,12 @@ pub(crate) async fn update_deposit(
     let scope = merchant.scope;
     if !metadata::update(
         &state.pool,
+        &state.routes,
         Object::Deposit,
         scope,
         id,
         request.metadata.as_ref(),
+        &merchant.actor(),
     )
     .await?
     {
@@ -287,14 +290,14 @@ pub(crate) async fn update_deposit(
     request_body = CreateRefundRequest,
     responses(
         (status = 200, description = "OK", body = Refund),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
-            status = 409,
-            description = "`deposit_not_refundable`, `deposit_not_final`, `paused`, or \
-                           `idempotency_key_in_use`",
+            status = 400,
+            description = "Bad Request, `destination_sanctioned`, `amount_too_small`, \
+                           `amount_too_large`, `deposit_not_refundable`, `deposit_not_final`, or \
+                           `paused`",
             body = ErrorResponse
         ),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 503, description = "Destination screening is unavailable; retry", body = ErrorResponse)
     ),
     security(("api_key" = [])),
@@ -350,6 +353,7 @@ pub(crate) async fn create_refund(
     }
     let refund_id = repository::request_refund(
         &state.pool,
+        &state.routes,
         &NewRefund {
             scope: merchant.scope,
             deposit_id,
@@ -581,10 +585,12 @@ pub(crate) async fn update_refund(
     let scope = merchant.scope;
     if !metadata::update(
         &state.pool,
+        &state.routes,
         Object::Refund,
         scope,
         id,
         request.metadata.as_ref(),
+        &merchant.actor(),
     )
     .await?
     {
@@ -611,15 +617,14 @@ pub(crate) async fn update_refund(
     request_body = MarkRefundPaidRequest,
     responses(
         (status = 200, description = "OK", body = Refund),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (
+            status = 400,
+            description = "Bad Request, `refund_unexpected_state` (not pending, or marked paid \
+                           with another transaction), or `transfer_already_used`",
+            body = ErrorResponse
+        ),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
-        (
-            status = 409,
-            description = "`refund_unexpected_state` (not pending, or marked paid with another \
-                           transaction), `transfer_already_used`, or `idempotency_key_in_use`",
-            body = ErrorResponse
-        )
     ),
     security(("api_key" = [])),
     tag = "refunds"
@@ -651,6 +656,7 @@ pub(crate) async fn mark_refund_paid(
         })?;
     repository::mark_refund_paid(
         &state.pool,
+        &state.routes,
         merchant.scope,
         id,
         tx_hash,
@@ -681,8 +687,8 @@ pub(crate) async fn mark_refund_paid(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
         (
-            status = 409,
-            description = "`refund_unexpected_state` (succeeded or failed) or `idempotency_key_in_use`",
+            status = 400,
+            description = "`refund_unexpected_state`: succeeded or failed",
             body = ErrorResponse
         )
     ),
@@ -701,7 +707,14 @@ pub(crate) async fn cancel_refund(
         .require(&state.pool, Permission::RefundsWrite)
         .await?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
-    repository::cancel_refund(&state.pool, merchant.scope, id, &merchant.actor()).await?;
+    repository::cancel_refund(
+        &state.pool,
+        &state.routes,
+        merchant.scope,
+        id,
+        &merchant.actor(),
+    )
+    .await?;
     let refund = find_refund(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::internal)?;
@@ -709,8 +722,8 @@ pub(crate) async fn cancel_refund(
 }
 
 /// The scope's deposit `id`, if it exists.
-pub(crate) async fn find_deposit(
-    pool: &PgPool,
+pub(crate) async fn find_deposit<'e>(
+    executor: impl PgExecutor<'e>,
     routes: &RouteSet,
     scope: Scope,
     id: Uuid,
@@ -719,7 +732,7 @@ pub(crate) async fn find_deposit(
     builder.push(" AND deposit.id = ").push_bind(id);
     builder
         .build_query_as::<DepositRow>()
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?
         .map(|row| deposit_object(routes, row))
         .transpose()
@@ -738,13 +751,14 @@ async fn expanded_quote(
         .await
         .map_err(|_| ApiError::internal())?
         .ok_or_else(ApiError::internal)?;
-    let quote = super::quotes::quote_object(&state.pool, &state.routes, lock).await?;
+    let quote =
+        super::quotes::quote_object(&mut *state.pool.acquire().await?, &state.routes, lock).await?;
     Ok(Some(ExpandableQuote::Object(Box::new(quote))))
 }
 
 /// The scope's refund `id`, if it exists.
-pub(crate) async fn find_refund(
-    pool: &PgPool,
+pub(crate) async fn find_refund<'e>(
+    executor: impl PgExecutor<'e>,
     scope: Scope,
     id: Uuid,
 ) -> ApiResult<Option<Refund>> {
@@ -763,7 +777,7 @@ pub(crate) async fn find_refund(
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(|row| {
         Ok(Refund {
@@ -939,8 +953,8 @@ struct ListFilters {
     deposit_address: Option<Uuid>,
     states: Option<&'static [&'static str]>,
     tx_hash: Option<String>,
-    created_gte: Option<DateTime<Utc>>,
-    created_lte: Option<DateTime<Utc>>,
+    /// `created[gt|gte|lt|lte]` bounds, as SQL comparison operators.
+    created: Vec<(&'static str, DateTime<Utc>)>,
     limit: i64,
     starting_after: Option<Uuid>,
     ending_before: Option<Uuid>,
@@ -954,8 +968,7 @@ impl ListFilters {
             deposit_address: None,
             states: None,
             tx_hash: None,
-            created_gte: None,
-            created_lte: None,
+            created: Vec::new(),
             limit: DEFAULT_LIMIT,
             starting_after: None,
             ending_before: None,
@@ -988,8 +1001,11 @@ impl ListFilters {
                     })?;
                     filters.tx_hash = Some(format!("{hash:#x}"));
                 }
-                "created[gte]" => filters.created_gte = Some(timestamp(name, value)?),
-                "created[lte]" => filters.created_lte = Some(timestamp(name, value)?),
+                "created[gt]" | "created[gte]" | "created[lt]" | "created[lte]" => {
+                    filters
+                        .created
+                        .extend(super::pagination::created_bound(name, value)?);
+                }
                 "limit" => {
                     filters.limit = value
                         .parse::<i64>()
@@ -1019,14 +1035,6 @@ impl ListFilters {
         }
         Ok(filters)
     }
-}
-
-fn timestamp(name: &str, value: &str) -> ApiResult<DateTime<Utc>> {
-    value
-        .parse::<i64>()
-        .ok()
-        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
-        .ok_or_else(|| ApiError::invalid_param(name, format!("{name} must be Unix seconds")))
 }
 
 fn decimal_u256(value: &str) -> Option<U256> {
