@@ -24,6 +24,24 @@ webhook receivers must ignore unknown fields. The format follows
     every forwarder over a treasury `pending` without `deposit.credited` until resumed; each change
     is `treasury.updated`.
 
+- Ledger correctness (docs/design/multi-tenant.md, "ledger correctness" amendment):
+  - Deposits carry `amount_refunded` (the cents of `amount` succeeded refunds take back, pro rata
+    to the refunded tokens, rounded down, cumulative) and `amount_reversed` (`amount` once
+    `reversed`), in every `deposit.*` snapshot. Balance rule: a deposit nets to
+    `amount - amount_refunded - amount_reversed` while `credited` or `reversed`, 0 otherwise;
+    merge snapshots per deposit (the later status and the larger amounts win) whatever the order.
+  - A refund with a transaction attached (`mark_paid`) can no longer be canceled
+    (`400 refund_unexpected_state`); it is `failed` with the new `failure_reason`s
+    `transaction_dropped` (its nonce consumed by another transaction at finality) or
+    `transaction_not_found` (never seen within 24 hours), after which a new refund can be
+    requested. A deposit's reversal cancels only its refunds without a transaction.
+  - `mark_paid` takes `receipt_log_index`, the paying log's position in the transaction's receipt,
+    and the refund reports it, replacing the block-wide `log_index`.
+  - Per account and mode, the credit of deposits credited but not final is capped
+    (`max_unfinalized_credit`, 100 000 cents by default, set by the operator with
+    `POST /v1/admin/accounts/{account}`); a deposit past it stays `pending` and is credited once
+    final.
+
 - API conformance with Stripe (docs/design/multi-tenant.md, "API conformance" amendment):
   - Business-state failures are `400` (`deposit_not_final`, `deposit_not_refundable`,
     `quote_unexpected_state`, `quote_payment_received`, `quote_window_closed`, `paused`,

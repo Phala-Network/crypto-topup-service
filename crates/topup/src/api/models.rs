@@ -336,6 +336,14 @@ pub enum ExpandableDeposit {
 /// A transfer to a quote's address or a deposit address at the route's confirmation: valued,
 /// screened, and credited, or rejected; `reversed` if its transaction left the chain before
 /// finality.
+///
+/// Every `deposit.*` event carries the whole deposit, with cumulative amounts, so the customer's
+/// balance can be recomputed from the latest snapshot whatever order events arrive in: the
+/// deposit contributes `amount - amount_refunded - amount_reversed` cents while its `status` is
+/// `credited` or `reversed`, and nothing while it is `pending` or `rejected`. `status` only moves
+/// forward (`pending`, then `credited` or `rejected`, then possibly `reversed`) and
+/// `amount_refunded` only grows, so of two snapshots the later one has the later status or, for
+/// the same status, the larger `amount_refunded`.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Deposit {
     /// `dep_` and the hex of the deposit's deterministic UUID,
@@ -356,8 +364,8 @@ pub struct Deposit {
     pub deposit_address: Option<String>,
     /// `pending` (recorded at the route's confirmation and being valued and screened, or held
     /// while the account's or customer's `settlement` is paused), `credited`, `rejected` (see
-    /// `rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a
-    /// credit as for `deposit.refunded`). New values may be added.
+    /// `rejection_reason`), or `reversed` (its transaction is not in the final chain: its credit is
+    /// taken back, `amount_reversed`). New values may be added.
     pub status: String,
     /// Whether the deposit's block is final on both providers: a final deposit can no longer be
     /// reversed, and only a final deposit can be refunded. A deposit is credited at the route's
@@ -402,6 +410,15 @@ pub struct Deposit {
     pub amount_refunded_atomic: String,
     /// Whether the deposit is fully refunded.
     pub refunded: bool,
+    /// Cents of `amount` its succeeded refunds take back: `amount` times `amount_refunded_atomic`
+    /// over `amount_atomic`, rounded down, so it never exceeds the refunded share, and all of
+    /// `amount` once fully refunded. Computed from the cumulative refunded amount, it only grows.
+    /// `0` without `amount`.
+    pub amount_refunded: u64,
+    /// Cents of `amount` the reversal takes back: `amount` once `status` is `reversed` (a
+    /// deposit is refunded only once final, and a final deposit is never reversed, so a reversed
+    /// deposit has no refunds); `0` otherwise.
+    pub amount_reversed: u64,
     /// Detection time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the
@@ -628,8 +645,10 @@ pub struct CreateRefundRequest {
 pub struct MarkRefundPaidRequest {
     /// Hash of the transaction that pays the refund from the treasury of the deposit's address.
     pub transaction_hash: String,
-    /// Block-wide index of the `Transfer` log that pays the refund; any matching log when absent.
-    pub log_index: Option<u64>,
+    /// Position of the `Transfer` log that pays the refund among the logs of the transaction's
+    /// receipt (0 for the first), not the block-wide `logIndex`, which changes if the transaction
+    /// is re-included in another block; any matching log when absent.
+    pub receipt_log_index: Option<u64>,
 }
 
 /// A refund of (part of) a deposit to the customer, which the merchant pays from the treasury of
@@ -653,17 +672,21 @@ pub struct Refund {
     pub treasury: String,
     /// `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
     /// final), `failed` (the attached transaction does not pay the refund; see
-    /// `failure_reason`), or `canceled`.
+    /// `failure_reason`), or `canceled` (only before a transaction is attached). A refund marked
+    /// paid stays `pending`, reserving its amount of the deposit, until it is `succeeded` or
+    /// `failed`.
     pub status: String,
     /// Why the refund failed: `transaction_failed`, `transfer_not_found`, `sender_mismatch`,
-    /// `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
-    /// added.
+    /// `destination_mismatch`, `amount_mismatch`, `transfer_already_used`,
+    /// `transaction_dropped` (in no block while, at `finalized` on both providers, its sender's
+    /// nonce was used by another transaction), or `transaction_not_found` (no provider returned
+    /// it within 24 hours of `mark_paid`). New values may be added.
     pub failure_reason: Option<String>,
     /// The attached refund transaction, once marked paid.
     pub transaction_hash: Option<String>,
-    /// Block-wide index of the paying `Transfer` log: as named when marked paid, or found at
-    /// verification.
-    pub log_index: Option<u64>,
+    /// Position of the paying `Transfer` log among the logs of the transaction's receipt: as named
+    /// when marked paid, or found at verification.
+    pub receipt_log_index: Option<u64>,
     /// Request time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
@@ -777,6 +800,11 @@ pub struct UpdateAccountRequest {
     /// Replaces the merchant's contact.
     #[serde(default)]
     pub contact: Option<Contact>,
+    /// Sets the cap, in cents and per mode, on the credit of the account's deposits credited
+    /// before they are final: a deposit whose credit would take that total past it is credited
+    /// once final instead. Default 100 000 ($1 000); `0` credits every deposit at finality.
+    #[serde(default)]
+    pub max_unfinalized_credit: Option<u64>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
@@ -800,6 +828,9 @@ pub struct AccountResponse {
     pub restricted: bool,
     /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
+    /// Cap, in cents and per mode, on the credit of the account's deposits credited before they
+    /// are final; a deposit past it is credited once final.
+    pub max_unfinalized_credit: u64,
     /// Creation time, Unix seconds.
     pub created: i64,
     /// The secret keys this request issued, each with its `secret` shown only here: at creation

@@ -53,6 +53,8 @@ def _deposit(**overrides: Any) -> dict[str, Any]:
         "block_number": 100,
         "amount_refunded_atomic": "0",
         "refunded": False,
+        "amount_refunded": 0,
+        "amount_reversed": 0,
         "created": 1_790_410_300,
     }
     deposit.update(overrides)

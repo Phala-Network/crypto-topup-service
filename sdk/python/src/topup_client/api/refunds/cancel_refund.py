@@ -90,9 +90,12 @@ def sync_detailed(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
-    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
-    transaction was attached; canceling a canceled refund returns it. Once its verification has
-    ended (`succeeded` or `failed`), a refund cannot be canceled.
+    """Cancels a pending refund that has no transaction attached and releases its reservation of the
+    deposit; canceling a canceled refund returns it. Once `mark_paid` attached a transaction, the
+    refund cannot be canceled, so that the deposit is never paid back twice: it stays reserved
+    until verification ends it, `succeeded`, or `failed` when the transaction does not pay it,
+    was dropped (its nonce consumed by another transaction at finality), or was never seen by the
+    service's providers within 24 hours. Then request a new refund.
 
     Args:
         id (str):
@@ -124,9 +127,12 @@ def sync(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
-    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
-    transaction was attached; canceling a canceled refund returns it. Once its verification has
-    ended (`succeeded` or `failed`), a refund cannot be canceled.
+    """Cancels a pending refund that has no transaction attached and releases its reservation of the
+    deposit; canceling a canceled refund returns it. Once `mark_paid` attached a transaction, the
+    refund cannot be canceled, so that the deposit is never paid back twice: it stays reserved
+    until verification ends it, `succeeded`, or `failed` when the transaction does not pay it,
+    was dropped (its nonce consumed by another transaction at finality), or was never seen by the
+    service's providers within 24 hours. Then request a new refund.
 
     Args:
         id (str):
@@ -153,9 +159,12 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
-    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
-    transaction was attached; canceling a canceled refund returns it. Once its verification has
-    ended (`succeeded` or `failed`), a refund cannot be canceled.
+    """Cancels a pending refund that has no transaction attached and releases its reservation of the
+    deposit; canceling a canceled refund returns it. Once `mark_paid` attached a transaction, the
+    refund cannot be canceled, so that the deposit is never paid back twice: it stays reserved
+    until verification ends it, `succeeded`, or `failed` when the transaction does not pay it,
+    was dropped (its nonce consumed by another transaction at finality), or was never seen by the
+    service's providers within 24 hours. Then request a new refund.
 
     Args:
         id (str):
@@ -185,9 +194,12 @@ async def asyncio(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
-    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
-    transaction was attached; canceling a canceled refund returns it. Once its verification has
-    ended (`succeeded` or `failed`), a refund cannot be canceled.
+    """Cancels a pending refund that has no transaction attached and releases its reservation of the
+    deposit; canceling a canceled refund returns it. Once `mark_paid` attached a transaction, the
+    refund cannot be canceled, so that the deposit is never paid back twice: it stays reserved
+    until verification ends it, `succeeded`, or `failed` when the transaction does not pay it,
+    was dropped (its nonce consumed by another transaction at finality), or was never seen by the
+    service's providers within 24 hours. Then request a new refund.
 
     Args:
         id (str):

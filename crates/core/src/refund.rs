@@ -76,8 +76,10 @@ pub struct ExpectedRefund {
 /// One ERC-20 `Transfer` log of a finalized refund transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RefundTransfer {
-    /// Block-wide index of the log.
-    pub log_index: u64,
+    /// Position of the log among the logs of the transaction's receipt (0 for the first). Unlike
+    /// the block-wide log index, it survives the transaction's re-inclusion in another block, as
+    /// a deposit's identity does.
+    pub receipt_log_index: u64,
     /// Token contract that emitted the log.
     pub token: Address,
     /// Transfer sender.
@@ -103,6 +105,11 @@ pub enum RefundFailure {
     AmountMismatch,
     /// The matching transfer already pays another refund.
     TransferAlreadyUsed,
+    /// The transaction is in no block and, at `finalized` on both providers, its sender's nonce
+    /// was consumed by another transaction: it can never be included.
+    TransactionDropped,
+    /// Neither provider ever returned the transaction, long after it was attached.
+    TransactionNotFound,
 }
 
 impl RefundFailure {
@@ -116,11 +123,14 @@ impl RefundFailure {
             Self::DestinationMismatch => "destination_mismatch",
             Self::AmountMismatch => "amount_mismatch",
             Self::TransferAlreadyUsed => "transfer_already_used",
+            Self::TransactionDropped => "transaction_dropped",
+            Self::TransactionNotFound => "transaction_not_found",
         }
     }
 }
 
-/// Picks the log of a finalized transaction that pays `expected`, and returns its block-wide index.
+/// Picks the log of a finalized transaction that pays `expected`, and returns its receipt
+/// position.
 ///
 /// `named` is the log the merchant named, if any; otherwise any matching log qualifies. A log in
 /// `used` pays another refund already. When nothing matches, the reason describes the first
@@ -139,10 +149,13 @@ pub fn match_refund_transfer(
     let mut already_used = false;
     let mut first_mismatch = None;
     for transfer in transfers.iter().filter(|transfer| {
-        transfer.token == expected.token && named.is_none_or(|index| transfer.log_index == index)
+        transfer.token == expected.token
+            && named.is_none_or(|index| transfer.receipt_log_index == index)
     }) {
         match mismatch(expected, transfer) {
-            None if !used.contains(&transfer.log_index) => return Ok(transfer.log_index),
+            None if !used.contains(&transfer.receipt_log_index) => {
+                return Ok(transfer.receipt_log_index);
+            }
             None => already_used = true,
             Some(reason) => {
                 first_mismatch.get_or_insert(reason);
@@ -166,6 +179,26 @@ fn mismatch(expected: &ExpectedRefund, transfer: &RefundTransfer) -> Option<Refu
     } else {
         None
     }
+}
+
+/// The part of a deposit's `credit` (cents) that its succeeded refunds take back: the credit
+/// pro rata to the refunded share of the deposited tokens, rounded down.
+///
+/// It is computed from the cumulative refunded amount, not summed per refund, so it never
+/// decreases as refunds succeed, it is never more than the refunded share (the merchant never
+/// claws back more than it credited for the refunded tokens), and a full refund takes back the
+/// whole credit. `refunded_atomic` above `amount_atomic` counts as a full refund.
+#[must_use]
+pub fn refunded_credit(credit: u64, amount_atomic: U256, refunded_atomic: U256) -> u64 {
+    if amount_atomic.is_zero() || refunded_atomic >= amount_atomic {
+        return if refunded_atomic.is_zero() { 0 } else { credit };
+    }
+    // credit < 2^64 and refunded < amount, so the quotient is below credit and fits.
+    let share = U256::from(credit)
+        .saturating_mul(refunded_atomic)
+        .checked_div(amount_atomic)
+        .unwrap_or_default();
+    u64::try_from(share).unwrap_or(credit)
 }
 
 #[cfg(test)]
@@ -291,9 +324,9 @@ mod tests {
         }
     }
 
-    fn paying(log_index: u64) -> RefundTransfer {
+    fn paying(receipt_log_index: u64) -> RefundTransfer {
         RefundTransfer {
-            log_index,
+            receipt_log_index,
             token: address(0x70),
             from: address(0x7e),
             to: address(0x44),
@@ -436,5 +469,46 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn refunded_credit_is_pro_rata_rounded_down_and_whole_when_fully_refunded() {
+        let cases = [
+            ("nothing refunded", 2_500, 1_000, 0, 0),
+            ("half", 2_500, 1_000, 500, 1_250),
+            ("a third rounds down", 100, 3, 1, 33),
+            ("two thirds rounds down", 100, 3, 2, 66),
+            ("the whole deposit", 100, 3, 3, 100),
+            ("more than the deposit", 100, 3, 4, 100),
+            ("one base unit of many", 1, 1_000_000, 1, 0),
+            ("no credit", 0, 1_000, 500, 0),
+            ("the largest credit", u64::MAX, 7, 6, u64::MAX / 7 * 6),
+        ];
+        for (name, credit, amount, refunded, expected) in cases {
+            assert_eq!(
+                refunded_credit(credit, U256::from(amount), U256::from(refunded)),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refunded_credit_never_over_claws_and_never_decreases() {
+        let (credit, amount) = (997_u64, 13_u64);
+        let mut previous = 0;
+        for refunded in 0..=amount {
+            let taken = refunded_credit(credit, U256::from(amount), U256::from(refunded));
+            // Never more than the exact share: taken * amount <= credit * refunded.
+            assert!(
+                u128::from(taken) * u128::from(amount) <= u128::from(credit) * u128::from(refunded)
+            );
+            assert!(
+                taken >= previous,
+                "cumulative claw-back decreased at {refunded}"
+            );
+            previous = taken;
+        }
+        assert_eq!(previous, credit);
     }
 }

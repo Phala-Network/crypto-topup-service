@@ -61,17 +61,24 @@ def _credited(
     *,
     account: str = CONFIG.product_slug,
     livemode: bool = False,
+    event_type: str = "deposit.credited",
+    **fields: object,
 ) -> tuple[dict[str, str], bytes]:
+    """A signed `deposit.*` delivery about deposit `number`; `fields` override its object."""
     tx_hash = "0x" + f"{number:02x}" * 32
     deposit = deposit_id(CONFIG.chain_id, tx_hash, 0)
-    event_id = credited_event_id(deposit)
+    event_id = (
+        credited_event_id(deposit)
+        if event_type == "deposit.credited"
+        else "evt_" + uuid.uuid4().hex
+    )
     body = json.dumps(
         {
             "id": event_id,
             "object": "event",
             "account": account,
             "livemode": livemode,
-            "type": "deposit.credited",
+            "type": event_type,
             "created": 1_790_410_321,
             "data": {
                 "object": {
@@ -102,8 +109,11 @@ def _credited(
                     "block_number": 100,
                     "amount_refunded_atomic": "0",
                     "refunded": False,
+                    "amount_refunded": 0,
+                    "amount_reversed": 0,
                     "created": 1_790_410_300,
                 }
+                | fields
             },
         }
     ).encode()
@@ -119,6 +129,60 @@ def test_a_credit_is_applied_once_across_redeliveries() -> None:
     assert amount == 2_500
     assert key.startswith("dep_")
     assert len(fulfillment.ledger.events("deposit.credited")) == 1
+
+
+def test_partial_refunds_take_back_their_share_of_the_credit() -> None:
+    fulfillment = _fulfillment()
+    third = _credited(event_type="deposit.refunded", amount_refunded=833)
+    whole = _credited(event_type="deposit.refunded", amount_refunded=2_500, refunded=True)
+    assert fulfillment.handle(*_credited()).status == 204
+    assert fulfillment.handle(*third).status == 204
+    assert fulfillment.ledger.balance_for(TEAM) == 2_500 - 833
+    # A repeated or late older snapshot never gives a claw-back back.
+    for delivery in (third, _credited(), third):
+        fulfillment.handle(*delivery)
+    assert fulfillment.ledger.balance_for(TEAM) == 2_500 - 833
+    fulfillment.handle(*whole)
+    assert fulfillment.ledger.balance_for(TEAM) == 0
+    [(key, amount)] = fulfillment.ledger.credits_for(TEAM)
+    assert amount == 2_500
+    assert fulfillment.ledger.adjustments_for(TEAM) == [
+        (key, -833, "deposit.refunded"),
+        (key, -1_667, "deposit.refunded"),
+    ]
+
+
+def test_a_refund_delivered_before_the_credit_applies_with_it() -> None:
+    fulfillment = _fulfillment()
+    fulfillment.handle(*_credited(event_type="deposit.refunded", amount_refunded=1_000))
+    assert fulfillment.ledger.credits_for(TEAM) == []
+    fulfillment.handle(*_credited())
+    assert fulfillment.ledger.balance_for(TEAM) == 1_500
+
+
+def test_a_reversal_takes_the_credit_back_in_either_order() -> None:
+    reversal = _credited(event_type="deposit.reversed", status="reversed", amount_reversed=2_500)
+    after = _fulfillment()
+    after.handle(*_credited())
+    after.handle(*reversal)
+    assert after.ledger.balance_for(TEAM) == 0
+    assert [amount for _, amount, _ in after.ledger.adjustments_for(TEAM)] == [-2_500]
+
+    # Reversed before the credit arrives: nothing is ever credited.
+    before = _fulfillment()
+    before.handle(*reversal)
+    before.handle(*_credited())
+    assert before.ledger.balance_for(TEAM) == 0
+    assert before.ledger.credits_for(TEAM) == []
+    assert before.ledger.orders_for(TEAM) == []
+
+
+def test_claw_backs_leave_a_held_credit_alone() -> None:
+    fulfillment = _fulfillment(suspended=True)
+    fulfillment.handle(*_credited())
+    fulfillment.handle(*_credited(event_type="deposit.refunded", amount_refunded=2_500))
+    assert fulfillment.ledger.adjustments_for(TEAM) == []
+    assert [order["status"] for order in fulfillment.ledger.orders_for(TEAM)] == ["held"]
 
 
 def test_a_forged_delivery_is_refused_without_a_credit() -> None:

@@ -301,6 +301,8 @@ def _deposit(index: int) -> dict[str, object]:
         "block_number": 1,
         "amount_refunded_atomic": "0",
         "refunded": False,
+        "amount_refunded": 0,
+        "amount_reversed": 0,
         "created": NOW,
     }
 
@@ -353,7 +355,7 @@ REFUND = {
     "status": "pending",
     "failure_reason": None,
     "transaction_hash": None,
-    "log_index": None,
+    "receipt_log_index": None,
     "created": NOW,
 }
 
@@ -374,17 +376,20 @@ def test_refunds_send_an_idempotency_key_and_default_to_the_remainder() -> None:
 
 
 def test_refunds_are_marked_paid_and_canceled_by_id() -> None:
-    marked = {**REFUND, "transaction_hash": "0x" + "dd" * 32, "log_index": 7}
+    marked = {**REFUND, "transaction_hash": "0x" + "dd" * 32, "receipt_log_index": 1}
     service = FakeService(lambda request, _: httpx.Response(200, json=marked))
     with _client(service) as client:
-        refund = client.mark_refund_paid(REFUND_ID, "0x" + "dd" * 32, log_index=7)
+        refund = client.mark_refund_paid(REFUND_ID, "0x" + "dd" * 32, receipt_log_index=1)
         client.mark_refund_paid(REFUND_ID, "0x" + "dd" * 32)
         client.cancel_refund(REFUND_ID)
     assert refund.transaction_hash == "0x" + "dd" * 32
-    assert refund.log_index == 7
+    assert refund.receipt_log_index == 1
     paid, unnamed, canceled = service.requests
     assert paid.url.raw_path == f"/v1/refunds/{REFUND_ID}/mark_paid".encode()
-    assert json.loads(paid.content) == {"transaction_hash": "0x" + "dd" * 32, "log_index": 7}
+    assert json.loads(paid.content) == {
+        "transaction_hash": "0x" + "dd" * 32,
+        "receipt_log_index": 1,
+    }
     assert json.loads(unnamed.content) == {"transaction_hash": "0x" + "dd" * 32}
     assert canceled.method == "POST"
     assert canceled.url.raw_path == f"/v1/refunds/{REFUND_ID}/cancel".encode()

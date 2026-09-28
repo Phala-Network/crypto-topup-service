@@ -1,7 +1,7 @@
-"""The webhook receiver and fulfillment: the product side of `deposit.credited`.
+"""The webhook receiver and fulfillment: the product side of `deposit.*` events.
 
-The service credits a deposit once it is final, priced, and screened, and tells the product with a
-signed `deposit.credited` webhook. `Fulfillment` does what Phala Cloud's backend does with it:
+The service credits a deposit once it is priced and screened, and tells the product with a signed
+`deposit.credited` webhook. `Fulfillment` does what Phala Cloud's backend does with it:
 
 1. verify the Standard Webhooks `v1a` signature against the account's webhook keys pinned from
    attestation, over the raw body, and that the event names the product's account and mode;
@@ -12,7 +12,14 @@ signed `deposit.credited` webhook. `Fulfillment` does what Phala Cloud's backend
    per-deposit or per-period cap); support later collects a refund address and requests a refund;
 4. answer `2xx` only after that commit, so a failure is retried by the service.
 
-Every other event type is stored for notifications and history; none moves a balance.
+`deposit.refunded` and `deposit.reversed` take a credit back. Every `deposit.*` event carries the
+whole deposit with cumulative, service-computed claw-backs (`amount_refunded`, the refunded share
+of the credit; `amount_reversed`, all of it once reversed), and events may arrive in any order, so
+the balance follows the snapshots, not the event types: per deposit, in one transaction, the stored
+view and the snapshot merge (the later status and the larger claw-backs win), and a credited order
+is adjusted to what its credit nets to, `credit - amount_refunded - amount_reversed`. A
+`deposit.reversed` that arrives before `deposit.credited` leaves nothing to credit. Every other
+event type is stored for notifications and history; none moves a balance.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ from topup_sdk import (
 )
 
 from .config import MissingProductKeyError, ProductConfig
-from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, ProductLedger
+from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, DepositView, ProductLedger
 
 LOG = logging.getLogger(__name__)
 
@@ -59,6 +66,22 @@ class PinnedKeys:
 class Answer:
     status: int
     body: dict[str, Any] | None = None
+
+
+def deposit_view(deposit: Mapping[str, Any]) -> tuple[str, DepositView] | None:
+    """A `deposit.*` event's snapshot: its `dep_` id and view, or `None` when malformed."""
+    fields = (
+        deposit.get("id"),
+        deposit.get("status"),
+        deposit.get("amount_refunded"),
+        deposit.get("amount_reversed"),
+    )
+    match fields:
+        case (str(key), str(status), int(refunded), int(reversed_)) if (
+            refunded >= 0 and reversed_ >= 0
+        ):
+            return key, DepositView(status, refunded, reversed_)
+    return None
 
 
 def parse_decimal(value: object) -> int | None:
@@ -105,23 +128,52 @@ class Fulfillment:
             except FulfillmentError as error:
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
             else:
-                self.fulfill(credit)
+                self.fulfill(credit, event.object or {})
+        elif event.type.startswith("deposit."):
+            snapshot = deposit_view(event.object or {})
+            if snapshot is None:
+                LOG.warning("ignoring %s %s: malformed deposit", event.type, event.id)
+            else:
+                self.settle(*snapshot, reason=event.type)
         if self.ledger.record_event(event.id, event.type, event.data):
             LOG.info("webhook %s %s", event.type, (event.object or {}).get("id", ""))
         return Answer(HTTPStatus.NO_CONTENT)
 
-    def fulfill(self, credit: CreditedDeposit) -> str:
-        """Credits the deposit once and returns its order status (`accepted` or `held`)."""
+    def fulfill(self, credit: CreditedDeposit, deposit: Mapping[str, Any] | None = None) -> str:
+        """Credits the deposit once and returns its order status (`accepted` or `held`), or
+        `reversed` when an earlier snapshot showed the deposit reversed, leaving nothing to credit.
+        `deposit` is the event's deposit object, whose claw-backs apply to the credit at once."""
         key = credit.fulfillment_key
+        view = deposit_view(deposit or {}) or (key, DepositView("credited", 0, 0))
+        return self.settle(key, view[1], credit=credit, reason=CREDITED_EVENT) or "reversed"
+
+    def settle(
+        self,
+        key: str,
+        snapshot: DepositView,
+        *,
+        credit: CreditedDeposit | None = None,
+        reason: str,
+    ) -> str | None:
+        """Merges a deposit snapshot and adjusts its credited order to what the credit nets to;
+        with `credit`, first credits the deposit when it has no order. Returns the order status,
+        or `None` when the deposit has no order."""
         now = time.time()
-        # SQLite's BEGIN IMMEDIATE serializes every writer. On PostgreSQL, lock the team row
+        # SQLite's BEGIN IMMEDIATE serializes every writer, so deliveries of one deposit apply one
+        # at a time. On PostgreSQL, lock the deposit's snapshot row and the team row
         # (SELECT ... FOR UPDATE) before the per-period cap sum so concurrent credits cannot
         # both pass it, and keep provider_order_id unique across teams for this flow.
         with self.ledger.transaction() as db:
-            existing = ProductLedger._find_order(db, key)
-            if existing is not None:
-                stored = parse_decimal(existing.payload.get("amount_minor"))
-                if stored is not None and stored != credit.amount:
+            view = ProductLedger.merge_snapshot(db, key, snapshot)
+            order = ProductLedger._find_order(db, key)
+            if order is None:
+                if credit is None or view.status == "reversed":
+                    return None
+                order_id, status = self._credit(db, credit, now)
+            else:
+                order_id, status = order.id, order.status
+                stored = parse_decimal(order.payload.get("amount_minor"))
+                if credit is not None and stored is not None and stored != credit.amount:
                     # Only a service restored from backup re-prices a spot deposit: keep the first
                     # credit and raise it with the operator.
                     LOG.error(
@@ -130,48 +182,63 @@ class Fulfillment:
                         credit.amount,
                         stored,
                     )
-                return existing.status
-            hold = self._hold_reason(db, credit, now)
-            order_id = str(uuid.uuid4())
-            team_id = None if hold == "unknown_account" else credit.client_reference_id
+            if status == "accepted":
+                credited, net = ProductLedger.order_amounts(db, order_id)
+                change = view.contribution(credited) - net
+                if change:
+                    db.execute(
+                        "INSERT INTO credit_adjustments "
+                        "(id, team_id, order_id, amount_minor, reason, created_at) "
+                        "SELECT ?, team_id, id, ?, ?, ? FROM orders WHERE id = ?",
+                        (f"adj_{uuid.uuid4().hex}", change, reason, now, order_id),
+                    )
+                    LOG.info("fulfillment %s adjusted %+d by %s", key, change, reason)
+        return status
+
+    def _credit(self, db: Any, credit: CreditedDeposit, now: float) -> tuple[str, str]:
+        """Creates the deposit's order, credited or held; returns its id and status."""
+        key = credit.fulfillment_key
+        hold = self._hold_reason(db, credit, now)
+        order_id = str(uuid.uuid4())
+        team_id = None if hold == "unknown_account" else credit.client_reference_id
+        db.execute(
+            "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
+            "payload, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                order_id,
+                team_id,
+                ORDER_PROVIDER,
+                ORDER_FLOW_CODE,
+                key,
+                json.dumps(_payload(credit)),
+                "held" if hold else "pending",
+                hold,
+                now,
+            ),
+        )
+        if hold is None:
+            credit_id = f"ctx_{uuid.uuid4().hex}"
             db.execute(
-                "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
-                "payload, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO credit_transactions "
+                "(id, team_id, order_id, amount_minor, funding_source, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
+                    credit_id,
+                    credit.client_reference_id,
                     order_id,
-                    team_id,
-                    ORDER_PROVIDER,
-                    ORDER_FLOW_CODE,
-                    key,
-                    json.dumps(_payload(credit)),
-                    "held" if hold else "pending",
-                    hold,
+                    credit.amount,
+                    f"crypto:{self.config.token_symbol}:{credit.chain_id}",
                     now,
                 ),
             )
-            if hold is None:
-                credit_id = f"ctx_{uuid.uuid4().hex}"
-                db.execute(
-                    "INSERT INTO credit_transactions "
-                    "(id, team_id, order_id, amount_minor, funding_source, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        credit_id,
-                        credit.client_reference_id,
-                        order_id,
-                        credit.amount,
-                        f"crypto:{self.config.token_symbol}:{credit.chain_id}",
-                        now,
-                    ),
-                )
-                # complete_order_payment, in the same transaction as the credit.
-                db.execute(
-                    "UPDATE orders SET status = 'accepted', credit_transaction_id = ? WHERE id = ?",
-                    (credit_id, order_id),
-                )
+            # complete_order_payment, in the same transaction as the credit.
+            db.execute(
+                "UPDATE orders SET status = 'accepted', credit_transaction_id = ? WHERE id = ?",
+                (credit_id, order_id),
+            )
         status = "held" if hold else "accepted"
         LOG.info("fulfillment %s -> %s %s", key, status, hold or "")
-        return status
+        return order_id, status
 
     def _hold_reason(self, db: Any, credit: CreditedDeposit, now: float) -> str | None:
         row = db.execute(

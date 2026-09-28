@@ -539,24 +539,28 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             .await?
         );
         let deposit = deposit_id(1, tx_hash, 0);
-        let refund = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO refunds (id, account_id, livemode, chain_id, deposit_id, amount_atomic,
-                                 destination_address, status)
-            SELECT $1, account_id, livemode, chain_id, id, 10, $3, 'pending'
-            FROM deposits WHERE id = $2
-            "#,
-        )
-        .bind(refund)
-        .bind(deposit)
-        .bind(format!("{:#x}", Address::repeat_byte(0x67)))
-        .execute(pool)
-        .await?;
+        // One refund to mark paid, and one to cancel: a refund marked paid cannot be canceled.
+        let (refund, unpaid_refund) = (Uuid::new_v4(), Uuid::new_v4());
+        for id in [refund, unpaid_refund] {
+            sqlx::query(
+                r#"
+                INSERT INTO refunds (id, account_id, livemode, chain_id, deposit_id, amount_atomic,
+                                     destination_address, status)
+                SELECT $1, account_id, livemode, chain_id, id, 10, $3, 'pending'
+                FROM deposits WHERE id = $2
+                "#,
+            )
+            .bind(id)
+            .bind(deposit)
+            .bind(format!("{:#x}", Address::repeat_byte(0x67)))
+            .execute(pool)
+            .await?;
+        }
 
         let quote = topup::ids::format(topup::ids::QUOTE, address.quote_id.context("quote address")?);
         let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit);
         let refund = topup::ids::format(topup::ids::REFUND, refund);
+        let unpaid_refund = topup::ids::format(topup::ids::REFUND, unpaid_refund);
         let api_key = topup::ids::format(topup::ids::API_KEY, owner_key_id);
         let refund_body = serde_json::to_vec(&json!({
             "deposit": deposit,
@@ -597,7 +601,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             ),
             (
                 Method::POST,
-                format!("/v1/refunds/{refund}/cancel"),
+                format!("/v1/refunds/{unpaid_refund}/cancel"),
                 Vec::new(),
             ),
             (Method::POST, "/v1/refunds".to_owned(), refund_body),
@@ -704,7 +708,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             .fetch_one(pool)
             .await?;
         ensure!(
-            refunds == 2,
+            refunds == 3,
             "only the owner's own request created a refund"
         );
         Ok(())

@@ -16,6 +16,12 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 - `roll_webhook_key` / `pay.account.roll_webhook_key` default to `expires_in=172800`, the shortest
   overlap a live roll accepts (was `0`).
 
+- `Deposit` has `amount_refunded` and `amount_reversed`, the service-computed cumulative
+  claw-backs; `Refund.receipt_log_index` replaces `log_index`, and `mark_paid(…,
+  receipt_log_index=…)` / `mark_refund_paid(…, receipt_log_index=…)` replace `log_index=`. A refund
+  marked paid can no longer be canceled. The FastAPI example applies every `deposit.*` event by
+  the balance rule (docs/integration.md §2.3).
+
 - API conformance with Stripe (docs/design/multi-tenant.md, "API conformance"): business-state
   failures such as `deposit_not_final`, `quote_unexpected_state`, `paused`, `treasury_not_set`,
   and `*_cap_exceeded` are `400` (only `idempotency_key_in_use` is `409`); per-customer limits are

@@ -571,14 +571,15 @@ class TopupClient:
         )
 
     def mark_refund_paid(
-        self, refund_id: str, transaction_hash: str, *, log_index: int | None = None
+        self, refund_id: str, transaction_hash: str, *, receipt_log_index: int | None = None
     ) -> Refund:
         """Attaches the transaction that pays a pending refund; the service verifies it at
-        finality. `log_index` names the paying `Transfer` log when one transaction pays several
-        refunds."""
+        finality. `receipt_log_index`, the paying `Transfer` log's position among the receipt's
+        logs, names it when one transaction pays several refunds. A refund marked paid can no
+        longer be canceled."""
         body = MarkRefundPaidRequest(
             transaction_hash=transaction_hash,
-            log_index=UNSET if log_index is None else log_index,
+            receipt_log_index=UNSET if receipt_log_index is None else receipt_log_index,
         )
         return self._call(
             lambda: mark_refund_paid.sync_detailed(refund_id, client=self._client, body=body),
@@ -586,7 +587,8 @@ class TopupClient:
         )
 
     def cancel_refund(self, refund_id: str) -> Refund:
-        """Cancels a pending refund and releases its reservation of the deposit."""
+        """Cancels a pending refund not yet marked paid and releases its reservation of the
+        deposit."""
         return self._call(
             lambda: cancel_refund.sync_detailed(refund_id, client=self._client),
             Refund,

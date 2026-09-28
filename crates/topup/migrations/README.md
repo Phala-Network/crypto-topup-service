@@ -186,3 +186,13 @@ service can only read it.
   admin-signed
   `POST /v1/admin/reconciliation_blocks/{block_key}/lift` and a `reason`: it deletes the row and
   writes an `audit` row carrying the removed block in one transaction.
+
+`20261017000000_ledger_correctness` applies the ledger correctness amendment of the design: it
+renames `refunds.log_index` to `receipt_log_index`, the paying log's position in its receipt (a
+pending refund's named log, block-wide until now, is cleared so any matching log pays it), adds
+`refunds.paid_at` and the transaction's `tx_from` and `tx_nonce` kept when first read, and the
+`transaction_dropped` and `transaction_not_found` failure reasons; adds
+`deposits.finality_check_at`, the finality watch's per-deposit recheck time, with the unfinal
+index extended to `(chain_id, block_number, id)`; and adds `accounts.max_unfinalized_credit`
+(cents, default 100 000) with an index of credited deposits not final. Its down migration returns
+refunds failed as dropped or never seen to `pending`.

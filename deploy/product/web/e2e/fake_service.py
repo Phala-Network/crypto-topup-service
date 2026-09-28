@@ -148,6 +148,8 @@ class FakeTopup:
             "block_number": payment["block"],
             "amount_refunded_atomic": "0",
             "refunded": False,
+            "amount_refunded": 0,
+            "amount_reversed": 0,
             "created": int(time.time()),
             "_acknowledged": False,
         }

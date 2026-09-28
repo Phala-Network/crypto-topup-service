@@ -61,6 +61,7 @@
             "reviewed_by": "operator@phala.network"
           },
           "id": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "max_unfinalized_credit": 100000,
           "name": "Example Cloud",
           "object": "account",
           "paused_scopes": [],
@@ -95,6 +96,12 @@
             "description": "Account id, `acct_…`.",
             "type": "string"
           },
+          "max_unfinalized_credit": {
+            "description": "Cap, in cents and per mode, on the credit of the account's deposits credited before they\nare final; a deposit past it is credited once final.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "name": {
             "description": "Display name.",
             "type": "string"
@@ -127,6 +134,7 @@
           "charges_enabled",
           "restricted",
           "paused_scopes",
+          "max_unfinalized_credit",
           "created",
           "api_keys"
         ],
@@ -471,12 +479,14 @@
         "type": "object"
       },
       "Deposit": {
-        "description": "A transfer to a quote's address or a deposit address at the route's confirmation: valued,\nscreened, and credited, or rejected; `reversed` if its transaction left the chain before\nfinality.",
+        "description": "A transfer to a quote's address or a deposit address at the route's confirmation: valued,\nscreened, and credited, or rejected; `reversed` if its transaction left the chain before\nfinality.\n\nEvery `deposit.*` event carries the whole deposit, with cumulative amounts, so the customer's\nbalance can be recomputed from the latest snapshot whatever order events arrive in: the\ndeposit contributes `amount - amount_refunded - amount_reversed` cents while its `status` is\n`credited` or `reversed`, and nothing while it is `pending` or `rejected`. `status` only moves\nforward (`pending`, then `credited` or `rejected`, then possibly `reversed`) and\n`amount_refunded` only grows, so of two snapshots the later one has the later status or, for\nthe same status, the larger `amount_refunded`.",
         "example": {
           "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
           "amount": 2500,
           "amount_atomic": "202510000000000000000",
+          "amount_refunded": 0,
           "amount_refunded_atomic": "0",
+          "amount_reversed": 0,
           "asset": "PHA",
           "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
           "block_number": 21000000,
@@ -533,9 +543,21 @@
             "description": "Token amount in base units, as a decimal string.",
             "type": "string"
           },
+          "amount_refunded": {
+            "description": "Cents of `amount` its succeeded refunds take back: `amount` times `amount_refunded_atomic`\nover `amount_atomic`, rounded down, so it never exceeds the refunded share, and all of\n`amount` once fully refunded. Computed from the cumulative refunded amount, it only grows.\n`0` without `amount`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "amount_refunded_atomic": {
             "description": "Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.",
             "type": "string"
+          },
+          "amount_reversed": {
+            "description": "Cents of `amount` the reversal takes back: `amount` once `status` is `reversed` (a\ndeposit is refunded only once final, and a final deposit is never reversed, so a reversed\ndeposit has no refunds); `0` otherwise.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "asset": {
             "description": "Asset code; `null` for a token without a route.",
@@ -656,7 +678,7 @@
             ]
           },
           "status": {
-            "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a\ncredit as for `deposit.refunded`). New values may be added.",
+            "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: its credit is\ntaken back, `amount_reversed`). New values may be added.",
             "type": "string"
           },
           "swept": {
@@ -695,6 +717,8 @@
           "block_number",
           "amount_refunded_atomic",
           "refunded",
+          "amount_refunded",
+          "amount_reversed",
           "created",
           "metadata"
         ],
@@ -1485,6 +1509,15 @@
               }
             ]
           },
+          "max_unfinalized_credit": {
+            "description": "Sets the cap, in cents and per mode, on the credit of the account's deposits credited\nbefore they are final: a deposit whose credit would take that total past it is credited\nonce final instead. Default 100 000 ($1 000); `0` credits every deposit at finality.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "reason": {
             "description": "Why, 1 to 1024 bytes.",
             "type": "string"
@@ -1742,7 +1775,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nor the contact. Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
+        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nthe contact, or the cap on credit before finality. Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
         "tags": [
           "admin"
         ]

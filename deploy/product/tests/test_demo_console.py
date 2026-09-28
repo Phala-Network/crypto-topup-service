@@ -94,6 +94,8 @@ def _deposit(**fields: Any) -> dict[str, Any]:
         "block_number": 1,
         "amount_refunded_atomic": "0",
         "refunded": False,
+        "amount_refunded": 0,
+        "amount_reversed": 0,
         "created": NOW,
         **fields,
     }

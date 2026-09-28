@@ -644,6 +644,32 @@ impl EvmClient {
         .await
     }
 
+    /// Reads a transaction's sender and nonce by hash, pending or included; `None` when the
+    /// provider does not know the transaction.
+    pub async fn transaction_origin(
+        &self,
+        hash: B256,
+    ) -> Result<Option<(Address, u64)>, ChainError> {
+        use alloy::consensus::Transaction as _;
+        use alloy::network::TransactionResponse as _;
+
+        let transaction = self
+            .bounded("transaction", self.provider.get_transaction_by_hash(hash))
+            .await?;
+        Ok(transaction.map(|transaction| (transaction.from(), transaction.nonce())))
+    }
+
+    /// Returns `account`'s nonce at `block`: the number of its transactions up to that block.
+    pub async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
+        self.bounded(
+            "nonce",
+            self.provider
+                .get_transaction_count(account)
+                .block_id(BlockId::number(block)),
+        )
+        .await
+    }
+
     /// Returns the provider's current `latest` block number. Used only by the display-only head
     /// scan; nothing that affects money reads above `finalized`.
     pub async fn latest_head(&self) -> Result<u64, ChainError> {

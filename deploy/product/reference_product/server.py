@@ -257,6 +257,11 @@ class AccountApi:
                 for key, amount in self.ledger.credits_for(team)
             ],
             "orders": self.ledger.orders_for(team),
+            "balance_minor": self.ledger.balance_for(team),
+            "adjustments": [
+                {"provider_order_id": key, "amount_minor": amount, "reason": reason}
+                for key, amount, reason in self.ledger.adjustments_for(team)
+            ],
             "events": [
                 event
                 for event in self.ledger.all_events()

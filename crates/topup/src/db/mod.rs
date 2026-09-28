@@ -17,8 +17,8 @@ pub use addresses::{Address, get_address, list_chain_addresses};
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
-    TransitionWrites, apply_transition, claim_deposit, get_deposit, insert_deposit,
-    release_deposit_lease,
+    TransitionWrites, UnfinalizedCredit, apply_transition, claim_deposit, get_deposit,
+    insert_deposit, release_deposit_lease, unfinalized_credit,
 };
 pub use outbox::{
     EventObject, NewOutboxEvent, Notice, SYSTEM_ACTOR, enqueue_in, enqueue_rendered_in, event_data,

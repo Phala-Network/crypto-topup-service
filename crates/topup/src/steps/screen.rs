@@ -1,7 +1,9 @@
 //! Confirmed-to-credited screening step.
 //!
 //! A deposit that passes screening is credited: its USD value is final and owed to the account,
-//! which learns it from the `deposit.credited` webhook written in the same transaction.
+//! which learns it from the `deposit.credited` webhook written in the same transaction. A deposit
+//! that is not final yet waits for finality instead when its credit would take the account's
+//! credit that is not final past `accounts.max_unfinalized_credit`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -207,6 +209,30 @@ impl Step for ScreenStep {
         };
         let mut result = screening_route.evaluate(deposit, pause_scopes).await;
         if result.outcome == StepOutcome::Advance {
+            // A deposit that is not final yet is credited only within the account's cap on
+            // credit a reorganization could still reverse; past it, it is credited once final.
+            if deposit.final_at.is_none() {
+                let credit = deposit.credit_minor.map_or(0, |credit| credit.value());
+                match crate::db::unfinalized_credit(
+                    &self.pool,
+                    deposit.account_id,
+                    deposit.livemode,
+                    deposit.id,
+                )
+                .await
+                {
+                    Ok(exposure) if !exposure.admits(credit) => {
+                        return crate::pump::unfinalized_cap_wait(exposure, credit);
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        return transient_result(
+                            "unfinalized_credit_load_failed",
+                            deposit.block_number,
+                        );
+                    }
+                }
+            }
             match credited_event(deposit) {
                 Ok(event) => result.events.push(event),
                 Err(error) => return invariant_result(error, deposit.block_number),

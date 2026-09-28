@@ -632,9 +632,10 @@ pub(crate) async fn update_refund(
 /// Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
 /// `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
 /// `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
-/// (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+/// (`receipt_log_index`, or any such log when absent). Then the refund is `succeeded` and
 /// `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
-/// transaction returns the refund.
+/// transaction returns the refund. From here on the refund cannot be canceled: it is `failed`
+/// only when its transaction is proven not to pay it.
 pub(crate) async fn mark_refund_paid(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -660,7 +661,7 @@ pub(crate) async fn mark_refund_paid(
         merchant.scope,
         id,
         tx_hash,
-        request.log_index,
+        request.receipt_log_index,
         &merchant.actor(),
     )
     .await?;
@@ -688,16 +689,19 @@ pub(crate) async fn mark_refund_paid(
         (status = 404, description = "Not Found", body = ErrorResponse),
         (
             status = 400,
-            description = "`refund_unexpected_state`: succeeded or failed",
+            description = "`refund_unexpected_state`: marked paid, succeeded, or failed",
             body = ErrorResponse
         )
     ),
     security(("api_key" = [])),
     tag = "refunds"
 )]
-/// Cancels a pending refund and releases its reservation of the deposit, whether or not a
-/// transaction was attached; canceling a canceled refund returns it. Once its verification has
-/// ended (`succeeded` or `failed`), a refund cannot be canceled.
+/// Cancels a pending refund that has no transaction attached and releases its reservation of the
+/// deposit; canceling a canceled refund returns it. Once `mark_paid` attached a transaction, the
+/// refund cannot be canceled, so that the deposit is never paid back twice: it stays reserved
+/// until verification ends it, `succeeded`, or `failed` when the transaction does not pay it,
+/// was dropped (its nonce consumed by another transaction at finality), or was never seen by the
+/// service's providers within 24 hours. Then request a new refund.
 pub(crate) async fn cancel_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -766,7 +770,8 @@ pub(crate) async fn find_refund<'e>(
         r#"
         SELECT refund.id, refund.livemode, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
                refund.destination_address, address.treasury, refund.status,
-               refund.failure_reason, refund.tx_hash, refund.log_index, refund.created_at,
+               refund.failure_reason, refund.tx_hash, refund.receipt_log_index,
+               refund.created_at,
                refund.metadata
         FROM refunds AS refund
         JOIN deposits AS deposit ON deposit.id = refund.deposit_id
@@ -791,8 +796,8 @@ pub(crate) async fn find_refund<'e>(
             status: row.status,
             failure_reason: row.failure_reason,
             transaction_hash: row.tx_hash,
-            log_index: row
-                .log_index
+            receipt_log_index: row
+                .receipt_log_index
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| ApiError::internal())?,
@@ -814,7 +819,7 @@ struct RefundRow {
     status: String,
     failure_reason: Option<String>,
     tx_hash: Option<String>,
-    log_index: Option<i64>,
+    receipt_log_index: Option<i64>,
     created_at: DateTime<Utc>,
     metadata: JsonColumn<Metadata>,
 }
@@ -896,6 +901,25 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
             .map(|route| route.asset.symbol.clone())
     });
     let refunded = row.amount_refunded_atomic == row.amount_atomic;
+    let amount = row
+        .credit_minor
+        .map(|credit| credit.parse::<u64>())
+        .transpose()
+        .map_err(|_| ApiError::internal())?;
+    let status = deposit_status(&row.state);
+    let amount_refunded = match amount {
+        Some(credit) => topup_core::refund::refunded_credit(
+            credit,
+            decimal_u256(&row.amount_atomic).ok_or_else(ApiError::internal)?,
+            decimal_u256(&row.amount_refunded_atomic).ok_or_else(ApiError::internal)?,
+        ),
+        None => 0,
+    };
+    let amount_reversed = if status == "reversed" {
+        amount.unwrap_or(0)
+    } else {
+        0
+    };
     Ok(Deposit {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
@@ -907,7 +931,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         deposit_address: row
             .deposit_address_id
             .map(crate::deposit_addresses::public_id),
-        status: deposit_status(&row.state).to_owned(),
+        status: status.to_owned(),
         is_final: row.is_final,
         swept: row.swept,
         rejection_reason: row.reason,
@@ -915,11 +939,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         asset,
         asset_contract: row.asset_contract,
         amount_atomic: row.amount_atomic,
-        amount: row
-            .credit_minor
-            .map(|credit| credit.parse::<u64>())
-            .transpose()
-            .map_err(|_| ApiError::internal())?,
+        amount,
         currency: "usd".to_owned(),
         exchange_rate: row
             .price_scaled
@@ -941,6 +961,8 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         block_number: u64::try_from(row.block_number).map_err(|_| ApiError::internal())?,
         amount_refunded_atomic: row.amount_refunded_atomic,
         refunded,
+        amount_refunded,
+        amount_reversed,
         created: row.created_at.timestamp(),
         metadata: row.metadata.0,
         admin: None,

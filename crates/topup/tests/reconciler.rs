@@ -657,6 +657,9 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         .fetch_one(&pool)
         .await?;
         ensure!(deposit_cursor == 301);
+        // The route is in token mode: each window is one request for every transfer of the
+        // token, whatever the number of addresses ever issued, never one per address batch.
+        ensure!(node.by_recipient.load(Ordering::SeqCst) == 0);
         Ok(())
     })
     .await
@@ -671,6 +674,8 @@ struct RpcNode {
     limit: AtomicUsize,
     admitted: Mutex<VecDeque<Instant>>,
     refused: AtomicUsize,
+    /// `eth_getLogs` requests that named their recipients (address mode).
+    by_recipient: AtomicUsize,
     logs: Mutex<Vec<TransferLog>>,
     derived: Mutex<BTreeMap<B256, Address>>,
     balances: Mutex<BTreeMap<Address, U256>>,
@@ -683,6 +688,7 @@ impl RpcNode {
             limit: AtomicUsize::new(usize::MAX),
             admitted: Mutex::new(VecDeque::new()),
             refused: AtomicUsize::new(0),
+            by_recipient: AtomicUsize::new(0),
             logs: Mutex::new(Vec::new()),
             derived: Mutex::new(BTreeMap::new()),
             balances: Mutex::new(BTreeMap::new()),
@@ -743,9 +749,21 @@ impl RpcNode {
                 let from = quantity(&filter["fromBlock"])?;
                 let to = quantity(&filter["toBlock"])?;
                 let transfers = filter["topics"][0] == json!(transfer_topic());
+                // By recipient (address mode), or every transfer of the tokens (token mode).
+                if !filter["topics"][2].is_null() {
+                    self.by_recipient.fetch_add(1, Ordering::SeqCst);
+                }
                 let recipients = match &filter["topics"][2] {
-                    Value::Array(topics) => topics.clone(),
-                    topic => vec![topic.clone()],
+                    Value::Null => None,
+                    Value::Array(topics) => Some(topics.clone()),
+                    topic => Some(vec![topic.clone()]),
+                };
+                let tokens: Option<Vec<Address>> = match &filter["address"] {
+                    Value::Null => None,
+                    Value::Array(tokens) => {
+                        Some(serde_json::from_value(Value::Array(tokens.clone()))?)
+                    }
+                    token => Some(vec![serde_json::from_value(token.clone())?]),
                 };
                 Ok(Value::Array(
                     self.logs
@@ -755,7 +773,12 @@ impl RpcNode {
                         .filter(|log| {
                             transfers
                                 && (from..=to).contains(&log.block_number)
-                                && recipients.contains(&json!(log.to.into_word()))
+                                && recipients.as_ref().is_none_or(|topics| {
+                                    topics.contains(&json!(log.to.into_word()))
+                                })
+                                && tokens
+                                    .as_ref()
+                                    .is_none_or(|tokens| tokens.contains(&log.token))
                         })
                         .map(rpc_log)
                         .collect(),

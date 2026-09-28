@@ -123,6 +123,39 @@ was live, so the API and SDKs changed directly:
    carries their price risk; the same deposit address on every EVM chain holds only with the same
    factory deployment and treasury address on a chain with the same `CREATE2` rule.
 
+**Amendment of 2026-09-28 (ledger correctness, final design review).** Accounting rules are
+tightened with standard mechanisms; nothing was live, so the API changed without aliases:
+
+1. *Service-computed claw-backs.* A deposit carries, in every `deposit.*` snapshot, the cumulative
+   `amount_refunded` (the cents of `amount` its succeeded refunds take back:
+   `floor(amount × amount_refunded_atomic / amount_atomic)`, over the cumulative refunded amount,
+   so it never exceeds the refunded share, never decreases, and is all of `amount` once fully
+   refunded) and `amount_reversed` (`amount` once `reversed`). The merchant's balance rule: a
+   deposit nets to `amount − amount_refunded − amount_reversed` while `credited` or `reversed`,
+   0 otherwise. Events may arrive in any order; a merchant processes each deposit's events
+   serially and merges each snapshot into its view (the later status wins, `pending` <
+   `credited` = `rejected` < `reversed`; the larger cumulative amounts win), so the result does not
+   depend on the order, and a `deposit.reversed` before `deposit.credited` nets to zero.
+2. *A refund marked paid is not canceled* (the double-payment risk): it stays reserved and
+   tracked until verified, or `failed` as `transaction_dropped` (no receipt on either provider
+   while the sender's nonce, kept when a provider first returned the transaction, is consumed at
+   `finalized` on both, the rule D1 uses for deposits) or `transaction_not_found` (never returned
+   by a provider within 24 hours of `mark_paid`); then the merchant requests a new refund.
+3. *Refund logs by receipt position.* `mark_paid` names the paying log by its position in the
+   receipt (`receipt_log_index`), not the block-wide `log_index`, which changes when the
+   transaction is re-included; a deposit's identity uses the same position (D1).
+4. *No starvation in the finality watch.* It claims due deposits in bounded pages, oldest block
+   first, and gives each its own recheck time, so deposits it keeps waiting on cannot hold back
+   later ones; the reconciler's missing-deposit scan requests each window as the scanner does,
+   one request per window in token mode whatever the number of addresses ever issued.
+5. *Exposure cap.* Per account and mode, the credit of deposits credited but not final is capped
+   (`accounts.max_unfinalized_credit`, $1 000 by default, set by the operator per account); a
+   deposit past it waits and is credited at finality. Merchants selling what they cannot take
+   back use the `finalized` confirmation policy (D1).
+6. *Reference implementations.* The FastAPI example and the reference product apply every
+   `deposit.*` snapshot by the balance rule, with tests of partial refunds, reversals, and
+   out-of-order delivery.
+
 ## 1. Context
 
 Before this design (architecture before PR 1): a **product** was the tenant, registered by the
@@ -227,8 +260,10 @@ the sender's nonce consumed at `finalized`: Etherscan's "Dropped & Replaced",
 (terminal); no receipt and the nonce not consumed → wait, alert after one hour.
 
 - `deposit.reversed` is sent for a reversed deposit that was reported as credited or rejected; a
-  quote it consumed re-opens if its window is still open; its pending refunds are canceled.
-- The merchant claws back the credit as for `deposit.refunded`. This is Stripe's pattern for
+  quote it consumed re-opens if its window is still open; its pending refunds without a
+  transaction are canceled.
+- The merchant takes the credit back by the snapshot's `amount_reversed`, as it takes a refund's
+  share back by `amount_refunded` (ledger correctness amendment). This is Stripe's pattern for
   payments that fail after success: "In rare situations, Stripe might receive an ACH failure from
   the bank after a PaymentIntent has transitioned to `succeeded`. If this happens, Stripe creates a
   dispute" ([Stripe ACH](https://docs.stripe.com/payments/ach-direct-debit/accept-a-payment?payment-ui=direct-api)).
@@ -311,13 +346,15 @@ own wallet, and Greenfield's `POST /api/v1/payouts/{payoutId}/mark-paid` records
 1. `POST /v1/refunds {deposit, amount_atomic, destination_address}` → Refund `pending`; requires
    the deposit to be `final` (`400 deposit_not_final` otherwise) and refundable, the amount to fit
    its unrefunded remainder (reserved), and `destination_address` to pass sanctions screening.
-2. After paying, `POST /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}`. At `finalized`
+2. After paying, `POST /v1/refunds/{id}/mark_paid {transaction_hash, receipt_log_index?}`. At `finalized`
    (refunds need no speed), both providers must show a `Transfer` of the deposit's token with
    `from == addresses.treasury` of the deposit's own address (not the account's current
    treasury), `to == destination_address`, `value == amount_atomic`, a log not used by another
    refund. Then `succeeded` and `deposit.refunded`; otherwise `failed` with `failure_reason` and
-   the reservation released. `POST /v1/refunds/{id}/cancel` cancels a pending refund; a deposit
-   that becomes `reversed` cancels its pending refunds.
+   the reservation released. `POST /v1/refunds/{id}/cancel` cancels a pending refund without a
+   transaction; one marked paid stays reserved until verified or proven dropped (ledger
+   correctness amendment); a deposit that becomes `reversed` cancels its pending refunds without
+   a transaction.
 
 Statuses are Stripe's Refund names (`pending`, `succeeded`, `failed`, `canceled`).
 
@@ -798,8 +835,9 @@ deposits        + account_id, livemode, receipt_log_index, confirmations_at, fin
 flushed         chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
                 block_number, block_hash                     -- from finalized Flushed events, any sender
 refunds         id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
-                tx_hash, log_index, status, failure_reason, metadata jsonb, created_at
-                UNIQUE (chain_id, tx_hash, log_index)
+                tx_hash, receipt_log_index, paid_at, tx_from, tx_nonce, status, failure_reason,
+                metadata jsonb, created_at
+                UNIQUE (chain_id, tx_hash, receipt_log_index)
 webhook_endpoints id (we_…), account_id, livemode, url, enabled_events text[], status, disabled_reason
 events          id (evt_…), account_id, livemode, type, object_type, object_id, actor, data jsonb, created
 webhook_deliveries event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
@@ -843,7 +881,7 @@ GET    /v1/deposits?client_reference_id&quote&status&tx_hash&created[...]&limit&
 GET    /v1/deposits/{id}
 GET    /v1/forwarders?chain_id&sweepable&…           (chain, factory, salt, treasury) per address
 POST   /v1/refunds {deposit, amount_atomic, destination_address}
-POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}
+POST   /v1/refunds/{id}/mark_paid {transaction_hash, receipt_log_index?}
 POST   /v1/refunds/{id}/cancel
 GET    /v1/refunds/{id}
 GET    /v1/balance                                   unswept amounts per chain and token

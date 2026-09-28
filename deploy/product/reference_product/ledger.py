@@ -50,6 +50,23 @@ CREATE TABLE IF NOT EXISTS credit_transactions (
     funding_source TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- The latest merged snapshot of each deposit (`deposit.*` events carry the whole deposit): the
+-- later status and the larger cumulative claw-backs win, whatever order events arrive in.
+CREATE TABLE IF NOT EXISTS deposit_snapshots (
+    provider_order_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    amount_refunded_minor INTEGER NOT NULL CHECK (amount_refunded_minor >= 0),
+    amount_reversed_minor INTEGER NOT NULL CHECK (amount_reversed_minor >= 0)
+);
+-- Changes to a credited order after its credit: refunds and reversals take it back.
+CREATE TABLE IF NOT EXISTS credit_adjustments (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES teams (id),
+    order_id TEXT NOT NULL REFERENCES orders (id),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor <> 0),
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS webhook_events (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
@@ -64,6 +81,38 @@ WHERE provider_order_id LIKE 'deposit:%';
 """
 
 
+# How far each deposit status is along the deposit's life; a snapshot never moves it back.
+STATUS_RANK = {"pending": 0, "credited": 1, "rejected": 1, "reversed": 2}
+
+
+@dataclass(frozen=True)
+class DepositView:
+    """A deposit's merged snapshot: its furthest status and cumulative claw-backs, in cents."""
+
+    status: str
+    amount_refunded: int
+    amount_reversed: int
+
+    def merge(self, other: DepositView) -> DepositView:
+        status = (
+            other.status
+            if STATUS_RANK.get(other.status, 0) > STATUS_RANK.get(self.status, 0)
+            else self.status
+        )
+        return DepositView(
+            status,
+            max(self.amount_refunded, other.amount_refunded),
+            max(self.amount_reversed, other.amount_reversed),
+        )
+
+    def contribution(self, credited: int) -> int:
+        """What a credit of `credited` cents nets to: less the claw-backs while the deposit is
+        `credited` or `reversed` (a reversal takes back all of it), nothing otherwise."""
+        if self.status not in ("credited", "reversed"):
+            return 0
+        return max(0, credited - self.amount_refunded - self.amount_reversed)
+
+
 @dataclass(frozen=True)
 class StoredOrder:
     provider_order_id: str
@@ -72,6 +121,7 @@ class StoredOrder:
     status: str
     reason: str | None
     credit_transaction_id: str | None
+    id: str
 
 
 class ProductLedger:
@@ -140,6 +190,58 @@ class ProductLedger:
             ).fetchall()
         return [(str(key), int(amount)) for key, amount in rows]
 
+    def balance_for(self, team_id: str) -> int:
+        """The workspace's crypto top-up balance: its credits less their claw-backs."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT (SELECT COALESCE(SUM(amount_minor), 0) FROM credit_transactions "
+                "WHERE team_id = ?) + (SELECT COALESCE(SUM(amount_minor), 0) "
+                "FROM credit_adjustments WHERE team_id = ?)",
+                (team_id, team_id),
+            ).fetchone()
+        return int(row[0])
+
+    def adjustments_for(self, team_id: str) -> list[tuple[str, int, str]]:
+        """The workspace's claw-backs: `(provider_order_id, amount_minor, reason)`, oldest first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT o.provider_order_id, a.amount_minor, a.reason FROM credit_adjustments a "
+                "JOIN orders o ON o.id = a.order_id WHERE a.team_id = ? ORDER BY a.created_at",
+                (team_id,),
+            ).fetchall()
+        return [(str(key), int(amount), str(reason)) for key, amount, reason in rows]
+
+    @staticmethod
+    def merge_snapshot(
+        db: sqlite3.Connection, provider_order_id: str, snapshot: DepositView
+    ) -> DepositView:
+        """Merges `snapshot` into the deposit's stored view and returns the result."""
+        row = db.execute(
+            "SELECT status, amount_refunded_minor, amount_reversed_minor FROM deposit_snapshots "
+            "WHERE provider_order_id = ?",
+            (provider_order_id,),
+        ).fetchone()
+        merged = snapshot if row is None else DepositView(row[0], row[1], row[2]).merge(snapshot)
+        db.execute(
+            "INSERT INTO deposit_snapshots (provider_order_id, status, amount_refunded_minor, "
+            "amount_reversed_minor) VALUES (?, ?, ?, ?) ON CONFLICT (provider_order_id) DO UPDATE "
+            "SET status = excluded.status, amount_refunded_minor = excluded.amount_refunded_minor, "
+            "amount_reversed_minor = excluded.amount_reversed_minor",
+            (provider_order_id, merged.status, merged.amount_refunded, merged.amount_reversed),
+        )
+        return merged
+
+    @staticmethod
+    def order_amounts(db: sqlite3.Connection, order_id: str) -> tuple[int, int]:
+        """An order's credit and what it nets to after its adjustments, in cents."""
+        row = db.execute(
+            "SELECT (SELECT COALESCE(SUM(amount_minor), 0) FROM credit_transactions "
+            "WHERE order_id = ?), (SELECT COALESCE(SUM(amount_minor), 0) FROM credit_adjustments "
+            "WHERE order_id = ?)",
+            (order_id, order_id),
+        ).fetchone()
+        return int(row[0]), int(row[0]) + int(row[1])
+
     def orders_for(self, team_id: str) -> list[dict[str, Any]]:
         """The workspace's crypto top-up orders: `accepted` (credited) or `held` (refused)."""
         with self._lock:
@@ -196,10 +298,10 @@ class ProductLedger:
     @staticmethod
     def _find_order(db: sqlite3.Connection, provider_order_id: str) -> StoredOrder | None:
         row = db.execute(
-            "SELECT provider_order_id, team_id, payload, status, reason, credit_transaction_id "
+            "SELECT provider_order_id, team_id, payload, status, reason, credit_transaction_id, id "
             "FROM orders WHERE order_flow_code = ? AND provider_order_id = ?",
             (ORDER_FLOW_CODE, provider_order_id),
         ).fetchone()
         if row is None:
             return None
-        return StoredOrder(row[0], row[1], json.loads(row[2]), row[3], row[4], row[5])
+        return StoredOrder(row[0], row[1], json.loads(row[2]), row[3], row[4], row[5], row[6])

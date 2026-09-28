@@ -28,13 +28,21 @@ class Deposit:
     screened, and credited, or rejected; `reversed` if its transaction left the chain before
     finality.
 
+    Every `deposit.*` event carries the whole deposit, with cumulative amounts, so the customer's
+    balance can be recomputed from the latest snapshot whatever order events arrive in: the
+    deposit contributes `amount - amount_refunded - amount_reversed` cents while its `status` is
+    `credited` or `reversed`, and nothing while it is `pending` or `rejected`. `status` only moves
+    forward (`pending`, then `credited` or `rejected`, then possibly `reversed`) and
+    `amount_refunded` only grows, so of two snapshots the later one has the later status or, for
+    the same status, the larger `amount_refunded`.
+
         Example:
             {'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount': 2500, 'amount_atomic':
-                '202510000000000000000', 'amount_refunded_atomic': '0', 'asset': 'PHA', 'asset_contract':
-                '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_number': 21000000, 'chain_id': 1, 'client_reference_id':
-                'team-42', 'created': 1790553624, 'currency': 'usd', 'deposit_address': None, 'exchange_rate': '0.12345679',
-                'final': True, 'from_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id':
-                'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False, 'log_index': 212, 'metadata': {'order_id':
+                '202510000000000000000', 'amount_refunded': 0, 'amount_refunded_atomic': '0', 'amount_reversed': 0, 'asset':
+                'PHA', 'asset_contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_number': 21000000, 'chain_id': 1,
+                'client_reference_id': 'team-42', 'created': 1790553624, 'currency': 'usd', 'deposit_address': None,
+                'exchange_rate': '0.12345679', 'final': True, 'from_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a',
+                'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False, 'log_index': 212, 'metadata': {'order_id':
                 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10',
                 'refunded': False, 'rejection_reason': None, 'status': 'credited', 'swept': False, 'tx_hash':
                 '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}
@@ -42,8 +50,16 @@ class Deposit:
         Attributes:
             address (str): Receiving forwarder address.
             amount_atomic (str): Token amount in base units, as a decimal string.
+            amount_refunded (int): Cents of `amount` its succeeded refunds take back: `amount` times
+                `amount_refunded_atomic`
+                over `amount_atomic`, rounded down, so it never exceeds the refunded share, and all of
+                `amount` once fully refunded. Computed from the cumulative refunded amount, it only grows.
+                `0` without `amount`.
             amount_refunded_atomic (str): Refunded token amount in base units, as a decimal string: the sum of succeeded
                 refunds.
+            amount_reversed (int): Cents of `amount` the reversal takes back: `amount` once `status` is `reversed` (a
+                deposit is refunded only once final, and a final deposit is never reversed, so a reversed
+                deposit has no refunds); `0` otherwise.
             asset_contract (str): Token contract address.
             block_number (int): Number of the block the transfer is in; it changes if the transaction is re-included.
             chain_id (int): EVM chain identifier.
@@ -67,8 +83,8 @@ class Deposit:
             refunded (bool): Whether the deposit is fully refunded.
             status (str): `pending` (recorded at the route's confirmation and being valued and screened, or held
                 while the account's or customer's `settlement` is paused), `credited`, `rejected` (see
-                `rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a
-                credit as for `deposit.refunded`). New values may be added.
+                `rejection_reason`), or `reversed` (its transaction is not in the final chain: its credit is
+                taken back, `amount_reversed`). New values may be added.
             swept (bool): Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of
                 its token to the treasury (`GET /v1/sweeps`), whoever sent the flush.
             tx_hash (str): Transaction hash.
@@ -90,7 +106,9 @@ class Deposit:
 
     address: str
     amount_atomic: str
+    amount_refunded: int
     amount_refunded_atomic: str
+    amount_reversed: int
     asset_contract: str
     block_number: int
     chain_id: int
@@ -128,7 +146,11 @@ class Deposit:
 
         amount_atomic = self.amount_atomic
 
+        amount_refunded = self.amount_refunded
+
         amount_refunded_atomic = self.amount_refunded_atomic
+
+        amount_reversed = self.amount_reversed
 
         asset_contract = self.asset_contract
 
@@ -228,7 +250,9 @@ class Deposit:
             {
                 "address": address,
                 "amount_atomic": amount_atomic,
+                "amount_refunded": amount_refunded,
                 "amount_refunded_atomic": amount_refunded_atomic,
+                "amount_reversed": amount_reversed,
                 "asset_contract": asset_contract,
                 "block_number": block_number,
                 "chain_id": chain_id,
@@ -280,7 +304,11 @@ class Deposit:
 
         amount_atomic = d.pop("amount_atomic")
 
+        amount_refunded = d.pop("amount_refunded")
+
         amount_refunded_atomic = d.pop("amount_refunded_atomic")
+
+        amount_reversed = d.pop("amount_reversed")
 
         asset_contract = d.pop("asset_contract")
 
@@ -416,7 +444,9 @@ class Deposit:
         deposit = cls(
             address=address,
             amount_atomic=amount_atomic,
+            amount_refunded=amount_refunded,
             amount_refunded_atomic=amount_refunded_atomic,
+            amount_reversed=amount_reversed,
             asset_contract=asset_contract,
             block_number=block_number,
             chain_id=chain_id,
