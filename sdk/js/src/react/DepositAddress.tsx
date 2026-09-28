@@ -1,7 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { formatUnits } from "viem";
 import { networkName } from "../chains.js";
+import {
+  retrieveDepositAddress,
+  type DepositAddressPayment,
+} from "../deposit-address.js";
+import { CheckoutError } from "../checkout.js";
 import { depositAddressTransfer, type DepositAddressDetails } from "../payment.js";
 import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
 import { Field } from "./Field.js";
@@ -14,6 +20,16 @@ export interface DepositAddressProps {
   chainId?: number;
   /** The token shown first, for example `pha`; the network's first token by default. */
   asset?: string;
+  /**
+   * The `client_secret` of the same response. With `apiBase`, the component follows the
+   * address's payments and shows each one within about a block of arriving: received with its
+   * confirmations, then credited. Display only; credit from your `deposit.credited` webhook.
+   */
+  clientSecret?: string;
+  /** The service origin, for example `https://pay.example.com`; needed with `clientSecret`. */
+  apiBase?: string;
+  /** Milliseconds between payment reads; default 3000. */
+  pollInterval?: number;
   appearance?: Appearance;
   className?: string;
 }
@@ -29,10 +45,14 @@ export function DepositAddress({
   depositAddress,
   chainId,
   asset,
+  clientSecret,
+  apiBase,
+  pollInterval,
   appearance,
   className,
 }: DepositAddressProps) {
   const { networks } = depositAddress;
+  const payments = usePayments(clientSecret, apiBase, pollInterval ?? 3000);
   const [selectedChain, setSelectedChain] = useState(chainId ?? networks[0]?.chain_id);
   const [selectedAsset, setSelectedAsset] = useState(asset);
   const network = networks.find((candidate) => candidate.chain_id === selectedChain) ?? networks[0];
@@ -104,6 +124,15 @@ export function DepositAddress({
         <Field label={`Token (${symbol}) contract`} value={contract} copy />
         <Field label="Deposit address" value={to} copy />
       </dl>
+      {payments.length > 0 && (
+        <ul className="pp-payments" aria-live="polite" aria-label="Payments">
+          {payments.map((payment) => (
+            <li key={`${payment.chain_id}:${payment.tx_hash}:${payment.created}`}>
+              {paymentMessage(payment)}
+            </li>
+          ))}
+        </ul>
+      )}
       <p className="pp-message">
         Send only {tokens.join(", ")} on {networks.map((each) => networkName(each.chain_id)).join(", ")}
         . Any amount is credited at the market rate when it arrives, usually in about 30 seconds.
@@ -111,4 +140,72 @@ export function DepositAddress({
       </p>
     </div>
   );
+}
+
+/** The address's recent payments, read every `interval` while mounted; empty without a secret. */
+function usePayments(
+  clientSecret: string | undefined,
+  apiBase: string | undefined,
+  interval: number,
+): DepositAddressPayment[] {
+  const key = clientSecret === undefined || apiBase === undefined ? "" : `${apiBase} ${clientSecret}`;
+  const [current, setCurrent] = useState<{ key: string; payments: DepositAddressPayment[] }>({
+    key: "",
+    payments: [],
+  });
+  useEffect(() => {
+    if (clientSecret === undefined || apiBase === undefined) {
+      return;
+    }
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const load = async () => {
+      try {
+        const view = await retrieveDepositAddress({ clientSecret, apiBase });
+        failures = 0;
+        if (!stopped) {
+          setCurrent({ key, payments: view.payments });
+        }
+      } catch (error) {
+        failures += 1;
+        // A secret that is not valid will not become valid: stop, keep showing the address.
+        if (error instanceof CheckoutError && error.code === "invalid_client_secret") {
+          return;
+        }
+      }
+      if (!stopped) {
+        timer = setTimeout(() => void load(), Math.min(interval * 2 ** failures, 30_000));
+      }
+    };
+    void load();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [key, clientSecret, apiBase, interval]);
+  // Another address starts without the previous one's payments.
+  return current.key === key && key !== "" ? current.payments : [];
+}
+
+function paymentMessage(payment: DepositAddressPayment): string {
+  const amount =
+    payment.asset === null || payment.decimals === null
+      ? "A payment"
+      : `${formatUnits(BigInt(payment.amount_atomic), payment.decimals)} ${payment.asset.toUpperCase()}`;
+  const on = `on ${networkName(payment.chain_id)}`;
+  switch (payment.status) {
+    case "seen":
+      return payment.confirmations === null
+        ? `${amount} received ${on}, crediting shortly`
+        : `${amount} received ${on}, ${payment.confirmations} confirmation${payment.confirmations === 1 ? "" : "s"}`;
+    case "confirming":
+      return `${amount} confirmed ${on}, crediting…`;
+    case "credited":
+      return `${amount} ${on} credited`;
+    case "rejected":
+      return `${amount} ${on} cannot be credited. Contact support with your transaction.`;
+    case "reversed":
+      return `${amount} ${on} was reversed: its transaction is no longer on the blockchain.`;
+  }
 }

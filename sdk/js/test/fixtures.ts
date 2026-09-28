@@ -10,6 +10,7 @@ export function quote(overrides: Partial<ClientQuote> = {}): ClientQuote {
   const base: ClientQuote = {
     id: QUOTE_ID,
     object: "quote",
+    livemode: false,
     status: "open",
     amount: 2500,
     currency: "usd",

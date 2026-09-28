@@ -23,6 +23,7 @@ type Theme = "light" | "dark";
 interface Session {
   quote: string;
   clientSecret: string;
+  expectedAddress: string;
 }
 
 const STEP_COPY: Record<StepKey, { title: string; current: string; failed?: string }> = {
@@ -155,7 +156,11 @@ export function App() {
                 <AmountPicker
                   account={account}
                   onQuote={(created) => {
-                    setSession({ quote: created.quote, clientSecret: created.client_secret });
+                    setSession({
+                      quote: created.quote,
+                      clientSecret: created.client_secret,
+                      expectedAddress: created.expected_address,
+                    });
                     setSelected(created.quote);
                     setTimeline(null);
                   }}
@@ -164,6 +169,7 @@ export function App() {
                 <div className="checkout">
                   <Checkout
                     clientSecret={session.clientSecret}
+                    expectedAddress={session.expectedAddress}
                     apiBase={account.api_base}
                     appearance={appearance}
                     onSuccess={refreshAccount}

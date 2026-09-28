@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { Hash, WalletClient } from "viem";
-import type { CheckoutState, CheckoutStatus } from "../checkout.js";
+import type { CheckoutErrorCode, CheckoutState, CheckoutStatus } from "../checkout.js";
 import { networkName, transactionUrl } from "../chains.js";
 import { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "../format.js";
 import { quoteTransfer } from "../payment.js";
@@ -22,6 +22,12 @@ import { useCheckout } from "./useCheckout.js";
 export interface CheckoutProps {
   /** The quote's `client_secret`, from your backend's `POST /v1/quotes`. */
   clientSecret: string;
+  /**
+   * The quote's `address` as your backend's SDK recomputed it from the pinned forwarder
+   * (`PhalaPay(forwarder=…)` in Python). Required: when the service's quote names another
+   * address, the checkout fails closed and shows nothing to pay.
+   */
+  expectedAddress: string;
   /** The service origin, for example `https://topup.example.com`. */
   apiBase: string;
   /** Called once when the payment is credited. Fulfil from the `deposit.credited` webhook, not here. */
@@ -53,6 +59,7 @@ const METHODS: { id: Method; label: string }[] = [
 /** A checkout for one quote: pay from a browser wallet, by QR code, or manually, with live status. */
 export function Checkout({
   clientSecret,
+  expectedAddress,
   apiBase,
   onSuccess,
   onExpire,
@@ -65,6 +72,7 @@ export function Checkout({
 }: CheckoutProps) {
   const { status, quote, error, refresh } = useCheckout({
     clientSecret,
+    expectedAddress,
     apiBase,
     ...(pollInterval === undefined ? {} : { pollInterval }),
   });
@@ -109,10 +117,11 @@ export function Checkout({
           </p>
           <p className="pp-subtitle">
             {formatAmount(quote)} top-up · {networkName(quote.chain_id)}
+            {!quote.livemode && <span className="pp-badge"> · Test mode</span>}
           </p>
         </>
       )}
-      <StatusLine status={status} quote={quote} now={now} reconnecting={error !== null} />
+      <StatusLine status={status} quote={quote} now={now} error={error} />
       {txHash !== null && quote !== null && <Transaction hash={txHash} chainId={quote.chain_id} />}
       {status === "waiting" && quote !== null && (
         <PaymentOptions
@@ -134,24 +143,24 @@ function StatusLine({
   status,
   quote,
   now,
-  reconnecting,
+  error,
 }: {
   status: CheckoutStatus;
   quote: ClientQuote | null;
   now: number;
-  reconnecting: boolean;
+  error: CheckoutState["error"];
 }) {
   const tone =
     status === "credited"
       ? "success"
-      : ["rejected", "expired", "canceled", "error"].includes(status)
+      : ["rejected", "reversed", "expired", "canceled", "error"].includes(status)
         ? "danger"
         : "neutral";
   return (
     <div className="pp-status" data-tone={tone}>
       <span role="status" aria-live="polite">
-        {statusMessage(status, quote)}
-        {reconnecting && status !== "error" ? " (reconnecting…)" : ""}
+        {statusMessage(status, quote, error?.code)}
+        {error !== null && status !== "error" ? " (reconnecting…)" : ""}
       </span>
       {status === "waiting" && quote !== null && (
         <span className="pp-countdown" aria-label="Time left to pay">
@@ -162,7 +171,11 @@ function StatusLine({
   );
 }
 
-function statusMessage(status: CheckoutStatus, quote: ClientQuote | null): string {
+function statusMessage(
+  status: CheckoutStatus,
+  quote: ClientQuote | null,
+  code: CheckoutErrorCode | undefined,
+): string {
   switch (status) {
     case "loading":
       return "Loading payment details…";
@@ -178,12 +191,16 @@ function statusMessage(status: CheckoutStatus, quote: ClientQuote | null): strin
       return quote === null ? "Payment credited" : `Payment credited: ${formatAmount(quote)}`;
     case "rejected":
       return "This payment cannot be credited. Contact support with your transaction.";
+    case "reversed":
+      return "This payment was reversed: its transaction is no longer on the blockchain, so it did not happen and its credit was taken back. Check your wallet, then start a new top-up.";
     case "expired":
       return "This quote has expired. Do not send funds to this address; start a new top-up.";
     case "canceled":
       return "This quote was canceled. Do not send funds to this address.";
     case "error":
-      return "This payment link is not valid. Start a new top-up.";
+      return code === "address_mismatch"
+        ? "This payment address could not be verified. Do not send funds; contact support."
+        : "This payment link is not valid. Start a new top-up.";
   }
 }
 

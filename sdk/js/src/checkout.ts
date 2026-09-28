@@ -1,3 +1,4 @@
+import { getAddress, isAddress, isAddressEqual } from "viem";
 import { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./quote.js";
 
 /**
@@ -8,8 +9,10 @@ import { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./q
  *   (two blocks on Ethereum) and is being valued;
  * - `credited` (about 30 seconds after paying), or `rejected` for a payment that will not be
  *   credited;
+ * - `reversed` when a credited payment's transaction left the chain before finality;
  * - `expired` or `canceled` without a payment;
- * - `error` when the client secret is not valid.
+ * - `error` when the client secret is not valid, or the quote's address is not the one your
+ *   backend expects (`address_mismatch`): nothing is shown to pay.
  */
 export type CheckoutStatus =
   | "loading"
@@ -18,12 +21,14 @@ export type CheckoutStatus =
   | "confirming"
   | "credited"
   | "rejected"
+  | "reversed"
   | "expired"
   | "canceled"
   | "error";
 
 export type CheckoutErrorCode =
   | "invalid_client_secret"
+  | "address_mismatch"
   | "rate_limited"
   | "network_error"
   | "invalid_response"
@@ -51,6 +56,12 @@ export interface CheckoutState {
 export interface CheckoutOptions {
   /** The quote's `client_secret`, from your backend's `POST /v1/quotes`. */
   clientSecret: string;
+  /**
+   * The quote's address as your backend's SDK recomputed it from the pinned forwarder. The
+   * checkout fails closed, showing nothing to pay, when the quote read from the service names
+   * another address.
+   */
+  expectedAddress: string;
   /** The service origin, for example `https://topup.example.com`. */
   apiBase: string;
   /** Milliseconds between status reads; default 3000. */
@@ -75,16 +86,20 @@ const MAX_BACKOFF = 30_000;
 
 export interface RetrieveQuoteOptions {
   clientSecret: string;
+  /** The address your backend recomputed; a quote naming another one is refused. */
+  expectedAddress: string;
   apiBase: string;
   fetch?: typeof globalThis.fetch;
 }
 
 /**
  * Reads a quote's public view once, as Stripe.js's `retrievePaymentIntent(clientSecret)` does.
- * Rejects with a `CheckoutError`: `invalid_client_secret` for an unknown quote or secret.
+ * Rejects with a `CheckoutError`: `invalid_client_secret` for an unknown quote or secret,
+ * `address_mismatch` for a quote whose address is not `expectedAddress`.
  */
 export async function retrieveQuote(options: RetrieveQuoteOptions): Promise<ClientQuote> {
   const quoteId = quoteIdFromClientSecret(options.clientSecret);
+  const expected = expectedAddress(options.expectedAddress);
   const base = options.apiBase.replace(/\/+$/, "");
   const url = `${base}/v1/quotes/${quoteId}?client_secret=${encodeURIComponent(options.clientSecret)}`;
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -99,13 +114,28 @@ export async function retrieveQuote(options: RetrieveQuoteOptions): Promise<Clie
   if (!response.ok) {
     throw new CheckoutError("api_error", `the payment service answered ${response.status}`);
   }
+  let quote: ClientQuote;
   try {
-    return parseClientQuote(await response.json());
+    quote = parseClientQuote(await response.json());
   } catch (cause) {
     throw new CheckoutError("invalid_response", "unexpected response from the payment service", {
       cause,
     });
   }
+  if (!isAddressEqual(getAddress(quote.address), expected)) {
+    throw new CheckoutError(
+      "address_mismatch",
+      "the quote's address is not the one the merchant expects",
+    );
+  }
+  return quote;
+}
+
+function expectedAddress(value: string): `0x${string}` {
+  if (!isAddress(value, { strict: false })) {
+    throw new TypeError("expectedAddress is not an address");
+  }
+  return getAddress(value);
 }
 
 /** The payer-facing status of a quote at `nowSeconds`. */
@@ -130,6 +160,7 @@ export function checkoutStatus(quote: ClientQuote, nowSeconds: number): Checkout
  */
 export function createCheckout(options: CheckoutOptions): CheckoutSession {
   quoteIdFromClientSecret(options.clientSecret);
+  expectedAddress(options.expectedAddress);
   const now = options.now ?? Date.now;
   const interval = options.pollInterval ?? DEFAULT_POLL_INTERVAL;
   const listeners = new Set<(state: CheckoutState) => void>();
@@ -161,6 +192,7 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
       status === "error" ||
       status === "credited" ||
       status === "rejected" ||
+      status === "reversed" ||
       status === "canceled" ||
       (status === "expired" && quote?.status === "expired")
     );
@@ -178,7 +210,10 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
           : new CheckoutError("network_error", "could not reach the payment service", { cause });
       failures += 1;
       const quote = state.quote;
-      if (error.code === "invalid_client_secret") {
+      if (error.code === "address_mismatch") {
+        // Fail closed: forget the quote, so nothing about its address is shown.
+        setState({ status: "error", quote: null, error });
+      } else if (error.code === "invalid_client_secret") {
         setState({ status: "error", quote, error });
       } else {
         setState({

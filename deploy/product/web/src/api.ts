@@ -88,6 +88,8 @@ export interface Trust {
 export interface CreatedQuote {
   quote: string;
   client_secret: string;
+  /** The quote's address as the product's SDK recomputed it. */
+  expected_address: string;
   api: ApiExchange[];
 }
 
@@ -125,7 +127,7 @@ export async function createQuote(amount: number): Promise<CreatedQuote> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ amount }),
   });
-  return expect<CreatedQuote>(body, ["quote", "client_secret", "api"]);
+  return expect<CreatedQuote>(body, ["quote", "client_secret", "expected_address", "api"]);
 }
 
 export async function getTimeline(quote: string): Promise<Timeline> {

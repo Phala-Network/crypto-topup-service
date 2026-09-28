@@ -14,11 +14,12 @@ export interface PhalaPayOptions {
 
 /**
  * The browser client, in the shape of Stripe.js: it holds no key, only the service origin, and
- * works with the `client_secret` your backend got from `POST /v1/quotes`.
+ * works with the `client_secret` your backend got from `POST /v1/quotes` and the `address` its
+ * SDK recomputed (`expectedAddress`).
  *
  *     const pay = new PhalaPay({ apiBase: "https://pay.example.com" });
- *     const quote = await pay.retrieveQuote(clientSecret);
- *     const session = pay.checkout(clientSecret);
+ *     const quote = await pay.retrieveQuote(clientSecret, expectedAddress);
+ *     const session = pay.checkout(clientSecret, { expectedAddress });
  *     session.subscribe(({ status }) => render(status));
  */
 export class PhalaPay {
@@ -30,15 +31,20 @@ export class PhalaPay {
     this.#fetch = options.fetch;
   }
 
-  /** Reads the quote's public view once. */
-  retrieveQuote(clientSecret: string): Promise<ClientQuote> {
-    return retrieveQuote({ clientSecret, apiBase: this.apiBase, ...this.#fetchOption() });
+  /** Reads the quote's public view once, refusing one whose address is not `expectedAddress`. */
+  retrieveQuote(clientSecret: string, expectedAddress: string): Promise<ClientQuote> {
+    return retrieveQuote({
+      clientSecret,
+      expectedAddress,
+      apiBase: this.apiBase,
+      ...this.#fetchOption(),
+    });
   }
 
-  /** Follows the quote until it is credited, rejected, canceled, or expired. */
+  /** Follows the quote until it is credited, rejected, reversed, canceled, or expired. */
   checkout(
     clientSecret: string,
-    options: Pick<CheckoutOptions, "pollInterval"> = {},
+    options: Pick<CheckoutOptions, "expectedAddress" | "pollInterval">,
   ): CheckoutSession {
     return createCheckout({
       clientSecret,

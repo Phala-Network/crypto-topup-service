@@ -22,7 +22,13 @@ afterEach(() => {
 
 async function renderCheckout(props: Partial<Parameters<typeof Checkout>[0]> = {}) {
   const view = render(
-    <Checkout clientSecret={CLIENT_SECRET} apiBase={API_BASE} pollInterval={1000} {...props} />,
+    <Checkout
+      clientSecret={CLIENT_SECRET}
+      expectedAddress={ADDRESS}
+      apiBase={API_BASE}
+      pollInterval={1000}
+      {...props}
+    />,
   );
   await screen.findByText("Waiting for your payment");
   return view;
@@ -36,7 +42,8 @@ describe("Checkout", () => {
   it("states the exact amount, the network, and the time left", async () => {
     await renderCheckout();
     expect(screen.getByText("100.502512562814070352 PHA")).toBeDefined();
-    expect(screen.getByText("$25.00 top-up · Sepolia")).toBeDefined();
+    expect(screen.getByText(/\$25\.00 top-up · Sepolia/)).toBeDefined();
+    expect(screen.getByText(/Test mode/)).toBeDefined();
     expect(screen.getByText(/exactly 100.502512562814070352 PHA/)).toBeDefined();
     expect(screen.getByLabelText("Time left to pay").textContent).toBe("14:32");
     expect(screen.getByRole("status").getAttribute("aria-live")).toBe("polite");

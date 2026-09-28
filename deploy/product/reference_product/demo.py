@@ -6,7 +6,7 @@ With `demo_dir` configured, the product serves the built page of deploy/product/
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, and its top-ups;
 - `POST api/quotes` `{"amount"}` (cents): creates a quote with the SDK and returns its
-  `client_secret` for `<Checkout>`;
+  `client_secret` and the `expected_address` the SDK recomputed, for `<Checkout>`;
 - `GET api/quotes/{id}`: the payment's timeline, built only from real data: the service's quote
   and deposit (read with the product's API key), the webhook events and ledger rows of this
   product, and the sweep transfer on chain; with the service requests behind it;
@@ -393,7 +393,14 @@ class DemoConsole:
                 ),
             )
         return _json(
-            HTTPStatus.OK, {"quote": quote.id, "client_secret": quote.client_secret, "api": calls}
+            HTTPStatus.OK,
+            {
+                "quote": quote.id,
+                "client_secret": quote.client_secret,
+                # Recomputed from the pinned forwarder by the client; `<Checkout>` shows only it.
+                "expected_address": quote.address,
+                "api": calls,
+            },
         )
 
     def _timeline(self, account: str, quote_id: str) -> dict[str, Any] | None:

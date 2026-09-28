@@ -83,6 +83,9 @@ export const STYLES = `
 .pp-root *, .pp-root *::before, .pp-root *::after { box-sizing: inherit; }
 .pp-amount { margin: 0; overflow-wrap: anywhere; font-size: 22px; font-weight: 600; }
 .pp-subtitle { margin: 2px 0 16px; color: var(--pp-color-text-secondary); }
+.pp-badge { font-weight: 600; }
+.pp-payments { list-style: none; margin: 12px 0 0; padding: 0; }
+.pp-payments li { margin: 4px 0; }
 .pp-status { display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
   margin-bottom: 12px; padding: 10px 12px; border-radius: var(--pp-border-radius);
   border: 1px solid var(--pp-color-border); }

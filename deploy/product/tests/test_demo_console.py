@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import replace
 from http import HTTPStatus
@@ -146,6 +147,8 @@ def _create_quote(console: DemoConsole, cookie: str) -> None:
     assert response.status == HTTPStatus.OK
     body = json.loads(response.body)
     assert body["client_secret"].startswith(QUOTE)
+    # The address the SDK recomputed for this demo account's quote, for `<Checkout>`.
+    assert re.fullmatch(r"0x[0-9a-fA-F]{40}", body["expected_address"])
     # The developer view shows only the key's prefix.
     assert body["api"][0]["request"]["headers"]["authorization"] == "Bearer ppay_sk_test_…"
     assert "AAAA" not in response.body.decode()

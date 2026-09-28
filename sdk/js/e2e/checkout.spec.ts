@@ -48,6 +48,7 @@ function newQuote(overrides: Partial<ClientQuote> = {}): { quote: ClientQuote; s
     quote: {
       id,
       object: "quote",
+      livemode: false,
       status: "open",
       amount: 2500,
       currency: "usd",
@@ -182,7 +183,7 @@ test("pays a quote from a browser wallet, end to end on Anvil", async ({ page })
     args: [getAddress(env("PAYER_ADDRESS"))],
   });
 
-  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}`);
+  await page.goto(`/?client_secret=${secret}&expected_address=${quote.address}&api_base=${API_BASE}`);
   await expect(page.getByRole("status")).toHaveText("Waiting for your payment");
   await expect(page.getByText("12.345678901234567891 PHA").first()).toBeVisible();
 
@@ -212,7 +213,7 @@ test("pays with the page's own viem wallet client instead of discovered wallets"
   await serveQuote(page, quote, secret);
   await installWallet(page);
 
-  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}&wallet_client=${env("PAYER_ADDRESS")}`);
+  await page.goto(`/?client_secret=${secret}&expected_address=${quote.address}&api_base=${API_BASE}&wallet_client=${env("PAYER_ADDRESS")}`);
   const panel = page.getByRole("tabpanel");
   await expect(panel.getByRole("button")).toHaveCount(1);
   await panel.getByRole("button", { name: "Pay with crypto" }).click();
@@ -230,7 +231,7 @@ test("pays with the page's own viem wallet client instead of discovered wallets"
 test("shows the payment request as a scannable EIP-681 QR code", async ({ page }) => {
   const { quote, secret } = newQuote();
   await serveQuote(page, quote, secret);
-  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}`);
+  await page.goto(`/?client_secret=${secret}&expected_address=${quote.address}&api_base=${API_BASE}`);
   await page.getByRole("tab", { name: "QR code" }).click();
 
   const qr = page.getByRole("img", { name: /Payment request for 12.345678901234567891 PHA/ });
@@ -246,7 +247,7 @@ test("lists the manual payment details with working copy buttons", async ({ page
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const { quote, secret } = newQuote();
   await serveQuote(page, quote, secret);
-  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}`);
+  await page.goto(`/?client_secret=${secret}&expected_address=${quote.address}&api_base=${API_BASE}`);
   await page.getByRole("tab", { name: "Send manually" }).click();
 
   const panel = page.getByRole("tabpanel");
@@ -263,7 +264,7 @@ test("lists the manual payment details with working copy buttons", async ({ page
 test("hides the address once the quote expires", async ({ page }) => {
   const { quote, secret } = newQuote({ expires_at: Math.floor(Date.now() / 1000) + 2 });
   await serveQuote(page, quote, secret);
-  await page.goto(`/?client_secret=${secret}&api_base=${API_BASE}`);
+  await page.goto(`/?client_secret=${secret}&expected_address=${quote.address}&api_base=${API_BASE}`);
   await expect(page.getByRole("status")).toHaveText("Waiting for your payment");
   await expect(page.getByRole("status")).toHaveText(/expired. Do not send funds/, { timeout: 10_000 });
   await expect(page.getByText(quote.address)).toHaveCount(0);
@@ -273,8 +274,20 @@ test("hides the address once the quote expires", async ({ page }) => {
 test("reports an invalid client secret", async ({ page }) => {
   const { quote } = newQuote();
   await serveQuote(page, quote, "another");
-  await page.goto(`/?client_secret=${quote.id}_secret_00&api_base=${API_BASE}`);
+  await page.goto(`/?client_secret=${quote.id}_secret_00&expected_address=${quote.address}&api_base=${API_BASE}`);
   await expect(page.getByRole("status")).toHaveText("This payment link is not valid. Start a new top-up.");
+});
+
+test("fails closed when the quote's address is not the expected one", async ({ page }) => {
+  const { quote, secret } = newQuote();
+  await serveQuote(page, quote, secret);
+  const other = privateKeyToAccount(generatePrivateKey()).address;
+  await page.goto(`/?client_secret=${secret}&expected_address=${other}&api_base=${API_BASE}`);
+  await expect(page.getByRole("status")).toHaveText(
+    "This payment address could not be verified. Do not send funds; contact support.",
+  );
+  await expect(page.getByText(quote.address)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Pay with crypto/ })).toHaveCount(0);
 });
 
 /** Rasterizes the SVG path (one unit per module) and decodes it. */
