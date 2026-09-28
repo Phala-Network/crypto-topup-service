@@ -297,6 +297,13 @@ async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<
                 .await
                 .map_err(anyhow::Error::msg)?;
             ensure!(report.status == "ok");
+            // The check records the restore, which freezes the service until the operator
+            // reconciles and unfreezes it.
+            let restore = topup::restore_mode::active(&context.app_pool)
+                .await?
+                .context("restore-check freezes the service")?;
+            ensure!(report.restore_id == restore.id.to_string());
+            ensure!(restore.detected_by == "restore_check");
             let latest = db::MIGRATOR
                 .iter()
                 .map(|migration| migration.version)
@@ -612,6 +619,9 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
         "reconciliation_deposit_cursors",
         &["SELECT", "INSERT", "UPDATE"],
     ),
+    ("restore_timeline", &["SELECT", "UPDATE"]),
+    ("restores", &["SELECT", "INSERT", "UPDATE"]),
+    ("restore_delivered_events", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),
     ("permissions", &["SELECT"]),
     ("accounts", OPERATIONAL),

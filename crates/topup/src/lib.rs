@@ -31,6 +31,7 @@ pub mod pump;
 pub mod reconciler;
 pub mod refunds;
 pub mod restore;
+pub mod restore_mode;
 pub mod routes;
 mod rpc_provider;
 pub mod scanner;

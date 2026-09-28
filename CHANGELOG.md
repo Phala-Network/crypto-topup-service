@@ -110,7 +110,14 @@ webhook receivers must ignore unknown fields. The format follows
   `GET /v1/deposits` takes `created[gt]` and `created[lt]` beside `created[gte]` and
   `created[lte]`, all compared at whole seconds.
 - The OpenAPI documents have `servers`, `tags`, and an example of every object and body.
-
+- Restore mode (docs/design/multi-tenant.md §13, architecture §14): after a restore from backup
+  the service is frozen until the operator has reconciled it. Every write answers
+  `503 service_restoring` with `Retry-After: 300`, reads work, and no event is delivered and no
+  deposit credited meanwhile. Merchants give the operator their records since the restore point
+  (integration guide §5.12). Operators: `GET /v1/admin/restore` and
+  `POST /v1/admin/restore/{api_keys/revoke, treasuries/verify, webhook_endpoints/delete,
+  deposit_addresses, events, unfreeze}` (`deploy/runbooks/restore.md`). On a restore-check
+  instance, writes other than these answer `503 service_restoring` (was `503 unavailable`).
 - `POST /v1/account {confirmation_policies}` requires, per chain, a confirmation stricter than the
   route's floor (a depth, `safe`, or `finalized`), applied to every deposit not credited yet;
   `GET /v1/config` reports the effective `confirmations` and `typical_credit_seconds`, and the

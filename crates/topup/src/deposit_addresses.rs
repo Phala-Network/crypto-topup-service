@@ -280,6 +280,7 @@ pub async fn create(
                 customer,
                 &chains,
                 &merged,
+                Uuid::new_v4(),
             )
             .await?;
             (id, true)
@@ -380,6 +381,7 @@ pub async fn rotate(
         &customer,
         &chains,
         &metadata,
+        Uuid::new_v4(),
     )
     .await?;
     audit::insert(
@@ -398,6 +400,207 @@ pub async fn rotate(
         .ok_or(DepositAddressError::DatabaseInvariant)?;
     transaction.commit().await?;
     Ok(address)
+}
+
+/// How far past a customer's latest restored version [`reissue`] derives addresses to find one.
+pub const REISSUE_SEARCH_VERSIONS: u64 = 32;
+
+/// The version of a customer's deposit address [`reissue`] brings back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReissueTarget {
+    /// This version.
+    Version(u64),
+    /// The version whose address, over the account's current treasury of some chain, is this one.
+    Address(EvmAddress),
+}
+
+/// Re-issues after a restore the customer's deposit address that was given out after the restore
+/// point and lost with it (docs/design/multi-tenant.md §13). The salt is derived from the account,
+/// mode, customer, and version, so the address is the one the merchant holds on every chain whose
+/// treasury is unchanged. Versions between the restored latest one and `target` are issued retired,
+/// as the rotations that issued them left them; the active one is retired. Each new network is
+/// backfilled from the chain's cursor in `backfill_from` (the restored cursor), so the rescan
+/// finds payments made to it since. `id` keeps the `da_` id the merchant holds.
+///
+/// A version the customer already has is returned as it is, with `false`. The account's cap,
+/// pauses, and the rotation limit do not apply: nothing new is given out.
+#[allow(clippy::too_many_arguments)]
+pub async fn reissue(
+    pool: &PgPool,
+    account: &Account,
+    customer: &Customer,
+    chains: &[ChainContracts],
+    target: ReissueTarget,
+    id: Option<Uuid>,
+    backfill_from: &BTreeMap<u64, u64>,
+    actor: &Actor,
+    reason: &str,
+) -> Result<(DepositAddress, bool), DepositAddressError> {
+    if customer.account_id != account.id {
+        return Err(DepositAddressError::NotFound);
+    }
+    let scope = Scope::new(account.id, customer.livemode);
+    let mut transaction = pool.begin().await?;
+    lock_customer(&mut transaction, customer).await?;
+    let issuable = chains;
+    let chains = with_treasuries(&mut transaction, scope, issuable).await?;
+    require_chains(issuable, &chains)?;
+    let latest: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM deposit_addresses WHERE customer_id = $1")
+            .bind(customer.id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    let latest =
+        u64::try_from(latest.unwrap_or(0)).map_err(|_| DepositAddressError::DatabaseInvariant)?;
+    let salt = |version| {
+        deposit_address_salt(
+            &account.public_id,
+            customer.livemode,
+            &customer.client_reference_id,
+            version,
+        )
+    };
+    let version = match target {
+        ReissueTarget::Version(0) => {
+            return Err(DepositAddressError::InvalidInput(
+                "version must be at least 1",
+            ));
+        }
+        ReissueTarget::Version(version) => version,
+        ReissueTarget::Address(address) => {
+            let recorded: Option<i64> = sqlx::query_scalar(
+                r#"
+                SELECT deposit_address.version
+                FROM addresses AS address
+                JOIN deposit_addresses AS deposit_address
+                  ON deposit_address.id = address.deposit_address_id
+                WHERE deposit_address.customer_id = $1 AND address.address = $2
+                LIMIT 1
+                "#,
+            )
+            .bind(customer.id)
+            .bind(format!("{address:#x}"))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            match recorded {
+                Some(version) => {
+                    u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?
+                }
+                None => (1..=latest.saturating_add(REISSUE_SEARCH_VERSIONS))
+                    .find(|version| {
+                        let salt = salt(*version);
+                        chains.iter().any(|chain| {
+                            forwarder_address(
+                                chain.factory,
+                                chain.implementation,
+                                chain.treasury,
+                                salt,
+                            ) == address
+                        })
+                    })
+                    .ok_or(DepositAddressError::InvalidInput(
+                        "the address is not one of the customer's deposit addresses over the \
+                         account's current treasuries",
+                    ))?,
+            }
+        }
+    };
+    if version <= latest {
+        let existing: Uuid = sqlx::query_scalar(
+            "SELECT id FROM deposit_addresses WHERE customer_id = $1 AND version = $2",
+        )
+        .bind(customer.id)
+        .bind(i64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if id.is_some_and(|id| id != existing) {
+            return Err(DepositAddressError::InvalidInput(
+                "id is not the customer's deposit address of this version",
+            ));
+        }
+        let address = get_in(&mut transaction, scope, existing)
+            .await?
+            .ok_or(DepositAddressError::DatabaseInvariant)?;
+        transaction.commit().await?;
+        return Ok((address, false));
+    }
+    if let Some(id) = id {
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposit_addresses WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if taken {
+            return Err(DepositAddressError::InvalidInput(
+                "id belongs to another deposit address",
+            ));
+        }
+    }
+    let active = sqlx::query_as::<_, (Uuid, Json<BTreeMap<String, String>>)>(
+        "SELECT id, metadata FROM deposit_addresses \
+         WHERE customer_id = $1 AND status = 'active' FOR UPDATE",
+    )
+    .bind(customer.id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let metadata = match active {
+        Some((active, Json(metadata))) => {
+            retire(&mut transaction, active).await?;
+            metadata
+        }
+        None => BTreeMap::new(),
+    };
+    let count = version
+        .checked_sub(latest)
+        .ok_or(DepositAddressError::DatabaseInvariant)?;
+    let mut issued = Vec::new();
+    for step in 1..=count {
+        let last = step == count;
+        let next = issue(
+            &mut transaction,
+            scope,
+            &account.public_id,
+            customer,
+            &chains,
+            &metadata,
+            id.filter(|_| last).unwrap_or_else(Uuid::new_v4),
+        )
+        .await?;
+        if !last {
+            retire(&mut transaction, next).await?;
+        }
+        issued.push(next);
+    }
+    let reissued = *issued
+        .last()
+        .ok_or(DepositAddressError::DatabaseInvariant)?;
+    for (chain_id, block) in backfill_from {
+        sqlx::query(
+            "UPDATE addresses SET created_block = LEAST(created_block, $3) \
+             WHERE deposit_address_id = ANY($1) AND chain_id = $2",
+        )
+        .bind(&issued)
+        .bind(i64::try_from(*chain_id).map_err(|_| DepositAddressError::InvalidInput("chain_id"))?)
+        .bind(i64::try_from(*block).map_err(|_| DepositAddressError::DatabaseInvariant)?)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(scope.account_id()),
+            actor,
+            action: "deposit_address.reissue",
+            subject: &format!("deposit_address:{}", public_id(reissued)),
+            reason,
+        },
+    )
+    .await?;
+    let address = get_in(&mut transaction, scope, reissued)
+        .await?
+        .ok_or(DepositAddressError::DatabaseInvariant)?;
+    transaction.commit().await?;
+    Ok((address, true))
 }
 
 /// The public id of a deposit address, `da_` and the hex of its id.
@@ -660,7 +863,8 @@ fn require_chains(
     }
 }
 
-/// Inserts the customer's next version with a network on each of `chains`, and returns its id.
+/// Inserts the customer's next version as `id` with a network on each of `chains`, and returns
+/// its id.
 async fn issue(
     transaction: &mut Transaction<'_, Postgres>,
     scope: Scope,
@@ -668,6 +872,7 @@ async fn issue(
     customer: &Customer,
     chains: &[Chain],
     metadata: &BTreeMap<String, String>,
+    id: Uuid,
 ) -> Result<Uuid, DepositAddressError> {
     let latest: Option<i64> =
         sqlx::query_scalar("SELECT max(version) FROM deposit_addresses WHERE customer_id = $1")
@@ -679,7 +884,6 @@ async fn issue(
         .checked_add(1)
         .ok_or(DepositAddressError::DatabaseInvariant)?;
     let version_u64 = u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?;
-    let id = Uuid::new_v4();
     sqlx::query(
         r#"
         INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version, metadata)

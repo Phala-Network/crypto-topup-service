@@ -591,6 +591,19 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let pool = connect("DATABASE_URL", "run", connection_count)
         .await
         .context("failed to connect to database")?;
+    // A restore from backup freezes the service until the operator reconciles it; one that booted
+    // straight into this compose is found by its new PostgreSQL timeline.
+    if let Some(restore) = topup::restore_mode::detect(&pool)
+        .await
+        .context("failed to check for a restore from backup")?
+    {
+        tracing::error!(
+            restore_id = %restore.id,
+            "frozen after a restore from backup: merchant writes answer 503 service_restoring, \
+             and crediting, settlement, quote expiry, treasury changes, refund verification, and \
+             event delivery wait for POST /v1/admin/restore/unfreeze (deploy/RESTORE.md)"
+        );
+    }
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
@@ -705,33 +718,42 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .await
     });
     let watch_heads = finalized_heads.clone();
-    tasks.spawn("finality watch", |cancellation| async move {
-        finality_watch.run(watch_heads, cancellation).await;
+    // The scanner and the reconciler run while frozen after a restore: they rescan the chain from
+    // the restored cursor. Every task that credits, settles, or announces waits for the unfreeze.
+    tasks.spawn("finality watch", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            finality_watch.run(watch_heads, cancellation).await;
+        })
     });
-    tasks.spawn("refund verification worker", |cancellation| async move {
-        refund_worker.run(cancellation).await;
+    tasks.spawn("refund verification worker", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            refund_worker.run(cancellation).await;
+        })
     });
     for worker in 0..PUMPS {
         let worker_pump = pump.clone();
-        tasks.spawn(
-            format!("deposit pump {worker}"),
-            |cancellation| async move {
+        tasks.spawn(format!("deposit pump {worker}"), |cancellation| {
+            after_unfreeze(pool.clone(), cancellation, move |cancellation| async move {
                 tracing::info!(worker, "deposit pump started");
                 worker_pump
                     .run_with_instance(worker.to_string(), cancellation)
                     .await;
-            },
-        );
+            })
+        });
     }
     let age_alerter = AgeAlerter::new(pool.clone(), age_config, AGE_ALERT_INTERVAL);
-    tasks.spawn("age alerter", |cancellation| async move {
-        age_alerter.run(cancellation).await;
+    tasks.spawn("age alerter", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            age_alerter.run(cancellation).await;
+        })
     });
     tasks.spawn("backup monitor", topup::observability::monitor_backup);
     let expiry_worker =
         topup::locks::ExpiryWorker::new(pool.clone(), Arc::clone(&routes), Duration::from_secs(5));
-    tasks.spawn("rate-lock expiry worker", |cancellation| async move {
-        expiry_worker.run(cancellation).await;
+    tasks.spawn("rate-lock expiry worker", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            expiry_worker.run(cancellation).await;
+        })
     });
     let treasury_worker = topup::treasuries::TreasuryWorker::new(
         pool.clone(),
@@ -741,14 +763,20 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         ))),
         Duration::from_secs(30),
     );
-    tasks.spawn("treasury time-lock worker", |cancellation| async move {
-        treasury_worker.run(cancellation).await;
+    tasks.spawn("treasury time-lock worker", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            treasury_worker.run(cancellation).await;
+        })
     });
-    tasks.spawn("test webhook delivery worker", |cancellation| async move {
-        test_delivery.run(cancellation).await;
+    tasks.spawn("test webhook delivery worker", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            test_delivery.run(cancellation).await;
+        })
     });
-    tasks.spawn("live webhook delivery worker", |cancellation| async move {
-        live_delivery.run(cancellation).await;
+    tasks.spawn("live webhook delivery worker", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            live_delivery.run(cancellation).await;
+        })
     });
     let reconcile_interval = Duration::from_secs(args.reconcile_interval_s);
     tasks.spawn("reconciler", |cancellation| async move {
@@ -814,6 +842,26 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Runs `task` once the service is not frozen after a restore (`topup::restore_mode`); nothing when
+/// shutdown comes first.
+async fn after_unfreeze<F>(
+    pool: sqlx::PgPool,
+    cancellation: CancellationToken,
+    task: impl FnOnce(CancellationToken) -> F,
+) where
+    F: Future<Output = ()>,
+{
+    if topup::restore_mode::wait_until_unfrozen(
+        &pool,
+        topup::restore_mode::UNFREEZE_POLL_INTERVAL,
+        &cancellation,
+    )
+    .await
+    {
+        task(cancellation).await;
+    }
 }
 
 /// Serves only the read API of a database restored from backup (`deploy/RESTORE.md`), so the

@@ -1,0 +1,765 @@
+//! The operator's reconciliation after a restore from backup (`crate::restore_mode`,
+//! `deploy/RESTORE.md`): the freeze's status, re-applying the security changes made after the
+//! restore point, re-issuing deposit addresses given out after it, importing the events the
+//! merchant received after it, and unfreezing. Every write needs an active freeze and is audited.
+
+use std::collections::BTreeSet;
+use std::str::FromStr as _;
+
+use alloy_primitives::Address as EvmAddress;
+use axum::Json;
+use axum::extract::State;
+use chrono::DateTime;
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::api_keys::{self, ApiKey};
+use crate::audit::{self, Actor};
+use crate::deposit_addresses::{self, ChainContracts, ReissueTarget};
+use crate::ids;
+use crate::restore_mode::{self, DeliveredEvent, Restore};
+use crate::tenancy::Scope;
+use crate::treasuries::{self, Status as TreasuryStatus};
+
+use super::AppState;
+use super::error::{ApiError, ErrorResponse};
+use super::extract::ApiJson;
+use super::handlers::{
+    admin_actor, parse_account_id, validate_client_reference_id, validate_reason,
+};
+use super::models::{
+    self, ApiKeyObject, EventImport, RestoreApiKeyRevokeRequest, RestoreDepositAddressRequest,
+    RestoreDepositAddressResponse, RestoreEventsImportRequest, RestoreEventsImportResponse,
+    RestoreObject, RestoreStatus, RestoreTreasuryVerifyRequest, RestoreTreasuryVerifyResponse,
+    RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest, TreasuryVerification,
+    WebhookEndpointObject,
+};
+
+type ApiResult<T> = Result<T, ApiError>;
+
+/// At most this many treasuries or events per request.
+const MAX_ITEMS: usize = 100;
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/restore",
+    responses(
+        (status = 200, description = "OK", body = RestoreStatus),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Whether the service is frozen after a restore from backup, the latest restore, each chain's
+/// rescan since it, and the delivered events imported for it compared with the ledger.
+pub(crate) async fn get_restore(State(state): State<AppState>) -> ApiResult<Json<RestoreStatus>> {
+    let latest = restore_mode::latest(&state.pool).await?;
+    let (rescan, delivered_events) = match &latest {
+        Some(restore) => {
+            let chains = restore_mode::rescan_progress(&state.pool, restore, &state.routes).await?;
+            let (imported, findings) =
+                restore_mode::delivered_event_findings(&state.pool, restore).await?;
+            (
+                chains.into_iter().map(chain_rescan).collect(),
+                models::DeliveredEvents {
+                    imported,
+                    findings: findings
+                        .into_iter()
+                        .map(|finding| models::DeliveredEventFinding {
+                            event: ids::format(ids::EVENT, finding.event_id),
+                            event_type: finding.event_type,
+                            deposit: ids::format(ids::DEPOSIT, finding.deposit_id),
+                            status: finding.status.to_owned(),
+                            delivered_amount_atomic: finding.delivered_amount_atomic,
+                            delivered_amount: finding.delivered_amount,
+                            ledger_amount_atomic: finding.ledger_amount_atomic,
+                            ledger_amount: finding.ledger_amount,
+                        })
+                        .collect(),
+                },
+            )
+        }
+        None => (
+            Vec::new(),
+            models::DeliveredEvents {
+                imported: 0,
+                findings: Vec::new(),
+            },
+        ),
+    };
+    Ok(Json(RestoreStatus {
+        object: "restore_status".to_owned(),
+        frozen: latest
+            .as_ref()
+            .is_some_and(|restore| restore.unfrozen_at.is_none()),
+        restore: latest.as_ref().map(restore_object),
+        rescan,
+        delivered_events,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/api_keys/revoke",
+    request_body = RestoreApiKeyRevokeRequest,
+    responses(
+        (status = 200, description = "OK: revoked, or already revoked", body = ApiKeyObject),
+        (status = 400, description = "Bad Request: no or both selectors, several keys match (name it by `id`), or `last_api_key` (issue a recovery key with `revoke_existing`)", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no key of the account matches", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Revokes again a key the merchant revoked after the restore point, which the restore made
+/// valid again: by its `id`, or by its `prefix` and `last4` as the merchant's records show it.
+/// Announced as `api_key.revoked`. Audited.
+pub(crate) async fn revoke_api_key(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreApiKeyRevokeRequest>,
+) -> ApiResult<Json<ApiKeyObject>> {
+    validate_reason(&request.reason)?;
+    let restore = frozen(&state).await?;
+    let account_id = parse_account_id(&request.account)?;
+    let key = match (&request.id, &request.prefix, &request.last4) {
+        (Some(id), None, None) => {
+            let id = ids::parse(ids::API_KEY, id)
+                .ok_or_else(|| ApiError::invalid_param("id", "id must be a key_ id"))?;
+            let mut found = None;
+            for livemode in [false, true] {
+                if let Some(key) =
+                    api_keys::get(&state.pool, Scope::new(account_id, livemode), id).await?
+                {
+                    found = Some(key);
+                }
+            }
+            found.ok_or_else(ApiError::not_found)?
+        }
+        (None, Some(prefix), Some(last4)) => {
+            let livemode = key_mode(prefix)?;
+            let matching: Vec<ApiKey> =
+                api_keys::list(&state.pool, Scope::new(account_id, livemode))
+                    .await?
+                    .into_iter()
+                    .filter(|key| key.prefix == *prefix && key.last4 == *last4)
+                    .collect();
+            let unrevoked: Vec<&ApiKey> = matching
+                .iter()
+                .filter(|key| key.revoked_at.is_none())
+                .collect();
+            match (unrevoked.as_slice(), matching.first()) {
+                ([key], _) => (*key).clone(),
+                ([], Some(revoked)) => revoked.clone(),
+                ([], None) => return Err(ApiError::not_found()),
+                _ => {
+                    return Err(ApiError::bad_request(
+                        "several keys have this prefix and last4; revoke by id",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "name the key by id, or by prefix and last4",
+            ));
+        }
+    };
+    let actor = admin_actor(&state);
+    let revoked = api_keys::revoke(&state.pool, key.scope(), key.id, &actor)
+        .await
+        .map_err(super::keys::map_error)?;
+    record(
+        &state,
+        &restore,
+        Some(account_id),
+        &actor,
+        "restore.api_key_revoke",
+        &format!("api_key:{}", revoked.public_id()),
+        &request.reason,
+    )
+    .await?;
+    Ok(Json(super::keys::api_key_object(&revoked, None)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/treasuries/verify",
+    request_body = RestoreTreasuryVerifyRequest,
+    responses(
+        (status = 200, description = "OK", body = RestoreTreasuryVerifyResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,
+/// with `reapply_cancellations`, cancels again each pending change the merchant canceled after the
+/// restore point: while frozen no treasury change applies, so none takes effect first. Audited.
+pub(crate) async fn verify_treasuries(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreTreasuryVerifyRequest>,
+) -> ApiResult<Json<RestoreTreasuryVerifyResponse>> {
+    validate_reason(&request.reason)?;
+    if request.treasuries.is_empty() || request.treasuries.len() > MAX_ITEMS {
+        return Err(ApiError::invalid_param(
+            "treasuries",
+            "treasuries must hold 1 to 100 objects",
+        ));
+    }
+    let restore = frozen(&state).await?;
+    let scope = Scope::new(parse_account_id(&request.account)?, request.livemode);
+    let mut ids_seen = BTreeSet::new();
+    let mut received = Vec::new();
+    for treasury in &request.treasuries {
+        let id = ids::parse(ids::TREASURY, &treasury.id)
+            .ok_or_else(|| ApiError::invalid_param("treasuries", "id must be a trs_ id"))?;
+        if !ids_seen.insert(id) {
+            return Err(ApiError::invalid_param(
+                "treasuries",
+                "send one object per treasury, the latest received",
+            ));
+        }
+        let address = EvmAddress::from_str(&treasury.address)
+            .map_err(|_| ApiError::invalid_param("treasuries", "address must be an address"))?;
+        received.push((id, treasury, address));
+    }
+    let actor = admin_actor(&state);
+    let mut data = Vec::new();
+    for (id, treasury, address) in received {
+        let current = treasuries::get(&state.pool, scope, id)
+            .await
+            .map_err(super::treasuries::map_error)?;
+        let (status, result) = match current {
+            None => (None, "missing"),
+            Some(current) => {
+                let object = super::treasuries::treasury_object(&current);
+                let same_place = current.chain_id == treasury.chain_id
+                    && object
+                        .address
+                        .eq_ignore_ascii_case(&format!("{address:#x}"));
+                if !same_place {
+                    (Some(object.status), "differs")
+                } else if object.status == treasury.status {
+                    (Some(object.status), "matches")
+                } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending
+                {
+                    if request.reapply_cancellations {
+                        let canceled = treasuries::cancel(&state.pool, scope, &actor, id)
+                            .await
+                            .map_err(super::treasuries::map_error)?;
+                        record(
+                            &state,
+                            &restore,
+                            Some(scope.account_id()),
+                            &actor,
+                            "restore.treasury_cancel",
+                            &format!("treasury:{}", treasury.id),
+                            &request.reason,
+                        )
+                        .await?;
+                        (
+                            Some(super::treasuries::treasury_object(&canceled).status),
+                            "canceled",
+                        )
+                    } else {
+                        (Some(object.status), "cancellation_lost")
+                    }
+                } else {
+                    (Some(object.status), "differs")
+                }
+            }
+        };
+        data.push(TreasuryVerification {
+            id: treasury.id.clone(),
+            received_status: treasury.status.clone(),
+            status,
+            result: result.to_owned(),
+        });
+    }
+    record(
+        &state,
+        &restore,
+        Some(scope.account_id()),
+        &actor,
+        "restore.treasury_verify",
+        &format!("account:{}", request.account),
+        &request.reason,
+    )
+    .await?;
+    Ok(Json(RestoreTreasuryVerifyResponse {
+        object: "list".to_owned(),
+        data,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/webhook_endpoints/delete",
+    request_body = RestoreWebhookEndpointDeleteRequest,
+    responses(
+        (status = 200, description = "OK: deleted", body = WebhookEndpointObject),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no endpoint of the account and mode, or deleted already", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Deletes again an endpoint the merchant deleted after the restore point, before deliveries
+/// resume, announced as `webhook_endpoint.deleted`. Audited.
+pub(crate) async fn delete_webhook_endpoint(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreWebhookEndpointDeleteRequest>,
+) -> ApiResult<Json<WebhookEndpointObject>> {
+    validate_reason(&request.reason)?;
+    let restore = frozen(&state).await?;
+    let scope = Scope::new(parse_account_id(&request.account)?, request.livemode);
+    let id = ids::parse(ids::WEBHOOK_ENDPOINT, &request.id)
+        .ok_or_else(|| ApiError::invalid_param("id", "id must be a we_ id"))?;
+    let actor = admin_actor(&state);
+    let deleted = crate::webhook_endpoints::delete(&state.pool, scope, id, &actor)
+        .await
+        .map_err(super::webhook_endpoints::map_error)?;
+    record(
+        &state,
+        &restore,
+        Some(scope.account_id()),
+        &actor,
+        "restore.webhook_endpoint_delete",
+        &format!("webhook_endpoint:{}", request.id),
+        &request.reason,
+    )
+    .await?;
+    Ok(Json(deleted.object()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/deposit_addresses",
+    request_body = RestoreDepositAddressRequest,
+    responses(
+        (status = 200, description = "OK: re-issued, or the customer's existing version", body = RestoreDepositAddressResponse),
+        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Re-issues a deposit address the merchant gave a customer after the restore point, from the
+/// merchant's record of its address or version: the salt is derived from the account, mode,
+/// customer, and version, so it is the same address, backfilled from the restored cursor so the
+/// rescan credits payments made to it since. Audited.
+pub(crate) async fn reissue_deposit_address(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreDepositAddressRequest>,
+) -> ApiResult<Json<RestoreDepositAddressResponse>> {
+    validate_reason(&request.reason)?;
+    validate_client_reference_id(&request.client_reference_id)?;
+    let restore = frozen(&state).await?;
+    let account_id = parse_account_id(&request.account)?;
+    let account = crate::db::get_account(&state.pool, account_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let address = request
+        .address
+        .as_deref()
+        .map(|value| {
+            EvmAddress::from_str(value)
+                .map_err(|_| ApiError::invalid_param("address", "address must be an address"))
+        })
+        .transpose()?;
+    let target = match (request.version, address) {
+        (Some(version), _) => ReissueTarget::Version(version),
+        (None, Some(address)) => ReissueTarget::Address(address),
+        (None, None) => {
+            return Err(ApiError::bad_request(
+                "send the address, its version, or both",
+            ));
+        }
+    };
+    let id = request
+        .id
+        .as_deref()
+        .map(|id| {
+            ids::parse(ids::DEPOSIT_ADDRESS, id)
+                .ok_or_else(|| ApiError::invalid_param("id", "id must be a da_ id"))
+        })
+        .transpose()?;
+    let scope = Scope::new(account_id, request.livemode);
+    let customer =
+        super::repository::ensure_customer(&state.pool, scope, &request.client_reference_id)
+            .await?;
+    // Every chain of the mode with a current route, paused or frozen or not: nothing new is
+    // given out, the address was issued already.
+    let chains: Vec<ChainContracts> = state
+        .routes
+        .current_in(request.livemode)
+        .map(|route| (route.chain.chain_id, ChainContracts::of(route)))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
+        .collect();
+    let (reissued, issued) = deposit_addresses::reissue(
+        &state.pool,
+        &account,
+        &customer,
+        &chains,
+        target,
+        id,
+        &restore.restored_cursors,
+        &admin_actor(&state),
+        &request.reason,
+    )
+    .await
+    .map_err(super::deposit_addresses::map_error)?;
+    if let (Some(version), Some(address)) = (request.version, address) {
+        let holds = reissued
+            .networks
+            .iter()
+            .any(|network| network.address == address);
+        if reissued.version != version || !holds {
+            return Err(ApiError::bad_request(
+                "the address is not the customer's address of this version",
+            ));
+        }
+    }
+    Ok(Json(RestoreDepositAddressResponse {
+        reissued: issued,
+        deposit_address: super::deposit_addresses::deposit_address_object(
+            &state.routes,
+            &reissued,
+        )?,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/events",
+    request_body = RestoreEventsImportRequest,
+    responses(
+        (status = 200, description = "OK", body = RestoreEventsImportResponse),
+        (status = 400, description = "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no account has an event's `account`", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Imports the deposit events a merchant received after the restore point, exactly as delivered:
+/// each is stored as the event it is, with no delivery, so when the rescan re-derives the deposit
+/// its event is recorded already and nothing is sent again with another body. An event recorded
+/// already keeps its stored snapshot; a different delivered body is reported as `mismatch`.
+/// Audited.
+pub(crate) async fn import_events(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreEventsImportRequest>,
+) -> ApiResult<Json<RestoreEventsImportResponse>> {
+    validate_reason(&request.reason)?;
+    if request.events.is_empty() || request.events.len() > MAX_ITEMS {
+        return Err(ApiError::invalid_param(
+            "events",
+            "events must hold 1 to 100 event objects",
+        ));
+    }
+    let restore = frozen(&state).await?;
+    let events = request
+        .events
+        .iter()
+        .map(delivered_event)
+        .collect::<ApiResult<Vec<_>>>()?;
+    for account_id in events
+        .iter()
+        .map(|event| event.account_id)
+        .collect::<BTreeSet<_>>()
+    {
+        if crate::db::get_account(&state.pool, account_id)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::not_found().with_param("events"));
+        }
+    }
+    let actor = admin_actor(&state);
+    let mut data = Vec::new();
+    for event in &events {
+        let outcome =
+            restore_mode::import_delivered_event(&state.pool, &restore, event, &actor).await?;
+        data.push(EventImport {
+            id: ids::format(ids::EVENT, event.id),
+            result: outcome.code().to_owned(),
+        });
+    }
+    Ok(Json(RestoreEventsImportResponse {
+        object: "list".to_owned(),
+        data,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/unfreeze",
+    request_body = RestoreUnfreezeRequest,
+    responses(
+        (status = 200, description = "OK: unfrozen", body = RestoreObject),
+        (status = 400, description = "Bad Request: a checklist item is not `true`", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 409, description = "`restore_not_frozen`, or `restore_rescan_incomplete`", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Lifts the freeze after a restore once every chain is rescanned and the operator confirms the
+/// checklist: crediting, settlement, quote expiry, treasury changes, refund verification, and
+/// event delivery resume, and merchants can write again. The reason and checklist are recorded
+/// in the restore and in `audit`.
+pub(crate) async fn unfreeze(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RestoreUnfreezeRequest>,
+) -> ApiResult<Json<RestoreObject>> {
+    validate_reason(&request.reason)?;
+    for (param, done) in [
+        (
+            "security_changes_reapplied",
+            request.security_changes_reapplied,
+        ),
+        (
+            "deposit_addresses_reissued",
+            request.deposit_addresses_reissued,
+        ),
+        (
+            "delivered_events_imported",
+            request.delivered_events_imported,
+        ),
+    ] {
+        if !done {
+            return Err(ApiError::invalid_param(
+                param,
+                format!("{param} must be true: finish that step first (deploy/RESTORE.md)"),
+            ));
+        }
+    }
+    let reason = format!(
+        "{}; checklist: security_changes_reapplied, deposit_addresses_reissued, \
+         delivered_events_imported",
+        request.reason.trim()
+    );
+    let restore = restore_mode::unfreeze(&state.pool, &state.routes, &admin_actor(&state), &reason)
+        .await
+        .map_err(|error| match error {
+            restore_mode::UnfreezeError::NotFrozen => ApiError::restore_not_frozen(),
+            restore_mode::UnfreezeError::RescanIncomplete(_) => {
+                ApiError::restore_rescan_incomplete()
+            }
+            restore_mode::UnfreezeError::Database(error) => ApiError::from(error),
+        })?;
+    Ok(Json(restore_object(&restore)))
+}
+
+/// The active freeze; every restore write needs one.
+async fn frozen(state: &AppState) -> ApiResult<Restore> {
+    restore_mode::active(&state.pool)
+        .await?
+        .ok_or_else(ApiError::restore_not_frozen)
+}
+
+/// Appends the audit row of a restore action.
+async fn record(
+    state: &AppState,
+    restore: &Restore,
+    account_id: Option<Uuid>,
+    actor: &Actor,
+    action: &str,
+    subject: &str,
+    reason: &str,
+) -> ApiResult<()> {
+    audit::insert(
+        &state.pool,
+        &audit::Entry {
+            account_id,
+            actor,
+            action,
+            subject,
+            reason: &format!("restore {}: {}", restore.id, reason.trim()),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// The mode a key prefix names.
+fn key_mode(prefix: &str) -> ApiResult<bool> {
+    [
+        (api_keys::KeyKind::Secret, false),
+        (api_keys::KeyKind::Secret, true),
+        (api_keys::KeyKind::Restricted, false),
+        (api_keys::KeyKind::Restricted, true),
+    ]
+    .into_iter()
+    .find(|(kind, livemode)| api_keys::prefix(*kind, *livemode) == prefix)
+    .map(|(_, livemode)| livemode)
+    .ok_or_else(|| {
+        ApiError::invalid_param(
+            "prefix",
+            "prefix must be ppay_sk_test_, ppay_sk_live_, ppay_rk_test_, or ppay_rk_live_",
+        )
+    })
+}
+
+/// Reads and checks one delivered event: a re-derived deposit event whose id is the one its type
+/// and deposit derive.
+fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
+    let invalid = |message: &str| ApiError::invalid_param("events", message.to_owned());
+    let text = |field: &str| {
+        event
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid(&format!("each event needs a string `{field}`")))
+    };
+    let id = ids::parse_event(text("id")?).ok_or_else(|| invalid("an event id is not evt_"))?;
+    let event_type = text("type")?;
+    if !restore_mode::REDERIVED_EVENT_TYPES.contains(&event_type) {
+        return Err(invalid(
+            "only deposit.credited, deposit.rejected, and deposit.reversed events are imported",
+        ));
+    }
+    let account_id = ids::parse(ids::ACCOUNT, text("account")?)
+        .ok_or_else(|| invalid("an event's account is not acct_"))?;
+    let livemode = event
+        .get("livemode")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("each event needs a boolean `livemode`"))?;
+    let created = event
+        .get("created")
+        .and_then(Value::as_i64)
+        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| invalid("each event needs `created`, Unix seconds"))?;
+    let data = event
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| invalid("each event needs its `data`"))?;
+    let object = data
+        .get("object")
+        .ok_or_else(|| invalid("an event's data has no object"))?;
+    let deposit_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| ids::parse(ids::DEPOSIT, id))
+        .ok_or_else(|| invalid("an event's object is not a dep_ deposit"))?;
+    if object.get("livemode").and_then(Value::as_bool) != Some(livemode) {
+        return Err(invalid("an event's object is in another mode"));
+    }
+    if topup_core::identity::event_id(event_type, deposit_id) != id {
+        return Err(invalid(
+            "an event's id is not the one its type and deposit derive",
+        ));
+    }
+    let actor = event
+        .get("actor")
+        .and_then(Value::as_str)
+        .unwrap_or(crate::db::SYSTEM_ACTOR);
+    Ok(DeliveredEvent {
+        id,
+        account_id,
+        livemode,
+        event_type: event_type.to_owned(),
+        deposit_id,
+        created,
+        actor: actor.to_owned(),
+        data: data.clone(),
+    })
+}
+
+fn restore_object(restore: &Restore) -> RestoreObject {
+    RestoreObject {
+        id: restore.id.to_string(),
+        object: "restore".to_owned(),
+        detected_at: restore.detected_at.timestamp(),
+        detected_by: restore.detected_by.clone(),
+        timeline_id: restore.timeline_id,
+        restore_point: restore.restore_point.map(|at| at.timestamp()),
+        restored_cursors: restore
+            .restored_cursors
+            .iter()
+            .map(|(chain_id, block)| (chain_id.to_string(), *block))
+            .collect(),
+        unfrozen_at: restore.unfrozen_at.map(|at| at.timestamp()),
+        unfrozen_by: restore.unfrozen_by.clone(),
+        unfreeze_reason: restore.unfreeze_reason.clone(),
+    }
+}
+
+fn chain_rescan(chain: restore_mode::ChainRescan) -> models::ChainRescan {
+    models::ChainRescan {
+        chain_id: chain.chain_id,
+        restored_block: chain.restored_block,
+        scanned_block: chain.scanned_block,
+        scanned_block_time: chain.scanned_block_time.map(|at| at.timestamp()),
+        pending_backfills: chain.pending_backfills,
+        blocked: chain.blocked,
+        complete: chain.complete,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use topup_core::identity::event_id;
+
+    use super::*;
+
+    fn credited(deposit: Uuid) -> Value {
+        json!({
+            "id": ids::format(ids::EVENT, event_id("deposit.credited", deposit)),
+            "object": "event",
+            "account": ids::format(ids::ACCOUNT, Uuid::from_u128(1)),
+            "livemode": false,
+            "type": "deposit.credited",
+            "created": 1_790_000_000,
+            "actor": "system",
+            "data": {"object": {"id": ids::format(ids::DEPOSIT, deposit), "livemode": false}},
+        })
+    }
+
+    #[test]
+    fn a_delivered_event_is_read_with_its_derived_identity() {
+        let deposit = Uuid::from_u128(7);
+        let event = delivered_event(&credited(deposit)).unwrap();
+        assert_eq!(event.id, event_id("deposit.credited", deposit));
+        assert_eq!(event.deposit_id, deposit);
+        assert_eq!(event.account_id, Uuid::from_u128(1));
+        assert!(!event.livemode);
+        assert_eq!(event.data, credited(deposit)["data"]);
+    }
+
+    #[test]
+    fn events_that_a_rescan_does_not_derive_are_refused() {
+        let deposit = Uuid::from_u128(7);
+        let mut other_type = credited(deposit);
+        other_type["type"] = json!("deposit.rejected");
+        let mut other_deposit = credited(deposit);
+        other_deposit["data"]["object"]["id"] =
+            json!(ids::format(ids::DEPOSIT, Uuid::from_u128(8)));
+        let mut refund = credited(deposit);
+        refund["type"] = json!("deposit.refunded");
+        let mut other_mode = credited(deposit);
+        other_mode["data"]["object"]["livemode"] = json!(true);
+        let mut no_data = credited(deposit);
+        no_data["data"] = json!(null);
+        for event in [other_type, other_deposit, refund, other_mode, no_data] {
+            assert!(delivered_event(&event).is_err(), "{event}");
+        }
+    }
+
+    #[test]
+    fn a_key_prefix_names_its_mode() {
+        assert!(!key_mode("ppay_sk_test_").unwrap());
+        assert!(key_mode("ppay_rk_live_").unwrap());
+        assert!(key_mode("ppay_sk_").is_err());
+    }
+}

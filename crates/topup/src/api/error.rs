@@ -760,6 +760,38 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
     }
 
+    /// Returns a write refused while the service is frozen after a restore from backup
+    /// (`crate::restore_mode`); the response carries `Retry-After`.
+    #[must_use]
+    pub fn service_restoring() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_restoring",
+            "the service was restored from backup and is being reconciled: reads work, writes are \
+             paused; retry later",
+        )
+    }
+
+    /// Returns a restore action that needs the service frozen after a restore.
+    #[must_use]
+    pub fn restore_not_frozen() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "restore_not_frozen",
+            "the service is not frozen after a restore",
+        )
+    }
+
+    /// Returns an unfreeze refused because a chain is not rescanned since the restore.
+    #[must_use]
+    pub fn restore_rescan_incomplete() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "restore_rescan_incomplete",
+            "a chain is not rescanned since the restore; see GET /v1/admin/restore",
+        )
+    }
+
     /// Returns an internal failure without exposing its cause.
     #[must_use]
     pub fn internal() -> Self {

@@ -642,7 +642,7 @@ pub(super) fn validate_client_reference_id(client_reference_id: &str) -> ApiResu
     Ok(())
 }
 
-fn validate_reason(reason: &str) -> ApiResult<()> {
+pub(super) fn validate_reason(reason: &str) -> ApiResult<()> {
     if reason.trim().is_empty() || reason.len() > 1024 {
         return Err(ApiError::bad_request("reason must contain 1 to 1024 bytes"));
     }
@@ -731,6 +731,6 @@ fn validate_contact(contact: &Contact) -> ApiResult<()> {
     Ok(())
 }
 
-fn parse_account_id(id: &str) -> ApiResult<Uuid> {
+pub(super) fn parse_account_id(id: &str) -> ApiResult<Uuid> {
     crate::ids::parse(crate::ids::ACCOUNT, id).ok_or_else(ApiError::not_found)
 }

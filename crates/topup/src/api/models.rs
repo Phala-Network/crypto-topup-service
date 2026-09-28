@@ -1666,3 +1666,276 @@ pub struct ForwarderList {
     /// The forwarders.
     pub data: Vec<Forwarder>,
 }
+
+/// `GET /v1/admin/restore`: the restore freeze and the reconciliation before unfreezing
+/// (`deploy/RESTORE.md`).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreStatus {
+    /// Always `restore_status`.
+    pub object: String,
+    /// Whether the service is frozen after a restore from backup: merchant writes answer
+    /// `503 service_restoring`, and nothing credits, settles, expires a quote, applies a treasury
+    /// change, verifies a refund, or delivers an event.
+    pub frozen: bool,
+    /// The most recent restore; `null` when the database was never restored.
+    pub restore: Option<RestoreObject>,
+    /// The rescan of each configured chain since that restore; the freeze lifts only once every
+    /// chain is `complete`.
+    pub rescan: Vec<ChainRescan>,
+    /// Delivered events imported from merchants' records, compared with the ledger.
+    pub delivered_events: DeliveredEvents,
+}
+
+/// A restore from backup the service detected.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreObject {
+    /// Restore id, a UUID.
+    pub id: String,
+    /// Always `restore`.
+    pub object: String,
+    /// When the service found the restore and froze, Unix seconds.
+    pub detected_at: i64,
+    /// `restore_check` (recorded after a restore on boot of the restore-check variant) or
+    /// `timeline` (`topup run` found a PostgreSQL timeline newer than the acknowledged one).
+    pub detected_by: String,
+    /// The PostgreSQL timeline the restore promoted to.
+    pub timeline_id: i64,
+    /// Newest heartbeat in the restored database, Unix seconds: changes after it may be lost.
+    pub restore_point: Option<i64>,
+    /// Each chain's scanned block when the restore was detected, by chain id: where the rescan
+    /// starts, and where a re-issued deposit address is backfilled from.
+    pub restored_cursors: std::collections::BTreeMap<String, u64>,
+    /// When the operator unfroze the service, Unix seconds.
+    pub unfrozen_at: Option<i64>,
+    /// Who unfroze it.
+    pub unfrozen_by: Option<String>,
+    /// Why, with the operator's checklist.
+    pub unfreeze_reason: Option<String>,
+}
+
+/// One chain's rescan since the restore.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ChainRescan {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The chain's scanned block when the restore was detected.
+    pub restored_block: Option<u64>,
+    /// The chain's scanned block now.
+    pub scanned_block: Option<u64>,
+    /// Block time of the finalized head the scanner last committed through, Unix seconds.
+    pub scanned_block_time: Option<i64>,
+    /// Issued addresses of the chain whose history the scanner has not read yet, such as
+    /// re-issued deposit addresses.
+    pub pending_backfills: i64,
+    /// Whether a reconciliation block freezes the chain: its scanner is paused, so it is left out
+    /// of the rescan, and it credits nothing until the block is lifted.
+    pub blocked: bool,
+    /// Whether the chain is rescanned: finalized past the moment the restore was detected, with
+    /// every issued address backfilled.
+    pub complete: bool,
+}
+
+/// Delivered events imported for the restore.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DeliveredEvents {
+    /// How many were imported.
+    pub imported: i64,
+    /// Each imported event whose deposit the ledger does not hold as delivered yet.
+    pub findings: Vec<DeliveredEventFinding>,
+}
+
+/// An imported event whose deposit is not re-derived yet, or whose amounts differ.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DeliveredEventFinding {
+    /// Event id, `evt_…`.
+    pub event: String,
+    /// Event type.
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// The deposit, `dep_…`.
+    pub deposit: String,
+    /// `pending` (the rescan has not re-derived or valued the deposit yet) or `mismatch` (the
+    /// ledger's token amount or credit differs from what the merchant received; the delivered
+    /// event is kept and never sent again).
+    pub status: String,
+    /// Delivered `amount_atomic`.
+    pub delivered_amount_atomic: Option<String>,
+    /// Delivered `amount`, the credit in minor units.
+    pub delivered_amount: Option<String>,
+    /// The ledger's `amount_atomic`.
+    pub ledger_amount_atomic: Option<String>,
+    /// The ledger's credit in minor units.
+    pub ledger_amount: Option<String>,
+}
+
+/// `POST /v1/admin/restore/api_keys/revoke` body: a key the merchant revoked after the restore
+/// point, named by its id or by its prefix and last four characters.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreApiKeyRevokeRequest {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The key's id, `key_…`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The key's prefix, such as `ppay_sk_live_`, with `last4`.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// The key's last four characters, with `prefix`.
+    #[serde(default)]
+    pub last4: Option<String>,
+    /// Why, 1 to 1024 bytes: the merchant's record of the revocation.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/treasuries/verify` body: the treasuries of the merchant's latest
+/// `treasury` events, as received.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreTreasuryVerifyRequest {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The mode.
+    pub livemode: bool,
+    /// Each treasury's latest object the merchant received (an event's `data.object`), one per
+    /// treasury; at most 100.
+    pub treasuries: Vec<ReceivedTreasury>,
+    /// Cancel again each pending treasury the merchant received as `canceled`.
+    #[serde(default)]
+    pub reapply_cancellations: bool,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// A treasury object as the merchant received it; other fields are ignored.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct ReceivedTreasury {
+    /// Treasury id, `trs_…`.
+    pub id: String,
+    /// The received `status`.
+    pub status: String,
+    /// The received `chain_id`.
+    pub chain_id: u64,
+    /// The received `address`.
+    pub address: String,
+}
+
+/// `POST /v1/admin/restore/treasuries/verify` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreTreasuryVerifyResponse {
+    /// Always `list`.
+    pub object: String,
+    /// One result per received treasury, in request order.
+    pub data: Vec<TreasuryVerification>,
+}
+
+/// A received treasury compared with the restored one.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct TreasuryVerification {
+    /// Treasury id, `trs_…`.
+    pub id: String,
+    /// The status the merchant received.
+    pub received_status: String,
+    /// The restored treasury's status now; `null` when it is missing.
+    pub status: Option<String>,
+    /// `matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,
+    /// the restore undid it: cancel it with `reapply_cancellations`); `missing` (created after the
+    /// restore point: the merchant creates it again after the unfreeze); or `differs` (another
+    /// status, chain, or address; a change that applied after the restore point applies again).
+    pub result: String,
+}
+
+/// `POST /v1/admin/restore/webhook_endpoints/delete` body: an endpoint the merchant deleted
+/// after the restore point.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreWebhookEndpointDeleteRequest {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The mode.
+    pub livemode: bool,
+    /// Endpoint id, `we_…`.
+    pub id: String,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/deposit_addresses` body: a deposit address the merchant holds, given
+/// out after the restore point.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreDepositAddressRequest {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The mode.
+    pub livemode: bool,
+    /// The customer's `client_reference_id`.
+    pub client_reference_id: String,
+    /// The address's `version`; with `address`, both must agree.
+    #[serde(default)]
+    pub version: Option<u64>,
+    /// The address the merchant holds (the top-level `address` or a network's); the version is
+    /// found by deriving the customer's versions over the account's current treasuries.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The `da_` id the merchant holds, kept for the re-issued address.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/deposit_addresses` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreDepositAddressResponse {
+    /// Whether the address was issued now; `false` when the customer already had this version.
+    pub reissued: bool,
+    /// The deposit address.
+    pub deposit_address: DepositAddress,
+}
+
+/// `POST /v1/admin/restore/events` body: `deposit.credited`, `deposit.rejected`, and
+/// `deposit.reversed` events the merchant received after the restore point, as delivered.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreEventsImportRequest {
+    /// Up to 100 event objects exactly as delivered.
+    #[schema(value_type = Vec<Object>)]
+    pub events: Vec<serde_json::Value>,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/events` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreEventsImportResponse {
+    /// Always `list`.
+    pub object: String,
+    /// One result per event, in request order.
+    pub data: Vec<EventImport>,
+}
+
+/// What importing one delivered event did.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct EventImport {
+    /// Event id, `evt_…`.
+    pub id: String,
+    /// `imported` (stored as delivered, with no delivery), `matches` (recorded already with the
+    /// same `data`), or `mismatch` (recorded already with other `data`, which is kept).
+    pub result: String,
+}
+
+/// `POST /v1/admin/restore/unfreeze` body: the operator's reason and checklist.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreUnfreezeRequest {
+    /// Why, 1 to 1024 bytes: the incident and its sign-off.
+    pub reason: String,
+    /// Every contact confirmed the key revocations, treasury cancellations, and endpoint
+    /// deletions made after the restore point, and each was applied again; must be `true`.
+    pub security_changes_reapplied: bool,
+    /// Every deposit address given out after the restore point was re-issued; must be `true`.
+    pub deposit_addresses_reissued: bool,
+    /// Every event delivered after the restore point was imported; must be `true`.
+    pub delivered_events_imported: bool,
+}

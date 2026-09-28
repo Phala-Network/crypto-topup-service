@@ -31,6 +31,7 @@ export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
 writer_pid=
 samples_file=
 routes_dir=
+admin_dir=
 seed_container="$project-seed"
 # The source runs the service variant of the rendered compose; the replacement boots the
 # restore-check variant (deploy/RESTORE.md).
@@ -53,6 +54,9 @@ cleanup() {
         "$TOPUP_LOCAL_DSTACK_IMAGE" >/dev/null 2>&1 || true
     if [ -n "$routes_dir" ]; then
         rm -rf "$routes_dir"
+    fi
+    if [ -n "$admin_dir" ]; then
+        rm -rf "$admin_dir"
     fi
 }
 trap cleanup EXIT
@@ -230,6 +234,222 @@ INSERT INTO restore_drill_marker(mode) VALUES ('base');
 SQL
 }
 
+# Business consistency after a restore (controlled mode; deploy/runbooks/restore.md): a test-mode
+# account whose key revocation, deposit address rotation, and delivered deposit.credited happen
+# after the last archived WAL, so the restore loses them. The addresses are the deposit address
+# formula's for this account, customer, route factory, and treasury (docs/design/multi-tenant.md
+# §5a); the ids are the deterministic deposit and event ids of the transfer.
+consistency_account=66666666-6666-6666-6666-666666666666
+consistency_account_id=acct_66666666666666666666666666666666
+consistency_treasury=0x0000000000000000000000000000000000007ea6
+consistency_salt_v1=0x5364d14f27c908c6861df22196c51b7b693306887fa5984420aeaf04b35527f1
+consistency_address_v1=0x52105a507f400b0f7ccdede0c294aab749981771
+consistency_salt_v2=0xb284965b0e0bc5759251ed751eee59732336798de341530456cbb3c57373f457
+consistency_address_v2=0x7581233e55c7a6f4b651f676ecc6e156d88fa14c
+consistency_address_v2_id=da_99999999999999999999999999999992
+consistency_event=c371cbc5-44c4-5e44-a795-6242ab4606d9
+delivered_event=$(jq -cn --arg address "$consistency_address_v2" '{
+    id: "evt_c371cbc544c45e44a7956242ab4606d9", object: "event",
+    account: "acct_66666666666666666666666666666666", livemode: false,
+    type: "deposit.credited", created: 1790000000, actor: "system",
+    data: {object: {
+        id: "dep_e2facb389b5c57c69f7501e57d34b8d5", object: "deposit", livemode: false,
+        client_reference_id: "restore-drill-da",
+        deposit_address: "da_99999999999999999999999999999992", status: "credited",
+        chain_id: 11155111, address: $address, amount_atomic: "1000000000000000000",
+        amount: 25, currency: "usd"}}}')
+kept_key=
+lost_key=
+
+# A well-formed test-mode secret key (crates/topup/src/api_keys.rs): 43 random base62 characters
+# and the base62 CRC-32 of everything before the checksum.
+new_api_key() {
+    dc exec -T mock-product python3 -c '
+import secrets, zlib
+alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+body = "ppay_sk_test_" + "".join(secrets.choice(alphabet) for _ in range(43))
+value, checksum = zlib.crc32(body.encode()), ""
+for _ in range(6):
+    checksum, value = alphabet[value % 62] + checksum, value // 62
+print(body + checksum)
+'
+}
+
+seed_consistency_fixture() {
+    kept_key=$(new_api_key)
+    lost_key=$(new_api_key)
+    dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
+        -v account="$consistency_account" -v treasury="$consistency_treasury" \
+        -v kept="$kept_key" -v lost="$lost_key" \
+        -v salt="$consistency_salt_v1" -v address="$consistency_address_v1" <<'SQL'
+INSERT INTO accounts (id, name) VALUES (:'account', 'restore-drill-consistency');
+INSERT INTO api_keys (id, account_id, livemode, kind, prefix, last4, key_hash, created_by)
+VALUES ('77777777-7777-7777-7777-777777777771', :'account', false, 'secret', 'ppay_sk_test_',
+        right(:'kept', 4), sha256(convert_to(:'kept', 'UTF8')), 'admin'),
+       ('77777777-7777-7777-7777-777777777772', :'account', false, 'secret', 'ppay_sk_test_',
+        right(:'lost', 4), sha256(convert_to(:'lost', 'UTF8')), 'admin');
+INSERT INTO treasuries (
+    id, account_id, livemode, chain_id, address, kind, proof_message, proof_signature,
+    verified_at, effective_at, screened_at, applied_at, created_by
+)
+VALUES ('77777777-7777-7777-7777-777777777773', :'account', false, 11155111, :'treasury', 'eoa',
+        'restore drill', '0x', now(), now(), now(), now(), 'key_77777777777777777777777777777771');
+INSERT INTO webhook_endpoints (id, account_id, livemode, url)
+VALUES ('77777777-7777-7777-7777-777777777774', :'account', false,
+        'http://mock-product:8081/webhooks');
+INSERT INTO customers (id, account_id, livemode, client_reference_id)
+VALUES ('88888888-8888-8888-8888-888888888888', :'account', false, 'restore-drill-da');
+INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version)
+VALUES ('99999999-9999-9999-9999-999999999991', :'account', false,
+        '88888888-8888-8888-8888-888888888888', 1);
+INSERT INTO addresses (
+    id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address
+)
+VALUES ('99999999-9999-9999-9999-9999999999a1', :'account', false, 11155111,
+        '99999999-9999-9999-9999-999999999991', :'salt', :'treasury', :'address');
+SQL
+}
+
+# After the last archived WAL: the merchant revokes a key, rotates the customer's deposit address,
+# and receives deposit.credited. None of it reaches object storage.
+lose_consistency_changes() {
+    dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
+        -v account="$consistency_account" -v treasury="$consistency_treasury" \
+        -v salt="$consistency_salt_v2" -v address="$consistency_address_v2" \
+        -v event="$consistency_event" -v data="$(jq -c .data <<<"$delivered_event")" <<'SQL'
+UPDATE api_keys SET revoked_at = now() WHERE id = '77777777-7777-7777-7777-777777777772';
+UPDATE deposit_addresses SET status = 'retired', retired_at = now()
+WHERE id = '99999999-9999-9999-9999-999999999991';
+INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version)
+VALUES ('99999999-9999-9999-9999-999999999992', :'account', false,
+        '88888888-8888-8888-8888-888888888888', 2);
+INSERT INTO addresses (
+    id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address
+)
+VALUES ('99999999-9999-9999-9999-9999999999a2', :'account', false, 11155111,
+        '99999999-9999-9999-9999-999999999992', :'salt', :'treasury', :'address');
+INSERT INTO events (id, account_id, livemode, type, object_type, object_id, actor, data, created)
+VALUES (:'event', :'account', false, 'deposit.credited', 'deposit',
+        'e2facb38-9b5c-57c6-9f75-01e57d34b8d5', 'system', :'data'::jsonb,
+        to_timestamp(1790000000));
+SQL
+}
+
+# One request to topup on the compose network, its body on stdin; prints the status, the
+# Retry-After header or `-`, and the body, one per line.
+topup_call() {
+    dc exec -T mock-product python3 -c '
+import sys, urllib.error, urllib.request
+method, path, *headers = sys.argv[1:]
+body = sys.stdin.buffer.read()
+request = urllib.request.Request("http://topup:8080" + path, data=body or None, method=method)
+for header in headers:
+    name, value = header.split(": ", 1)
+    request.add_header(name, value)
+try:
+    response = urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as error:
+    response = error
+print(response.status)
+print(response.headers.get("Retry-After") or "-")
+print(response.read().decode())
+' "$@"
+}
+
+# An admin-signed request with the drill's admin key (deploy/runbooks/sign-admin-request.sh), for
+# the replacement's public origin. A signature is single-use, so each is made in its own second.
+admin_call() {
+    sleep 1
+    printf '%s' "${3:-}" >"$admin_dir/body"
+    local headers
+    mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" "$1" \
+        "https://topup.localhost$2" "$admin_dir/body" "$admin_dir/admin.pem" local-admin/v1)
+    topup_call "$1" "$2" 'content-type: application/json' "${headers[@]}" <"$admin_dir/body"
+}
+
+merchant_call() {
+    topup_call "$1" "$2" "authorization: Bearer $3" 'content-type: application/json'
+}
+
+call_status() { sed -n 1p <<<"$1"; }
+call_retry_after() { sed -n 2p <<<"$1"; }
+call_body() { tail -n +3 <<<"$1"; }
+
+expect_call() {
+    test "$(call_status "$2")" = "$1" || {
+        printf 'expected %s, got: %s\n' "$1" "$2" >&2
+        return 1
+    }
+}
+
+# The replacement is frozen; the operator's reconciliation brings back the lost security change
+# and deposit address, and keeps the delivered event as delivered (deploy/runbooks/restore.md).
+check_consistency_after_restore() {
+    local answer
+    answer=$(admin_call GET /v1/admin/restore)
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e --arg id "$(jq -r .restore_id <<<"$restore_report")" \
+        '.frozen and .restore.detected_by == "restore_check" and .restore.id == $id' >/dev/null
+    answer=$(merchant_call POST /v1/deposit_addresses "$kept_key" \
+        <<<'{"client_reference_id":"restore-drill-da"}')
+    expect_call 503 "$answer"
+    test "$(call_retry_after "$answer")" = 300
+    call_body "$answer" | jq -e '.error.code == "service_restoring"' >/dev/null
+
+    # The key revoked after the backup works again until it is revoked again, by prefix.
+    expect_call 200 "$(merchant_call GET /v1/account "$lost_key" </dev/null)" || {
+        echo "the key revocation was not lost: the segment holding it was archived" >&2
+        return 1
+    }
+    answer=$(admin_call POST /v1/admin/restore/api_keys/revoke "$(jq -cn \
+        --arg account "$consistency_account_id" --arg last4 "${lost_key: -4}" \
+        '{account: $account, prefix: "ppay_sk_test_", last4: $last4,
+          reason: "restore drill: revoked after the backup"}')")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e '.status == "revoked"' >/dev/null
+    expect_call 401 "$(merchant_call GET /v1/account "$lost_key" </dev/null)"
+    expect_call 200 "$(merchant_call GET /v1/account "$kept_key" </dev/null)"
+
+    # The address given out after the backup is re-issued identically from the merchant's record.
+    test "$(psql_value "SELECT count(*) FROM deposit_addresses WHERE version = 2")" = 0
+    answer=$(admin_call POST /v1/admin/restore/deposit_addresses "$(jq -cn \
+        --arg account "$consistency_account_id" --arg address "$consistency_address_v2" \
+        --arg id "$consistency_address_v2_id" \
+        '{account: $account, livemode: false, client_reference_id: "restore-drill-da",
+          address: $address, id: $id, reason: "restore drill: issued after the backup"}')")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e --arg address "$consistency_address_v2" \
+        --arg id "$consistency_address_v2_id" \
+        '.reissued and .deposit_address.id == $id and .deposit_address.version == 2
+         and .deposit_address.address == $address and .deposit_address.status == "active"' \
+        >/dev/null
+
+    # The event delivered after the backup is imported as delivered and never sent again; another
+    # body for it is a mismatch that changes nothing.
+    test "$(psql_value "SELECT count(*) FROM events WHERE id = '$consistency_event'")" = 0
+    answer=$(admin_call POST /v1/admin/restore/events \
+        "$(jq -c '{events: [.], reason: "restore drill: delivered after the backup"}' \
+            <<<"$delivered_event")")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e '.data == [{id: "evt_c371cbc544c45e44a7956242ab4606d9",
+        result: "imported"}]' >/dev/null
+    answer=$(admin_call POST /v1/admin/restore/events \
+        "$(jq -c '.data.object.amount = 26 | {events: [.], reason: "restore drill: re-valued"}' \
+            <<<"$delivered_event")")
+    call_body "$answer" | jq -e '.data[0].result == "mismatch"' >/dev/null
+    test "$(psql_value "SELECT (data = '$(jq -c .data <<<"$delivered_event")'::jsonb)::text \
+        || ':' || (SELECT count(*) FROM webhook_deliveries WHERE event_id = '$consistency_event') \
+        FROM events WHERE id = '$consistency_event'")" = 'true:0'
+
+    # Nothing scans on the restore-check instance, so the freeze cannot be lifted there.
+    answer=$(admin_call POST /v1/admin/restore/unfreeze '{"reason":"restore drill",
+        "security_changes_reapplied":true,"deposit_addresses_reissued":true,
+        "delivered_events_imported":true}')
+    expect_call 409 "$answer"
+    call_body "$answer" | jq -e '.error.code == "restore_rescan_incomplete"' >/dev/null
+    test "$(psql_value 'SELECT count(*) FROM restores WHERE unfrozen_at IS NULL')" = 1
+}
+
 startup_base_backup_listed() {
     dc exec -T backup sh -c 'wal-g backup-list --json | jq -e "length > 0"'
 }
@@ -365,6 +585,12 @@ test_restore_failures_are_fatal() {
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 
 routes_dir=$(mktemp -d)
+# The replacement's admin key, for the operator's restore reconciliation.
+admin_dir=$(mktemp -d)
+openssl genpkey -algorithm ed25519 -out "$admin_dir/admin.pem" 2>/dev/null
+TOPUP_LOCAL_ADMIN_PUBLIC_KEY=$(openssl pkey -in "$admin_dir/admin.pem" -pubout -outform DER |
+    tail -c 32 | base64)
+export TOPUP_LOCAL_ADMIN_PUBLIC_KEY TOPUP_LOCAL_ADMIN_KID=local-admin/v1
 sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
     >"$routes_dir/phala-cloud-sepolia-pha.yaml"
@@ -401,6 +627,9 @@ wait_for mock-product dc exec -T mock-product python3 -c \
     "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"
 dc run --rm --no-deps migrate >/dev/null
 seed_reconciliation_fixture
+if [ "$mode" = controlled ]; then
+    seed_consistency_fixture
+fi
 
 # WAL-G 3.0.9 `backup-list --json` has `backup_name` and `time`; the newest is the one just pushed.
 backup_name=$(dc exec -T backup sh -c 'wal-g backup-push "$PGDATA" >&2 && wal-g backup-list --json' |
@@ -464,6 +693,9 @@ test_restore_failures_are_fatal "$last_archived_wal"
 
 storage_probe_writes
 
+if [ "$mode" = controlled ]; then
+    lose_consistency_changes
+fi
 rto_started=$(date +%s)
 dc stop backup >/dev/null
 if [ "$mode" = crash ]; then
@@ -547,6 +779,7 @@ test "$rto_elapsed" -le 3600
 if [ "$mode" = controlled ]; then
     test "$restored_marker" -eq "$expected_marker"
     test "$wal_bytes_behind" -eq 0
+    check_consistency_after_restore
 fi
 
 # Promotion wrote a new timeline; close its segment and confirm nothing reached object storage.
@@ -572,4 +805,7 @@ printf 'archive_wait_seconds=%s\n' "$archive_wait_seconds"
 printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
+if [ "$mode" = controlled ]; then
+    echo 'restore_mode=frozen; lost key revoked again; lost deposit address re-issued identically; delivered event kept as delivered'
+fi
 echo "restore drill $mode passed"

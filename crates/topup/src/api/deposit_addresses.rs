@@ -795,7 +795,7 @@ fn parse_filter(pairs: &[(String, String)]) -> ApiResult<ListFilter> {
     Ok(filter)
 }
 
-fn map_error(error: DepositAddressError) -> ApiError {
+pub(super) fn map_error(error: DepositAddressError) -> ApiError {
     match error {
         DepositAddressError::NotFound => ApiError::not_found(),
         DepositAddressError::Retired => ApiError::deposit_address_retired(),

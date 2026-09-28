@@ -851,6 +851,13 @@ POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state ch
 POST   /v1/admin/reconciliation_blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 GET    /v1/admin/reports/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
+GET    /v1/admin/restore                      restore freeze, rescan per chain, imported events vs the ledger (§14)
+POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   revoke again after a restore
+POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply_cancellations, reason}
+POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
+POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, reason}   re-issue identically
+POST   /v1/admin/restore/events {events, reason}   import delivered deposit events as delivered
+POST   /v1/admin/restore/unfreeze {reason, checklist}   once every chain is rescanned; audited
 ```
 
 **Metadata.** Quotes, deposits, and refunds carry Stripe's
@@ -1252,12 +1259,26 @@ bootstrap from backup: a new instance of the same app boots the attested restore
 the compose, whose PostgreSQL restores and promotes with archiving off, whose `topup` is
 read-only on its own port, and which runs the post-restore check (§13) and reports it on
 `/healthz`; resume upgrades that instance to the service compose (`deploy/RESTORE.md`). A
-restore loses at most the RPO window. A deposit whose `credited` transition was lost is rebuilt
-and credited again with the same `deposit.credited` event id and deposit id, so the product
-ignores the repeat; a lock-priced deposit gets the same amount, while a spot-priced one is
-re-priced, and the product keeps its first credit and reports a differing amount (§11). The
-restore drill runs weekly in CI on a local stack; the staging drill restores staging's real
-backups. Addresses need no restore because salts derive from product data. Ingress via the
+restore loses at most the RPO window, and restoring the database does not restore the business
+state within it, so a restored service starts in **restore mode** (design §13): `restore-check`
+records the restore, and `topup run` also freezes on a PostgreSQL timeline newer than the one it
+acknowledged (every promotion out of archive recovery starts one), so a restore that booted
+straight into the service compose is caught too. The freeze is a `restores` row. While frozen,
+reads and `/healthz` stay up, every merchant write answers `503 service_restoring` with
+`Retry-After`, and the pumps, finality watch, refund verification, quote expiry, treasury
+time-lock, and webhook delivery wait; the scanner rescans from the restored cursor and the
+reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
+action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations and
+endpoint deletions applied again, deposit addresses given out after the restore point re-issued
+identically from their deterministic salts (backfilled from the restored cursor), and the events
+merchants received imported as delivered, so a deposit rebuilt from the chain keeps its
+`deposit.credited` event id and delivered body and is never re-emitted with a re-valued amount; a
+differing amount is flagged. `POST /v1/admin/restore/unfreeze` lifts the freeze once every chain
+has finalized past the restore's detection with every address backfilled, recording the reason
+and checklist in `audit`. A deposit not imported is credited again with the same event id, so the
+product ignores the repeat and keeps its first credit (§11). The restore drill runs weekly in CI
+on a local stack, including the freeze and the reconciliation; the staging drill restores
+staging's real backups. Ingress via the
 dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, product URLs, and
 Sentry. The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer

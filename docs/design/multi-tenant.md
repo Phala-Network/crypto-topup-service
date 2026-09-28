@@ -793,12 +793,40 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   left without an enabled endpoint so the operator can contact them.
 - **Disaster recovery.** `ForwarderCreated` and `Flushed` carry the treasury, so swept status and
   clone arguments are rebuilt from the chain; quotes issued within the RPO window are lost, as
-  today. Security changes inside the window (key revocations, endpoint and treasury changes) could
-  be undone, so after a restore the operator sends every account's contact the restore point to
-  re-apply later changes; `deploy/RESTORE.md` gains this step.
+  today. Restoring the database is not restoring the business: within the window a restore can
+  undo key revocations (the keys work again), treasury cancellations, and endpoint changes, lose
+  deposit addresses given to customers, and lose delivered events, whose deposits are re-derived
+  from the chain and, at spot, re-valued. So a restored service starts in **restore mode**
+  (amendment of 2026-09-28, after a design review), the smallest standard mechanism, a
+  maintenance freeze with operator reconciliation:
+  - **Frozen.** The restore is known from the restore step (`restore-check`, run only after a
+    restore on boot, records it) or from PostgreSQL itself (every promotion out of archive recovery
+    starts a new timeline, so `topup run` freezes on a timeline newer than the acknowledged one).
+    The freeze is a row of the database, so it survives the upgrade from the restore-check variant
+    to the service. While frozen, reads and health stay up; every merchant write answers
+    `503 service_restoring` with `Retry-After` (key, treasury, endpoint, quote, deposit address,
+    and refund changes alike); nothing credits, settles, expires a quote, applies a treasury
+    change, verifies a refund, or delivers an event. The scanner and the reconciler run: the
+    rescan from the restored cursor re-derives every deposit, deduplicated by its deterministic id.
+  - **Reconciliation, operator-driven and audited** (`/v1/admin/restore/…`, runbook
+    `deploy/runbooks/restore.md`): the operator sends every contact the restore point and, from
+    the merchant's records, revokes again the keys revoked after it (by id, or prefix and last
+    four), compares the treasuries with the `treasury` events the merchant received and cancels
+    again what it canceled, deletes again the endpoints it deleted, re-issues the deposit
+    addresses it gave out (the salt formula of §5a gives the same address, backfilled from the
+    restored cursor), and imports the deposit events it received as delivered: the delivered
+    snapshot is the event, so a re-derived deposit never re-emits it with another body, and a
+    re-valued amount that differs is flagged for the operator to settle. The chain alone cannot
+    name the customers of lost addresses (a salt is a hash of the `client_reference_id`), so the
+    merchant's records, or its own re-registration (create returns version 1, rotation the next
+    ones), are the source.
+  - **Unfreeze** through the admin API once every chain has finalized past the moment the restore
+    was detected with every issued address backfilled, with the operator's checklist; the reason
+    and checklist are recorded in the restore and in `audit`.
 - **Admin API** (RFC 9421 admin key): account creation and live access (D8, D12),
   restrict/pause/resume, first or recovery keys and revocation (D7), platform limits, route pause,
-  reconciliation block lift, deposit nudge, support views, daily report. Each writes `audit`; each
+  reconciliation block lift, deposit nudge, support views, daily report, and the reconciliation
+  and unfreeze after a restore (Disaster recovery above). Each writes `audit`; each
   action on an account also emits its event (`account.updated`, `api_key.*`).
 
 ## 14. Data model

@@ -262,7 +262,7 @@ verbatim:
 | `amount_too_large` (400) | The amount is above the maximum for one payment; split it. |
 | `exposure_cap_exceeded` (400) | Too many unpaid quotes are open; pay or wait for one to expire, or enter a smaller amount. |
 | `paused`, `chain_frozen` (400) | Crypto top-ups are temporarily unavailable. |
-| `unavailable` (503), `rate_limit`, `customer_rate_limit` (429) | Try again in a minute (`Retry-After` says how long). |
+| `unavailable`, `service_restoring` (503), `rate_limit`, `customer_rate_limit` (429) | Try again in a minute (`Retry-After` says how long). |
 
 Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 [architecture §9](architecture.md#9-quotes).
@@ -730,7 +730,7 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 | 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
-| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
+| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)); the events you give the operator after a restore are kept as delivered and not sent again (§5.12). |
 | 6 | Apply `deposit.refunded` and `deposit.reversed` by the balance rule below, from the snapshot, per deposit, serially (a held credit was never applied, so nothing is taken back from it). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. A partial refund takes back its share of the credit. |
 
 #### The balance rule and event ordering
@@ -1362,6 +1362,7 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 | 429 | `rate_limit` | Requests per account and mode (§5.5), or reads of one quote's or deposit address's public view by its `client_secret`; retry after `Retry-After`. |
 | 429 | `customer_rate_limit` | The customer's quotes per minute (the route's limit) or deposit address rotations per hour (10); retry after `Retry-After`, or tell the customer to wait. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
+| 503 | `service_restoring` | Every write while the service is frozen after a restore from backup; reads work. Retry after `Retry-After` (§5.12). |
 | 500 | `internal_error` | Retry with the same `Idempotency-Key`: it replays this failure, so the request never runs twice (§5.6). |
 
 ### 5.9 Versioning and deprecation
@@ -1461,3 +1462,31 @@ You manage your receivers with your secret key, per mode, as Stripe's
   one: retried, never disabled. Redirects are never followed.
 - Undelivered events stay in `GET /v1/events`. After re-enabling an endpoint, page through the
   events it missed (`created[gte]`) and resend each; your receiver deduplicates by `webhook-id`.
+
+### 5.12 After a service restore
+
+If the service's database is lost it is restored from backup, which loses at most the last minute
+before the loss (the **restore point**). The service then starts frozen: reads work, and every
+write answers `503 service_restoring` with `Retry-After` until the operator has reconciled it with
+you. Nothing is credited or delivered meanwhile; payments keep arriving at your addresses and are
+credited after the freeze. The operator sends your contact the restore point and asks, from your
+own records since then, for:
+
+- the API keys you revoked or rolled (the `key_…` id, or the prefix and last four characters): the
+  restore made them valid again, and the operator revokes them again;
+- the latest `treasury` object of each treasury you received an event about: a change you
+  canceled is canceled again before any treasury change can apply;
+- the webhook endpoints you deleted: they are deleted again before deliveries resume;
+- the deposit addresses you received (`client_reference_id`, `address`, and `id` or `version`):
+  the address is derived from your account, mode, customer, and version, so the operator issues
+  the same address again, and payments made to it since are credited;
+- every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event you received, as
+  delivered: each is kept as the event, so when the deposit is rebuilt from the chain it is not
+  sent again, not even with a re-valued `amount`.
+
+Keep these records (the webhook bodies you store for obligation 2 of §2.3, and your keys'
+prefixes and last four characters). Keys and endpoints you created after the restore point are
+gone: create them again after the freeze lifts. You can also register a lost deposit address
+yourself after the freeze: `POST /v1/deposit_addresses` returns version 1 identically, and each
+`POST /v1/deposit_addresses/{id}/rotate` the next version, but payments made before you register
+it are then not found; give the operator your records instead.
