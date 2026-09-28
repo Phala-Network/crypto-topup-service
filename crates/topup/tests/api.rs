@@ -14,14 +14,14 @@ use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row;
 #[cfg(feature = "dev-signer")]
-use topup::api::models::{AttestationResponse, OperatorIdentity};
+use topup::api::models::AttestationResponse;
 use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
 #[cfg(feature = "dev-signer")]
 use topup::api::{AttestationError, AttestationFuture};
 use topup::db::{Account, NewDeposit};
 use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
-use topup_adapters::attestation::{AttestedOperator, OperatorKey, report_data};
+use topup_adapters::attestation::report_data;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_core::deposit::DepositState;
@@ -446,7 +446,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         ensure!(response_json(paused_quote).await?["error"]["code"] == "paused");
 
         let admin_path = "/v1/admin/routes/phala-cloud-ethereum-pha-usd/pause";
-        let admin_body = serde_json::to_vec(&json!({"scopes": ["flush"]}))?;
+        let admin_body = serde_json::to_vec(&json!({"scopes": ["refunds"]}))?;
         let product_signed = app
             .clone()
             .oneshot(signed_request(
@@ -460,6 +460,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
             .await?;
         ensure!(product_signed.status() == StatusCode::UNAUTHORIZED);
         let admin_signed = app
+            .clone()
             .oneshot(signed_request(
                 Method::POST,
                 admin_path,
@@ -470,6 +471,19 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
             ))
             .await?;
         ensure!(admin_signed.status() == StatusCode::OK);
+        // The service sends no transactions, so there is no `flush` scope to pause.
+        let removed_scope = app
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                admin_path,
+                serde_json::to_vec(&json!({"scopes": ["flush"]}))?,
+                ADMIN_KID,
+                &admin_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(removed_scope.status() == StatusCode::BAD_REQUEST);
         let admin_audit_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM audit WHERE subject = $1")
                 .bind("route:phala-cloud-ethereum-pha-usd")
@@ -1396,28 +1410,13 @@ async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {
     ensure!(response["keyid"] == SETTLEMENT_KEY_DOMAIN);
     ensure!(response["quote"] == "");
 
-    // The fixture route runs on chain 1 with operator key version 1.
-    let dev = DevSigner::derive(&SecretKey32::new(seed), std::num::NonZeroU32::MIN);
-    let settlement = dev.settlement_public_key().await?;
-    let operator = AttestedOperator {
-        chain_id: 1,
-        key_version: std::num::NonZeroU32::MIN,
-        address: dev.operator_address().await?,
-    };
+    let settlement = DevSigner::derive(&SecretKey32::new(seed))
+        .settlement_public_key()
+        .await?;
     ensure!(response["settlement_pubkey"] == hex::encode(settlement.0));
-    ensure!(
-        response["operators"]
-            == json!([{
-                "chain_id": 1,
-                "operator_key_version": 1,
-                "keyid": "operator/v1",
-                "address": format!("{:#x}", operator.address),
-            }])
-    );
-    ensure!(
-        response["report_data"]
-            == hex::encode(report_data(&[0, 1, 2, 3], &settlement, &[operator]))
-    );
+    // The service sends no transactions, so no operator is attested.
+    ensure!(response.get("operators").is_none());
+    ensure!(response["report_data"] == hex::encode(report_data(&[0, 1, 2, 3], &settlement)));
     Ok(())
 }
 
@@ -1482,33 +1481,16 @@ struct DevHttpAttestor([u8; 32]);
 
 #[cfg(feature = "dev-signer")]
 impl Attestor for DevHttpAttestor {
-    fn attest<'a>(
-        &'a self,
-        nonce: &'a [u8],
-        operator_keys: &'a [OperatorKey],
-    ) -> AttestationFuture<'a> {
+    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a> {
         Box::pin(async move {
-            let seed = SecretKey32::new(self.0);
-            let public_key = DevSigner::derive(&seed, std::num::NonZeroU32::MIN)
+            let public_key = DevSigner::derive(&SecretKey32::new(self.0))
                 .settlement_public_key()
                 .await
                 .map_err(|_| AttestationError::Unavailable)?;
-            let mut operators = Vec::with_capacity(operator_keys.len());
-            for key in operator_keys {
-                operators.push(AttestedOperator {
-                    chain_id: key.chain_id,
-                    key_version: key.key_version,
-                    address: DevSigner::derive(&seed, key.key_version)
-                        .operator_address()
-                        .await
-                        .map_err(|_| AttestationError::Unavailable)?,
-                });
-            }
             Ok(AttestationResponse {
                 keyid: SETTLEMENT_KEY_DOMAIN.to_owned(),
                 settlement_pubkey: hex::encode(public_key.0),
-                operators: operators.iter().map(OperatorIdentity::from).collect(),
-                report_data: hex::encode(report_data(nonce, &public_key, &operators)),
+                report_data: hex::encode(report_data(nonce, &public_key)),
                 quote: String::new(),
             })
         })

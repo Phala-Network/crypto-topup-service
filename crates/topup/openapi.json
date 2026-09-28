@@ -1600,7 +1600,7 @@
       },
       "AttestationResponse": {
         "type": "object",
-        "description": "TDX evidence binding a nonce to the settlement public key and the flusher operators.",
+        "description": "TDX evidence binding a nonce to the settlement public key.",
         "required": [
           "keyid",
           "settlement_pubkey",
@@ -1612,20 +1612,13 @@
             "type": "string",
             "description": "Settlement key identifier."
           },
-          "operators": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OperatorIdentity"
-            },
-            "description": "Flusher operator of each configured chain, in ascending `chain_id` order. This service\nalways sends it; it is optional in the schema so clients also parse responses from servers\nthat predate it, whose report data binds no operators (an absent list reads as empty)."
-          },
           "quote": {
             "type": "string",
             "description": "Versioned dstack attestation bytes as lowercase hexadecimal."
           },
           "report_data": {
             "type": "string",
-            "description": "`sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)` as lowercase hexadecimal,\nwith one 32-byte record per operator in list order: `chain_id` (u64 big-endian),\n`operator_key_version` (u32 big-endian), and the 20 address bytes."
+            "description": "`sha256(nonce ‖ settlement_pubkey)` as lowercase hexadecimal."
           },
           "settlement_pubkey": {
             "type": "string",
@@ -2496,32 +2489,6 @@
           }
         }
       },
-      "FlushPlanningReport": {
-        "type": "object",
-        "description": "Outcome of one scheduled flush planning run.",
-        "required": [
-          "at",
-          "outcome"
-        ],
-        "properties": {
-          "at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "When the run finished."
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Error of a failed run, without provider URLs."
-          },
-          "outcome": {
-            "type": "string",
-            "description": "`planned`; `idle` when no address met the flush policy, a flush was already in flight, or\nreconciliation froze the chain; `operator_not_authorized` when the operator was not known\nto hold `OPERATOR_ROLE`; `failed`; or `send_failed` when planning succeeded but sending or\nmaintaining a flush afterwards failed."
-          }
-        }
-      },
       "NudgeResponse": {
         "type": "object",
         "description": "Administrative deposit nudge result.",
@@ -2538,38 +2505,6 @@
             "type": "string",
             "format": "date-time",
             "description": "Newly due processing time."
-          }
-        }
-      },
-      "OperatorIdentity": {
-        "type": "object",
-        "description": "The key a chain's flusher signs `flush` transactions with; it needs `OPERATOR_ROLE` and gas.",
-        "required": [
-          "chain_id",
-          "operator_key_version",
-          "keyid",
-          "address"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Operator address as lowercase `0x`-prefixed hexadecimal."
-          },
-          "chain_id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "EVM chain identifier.",
-            "minimum": 0
-          },
-          "keyid": {
-            "type": "string",
-            "description": "Operator key identifier, `operator/v{operator_key_version}`."
-          },
-          "operator_key_version": {
-            "type": "integer",
-            "format": "int32",
-            "description": "The chain's configured operator key derivation version.",
-            "minimum": 0
           }
         }
       },
@@ -2848,7 +2783,7 @@
           },
           "block_key": {
             "type": "string",
-            "description": "Block identifier, `chain:{chain_id}` or `address:{address_id}`."
+            "description": "Block identifier, `chain:{chain_id}`."
           },
           "chain_id": {
             "type": "integer",
@@ -2871,7 +2806,7 @@
           },
           "scope": {
             "type": "string",
-            "description": "`chain` (the chain is frozen) or `address` (the address is left out of flush planning)."
+            "description": "`chain`: the chain is frozen. No check writes the `address` scope any more; it excluded an\naddress from the removed operator flusher."
           }
         }
       },
@@ -3025,17 +2960,6 @@
               "type": "string"
             }
           },
-          "flush_planning": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/FlushPlanningReport",
-                "description": "Latest scheduled flush planning run of this route in the serving process; absent for\nunrouted assets and until the first run after a restart."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "open_rate_lock_exposure_atomic": {
             "type": "string",
             "description": "Sum of unconsumed rate-lock token amounts."
@@ -3073,7 +2997,7 @@
           },
           "unflushed_balance_atomic": {
             "type": "string",
-            "description": "Sum of deposits not linked to a confirmed flush."
+            "description": "Deposits not reversed minus finalized `Flushed` amounts: what the route's forwarders\nstill hold for their merchants to sweep."
           }
         }
       },

@@ -1,19 +1,7 @@
 //! Signing boundary types shared by service adapters.
 
-use std::num::NonZeroU32;
-
-use alloy_primitives::{Address, Bytes, U256};
 use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox};
-
-/// Returns the domain used to derive the transaction-signing key at `version`.
-///
-/// The version comes from the attested chain configuration, so rotating the operator key is a new
-/// configuration version rather than a runtime change.
-#[must_use]
-pub fn operator_key_domain(version: NonZeroU32) -> String {
-    format!("operator/v{version}")
-}
 
 /// Domain used to derive the settlement-signing key.
 pub const SETTLEMENT_KEY_DOMAIN: &str = "settlement/v1";
@@ -69,34 +57,6 @@ pub struct Ed25519PublicKey(pub [u8; 32]);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ed25519Signature(pub [u8; 64]);
 
-/// Minimal EIP-1559 transaction request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TxRequest {
-    /// EIP-155 chain identifier.
-    pub chain_id: u64,
-    /// Sender account nonce.
-    pub nonce: u64,
-    /// Recipient address.
-    pub to: Address,
-    /// Value in wei.
-    pub value: U256,
-    /// Contract call data.
-    pub data: Bytes,
-    /// Maximum gas units.
-    pub gas_limit: u64,
-    /// Maximum total fee per gas unit.
-    pub max_fee_per_gas: u128,
-    /// Maximum priority fee per gas unit.
-    pub max_priority_fee_per_gas: u128,
-}
-
-/// An EIP-2718 encoded signed transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SignedTx {
-    /// Raw signed transaction bytes.
-    pub raw_signed_bytes: Bytes,
-}
-
 /// A signer boundary failure safe to expose to service callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SignerError {
@@ -111,20 +71,14 @@ pub enum SignerError {
     SigningFailed,
 }
 
-/// Signs operator transactions and product settlement payloads.
+/// Signs settlement payloads.
 ///
 /// Implementors are safe to move and share across service tasks. The returned futures are not
 /// required to be `Send` because the pinned dstack Unix transport does not provide `Send` futures.
 #[allow(async_fn_in_trait)]
 pub trait Signer: Send + Sync {
-    /// Signs an EIP-1559 operator transaction.
-    async fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError>;
-
     /// Signs settlement payload bytes with ed25519.
     async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError>;
-
-    /// Returns the current operator address.
-    async fn operator_address(&self) -> Result<Address, SignerError>;
 
     /// Returns the current settlement public key.
     async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError>;
@@ -136,20 +90,9 @@ mod tests {
 
     use static_assertions::assert_not_impl_any;
 
-    use std::num::NonZeroU32;
-
-    use super::{SecretKey32, operator_key_domain};
+    use super::SecretKey32;
 
     assert_not_impl_any!(SecretKey32: Debug, Display, serde::Serialize);
-
-    #[test]
-    fn operator_key_domain_carries_the_configured_version() {
-        assert_eq!(operator_key_domain(NonZeroU32::MIN), "operator/v1");
-        assert_eq!(
-            operator_key_domain(NonZeroU32::new(2).expect("two is non-zero")),
-            "operator/v2"
-        );
-    }
 
     #[test]
     fn secret_key_can_only_be_read_explicitly() {

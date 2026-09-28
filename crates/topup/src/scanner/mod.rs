@@ -1,5 +1,7 @@
 //! ERC-20 deposit scanners: the fast scan at the route's confirmation, driven by the head loop
-//! every 2 s, and the finalized scan, which records any transfer the fast scan missed.
+//! every 2 s, and the finalized scan, which records any transfer the fast scan missed and indexes
+//! the forwarder factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events for the same
+//! addresses, whoever called the factory (design §13).
 
 mod confirmed;
 mod head;
@@ -117,6 +119,8 @@ pub struct ScanStats {
     pub finalized: u64,
     /// Addresses whose one-time historical backfill completed.
     pub backfilled_addresses: u64,
+    /// Factory events recorded for known addresses.
+    pub factory: db::FactoryCommit,
 }
 
 impl ScanStats {
@@ -126,6 +130,13 @@ impl ScanStats {
             .checked_add(inserted)
             .ok_or_else(|| ScannerError::Configuration("scan count overflow".to_owned()))?;
         Ok(())
+    }
+
+    fn record_factory(&mut self, commit: db::FactoryCommit) {
+        self.factory.created = self.factory.created.saturating_add(commit.created);
+        self.factory.flushed = self.factory.flushed.saturating_add(commit.flushed);
+        self.factory.failed = self.factory.failed.saturating_add(commit.failed);
+        self.factory.swept = self.factory.swept.saturating_add(commit.swept);
     }
 
     fn record_backfilled(&mut self, count: usize) -> Result<(), ScannerError> {
@@ -169,12 +180,16 @@ pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
 }
 
 /// Scans one chain through its current finalized head and commits durable progress.
+///
+/// Each window records the transfers to every address and the factory's events about them before
+/// the cursor passes it, so everything at or below the cursor is indexed at finality.
 pub async fn scan_once<R: ChainReader>(
     pool: &PgPool,
     reader: &R,
     routes: &ChainRoutes,
 ) -> Result<ScanStats, ScannerError> {
     let chain_id = routes.chain.chain_id;
+    let factory = routes.chain.contracts.forwarder_factory;
     let cursor = db::get_cursor(pool, chain_id).await?.unwrap_or(0);
     if crate::reconciler::chain_is_blocked(pool, chain_id).await? {
         tracing::warn!(
@@ -212,13 +227,17 @@ pub async fn scan_once<R: ChainReader>(
                     .transfer_logs_to(&[address.address], from_block, to_block)
                     .await?;
                 let deposits = resolve_logs(logs, &address_index, routes)?;
-                db::commit_scan(pool, chain_id, &deposits, &[], None, None)
-                    .await
-                    .map_err(ScannerError::from)
+                let factory_logs = reader
+                    .factory_logs(factory, &[address.address], from_block, to_block)
+                    .await?;
+                let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
+                let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
+                Ok::<_, ScannerError>((committed, indexed))
             }
             .instrument(span)
             .await?;
-            record_committed(chain_id, &mut stats, committed)?;
+            record_committed(chain_id, &mut stats, committed.0)?;
+            stats.record_factory(committed.1);
         }
         db::commit_scan(pool, chain_id, &[], &[address.id], None, None).await?;
         stats.record_backfilled(1)?;
@@ -249,13 +268,17 @@ pub async fn scan_once<R: ChainReader>(
             let committed = async {
                 let logs = reader.transfer_logs_to(batch, from_block, to_block).await?;
                 let deposits = resolve_logs(logs, &address_index, routes)?;
-                db::commit_scan(pool, chain_id, &deposits, &[], None, None)
-                    .await
-                    .map_err(ScannerError::from)
+                let factory_logs = reader
+                    .factory_logs(factory, batch, from_block, to_block)
+                    .await?;
+                let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
+                let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
+                Ok::<_, ScannerError>((committed, indexed))
             }
             .instrument(span)
             .await?;
-            record_committed(chain_id, &mut stats, committed)?;
+            record_committed(chain_id, &mut stats, committed.0)?;
+            stats.record_factory(committed.1);
         }
         let backfilled = pending_backfill_marks
             .iter()
@@ -427,6 +450,9 @@ where
                     cursor = stats.cursor,
                     inserted = stats.inserted,
                     backfilled_addresses = stats.backfilled_addresses,
+                    flushed = stats.factory.flushed,
+                    flush_failed = stats.factory.failed,
+                    swept = stats.factory.swept,
                     "finalized chain scan committed"
                 );
                 poll_interval
@@ -588,6 +614,7 @@ mod tests {
                 cursor: 2,
                 finalized: 2,
                 backfilled_addresses: 0,
+                factory: db::FactoryCommit::default(),
             }),
             Err(ScannerError::Chain(ChainError::ProviderUnhealthy)),
         ]));

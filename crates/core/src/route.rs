@@ -1,9 +1,8 @@
 //! Serde schemas and pure validation for attested chain and route files.
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
 
-use alloy_primitives::{Address, U256, address, keccak256};
+use alloy_primitives::{Address, address, keccak256};
 use serde::{Deserialize, Serialize};
 
 use crate::money::{AtomicAmount, Bps};
@@ -70,35 +69,8 @@ impl RouteFile {
         self.chain.confirmations.validate(self.chain.chain_id)?;
         validate_livemode(self.livemode, self.chain.chain_id)?;
         validate_slug("asset.symbol", &self.asset.symbol)?;
-        self.chain.operator_key_version()?;
         validate_decimals("asset.decimals", self.asset.decimals)?;
         validate_decimals("unit_decimals", self.destination.unit_decimals)?;
-        validate_bps(
-            "chain.flush.max_gas_ratio_bps",
-            self.chain.flush.max_gas_ratio_bps,
-        )?;
-        validate_positive(
-            "chain.flush.max_fee_per_gas_wei",
-            self.chain.flush.max_fee_per_gas_wei,
-        )?;
-        if self.chain.flush.min_operator_balance_wei.value().is_zero() {
-            return Err(RouteError::validation(
-                "chain.flush.min_operator_balance_wei",
-                "must be greater than zero",
-            ));
-        }
-        if self.chain.flush.replacement_bps <= 10_000 {
-            return Err(RouteError::validation(
-                "chain.flush.replacement_bps",
-                "must be greater than 10000",
-            ));
-        }
-        if self.chain.flush.native_price_asset.trim().is_empty() {
-            return Err(RouteError::validation(
-                "chain.flush.native_price_asset",
-                "must not be empty",
-            ));
-        }
         validate_bps("pricing.max_deviation_bps", self.pricing.max_deviation_bps)?;
         if self.pricing.mode == PricingMode::Spot {
             if self.pricing.check.is_none() {
@@ -137,10 +109,6 @@ impl RouteFile {
             "alerts.stuck_after_s.confirmed",
             self.alerts.stuck_after_s.confirmed,
         )?;
-        validate_positive(
-            "alerts.stuck_after_s.credited",
-            self.alerts.stuck_after_s.credited,
-        )?;
         validate_rpc_providers(&self.chain.rpc_providers)?;
         if self.screening.min_deposit_atomic > self.screening.max_deposit_atomic {
             return Err(RouteError::validation(
@@ -161,21 +129,8 @@ pub struct ChainConfig {
     pub confirmations: Confirmations,
     /// Independent RPC provider identifiers.
     pub rpc_providers: Vec<String>,
-    /// Derivation version of the operator key, selecting the `operator/v{n}` signer domain.
-    pub operator_key_version: u32,
     /// Forwarder contract addresses.
     pub contracts: ChainContracts,
-    /// Flush scheduling and gas policy.
-    pub flush: FlushConfig,
-}
-
-impl ChainConfig {
-    /// Returns the operator key derivation version, which must be at least one.
-    pub fn operator_key_version(&self) -> Result<NonZeroU32, RouteError> {
-        NonZeroU32::new(self.operator_key_version).ok_or_else(|| {
-            RouteError::validation("chain.operator_key_version", "must be at least 1")
-        })
-    }
 }
 
 /// The family of a chain, which decides the confirmation values it accepts (design D1).
@@ -366,23 +321,6 @@ pub struct ChainContracts {
     pub treasury: Address,
 }
 
-/// Automatic flush policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlushConfig {
-    /// Cron schedule for flush planning.
-    pub schedule: String,
-    /// Maximum gas-to-value ratio in basis points.
-    pub max_gas_ratio_bps: Bps,
-    /// Provider asset identifier for the chain's native gas token.
-    pub native_price_asset: String,
-    /// Hard maximum EIP-1559 fee per gas in wei.
-    pub max_fee_per_gas_wei: u64,
-    /// Required fee replacement multiplier in basis points.
-    pub replacement_bps: u16,
-    /// Operator native balance in wei below which the flusher raises a gas-reserve alert.
-    pub min_operator_balance_wei: AtomicAmount,
-}
-
 /// Deposited asset configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetConfig {
@@ -392,8 +330,6 @@ pub struct AssetConfig {
     pub contract: Address,
     /// ERC-20 decimal count.
     pub decimals: u8,
-    /// Minimum on-chain balance considered for flushing.
-    pub min_flush_atomic: AtomicAmount,
     /// Minimum deposit amount eligible for a treasury refund.
     pub min_refund_atomic: AtomicAmount,
 }
@@ -519,8 +455,6 @@ pub struct StuckAfterConfig {
     pub detected: u64,
     /// Confirmed-state threshold.
     pub confirmed: u64,
-    /// Credited-state threshold.
-    pub credited: u64,
 }
 
 /// A route file as written: the values that differ per route or environment, plus optional
@@ -576,42 +510,6 @@ pub struct ChainSpec {
     /// RPC provider ids; default [`DEFAULT_RPC_PROVIDERS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_providers: Option<Vec<String>>,
-    /// Operator key derivation version; default 1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator_key_version: Option<u32>,
-    /// Flush policy overrides.
-    #[serde(default, skip_serializing_if = "FlushSpec::is_empty")]
-    pub flush: FlushSpec,
-}
-
-/// Flush policy overrides; each field defaults to the `DEFAULT_FLUSH_*` constant.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FlushSpec {
-    /// Cron schedule for flush planning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schedule: Option<String>,
-    /// Maximum gas-to-value ratio in basis points.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gas_ratio_bps: Option<Bps>,
-    /// Price-source asset id of the native gas token; default [`default_native_price_asset`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_price_asset: Option<String>,
-    /// Hard maximum EIP-1559 fee per gas in wei.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_fee_per_gas_wei: Option<u64>,
-    /// Required fee replacement multiplier in basis points.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replacement_bps: Option<u16>,
-    /// Operator gas reserve alert threshold in wei.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_operator_balance_wei: Option<AtomicAmount>,
-}
-
-impl FlushSpec {
-    fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// Deposited asset of a route file.
@@ -677,9 +575,6 @@ pub struct LimitsSpec {
     /// Minimum creditable deposit in token base units; default 0 (`min_credit_minor` governs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_deposit_atomic: Option<AtomicAmount>,
-    /// Minimum address balance to flush; default 0 (the gas-ratio rule governs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_flush_atomic: Option<AtomicAmount>,
 }
 
 /// Quote policy overrides; each field defaults to the `DEFAULT_QUOTE_*` constant.
@@ -735,9 +630,6 @@ pub struct StuckAfterSpec {
     /// Confirmed-state threshold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed: Option<u64>,
-    /// Credited-state threshold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credited: Option<u64>,
 }
 
 impl StuckAfterSpec {
@@ -758,18 +650,6 @@ pub const TYPICAL_SAFE_SECONDS: u64 = 300;
 pub const TYPICAL_FINALIZED_SECONDS: u64 = 900;
 /// Provider ids whose URLs are `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL`.
 pub const DEFAULT_RPC_PROVIDERS: [&str; 2] = ["provider-a", "provider-b"];
-/// The first operator key; bumped only after an operator rotation.
-pub const DEFAULT_OPERATOR_KEY_VERSION: u32 = 1;
-/// Flush planning every six hours.
-pub const DEFAULT_FLUSH_SCHEDULE: &str = "0 */6 * * *";
-/// An address's share of batch gas is at most 2% of its value.
-pub const DEFAULT_FLUSH_MAX_GAS_RATIO_BPS: u16 = 200;
-/// 500 gwei: a runaway-fee guard far above normal Ethereum and Base fees.
-pub const DEFAULT_FLUSH_MAX_FEE_PER_GAS_WEI: u64 = 500_000_000_000;
-/// A 25% fee bump, above every client's replacement rule (geth needs 10%).
-pub const DEFAULT_FLUSH_REPLACEMENT_BPS: u16 = 12_500;
-/// 0.05 ETH of operator gas reserve.
-pub const DEFAULT_FLUSH_MIN_OPERATOR_BALANCE_WEI: u64 = 50_000_000_000_000_000;
 /// Two Coin Metrics one-minute reference-rate intervals.
 pub const DEFAULT_PRICE_MAX_AGE_S: u64 = 120;
 /// 1% between the primary rate and the market check.
@@ -791,8 +671,6 @@ pub const DEFAULT_QUOTE_MAX_CREATIONS_PER_MINUTE: u64 = 10;
 pub const DEFAULT_STUCK_AFTER_DETECTED_S: u64 = 1_800;
 /// Confirmed deposits normally credit within minutes.
 pub const DEFAULT_STUCK_AFTER_CONFIRMED_S: u64 = 1_800;
-/// Credited deposits wait for a flush (six-hourly, gas-ratio gated): two days.
-pub const DEFAULT_STUCK_AFTER_CREDITED_S: u64 = 172_800;
 
 const CHAINALYSIS_ORACLE: Address = address!("0x40C57923924B5c5c5455c48D93317139ADDaC8fb");
 const CHAINALYSIS_ORACLE_BASE: Address = address!("0x3A91A31cB3dC49b4db9Ce721F50a9D076c8D739B");
@@ -804,16 +682,6 @@ pub const fn default_sanctions_oracle(chain_id: u64) -> Option<Address> {
     match chain_id {
         1 | 10 | 56 | 137 | 250 | 42_161 | 42_220 | 43_114 => Some(CHAINALYSIS_ORACLE),
         8_453 => Some(CHAINALYSIS_ORACLE_BASE),
-        _ => None,
-    }
-}
-
-/// The price-source asset id of `chain_id`'s native gas token, if known.
-#[must_use]
-pub const fn default_native_price_asset(chain_id: u64) -> Option<&'static str> {
-    match chain_id {
-        // Ethereum, Sepolia, and Base pay gas in ETH.
-        1 | 11_155_111 | 8_453 => Some("eth"),
         _ => None,
     }
 }
@@ -835,16 +703,6 @@ impl TryFrom<RouteSpec> for RouteFile {
 
     fn try_from(spec: RouteSpec) -> Result<Self, Self::Error> {
         let chain_id = spec.chain.chain_id;
-        let flush = spec.chain.flush;
-        let native_price_asset = flush
-            .native_price_asset
-            .or_else(|| default_native_price_asset(chain_id).map(str::to_owned))
-            .ok_or_else(|| {
-                RouteError::validation(
-                    "chain.flush.native_price_asset",
-                    format!("is required for chain {chain_id}, which has no default"),
-                )
-            })?;
         let sanctions_oracle = spec
             .chain
             .sanctions_oracle
@@ -904,10 +762,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                         .map(|&id| id.to_owned())
                         .collect()
                 }),
-                operator_key_version: spec
-                    .chain
-                    .operator_key_version
-                    .unwrap_or(DEFAULT_OPERATOR_KEY_VERSION),
                 contracts: ChainContracts {
                     forwarder_factory: spec.chain.forwarder_factory,
                     implementation: spec
@@ -916,28 +770,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                         .unwrap_or_else(|| factory_implementation(spec.chain.forwarder_factory)),
                     treasury: spec.chain.treasury,
                 },
-                flush: FlushConfig {
-                    schedule: flush
-                        .schedule
-                        .unwrap_or_else(|| DEFAULT_FLUSH_SCHEDULE.to_owned()),
-                    max_gas_ratio_bps: match flush.max_gas_ratio_bps {
-                        Some(value) => value,
-                        None => bps(
-                            "chain.flush.max_gas_ratio_bps",
-                            DEFAULT_FLUSH_MAX_GAS_RATIO_BPS,
-                        )?,
-                    },
-                    native_price_asset,
-                    max_fee_per_gas_wei: flush
-                        .max_fee_per_gas_wei
-                        .unwrap_or(DEFAULT_FLUSH_MAX_FEE_PER_GAS_WEI),
-                    replacement_bps: flush
-                        .replacement_bps
-                        .unwrap_or(DEFAULT_FLUSH_REPLACEMENT_BPS),
-                    min_operator_balance_wei: flush.min_operator_balance_wei.unwrap_or_else(|| {
-                        AtomicAmount::new(U256::from(DEFAULT_FLUSH_MIN_OPERATOR_BALANCE_WEI))
-                    }),
-                },
             },
             route: spec.route,
             version: spec.version,
@@ -945,7 +777,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                 symbol: spec.asset.symbol,
                 contract: spec.asset.contract,
                 decimals: spec.asset.decimals,
-                min_flush_atomic: spec.limits.min_flush_atomic.unwrap_or_default(),
                 min_refund_atomic: spec.limits.min_refund_atomic,
             },
             livemode: spec.livemode,
@@ -993,7 +824,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                 stuck_after_s: StuckAfterConfig {
                     detected: stuck.detected.unwrap_or(DEFAULT_STUCK_AFTER_DETECTED_S),
                     confirmed: stuck.confirmed.unwrap_or(DEFAULT_STUCK_AFTER_CONFIRMED_S),
-                    credited: stuck.credited.unwrap_or(DEFAULT_STUCK_AFTER_CREDITED_S),
                 },
             },
         })
@@ -1016,15 +846,6 @@ impl From<RouteFile> for RouteSpec {
                 implementation: Some(route.chain.contracts.implementation),
                 sanctions_oracle: Some(route.screening.sanctions_oracle),
                 rpc_providers: Some(route.chain.rpc_providers),
-                operator_key_version: Some(route.chain.operator_key_version),
-                flush: FlushSpec {
-                    schedule: Some(route.chain.flush.schedule),
-                    max_gas_ratio_bps: Some(route.chain.flush.max_gas_ratio_bps),
-                    native_price_asset: Some(route.chain.flush.native_price_asset),
-                    max_fee_per_gas_wei: Some(route.chain.flush.max_fee_per_gas_wei),
-                    replacement_bps: Some(route.chain.flush.replacement_bps),
-                    min_operator_balance_wei: Some(route.chain.flush.min_operator_balance_wei),
-                },
             },
             asset: AssetSpec {
                 symbol: route.asset.symbol,
@@ -1049,7 +870,6 @@ impl From<RouteFile> for RouteSpec {
                 min_refund_atomic: route.asset.min_refund_atomic,
                 max_open_minor: route.rate_lock.max_open_minor,
                 min_deposit_atomic: Some(route.screening.min_deposit_atomic),
-                min_flush_atomic: Some(route.asset.min_flush_atomic),
             },
             quote: QuoteSpec {
                 window_s: Some(route.rate_lock.window_s),
@@ -1062,7 +882,6 @@ impl From<RouteFile> for RouteSpec {
                 stuck_after_s: StuckAfterSpec {
                     detected: Some(route.alerts.stuck_after_s.detected),
                     confirmed: Some(route.alerts.stuck_after_s.confirmed),
-                    credited: Some(route.alerts.stuck_after_s.credited),
                 },
             },
         }
@@ -1222,8 +1041,6 @@ mod tests {
             Some(CHAINALYSIS_ORACLE_BASE)
         );
         assert_eq!(default_sanctions_oracle(11_155_111), None);
-        assert_eq!(default_native_price_asset(11_155_111), Some("eth"));
-        assert_eq!(default_native_price_asset(137), None);
     }
 
     #[test]

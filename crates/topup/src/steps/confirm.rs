@@ -772,6 +772,16 @@ mod tests {
             panic!("confirm finality must locate the log by receipt identity")
         }
 
+        async fn factory_logs(
+            &self,
+            _factory: Address,
+            _forwarders: &[Address],
+            _from_block: u64,
+            _to_block: u64,
+        ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+            panic!("the confirm step never reads factory events")
+        }
+
         fn receipt_transfer(
             &self,
             tx_hash: B256,
@@ -1429,7 +1439,6 @@ mod tests {
             price_source: None,
             credit_minor: None,
             quote: None,
-            flush_id: None,
             created_at: now,
             updated_at: now,
         }

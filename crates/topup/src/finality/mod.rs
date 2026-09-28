@@ -524,7 +524,8 @@ async fn unfinal_deposits(
 }
 
 /// Records where the transfer is now and, when `is_final`, that the deposit is final; a final
-/// deposit is then linked to a confirmed flush after it. Returns whether the row changed.
+/// credited deposit is then swept by a finalized `Flushed` event after it. Returns whether the row
+/// changed.
 async fn record_evidence(
     pool: &PgPool,
     deposit: &WatchedDeposit,
@@ -572,7 +573,7 @@ async fn record_evidence(
     )
     .await?;
     if is_final {
-        db::link_deposit_to_flush(&mut transaction, deposit.id).await?;
+        db::mark_swept(&mut transaction, Some(deposit.id), &[]).await?;
     }
     transaction.commit().await?;
     Ok(true)

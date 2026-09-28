@@ -1249,6 +1249,23 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         .bind(credited)
         .execute(&database.app_pool)
         .await?;
+        // A merchant swept 120 of the route's token from the credited deposit's forwarder.
+        sqlx::query(
+            r#"
+            INSERT INTO flushed
+                (chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
+                 block_number, block_hash)
+            SELECT deposit.chain_id, '0x' || repeat('ab', 32), 0, deposit.address_id,
+                   deposit.asset_contract, address.treasury, 120, deposit.block_number + 1,
+                   '0x' || repeat('cd', 32)
+            FROM deposits AS deposit
+            JOIN addresses AS address ON address.id = deposit.address_id
+            WHERE deposit.id = $1
+            "#,
+        )
+        .bind(credited)
+        .execute(&database.app_pool)
+        .await?;
         seed_open_lock(&database.app_pool, product.id).await?;
         seed_expired_lock(&database.app_pool, product.id).await?;
         seed_refund_row(&database.app_pool, rejected, 20).await?;
@@ -1292,12 +1309,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         .await?;
         ensure!(audit_count == 2);
 
-        // Production has no logs: the report says why the route's last planning run stopped.
-        topup::observability::record_flush_planning(
-            "phala-cloud-ethereum-pha-usd",
-            topup::observability::FlushPlanningOutcome::Failed,
-            Some("chain operation failed: rate limit exceeded".to_owned()),
-        );
         let response = app
             .oneshot(signed_request(
                 Method::GET,
@@ -1322,7 +1333,8 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .as_str()
             .context("treasury note")?
             .contains("not configured"));
-        ensure!(route["unflushed_balance_atomic"] == "300");
+        // Forwarders hold deposits that are not reversed minus what finalized sweeps moved.
+        ensure!(route["unflushed_balance_atomic"] == "180");
         ensure!(route["open_rate_lock_exposure_atomic"] == "50");
         ensure!(route["rejected_holds_atomic"] == "100");
         ensure!(route["deposits_by_state"]["rejected"] == 1);
@@ -1336,8 +1348,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         );
         ensure!(route["refunds_by_status"]["requested"] == 1);
         ensure!(route["age_in_state_max_seconds"]["credited"].as_u64().context("credited age")? >= 7_000);
-        ensure!(route["flush_planning"]["outcome"] == "failed");
-        ensure!(route["flush_planning"]["error"] == "chain operation failed: rate limit exceeded");
+        ensure!(route.get("flush_planning").is_none());
         let unrouted = routes
             .iter()
             .find(|route| {
@@ -1348,7 +1359,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         ensure!(unrouted["unflushed_balance_atomic"] == "25");
         ensure!(unrouted["rejected_holds_atomic"] == "25");
         ensure!(unrouted["deposits_by_state"]["rejected"] == 1);
-        ensure!(unrouted["flush_planning"].is_null());
         Ok(())
     }
     .await;

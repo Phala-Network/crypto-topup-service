@@ -8,7 +8,6 @@ use tokio::time::timeout;
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
 
 use crate::jitter::{JitterSource as _, OsJitter};
-use crate::scanner::MAX_SCAN_WINDOW;
 
 use super::ReconciliationError;
 
@@ -39,17 +38,6 @@ pub trait ReconciliationChain: Send + Sync {
         block: u64,
     ) -> Result<Vec<U256>, ReconciliationError>;
 
-    /// Returns the sum of finalized on-chain `Flushed` events for one token and treasury. The
-    /// factory is permissionless, so events for other treasuries are not ours.
-    async fn flushed_total(
-        &self,
-        factory: Address,
-        treasury: Address,
-        token: Address,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<U256, ReconciliationError>;
-
     /// Returns factory-derived forwarder addresses of `treasury` in bounded batches.
     async fn factory_addresses(
         &self,
@@ -60,7 +48,7 @@ pub trait ReconciliationChain: Send + Sync {
 }
 
 /// Production reconciliation reads: finalized logs through the reconciler's own reader, and
-/// balances, `Flushed` events and derived addresses through the shared client.
+/// balances and derived addresses through the shared client.
 ///
 /// Every read backs off and retries while the provider refuses it for now (see
 /// [`backing_off`]); each attempt keeps the client's request timeout.
@@ -105,42 +93,6 @@ impl ReconciliationChain for FinalizedReader {
                 .token_balances(token, addresses, BlockNumberOrTag::Number(block))
         })
         .await?)
-    }
-
-    async fn flushed_total(
-        &self,
-        factory: Address,
-        treasury: Address,
-        token: Address,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<U256, ReconciliationError> {
-        let mut total = U256::ZERO;
-        let mut start = from_block;
-        loop {
-            let end = start
-                .saturating_add(MAX_SCAN_WINDOW.saturating_sub(1))
-                .min(to_block);
-            for event in
-                backing_off(|| self.client().flushed_events(factory, token, start, end)).await?
-            {
-                if event.treasury != treasury {
-                    continue;
-                }
-                total = total
-                    .checked_add(event.amount)
-                    .ok_or(ReconciliationError::Invariant(
-                        "Flushed event total overflowed U256",
-                    ))?;
-            }
-            if end == to_block {
-                break;
-            }
-            start = end.checked_add(1).ok_or(ReconciliationError::Invariant(
-                "Flushed log range overflowed",
-            ))?;
-        }
-        Ok(total)
     }
 
     async fn factory_addresses(
@@ -213,7 +165,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn flushed_log_transport_failure_does_not_format_the_provider_url() {
+    async fn balance_read_transport_failure_does_not_format_the_provider_url() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("local listener binds");
@@ -233,9 +185,9 @@ mod tests {
         ));
 
         let error = chain
-            .flushed_total(Address::ZERO, Address::ZERO, Address::ZERO, 1, 1)
+            .token_balances(Address::ZERO, &[Address::ZERO], 1)
             .await
-            .expect_err("closed connections fail the log request");
+            .expect_err("closed connections fail the balance read");
         server.abort();
 
         let message = error.to_string();

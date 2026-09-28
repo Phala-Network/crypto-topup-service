@@ -16,12 +16,12 @@ use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
 use topup::db;
 use topup::finality::FinalityWatch;
-use topup::flusher::SweepStep;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, StepSet};
 use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, confirmed_scan_once, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::{ScreenRoute, ScreenStep};
+use topup::steps::sweep::SweepStep;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, ReceiptLookup, TransferLog,
 };
@@ -714,6 +714,18 @@ struct LaggingReader {
 }
 
 impl ChainReader for LaggingReader {
+    async fn factory_logs(
+        &self,
+        factory: Address,
+        forwarders: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        self.inner
+            .factory_logs(factory, forwarders, from_block, to_block)
+            .await
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         self.inner.finalized_head().await
     }

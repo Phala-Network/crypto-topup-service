@@ -39,8 +39,11 @@ impl AgeAlertConfig {
         match state {
             DepositState::Detected => Some(stuck_after.detected),
             DepositState::Confirmed => Some(stuck_after.confirmed),
-            DepositState::Credited => Some(stuck_after.credited),
-            DepositState::Swept | DepositState::Rejected | DepositState::Reversed => None,
+            // A credited deposit waits for its merchant's sweep, which has no deadline.
+            DepositState::Credited
+            | DepositState::Swept
+            | DepositState::Rejected
+            | DepositState::Reversed => None,
         }
     }
 }
@@ -110,7 +113,7 @@ impl AgeAlerter {
                     deposit.created_at
                 ) AS entered_at
             FROM deposits AS deposit
-            WHERE deposit.state NOT IN ('swept', 'rejected')
+            WHERE deposit.state IN ('detected', 'confirmed')
             "#,
         )
         .fetch_all(&self.pool)

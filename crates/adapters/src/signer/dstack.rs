@@ -11,32 +11,25 @@
 //! key string this module receives is zeroized after decoding, and the decoded `Vec` is moved into
 //! [`Zeroizing`] and copied directly into [`SecretKey32`]; all owned buffers are zeroized on drop.
 
-use std::num::NonZeroU32;
 use std::time::Duration;
 
 use dstack_sdk::dstack_client::DstackClient;
 use tokio::time::timeout;
 use topup_core::{
     BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32,
-    SignedTx, Signer, SignerError, TxRequest, operator_key_domain,
+    Signer, SignerError,
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::{
-    operator_address, operator_signer, settlement_public_key, sign_operator_tx, sign_settlement,
-};
+use super::{settlement_public_key, sign_settlement, validate_secp256k1};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A signer which derives a fresh key for every operation through the dstack guest agent.
-///
-/// Operator keys derive from `operator/v{n}`, where `n` defaults to one and is set from the
-/// attested chain configuration with [`DstackSigner::with_operator_key_version`].
 #[derive(Clone, Debug)]
 pub struct DstackSigner {
     endpoint: Option<String>,
     timeout: Duration,
-    operator_key_version: NonZeroU32,
 }
 
 impl Default for DstackSigner {
@@ -52,7 +45,6 @@ impl DstackSigner {
         Self {
             endpoint: None,
             timeout: DEFAULT_TIMEOUT,
-            operator_key_version: NonZeroU32::MIN,
         }
     }
 
@@ -62,7 +54,6 @@ impl DstackSigner {
         Self {
             endpoint: None,
             timeout,
-            operator_key_version: NonZeroU32::MIN,
         }
     }
 
@@ -72,7 +63,6 @@ impl DstackSigner {
         Self {
             endpoint: Some(endpoint.into()),
             timeout: DEFAULT_TIMEOUT,
-            operator_key_version: NonZeroU32::MIN,
         }
     }
 
@@ -82,15 +72,7 @@ impl DstackSigner {
         Self {
             endpoint: Some(endpoint.into()),
             timeout,
-            operator_key_version: NonZeroU32::MIN,
         }
-    }
-
-    /// Derives operator keys from `operator/v{version}`; settlement and backup keys are unchanged.
-    #[must_use]
-    pub const fn with_operator_key_version(mut self, version: NonZeroU32) -> Self {
-        self.operator_key_version = version;
-        self
     }
 
     /// Derives the WAL-G backup-encryption key from [`BACKUP_KEY_DOMAIN`].
@@ -122,32 +104,14 @@ impl DstackSigner {
         response.key.zeroize();
         DerivedKey::from_bytes(key?, algorithm)
     }
-
-    async fn derive_operator_key(&self) -> Result<DerivedKey, SignerError> {
-        self.derive_key(
-            &operator_key_domain(self.operator_key_version),
-            KeyAlgorithm::Secp256k1,
-        )
-        .await
-    }
 }
 
 impl Signer for DstackSigner {
-    async fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError> {
-        let key = self.derive_operator_key().await?;
-        sign_operator_tx(&key.secret, tx)
-    }
-
     async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
         let key = self
             .derive_key(SETTLEMENT_KEY_DOMAIN, KeyAlgorithm::Ed25519)
             .await?;
         Ok(sign_settlement(&key.secret, payload))
-    }
-
-    async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
-        let key = self.derive_operator_key().await?;
-        operator_address(&key.secret)
     }
 
     async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
@@ -175,7 +139,7 @@ impl DerivedKey {
         let key = Zeroizing::new(key);
         let secret = SecretKey32::from_slice(key.as_slice()).ok_or(SignerError::InvalidKey)?;
         if let KeyAlgorithm::Secp256k1 = algorithm {
-            operator_signer(&secret)?;
+            validate_secp256k1(&secret)?;
         }
         Ok(Self { secret })
     }

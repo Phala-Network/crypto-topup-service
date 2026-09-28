@@ -1,7 +1,7 @@
 # Fully valid schema fixture. Addresses are from the A1 deterministic test-vector deployment.
 # It overrides defaults the tests rely on: providers, the chain defaults (so tests may change the
 # chain id), crediting only at `finalized` (so the suite checks that `finalized` reproduces the
-# behaviour before fast credit), and the deposit and flush floors.
+# behaviour before fast credit), and the deposit floor.
 route: phala-cloud-ethereum-pha-usd
 version: 1
 livemode: true
@@ -13,9 +13,6 @@ chain:
   confirmations: finalized
   sanctions_oracle: "0x40C57923924B5c5c5455c48D93317139ADDaC8fb"
   rpc_providers: [alchemy, quicknode]
-  flush:
-    native_price_asset: eth
-    min_operator_balance_wei: "10000000000000000"
 
 asset:
   symbol: pha
@@ -32,4 +29,3 @@ limits:
   min_refund_atomic: "20"
   max_open_minor: { account: 500000, product: 5000000, global: 10000000 }
   min_deposit_atomic: "20000000000000000000"
-  min_flush_atomic: "20000000000000000000000"

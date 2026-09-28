@@ -55,17 +55,6 @@ mod tests {
             "0x70b714508bfa441449dc09f790ca03baa5170360"
         );
         assert_eq!(route.chain.rpc_providers, ["provider-a", "provider-b"]);
-        assert_eq!(route.chain.operator_key_version, 1);
-        assert_eq!(route.chain.flush.native_price_asset, "eth");
-        assert_eq!(
-            route
-                .chain
-                .flush
-                .min_operator_balance_wei
-                .value()
-                .to_string(),
-            "10000000000000000"
-        );
         let check = route
             .pricing
             .check
@@ -75,11 +64,10 @@ mod tests {
             (check.fx.source.as_str(), check.fx.pair.as_str()),
             ("kraken", "USDT/USD")
         );
-        assert!(route.asset.min_flush_atomic.value().is_zero());
         assert!(route.screening.min_deposit_atomic.value().is_zero());
         assert_eq!(route.rate_lock.window_s, 900);
         assert_eq!(route.rate_lock.spread_bps.value(), 50);
-        assert_eq!(route.alerts.stuck_after_s.credited, 172_800);
+        assert_eq!(route.alerts.stuck_after_s.confirmed, 1_800);
     }
 
     #[test]
@@ -94,23 +82,15 @@ mod tests {
 
     #[test]
     fn chain_defaults_are_required_where_the_chain_has_none() {
-        let without_chain_overrides = VALID
-            .replace(
-                "  sanctions_oracle: \"0x40C57923924B5c5c5455c48D93317139ADDaC8fb\"\n",
-                "",
-            )
-            .replace("    native_price_asset: eth\n", "");
+        let without_chain_overrides = VALID.replace(
+            "  sanctions_oracle: \"0x40C57923924B5c5c5455c48D93317139ADDaC8fb\"\n",
+            "",
+        );
         let mainnet =
             parse_and_validate(&without_chain_overrides, false).expect("chain 1 defaults");
         assert_eq!(
             mainnet.screening.sanctions_oracle,
             topup_core::route::default_sanctions_oracle(1).expect("mainnet oracle")
-        );
-        let polygon = without_chain_overrides.replace("  chain_id: 1\n", "  chain_id: 137\n");
-        assert!(
-            parse_and_validate(&polygon, false)
-                .expect_err("no native gas asset default on 137")
-                .contains("chain.flush.native_price_asset")
         );
         let sepolia = without_chain_overrides.replace("  chain_id: 1\n", "  chain_id: 11155111\n");
         assert!(
@@ -145,6 +125,32 @@ mod tests {
                 ),
                 "enabled",
             ),
+            // The service sends no transactions: no operator key, flush schedule, or gas policy.
+            (
+                VALID.replace(
+                    "  rpc_providers: [alchemy, quicknode]\n",
+                    "  rpc_providers: [alchemy, quicknode]\n  operator_key_version: 1\n",
+                ),
+                "operator_key_version",
+            ),
+            (
+                VALID.replace(
+                    "  rpc_providers: [alchemy, quicknode]\n",
+                    "  rpc_providers: [alchemy, quicknode]\n  flush:\n    schedule: \"0 * * * *\"\n",
+                ),
+                "flush",
+            ),
+            (
+                VALID.replace(
+                    "  min_credit_minor: 100\n",
+                    "  min_credit_minor: 100\n  min_flush_atomic: \"1\"\n",
+                ),
+                "min_flush_atomic",
+            ),
+            (
+                format!("{VALID}alerts:\n  stuck_after_s:\n    credited: 60\n"),
+                "credited",
+            ),
         ] {
             assert_ne!(yaml, VALID, "fixture edit for `{key}` must apply");
             let error =
@@ -154,29 +160,6 @@ mod tests {
                 "unclear error for `{key}`: {error}"
             );
         }
-    }
-
-    #[test]
-    fn operator_key_version_defaults_to_one_and_must_be_positive() {
-        let route = parse_and_validate(VALID, false).expect("valid fixture");
-        assert_eq!(route.chain.operator_key_version().map(u32::from), Ok(1));
-        let with = |version: u32| {
-            VALID.replace(
-                "  rpc_providers: [alchemy, quicknode]\n",
-                &format!(
-                    "  rpc_providers: [alchemy, quicknode]\n  operator_key_version: {version}\n"
-                ),
-            )
-        };
-        for template in [false, true] {
-            assert!(
-                parse_and_validate(&with(0), template)
-                    .expect_err("operator key version zero must fail")
-                    .contains("chain.operator_key_version")
-            );
-        }
-        let rotated = parse_and_validate(&with(2), false).expect("a later version is valid");
-        assert_eq!(rotated.chain.operator_key_version().map(u32::from), Ok(2));
     }
 
     #[test]

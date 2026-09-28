@@ -3,32 +3,22 @@
 mod accounts;
 mod addresses;
 mod deposits;
-mod flushes;
 mod outbox;
 mod pending;
 mod scanner;
+mod sweeps;
 mod types;
 
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 pub use accounts::{Account, Customer, get_account, get_customer};
-pub(crate) use addresses::list_chain_addresses_with_pause_scopes;
 pub use addresses::{Address, get_address, list_chain_addresses};
-pub(crate) use deposits::link_deposit_to_flush;
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
     TransitionWrites, apply_transition, claim_deposit, get_deposit, insert_deposit,
     release_deposit_lease,
-};
-pub use flushes::{
-    Flush, FlushStatus, FlushedEvent, NewFlush, confirm_flush, get_flush_locked,
-    has_open_flush_locked, has_sent_flush, has_sent_flush_for_token, insert_flush, insert_flushed,
-    insert_planned_flush, link_confirmed_flush, list_active_flush_exclusions, list_flushes,
-    lock_flush_plan, lock_operator, mark_flush_reverted_locked, mark_flush_sent, next_flush_nonce,
-    next_planned_flush, rebind_planned_flushes, store_flush_replacement_cas, update_sent_evidence,
-    upsert_flush_exclusion, void_paused_plan,
 };
 pub use outbox::{EventObject, NewOutboxEvent, enqueue_in};
 pub use pending::{
@@ -39,6 +29,8 @@ pub use scanner::{
     ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,
     list_scan_addresses,
 };
+pub(crate) use sweeps::mark_swept;
+pub use sweeps::{FactoryCommit, commit_factory_logs};
 
 /// Embedded SQL migrations for the service database.
 pub static MIGRATOR: Migrator = sqlx::migrate!();

@@ -13,8 +13,6 @@ chain:
   treasury: "${TREASURY}"
   # The sandbox deploys MockSanctionsOracle; there is no Chainalysis oracle on Sepolia.
   sanctions_oracle: "${SANCTIONS_ORACLE}"
-  flush:
-    min_operator_balance_wei: "10000000000000000"
 
 # The sandbox test token is the A1 MockERC20 (18 decimals, public mint). It is valued as PHA so
 # integrators see production-shaped quotes; it has no market value of its own.

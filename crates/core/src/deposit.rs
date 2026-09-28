@@ -16,7 +16,7 @@ pub enum DepositState {
     /// Screening passed: the credit is final and owed to the product, which is told with a
     /// `deposit.credited` webhook.
     Credited,
-    /// A later confirmed flush covers the deposit.
+    /// A finalized `Flushed` event after the final deposit emptied its forwarder.
     Swept,
     /// The deposit was deterministically denied credit.
     Rejected,
@@ -94,7 +94,7 @@ pub enum WaitReason {
     Confirmations,
     /// Crediting is paused for the account, product, or route.
     Paused,
-    /// No confirmed flush after the deposit has been observed yet.
+    /// No finalized `Flushed` event after the deposit has been indexed yet.
     FlushNotConfirmed,
 }
 

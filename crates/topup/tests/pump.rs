@@ -841,6 +841,16 @@ struct ConfirmChain {
 }
 
 impl ChainReader for ConfirmChain {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        panic!("the confirm step never reads factory events")
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         if let Some(barrier) = &self.barrier {
             barrier.wait().await;

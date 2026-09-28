@@ -347,7 +347,6 @@ mod tests {
             price_source: Some("spot".to_owned()),
             credit_minor: None,
             quote: None,
-            flush_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -497,7 +496,7 @@ mod tests {
         );
 
         let non_settlement_route_pause = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["flush"]))
+            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["refunds"]))
             .await;
         assert_eq!(non_settlement_route_pause.outcome, StepOutcome::Advance);
     }

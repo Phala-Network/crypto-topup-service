@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use alloy_primitives::Address;
-use topup_adapters::attestation::OperatorKey;
 use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::{ChainConfig, RouteFile};
 
@@ -157,34 +156,6 @@ impl RouteSet {
         self.current
             .values()
             .filter_map(|index| self.routes.get(*index))
-    }
-
-    /// Returns the operator key each chain's flusher signs with, in ascending chain order.
-    ///
-    /// The version comes from the chain's current routes, which must all name the same
-    /// `operator_key_version`.
-    pub fn operator_keys(&self) -> Result<Vec<OperatorKey>, String> {
-        let mut keys = BTreeMap::<u64, (&str, OperatorKey)>::new();
-        for route in self.current() {
-            let chain_id = route.chain.chain_id;
-            let key = OperatorKey {
-                chain_id,
-                key_version: route
-                    .chain
-                    .operator_key_version()
-                    .map_err(|error| error.to_string())?,
-            };
-            if let Some((other, other_key)) = keys.insert(chain_id, (&route.route, key))
-                && other_key != key
-            {
-                return Err(format!(
-                    "current routes `{other}` and `{}` on chain {chain_id} use operator key \
-                     versions {} and {}; they must share one operator_key_version",
-                    route.route, other_key.key_version, key.key_version
-                ));
-            }
-        }
-        Ok(keys.into_values().map(|(_, key)| key).collect())
     }
 
     /// Returns the configured chain ids in ascending order.

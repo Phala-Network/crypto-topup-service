@@ -45,12 +45,7 @@ pub(crate) async fn get_attestation(
     ApiQuery(query): ApiQuery<AttestationQuery>,
 ) -> ApiResult<Json<AttestationResponse>> {
     let nonce = decode_nonce(&query.nonce)?;
-    // The flusher signs with these keys; startup refuses routes that disagree on one.
-    let operator_keys = state.routes.operator_keys().map_err(|error| {
-        tracing::error!(%error, "invalid operator key configuration");
-        ApiError::service_unavailable("attestation is unavailable")
-    })?;
-    match state.attestor.attest(&nonce, &operator_keys).await {
+    match state.attestor.attest(&nonce).await {
         Ok(response) => Ok(Json(response)),
         Err(AttestationError::Unavailable) => {
             Err(ApiError::service_unavailable("attestation is unavailable"))
@@ -388,10 +383,6 @@ pub(crate) async fn daily_report(
     let mut report =
         repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
     populate_treasury_balances(&state.routes, &mut report).await;
-    for route_report in &mut report.routes {
-        route_report.flush_planning =
-            crate::observability::flush_planning(&route_report.route).map(Into::into);
-    }
     report.reconciliation = crate::observability::reconciliation().map(Into::into);
     Ok(Json(report))
 }
