@@ -4,7 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
 const wsEndpoint = process.env["PLAYWRIGHT_WS_ENDPOINT"];
 
 // The product, the fake service, and Anvil are started by the global setup; the page under test
-// is the product's own `/demo/`, built from `dist` (run `pnpm run build` first).
+// is the product's own `/`, built from `dist` (run `pnpm run build` first).
 export default defineConfig({
   testDir: "e2e",
   globalSetup: "./e2e/global-setup.ts",

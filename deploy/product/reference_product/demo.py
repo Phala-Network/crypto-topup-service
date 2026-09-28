@@ -1,9 +1,9 @@
 """The Phala Pay website and demo: a cloud console's "Billing → Add credits" page, on staging.
 
-With `demo_dir` configured, the product serves the built website of deploy/product/web: its
-landing page at exactly `{public_url}/`, their shared assets at `{public_url}/assets/`, the demo
-page at `{public_url}/demo/`, and the demo's JSON API at `{public_url}/demo/api/`. The demo shows
-both ways to collect a payment, as the product's backend runs them with its API key:
+With `demo_dir` configured, the product serves the built website of deploy/product/web: its one
+page at exactly `{public_url}/`, the page's assets at `{public_url}/assets/`, and the demo's JSON
+API at `{public_url}/api/`. The demo shows both ways to collect a payment, as the product's backend
+runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, the ledger lines behind it, and its payments;
@@ -196,7 +196,7 @@ class ApiRecorder(httpx.BaseTransport):
 
 
 class DemoConsole:
-    """Serves the demo page and its API; see the module docstring."""
+    """Serves the website and the demo's API; see the module docstring."""
 
     def __init__(
         self,
@@ -211,7 +211,7 @@ class DemoConsole:
         self.config = config
         self.ledger = ledger
         self.root = urlsplit(config.public_url).path.rstrip("/")
-        self.base = self.root + "/demo"
+        self.api = self.root + "/api/"
         root = Path(demo_dir)
         # Only files present at startup are served, by exact name: no request path is resolved.
         self.files = {
@@ -219,9 +219,8 @@ class DemoConsole:
             for file in root.rglob("*")
             if file.is_file() and file.suffix in CONTENT_TYPES
         }
-        for page in ("index.html", "demo/index.html"):
-            if page not in self.files:
-                raise ValueError(f"{root} has no built website page ({page})")
+        if "index.html" not in self.files:
+            raise ValueError(f"{root} has no built website page (index.html)")
         service = urlsplit(config.service_url)
         # The page reads the public quote and deposit address views from the service, and sends
         # the visitor's own wallet requests through the wallet's provider (no network access).
@@ -255,9 +254,7 @@ class DemoConsole:
 
     def handles(self, target: str) -> bool:
         path = urlsplit(target).path
-        return path in (self.root + "/", self.base) or path.startswith(
-            (self.root + "/assets/", self.base + "/")
-        )
+        return path == self.root + "/" or path.startswith((self.root + "/assets/", self.api))
 
     def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         path = urlsplit(target).path
@@ -265,14 +262,11 @@ class DemoConsole:
             return self._static(method, "index.html")
         if path.startswith(self.root + "/assets/"):
             return self._static(method, path.removeprefix(self.root + "/"))
-        if path == self.base:
-            return Response(HTTPStatus.MOVED_PERMANENTLY, headers={"location": self.base + "/"})
-        name = path.removeprefix(self.base + "/")
-        if not name.startswith("api/"):
-            return self._static(method, "demo/" + (name or "index.html"))
+        if not path.startswith(self.api):
+            return Response(HTTPStatus.NOT_FOUND)
         lowered = {key.lower(): value for key, value in headers.items()}
         try:
-            return self._api(method, name.removeprefix("api/"), lowered, body)
+            return self._api(method, path.removeprefix(self.api), lowered, body)
         except ApiError as error:
             # The service's documented code is public; its message and everything else are not.
             LOG.warning("demo: service answered %s %s", error.status_code, error.code)
@@ -372,7 +366,7 @@ class DemoConsole:
 
     def _set_cookie(self, account: str) -> str:
         cookie = (
-            f"{ACCOUNT_COOKIE}={account}; Path={self.base}/; Max-Age={30 * 86_400}; "
+            f"{ACCOUNT_COOKIE}={account}; Path={self.root}/; Max-Age={30 * 86_400}; "
             "HttpOnly; SameSite=Strict"
         )
         return cookie + ("; Secure" if self.secure_cookie else "")

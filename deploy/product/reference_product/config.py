@@ -61,7 +61,7 @@ class ProductConfig:
     per_period_cap_minor: int = 500_000
     period_seconds: int = 24 * 60 * 60
     restart_command: list[str] = field(default_factory=list)
-    # The built website, deploy/product/web/dist: the landing page and the demo checkout page
+    # The built website, deploy/product/web/dist, served with the demo's API
     # (reference_product.demo); unset, neither is served.
     demo_dir: str | None = None
 

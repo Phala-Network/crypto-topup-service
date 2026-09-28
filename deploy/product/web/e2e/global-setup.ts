@@ -20,8 +20,8 @@ const DETERMINISTIC_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
  * Runs the whole demo locally: Anvil as Sepolia with the test token and the real forwarder
  * factory, deployed as deploy/CONTRACTS.md deploys it (through the deterministic deployment proxy
  * with the committed salt), so it lands at its pinned address; the fake top-up service
- * (e2e/fake_service.py), and the reference product serving the built page at `/demo/`, pinned to
- * the fake service's webhook key. Tests read DEMO_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS,
+ * (e2e/fake_service.py), and the reference product serving the built page at `/`, pinned to
+ * the fake service's webhook key. Tests read SITE_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS,
  * TOKEN_ADDRESS, and TREASURY (which the tests control on Anvil, as the merchant's finance team
  * controls its treasury). Service logs go to test-results/services.
  */
@@ -167,7 +167,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await waitFor(() => fetchOk(`${product}/healthz`), 600);
 
     Object.assign(process.env, {
-      DEMO_URL: `${product}/demo/`,
+      SITE_URL: `${product}/`,
       SERVICE_URL: service,
       ANVIL_URL: anvil,
       PAYER_ADDRESS: payer,

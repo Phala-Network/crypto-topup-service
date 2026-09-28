@@ -684,10 +684,12 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), `PRODUCT_RPC_URL` (a keyless Sepolia RPC: it is published and the product seals no
   RPC key), and `PRODUCT_DRIVER_PUBLIC_KEY`.
 
-The product also serves the public **Phala Pay demo** at `PRODUCT_PUBLIC_URL/demo/`
-([product/web](product/web), built into the image; served by
-[reference_product/demo.py](product/reference_product/demo.py)): a cloud console's billing page
-with both ways to collect a payment: a **quote** (a locked price and an exact amount, paid through
+The product also serves the public **Phala Pay website** ([pay.phala.com](https://pay.phala.com/)):
+one page at exactly `PRODUCT_PUBLIC_URL/`, its hashed assets at `/assets/`, and the demo's JSON
+API at `/api/` ([product/web](product/web), built into the image; served by
+[reference_product/demo.py](product/reference_product/demo.py) from the files present at startup,
+by exact name). The page is a short introduction, the live demo, and the key properties. The demo
+is a cloud console's billing page with both ways to collect a payment: a **quote** (a locked price and an exact amount, paid through
 `@phala/pay`'s `<Checkout expectedAddress>`) and the visitor's single **deposit address** (every
 token on every network, any amount credited at spot, its payments read by the browser with the
 address's `client_secret`). An order id set as `metadata` arrives in the `deposit.credited` event.

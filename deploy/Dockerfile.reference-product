@@ -3,10 +3,11 @@
 # deploy/sandbox/run-local.sh and the CVM rehearsal. Configuration comes from
 # /etc/product/config.json and the ledger lives in /data.
 
-# The Phala Pay demo page (reference_product.demo): the @phala/pay SDK (sdk/js) and the page
-# (deploy/product/web) built with their locked dependencies. Only the page's static output reaches
-# the runtime image; Vite names assets by content hash, so the output is the same on every build.
-FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS demo
+# The Phala Pay website with its live demo (reference_product.demo): the @phala/pay SDK (sdk/js)
+# and the page (deploy/product/web) built with their locked dependencies. Only the page's static
+# output reaches the runtime image; Vite names assets by content hash, so the output is the same on
+# every build.
+FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS web
 WORKDIR /src/sdk/js
 COPY sdk/js/package.json sdk/js/pnpm-lock.yaml ./
 RUN npx -y pnpm@12.6.0 install --frozen-lockfile --ignore-scripts
@@ -40,7 +41,7 @@ RUN uv sync --locked --no-default-groups --group product --no-install-project --
     rm -r /opt/venv/lib/python3.14/site-packages/docs
 COPY sdk/python/src ./src
 COPY deploy/product/reference_product /opt/product/reference_product
-COPY --from=demo /src/deploy/product/web/dist /opt/product/demo
+COPY --from=web /src/deploy/product/web/dist /opt/product/web
 
 # Named volumes copy this directory's ownership, so the ledger is writable by the service user.
 RUN mkdir /data && chown 10001:10001 /data

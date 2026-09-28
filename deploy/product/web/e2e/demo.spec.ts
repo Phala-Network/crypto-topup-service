@@ -160,12 +160,17 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 }, testInfo) => {
   test.setTimeout(300_000);
   await installWallet(page);
-  const response = await page.goto(env("DEMO_URL"));
+  const response = await page.goto(env("SITE_URL"));
   expect(response?.headers()["content-security-policy"]).toContain("default-src 'none'");
 
-  // Testnet banner, trust strip, and a fresh demo account.
+  // The introduction, the testnet banner, the trust details (collapsed), and a fresh demo account.
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Phala Pay");
+  await expect(page.getByText("Sepolia testnet · mainnet not live yet")).toBeVisible();
   await expect(page.getByRole("note")).toContainText("Testnet demo.");
-  const trust = page.getByRole("region", { name: "Why you can trust Phala Pay" });
+  const trustSummary = page.getByRole("button", { name: /^Why you can trust Phala Pay/ });
+  await expect(trustSummary).toContainText("Attestation verified");
+  await trustSummary.click();
+  const trust = page.getByRole("region", { name: /^Why you can trust Phala Pay/ });
   await expect(trust).toContainText("Verified");
   await expect(trust).toContainText("e2e0000000000000000000000000000000000001");
   await expect(page.getByTestId("balance")).toHaveText("$0.00");
@@ -204,13 +209,15 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(step(timeline, "webhook_received")).toContainText("+$20.00");
   await expect(scenes.getByTestId("webhook-event").first()).toContainText("deposit.credited");
   // Refunds wait for finality.
+  await scenes.getByText(/^Refunds \(/).click();
   await expect(scenes.getByTestId("refund-unavailable")).toContainText("deposit_not_final");
   await expectComplete(timeline, ["final"]);
   await expect(step(timeline, "swept")).toHaveAttribute("data-state", "current");
 
   // The merchant sweeps: the SDK's flush, signed from a wallet (anyone may send it; the funds can
   // only reach the treasury), indexed by the service once final.
-  const sweeps = page.getByRole("region", { name: "Sweeps: the merchant's transaction" });
+  await page.getByRole("button", { name: /^Sweeps: the merchant's transaction/ }).click();
+  const sweeps = page.getByRole("region", { name: /^Sweeps: the merchant's transaction/ });
   await expect(sweeps.getByTestId("unswept")).toContainText("80 PHA in 1 forwarder", { timeout: 30_000 });
   await sweeps.getByRole("button", { name: "Sign the flush from my wallet" }).click();
   await expect(sweeps.getByTestId("flush-status")).toContainText("Flush sent: 0x");
@@ -282,7 +289,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
 }, testInfo) => {
   test.setTimeout(180_000);
   await installWallet(page);
-  await page.goto(env("DEMO_URL"));
+  await page.goto(env("SITE_URL"));
   await expect(page.getByTestId("balance")).toHaveText("$0.00");
 
   // The tabs follow the keyboard.
@@ -332,6 +339,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(scenes.getByTestId("nets-to")).toHaveText("$0.00");
   await expect(page.getByTestId("balance")).toHaveText("$0.00", { timeout: 10_000 });
   await expect(scenes.getByTestId("webhook-event").filter({ hasText: "deposit.reversed" })).toBeVisible();
+  await scenes.getByText(/^Refunds \(/).click();
   await expect(scenes.getByTestId("refund-unavailable")).toContainText("reversed");
   await expect(page.locator(".pp-payments")).toContainText("25 PHA");
   await page.getByText(/^How this balance adds up/).click();
@@ -344,7 +352,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
 test("refuses another browser's payments and refunds, and rate-limits quote creation", async ({ browser }) => {
   const first = await browser.newContext();
   const page = await first.newPage();
-  await page.goto(env("DEMO_URL"));
+  await page.goto(env("SITE_URL"));
   await expect(page.getByTestId("balance")).toHaveText("$0.00");
   const created = await page.evaluate(async () => {
     const statuses: number[] = [];
@@ -362,10 +370,14 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
     return { statuses, quote };
   });
   expect(created.statuses).toEqual([200, 200, 200, 429]);
+  // The demo is on the page and its API at `/api/`: the old `/demo/` paths are unknown.
+  for (const path of ["demo", "demo/", "demo/api/account"]) {
+    expect((await fetch(`${env("SITE_URL")}${path}`)).status).toBe(404);
+  }
 
   const second = await browser.newContext();
   const other = await second.newPage();
-  await other.goto(env("DEMO_URL"));
+  await other.goto(env("SITE_URL"));
   await expect(other.getByTestId("balance")).toHaveText("$0.00");
   const statuses = await other.evaluate(async (quote) => {
     const post = (path: string, body: unknown) =>

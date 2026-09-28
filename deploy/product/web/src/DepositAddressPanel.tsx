@@ -114,9 +114,9 @@ export function DepositAddressPanel({
       </div>
       <PayFromWallet account={account} to={view.address ?? view.networks[0]?.address ?? ""} />
       <section className="flex flex-col gap-2 border-t pt-4" aria-labelledby="address-payments-title">
-        <h3 id="address-payments-title" className="font-medium">
+        <h4 id="address-payments-title" className="font-medium">
           Payments the product sees
-        </h3>
+        </h4>
         {view.payments.length === 0 ? (
           <p className="text-xs text-muted-foreground">None yet. Send any amount of {account.token.symbol} to the address.</p>
         ) : (

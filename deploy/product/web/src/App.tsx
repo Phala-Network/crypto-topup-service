@@ -1,6 +1,7 @@
 import { Checkout, type Appearance } from "@phala/pay/react";
-import { ChevronRight, CircleAlert, Cloud, Cpu, ShieldCheck, TriangleAlert, Wallet } from "lucide-react";
+import { ChevronRight, CircleAlert, Cpu, FlaskConical, ShieldCheck, Wallet } from "lucide-react";
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,9 +27,10 @@ import {
 import { Detail, Details, ExplorerLink, LINK, StatusBadge, describe, usePolling } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
 import { dollars, short, signedDollars, statusLabel, time, tokens } from "./format.js";
+import { CONTAINER, Hero, Properties, SiteFooter, SiteHeader } from "./Site.js";
 import { Sweeps } from "./Sweeps.js";
 import { errorMessage, mintTestTokens } from "./testTokens.js";
-import { ThemeToggle, useTheme } from "./theme.js";
+import { useTheme } from "./theme.js";
 import { BehindTheScenes } from "./Timeline.js";
 
 type Method = "quote" | "address";
@@ -44,9 +46,6 @@ const METHODS: { id: Method; label: string }[] = [
   { id: "quote", label: "Exact amount" },
   { id: "address", label: "Deposit address" },
 ];
-
-/** The page's width: wide screens get room for the payment and its timeline side by side. */
-const CONTAINER = "mx-auto w-full max-w-[1760px] px-4 sm:px-6 lg:px-8";
 
 export function App() {
   const [theme, setTheme] = useTheme();
@@ -111,119 +110,114 @@ export function App() {
     setTimeline(null);
   };
 
+  // The website is one page: a short introduction, the live demo, and the key properties.
   return (
     <TooltipProvider>
-      <div className="min-h-svh bg-muted/40 dark:bg-background">
-        <header className="sticky top-0 z-30 border-b bg-background/90 backdrop-blur">
-          <div className={`${CONTAINER} flex h-14 items-center justify-between gap-4`}>
-            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Cloud className="size-4" aria-hidden="true" />
-              </span>
-              <span className="truncate">Cloud Console</span>
-              <span className="hidden font-normal text-muted-foreground sm:inline">/ Billing</span>
-              <Badge variant="outline" asChild>
-                <a href="../">Phala Pay demo</a>
-              </Badge>
+      <div className="flex min-h-svh flex-col">
+        <SiteHeader theme={theme} onThemeChange={setTheme} />
+        <main id="top" className="flex-1">
+          <Hero />
+          <section aria-labelledby="demo-title" className="border-y bg-muted/40 dark:bg-muted/15">
+            <div className={`${CONTAINER} flex flex-col gap-6 py-10 lg:py-14`}>
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium text-muted-foreground">Live demo</p>
+                <h2 id="demo-title" className="text-2xl font-semibold tracking-tight">
+                  Add credits to a cloud console
+                </h2>
+                <p className="max-w-3xl text-sm text-muted-foreground">
+                  A cloud console's billing page, paid with Phala Pay: top up this workspace with{" "}
+                  {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}, either for an
+                  exact amount at a locked price, or at any time to your own deposit address. The balance
+                  moves only when this console's webhook handler receives a verified <code>deposit.*</code>{" "}
+                  event, exactly as a real integration applies credits.
+                </p>
+              </div>
+              {account?.network.testnet === true && <TestnetBanner account={account} />}
+              {accountError !== null && (
+                <Alert variant="destructive">
+                  <CircleAlert aria-hidden="true" />
+                  <AlertDescription>Could not load the account: {accountError}</AlertDescription>
+                </Alert>
+              )}
+
+              <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,30rem)_minmax(0,1fr)]">
+                <div className="flex min-w-0 flex-col gap-6">
+                  <BalanceCard account={account} />
+                  <Card role="region" aria-labelledby="pay-title">
+                    <CardHeader>
+                      <CardTitle>
+                        <h3 id="pay-title">Pay with crypto</h3>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <Tabs value={method} onValueChange={(value) => setMethod(value === "address" ? "address" : "quote")}>
+                        <TabsList aria-label="Payment method" className="w-full">
+                          {METHODS.map(({ id, label }) => (
+                            <TabsTrigger key={id} value={id}>
+                              {label}
+                            </TabsTrigger>
+                          ))}
+                        </TabsList>
+                        <TabsContent value="quote" className="pt-3">
+                          {session === null || account === null ? (
+                            <AmountPicker
+                              account={account}
+                              onQuote={(created: CreatedQuote) => {
+                                setSession({
+                                  quote: created.quote,
+                                  clientSecret: created.client_secret,
+                                  expectedAddress: created.expected_address,
+                                  orderId: created.order_id,
+                                });
+                                select({ kind: "quote", id: created.quote });
+                              }}
+                            />
+                          ) : (
+                            <div className="flex flex-col gap-4">
+                              <p className="text-xs text-muted-foreground">
+                                Order <code>{session.orderId}</code>, in the quote's <code>metadata</code>. The
+                                checkout shows the quote only if the service's address is the one the product's
+                                SDK recomputed from its pins.
+                              </p>
+                              <Checkout
+                                clientSecret={session.clientSecret}
+                                expectedAddress={session.expectedAddress}
+                                apiBase={account.api_base}
+                                appearance={appearance}
+                                onSuccess={refreshAccount}
+                              />
+                              <Button type="button" variant="outline" onClick={() => setSession(null)}>
+                                Start a new top-up
+                              </Button>
+                            </div>
+                          )}
+                        </TabsContent>
+                        <TabsContent value="address" className="pt-3">
+                          {account === null ? (
+                            <p className="text-muted-foreground">Loading…</p>
+                          ) : (
+                            <DepositAddressPanel account={account} appearance={appearance} onSelect={select} />
+                          )}
+                        </TabsContent>
+                      </Tabs>
+                    </CardContent>
+                  </Card>
+                </div>
+                <BehindTheScenes
+                  timeline={timeline !== null && timeline.key === selectedKey ? timeline.view : null}
+                  loading={selected?.id ?? null}
+                  account={account}
+                  onChanged={refreshAll}
+                />
+              </div>
+
+              <Payments account={account} selected={selected} onSelect={select} />
+              <MoreDetails trust={trust} account={account} />
             </div>
-            <ThemeToggle theme={theme} onChange={setTheme} />
-          </div>
-        </header>
-
-        <main className={`${CONTAINER} flex flex-col gap-6 py-6 lg:py-8`}>
-          {account?.network.testnet === true && <TestnetBanner account={account} />}
-          <div className="flex flex-col gap-2">
-            <h1 className="text-2xl font-semibold tracking-tight">Add credits</h1>
-            <p className="max-w-3xl text-sm text-muted-foreground">
-              A cloud console's billing page paid with Phala Pay: top up this workspace with{" "}
-              {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}, either for an
-              exact amount at a locked price, or at any time to your own deposit address. The balance
-              moves only when this console's webhook handler receives a verified <code>deposit.*</code>{" "}
-              event, exactly as a real integration applies credits.
-            </p>
-          </div>
-          {accountError !== null && (
-            <Alert variant="destructive">
-              <CircleAlert aria-hidden="true" />
-              <AlertDescription>Could not load the account: {accountError}</AlertDescription>
-            </Alert>
-          )}
-
-          <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,30rem)_minmax(0,1fr)]">
-            <div className="flex min-w-0 flex-col gap-6">
-              <BalanceCard account={account} />
-              <Card role="region" aria-labelledby="pay-title">
-                <CardHeader>
-                  <CardTitle>
-                    <h2 id="pay-title">Pay with crypto</h2>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <Tabs value={method} onValueChange={(value) => setMethod(value === "address" ? "address" : "quote")}>
-                    <TabsList aria-label="Payment method" className="w-full">
-                      {METHODS.map(({ id, label }) => (
-                        <TabsTrigger key={id} value={id}>
-                          {label}
-                        </TabsTrigger>
-                      ))}
-                    </TabsList>
-                    <TabsContent value="quote" className="pt-3">
-                      {session === null || account === null ? (
-                        <AmountPicker
-                          account={account}
-                          onQuote={(created: CreatedQuote) => {
-                            setSession({
-                              quote: created.quote,
-                              clientSecret: created.client_secret,
-                              expectedAddress: created.expected_address,
-                              orderId: created.order_id,
-                            });
-                            select({ kind: "quote", id: created.quote });
-                          }}
-                        />
-                      ) : (
-                        <div className="flex flex-col gap-4">
-                          <p className="text-xs text-muted-foreground">
-                            Order <code>{session.orderId}</code>, in the quote's <code>metadata</code>. The
-                            checkout shows the quote only if the service's address is the one the product's
-                            SDK recomputed from its pins.
-                          </p>
-                          <Checkout
-                            clientSecret={session.clientSecret}
-                            expectedAddress={session.expectedAddress}
-                            apiBase={account.api_base}
-                            appearance={appearance}
-                            onSuccess={refreshAccount}
-                          />
-                          <Button type="button" variant="outline" onClick={() => setSession(null)}>
-                            Start a new top-up
-                          </Button>
-                        </div>
-                      )}
-                    </TabsContent>
-                    <TabsContent value="address" className="pt-3">
-                      {account === null ? (
-                        <p className="text-muted-foreground">Loading…</p>
-                      ) : (
-                        <DepositAddressPanel account={account} appearance={appearance} onSelect={select} />
-                      )}
-                    </TabsContent>
-                  </Tabs>
-                </CardContent>
-              </Card>
-            </div>
-            <BehindTheScenes
-              timeline={timeline !== null && timeline.key === selectedKey ? timeline.view : null}
-              loading={selected?.id ?? null}
-              account={account}
-              onChanged={refreshAll}
-            />
-          </div>
-
-          <Payments account={account} selected={selected} onSelect={select} />
-          {account !== null && <Sweeps account={account} />}
-          <TrustStrip trust={trust} account={account} />
+          </section>
+          <Properties />
         </main>
+        <SiteFooter />
       </div>
     </TooltipProvider>
   );
@@ -243,10 +237,10 @@ function TestnetBanner({ account }: { account: Account }) {
     }
   };
   return (
-    <Alert role="note" className="border-warning/50 bg-warning/10">
-      <TriangleAlert aria-hidden="true" />
+    <Alert role="note">
+      <FlaskConical aria-hidden="true" />
       <AlertTitle>Testnet demo.</AlertTitle>
-      <AlertDescription className="text-foreground/80">
+      <AlertDescription>
         <p>
           {account.network.name} and test {account.token.symbol} only; no real money moves. Test{" "}
           {account.token.symbol} is free: mint it from your wallet (gas is {account.network.name} ETH from a
@@ -280,7 +274,7 @@ function BalanceCard({ account }: { account: Account | null }) {
     <Card role="region" aria-labelledby="balance-title">
       <CardHeader>
         <CardDescription>
-          <h2 id="balance-title">Account balance</h2>
+          <h3 id="balance-title">Account balance</h3>
         </CardDescription>
         <div className="text-3xl font-semibold tracking-tight tabular-nums" aria-live="polite" data-testid="balance">
           {account === null ? <Skeleton className="h-9 w-32" /> : dollars(account.balance)}
@@ -434,7 +428,7 @@ function Payments({
     <Card role="region" aria-labelledby="history-title">
       <CardHeader>
         <CardTitle>
-          <h2 id="history-title">Payments</h2>
+          <h3 id="history-title">Payments</h3>
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -511,79 +505,122 @@ function Payments({
   );
 }
 
-function TrustStrip({ trust, account }: { trust: Trust | null; account: Account | null }) {
+// The accordion's content keeps its height as its data loads, and its own layout spacing.
+const DETAILS_CONTENT = "h-auto pb-4 [&_p:not(:last-child)]:mb-0";
+
+/** Secondary material, collapsed until opened: the merchant's sweeps and the service's attestation. */
+function MoreDetails({ trust, account }: { trust: Trust | null; account: Account | null }) {
+  const verified = trust?.attestation.binding_verified;
+  return (
+    <Card className="py-0">
+      <CardContent>
+        <Accordion type="multiple">
+          <AccordionItem value="sweeps">
+            <AccordionTrigger className="items-center gap-3 py-4 hover:no-underline">
+              <Summary
+                title="Sweeps: the merchant's transaction"
+                text="The unswept balance, the flush the SDK builds for the merchant to sign, and the finalized sweeps."
+              />
+            </AccordionTrigger>
+            <AccordionContent className={DETAILS_CONTENT}>
+              {account === null ? <p className="text-muted-foreground">Loading…</p> : <Sweeps account={account} />}
+            </AccordionContent>
+          </AccordionItem>
+          <AccordionItem value="trust">
+            <AccordionTrigger className="items-center gap-3 py-4 hover:no-underline">
+              <Summary
+                title="Why you can trust Phala Pay"
+                text="The service's attestation, the application it runs, and why it holds no funds."
+              />
+              {verified === true && (
+                <Badge className="hidden bg-success/15 text-success sm:inline-flex">Attestation verified</Badge>
+              )}
+            </AccordionTrigger>
+            <AccordionContent className={DETAILS_CONTENT}>
+              <TrustDetails trust={trust} account={account} />
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Summary({ title, text }: { title: string; text: string }) {
+  return (
+    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <span>{title}</span>
+      <span className="text-xs font-normal text-muted-foreground">{text}</span>
+    </span>
+  );
+}
+
+function TrustDetails({ trust, account }: { trust: Trust | null; account: Account | null }) {
   const attestation = trust?.attestation;
   const evidence = trust?.tls_evidence;
   return (
-    <Card role="region" aria-labelledby="trust-title">
-      <CardHeader>
-        <CardTitle>
-          <h2 id="trust-title">Why you can trust Phala Pay</h2>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-6 text-xs md:grid-cols-3">
-        <div className="flex flex-col gap-2">
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <ShieldCheck className="size-4 text-muted-foreground" aria-hidden="true" />
-            Attestation
-          </h3>
-          {attestation === undefined ? (
-            <p className="text-muted-foreground">Loading…</p>
-          ) : attestation.binding_verified ? (
-            <p>
-              <span className="font-medium text-success">Verified</span> for a fresh nonce: the TDX quote's
-              report data binds this account's webhook key{" "}
-              <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code> that
-              signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
-            </p>
-          ) : (
-            <p className="text-destructive">The attestation did not bind its keys.</p>
-          )}
-        </div>
-        <div className="flex flex-col gap-2">
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <Cpu className="size-4 text-muted-foreground" aria-hidden="true" />
-            Application
-          </h3>
-          {evidence == null ? (
-            <p className="text-muted-foreground">TLS evidence unavailable.</p>
-          ) : (
-            <Details>
-              <Detail label="App id" className="font-mono">
-                {evidence.app_id}
+    <div className="grid gap-6 text-xs md:grid-cols-3">
+      <div className="flex flex-col gap-2">
+        <h4 className="flex items-center gap-2 text-sm font-medium">
+          <ShieldCheck className="size-4 text-muted-foreground" aria-hidden="true" />
+          Attestation
+        </h4>
+        {attestation === undefined ? (
+          <p className="text-muted-foreground">Loading…</p>
+        ) : attestation.binding_verified ? (
+          <p>
+            <span className="font-medium text-success">Verified</span> for a fresh nonce: the TDX quote's
+            report data binds this account's webhook key{" "}
+            <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code> that
+            signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
+          </p>
+        ) : (
+          <p className="text-destructive">The attestation did not bind its keys.</p>
+        )}
+      </div>
+      <div className="flex flex-col gap-2">
+        <h4 className="flex items-center gap-2 text-sm font-medium">
+          <Cpu className="size-4 text-muted-foreground" aria-hidden="true" />
+          Application
+        </h4>
+        {evidence == null ? (
+          <p className="text-muted-foreground">TLS evidence unavailable.</p>
+        ) : (
+          <Details>
+            <Detail label="App id" className="font-mono">
+              {evidence.app_id}
+            </Detail>
+            {evidence.compose_hash !== undefined && (
+              <Detail label="Compose hash" className="font-mono" title={evidence.compose_hash}>
+                {short(evidence.compose_hash)}
               </Detail>
-              {evidence.compose_hash !== undefined && (
-                <Detail label="Compose hash" className="font-mono" title={evidence.compose_hash}>
-                  {short(evidence.compose_hash)}
-                </Detail>
-              )}
-            </Details>
-          )}
-          <p className="text-muted-foreground">From the TLS certificate evidence quote (at issuance).</p>
-        </div>
-        <div className="flex flex-col gap-2">
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <Wallet className="size-4 text-muted-foreground" aria-hidden="true" />
-            Non-custodial
-          </h3>
-          <p>
-            Every address pays only the merchant's treasury, fixed in the address. Phala Pay holds no
-            funds and sends no transactions: the merchant sweeps and refunds itself.
-          </p>
-          <p>
-            <a className={LINK} href={trust?.verify_docs} target="_blank" rel="noreferrer">
-              Attestation guide
-            </a>{" "}
-            ·{" "}
-            <a className={LINK} href={trust?.dstack_verifier} target="_blank" rel="noreferrer">
-              dstack verifier
-            </a>
-          </p>
-          <p className="text-muted-foreground">
-            Network: {account?.network.name ?? "Sepolia"} {account?.network.testnet === false ? "" : "testnet"}
-          </p>
-        </div>
-      </CardContent>
-    </Card>
+            )}
+          </Details>
+        )}
+        <p className="text-muted-foreground">From the TLS certificate evidence quote (at issuance).</p>
+      </div>
+      <div className="flex flex-col gap-2">
+        <h4 className="flex items-center gap-2 text-sm font-medium">
+          <Wallet className="size-4 text-muted-foreground" aria-hidden="true" />
+          Non-custodial
+        </h4>
+        <p>
+          Every address pays only the merchant's treasury, fixed in the address. Phala Pay holds no
+          funds and sends no transactions: the merchant sweeps and refunds itself.
+        </p>
+        <p>
+          <a className={LINK} href={trust?.verify_docs} target="_blank" rel="noreferrer">
+            Attestation guide
+          </a>{" "}
+          ·{" "}
+          <a className={LINK} href={trust?.dstack_verifier} target="_blank" rel="noreferrer">
+            dstack verifier
+          </a>
+        </p>
+        <p className="text-muted-foreground">
+          Network: {account?.network.name ?? "Sepolia"} {account?.network.testnet === false ? "" : "testnet"}
+        </p>
+      </div>
+    </div>
   );
 }

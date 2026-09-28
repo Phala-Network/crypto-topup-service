@@ -14,7 +14,7 @@ import type {
   Timeline,
   WebhookEvent,
 } from "./api.js";
-import { Detail, Details, ExplorerLink, Subsection } from "./common.js";
+import { Detail, Details, Disclosure, ExplorerLink, Subsection } from "./common.js";
 import { dollars, duration, short, signedDollars, time, tokens } from "./format.js";
 import { Refunds } from "./Refunds.js";
 
@@ -65,6 +65,8 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
   },
 };
 
+// A quote's steps, shown before there is a payment to follow.
+const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "webhook_received", "final", "swept"];
 
 export function BehindTheScenes({
   timeline,
@@ -86,7 +88,7 @@ export function BehindTheScenes({
     >
       <CardHeader>
         <CardTitle>
-          <h2 id="scenes-title">Behind the scenes</h2>
+          <h3 id="scenes-title">Behind the scenes</h3>
         </CardTitle>
         {loading !== null && (
           <CardAction>
@@ -98,10 +100,17 @@ export function BehindTheScenes({
       </CardHeader>
       <CardContent className="@container">
         {loading === null ? (
-          <p className="max-w-prose text-muted-foreground">
-            Create a quote, or pay to your deposit address, to follow the payment through the chain,
-            the service, and this console's webhook handler, with real data only.
-          </p>
+          <div className="flex flex-col gap-5">
+            <p className="max-w-prose text-muted-foreground">
+              Create a quote, or pay to your deposit address, to follow the payment through the chain,
+              the service, and this console's webhook handler, with real data only.
+            </p>
+            <ol className="hidden max-w-2xl flex-col lg:flex" aria-label="The steps of a payment">
+              {PREVIEW.map((key) => (
+                <TimelineStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} account={account} />
+              ))}
+            </ol>
+          </div>
         ) : timeline === null ? (
           <p className="text-muted-foreground">Loading {short(loading)}…</p>
         ) : (
@@ -113,10 +122,10 @@ export function BehindTheScenes({
             </ol>
             <div className="flex min-w-0 flex-col gap-4">
               {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
+              <EventsLog events={timeline.events} />
               {timeline.deposit !== null && account !== null && (
                 <Refunds timeline={timeline} deposit={timeline.deposit} account={account} onChanged={onChanged} />
               )}
-              <EventsLog events={timeline.events} />
               <DeveloperView exchanges={timeline.api} />
             </div>
           </div>
@@ -269,16 +278,12 @@ function EventsLog({ events }: { events: WebhookEvent[] }) {
 
 export function DeveloperView({ exchanges, title }: { exchanges: ApiExchange[]; title?: string }) {
   return (
-    <details className="group/dev border-t pt-4 text-xs @4xl:first:border-t-0 @4xl:first:pt-0">
-      <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-medium [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-4 shrink-0 transition-transform group-open/dev:rotate-90" aria-hidden="true" />
-        {title ?? "Developer view: the product's API requests"} ({exchanges.length})
-      </summary>
-      <p className="mt-2 text-muted-foreground">
+    <Disclosure summary={`${title ?? "Developer view: the product's API requests"} (${exchanges.length})`}>
+      <p className="text-muted-foreground">
         Sent from the product's server with its restricted API key; the browser never holds it.
       </p>
       {exchanges.map((exchange, index) => (
-        <details key={`${exchange.method}-${exchange.url}-${index}`} className="group/exchange mt-2">
+        <details key={`${exchange.method}-${exchange.url}-${index}`} className="group/exchange">
           <summary className="flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden">
             <ChevronRight
               className="size-3.5 shrink-0 transition-transform group-open/exchange:rotate-90"
@@ -295,7 +300,7 @@ export function DeveloperView({ exchanges, title }: { exchanges: ApiExchange[]; 
           </pre>
         </details>
       ))}
-    </details>
+    </Disclosure>
   );
 }
 

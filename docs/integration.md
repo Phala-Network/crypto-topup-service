@@ -137,7 +137,7 @@ A Node backend verifies the same way with `constructEvent(rawBody, headers, WEBH
 [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) is this backend in full, with an
 idempotent, snapshot-driven SQLite ledger (`apply_deposit`) and tests of partial refunds,
 reversals, and out-of-order delivery; the staging reference product serves the Phala Pay demo, a
-cloud console's billing page, at `/demo/`.
+cloud console's billing page, on [pay.phala.com](https://pay.phala.com/).
 
 ## 1. Quotes
 
