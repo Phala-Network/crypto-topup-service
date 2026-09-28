@@ -720,18 +720,14 @@ def _quote_view(quote: Quote) -> dict[str, Any]:
 
 
 def _attestation_view(evidence: AttestationResponse) -> dict[str, Any]:
-    operators = evidence.operators if isinstance(evidence.operators, list) else []
     return {
-        # TopupClient.attestation raises unless report_data binds the fresh nonce, the settlement
-        # key, and every operator.
+        # TopupClient.attestation raises unless report_data binds the fresh nonce and the
+        # settlement key.
         "binding_verified": True,
         "keyid": evidence.keyid,
         "settlement_pubkey": evidence.settlement_pubkey,
         "report_data": evidence.report_data,
         "quote_bytes": len(evidence.quote) // 2,
-        "operators": [
-            {"chain_id": operator.chain_id, "address": operator.address} for operator in operators
-        ],
     }
 
 

@@ -80,8 +80,8 @@ class Integration:
 def pin_settlement_key(client: TopupClient) -> Ed25519PublicKey:
     """Returns the settlement key from attestation evidence bound to a fresh nonce.
 
-    `TopupClient.attestation` checks that the report data binds the nonce, the key, and the
-    flusher operators. In production, also verify the TDX quote with the dstack verifier
+    `TopupClient.attestation` checks that the report data binds the nonce and the key. In
+    production, also verify the TDX quote with the dstack verifier
     (deploy/dstack-verifier.sh), then pin `(keyid, public key)` in configuration.
     """
     evidence = client.attestation(secrets.token_bytes(32))

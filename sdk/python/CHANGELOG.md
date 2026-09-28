@@ -8,6 +8,13 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Changed
 
+- **Breaking**: the service sends no transactions, so attestation binds no flusher operators.
+  `AttestationResponse` drops `operators` (and `OperatorIdentity` is gone), `report_data` is
+  `sha256(nonce ‖ settlement_pubkey)`, and `attestation_report_data(nonce, settlement_pubkey)`
+  takes no operators. The admin daily report drops `flush_planning` (`FlushPlanningReport`), and
+  its `unflushed_balance_atomic` is what forwarders still hold: deposits not reversed minus
+  finalized `Flushed` amounts, whoever flushed.
+
 - **Breaking**: products are gone; the service's tenant is an account, `acct_…`. Sign with the key
   id the operator issued with your account, `{acct_…}/v1`: the client takes the account id from
   it as the first input of every quote's address salt, as it took the product slug. The

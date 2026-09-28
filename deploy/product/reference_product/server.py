@@ -294,8 +294,8 @@ def _json_object(body: bytes) -> dict[str, Any]:
 def pin_settlement_key(config: ProductConfig, *, wait_s: float = 0) -> Ed25519PublicKey:
     """Returns the settlement key from attestation evidence bound to a fresh nonce.
 
-    `verify_attestation_binding` checks that the report data binds the nonce, the key, and the
-    flusher operators. Production integrators must also verify the TDX quote with the dstack
+    `verify_attestation_binding` checks that the report data binds the nonce and the key.
+    Production integrators must also verify the TDX quote with the dstack
     verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin `(keyid, public key)` in
     configuration; a configured `settlement_public_key` skips the fetch. While the service is
     unreachable this retries for up to `wait_s` seconds.

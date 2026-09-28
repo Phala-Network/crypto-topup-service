@@ -12,7 +12,6 @@ from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
-    from ..models.flush_planning_report import FlushPlanningReport
     from ..models.route_daily_report_age_in_state_max_seconds import (
         RouteDailyReportAgeInStateMaxSeconds,
     )
@@ -42,8 +41,9 @@ class RouteDailyReport:
         rejected_holds_atomic (str): Rejected token amount still held after confirmed refunds.
         route (str): Stable route name.
         treasury_balance_note (str): Balance source or explicit reason the treasury balance is unavailable.
-        unflushed_balance_atomic (str): Sum of deposits not linked to a confirmed flush.
-        flush_planning (FlushPlanningReport | None | Unset):
+        unflushed_balance_atomic (str): Deposits not reversed minus finalized `Flushed` amounts: what the route's
+            forwarders
+            still hold for their merchants to sweep.
         treasury_balance_atomic (None | str | Unset): Latest treasury token balance in atomic units, when the chain read
             succeeds.
     """
@@ -60,12 +60,10 @@ class RouteDailyReport:
     route: str
     treasury_balance_note: str
     unflushed_balance_atomic: str
-    flush_planning: FlushPlanningReport | None | Unset = UNSET
     treasury_balance_atomic: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.flush_planning_report import FlushPlanningReport  # noqa: PLC0415
         from ..models.route_daily_report_age_in_state_max_seconds import (
             RouteDailyReportAgeInStateMaxSeconds,
         )  # noqa: PLC0415
@@ -96,14 +94,6 @@ class RouteDailyReport:
 
         unflushed_balance_atomic = self.unflushed_balance_atomic
 
-        flush_planning: dict[str, Any] | None | Unset
-        if isinstance(self.flush_planning, Unset):
-            flush_planning = UNSET
-        elif isinstance(self.flush_planning, FlushPlanningReport):
-            flush_planning = self.flush_planning.to_dict()
-        else:
-            flush_planning = self.flush_planning
-
         treasury_balance_atomic: None | str | Unset
         if isinstance(self.treasury_balance_atomic, Unset):
             treasury_balance_atomic = UNSET
@@ -128,8 +118,6 @@ class RouteDailyReport:
                 "unflushed_balance_atomic": unflushed_balance_atomic,
             }
         )
-        if flush_planning is not UNSET:
-            field_dict["flush_planning"] = flush_planning
         if treasury_balance_atomic is not UNSET:
             field_dict["treasury_balance_atomic"] = treasury_balance_atomic
 
@@ -137,7 +125,6 @@ class RouteDailyReport:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.flush_planning_report import FlushPlanningReport  # noqa: PLC0415
         from ..models.route_daily_report_age_in_state_max_seconds import (
             RouteDailyReportAgeInStateMaxSeconds,
         )  # noqa: PLC0415
@@ -171,23 +158,6 @@ class RouteDailyReport:
 
         unflushed_balance_atomic = d.pop("unflushed_balance_atomic")
 
-        def _parse_flush_planning(data: object) -> FlushPlanningReport | None | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                flush_planning_type_0 = FlushPlanningReport.from_dict(data)
-
-                return flush_planning_type_0
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            return cast(FlushPlanningReport | None | Unset, data)
-
-        flush_planning = _parse_flush_planning(d.pop("flush_planning", UNSET))
-
         def _parse_treasury_balance_atomic(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -212,7 +182,6 @@ class RouteDailyReport:
             route=route,
             treasury_balance_note=treasury_balance_note,
             unflushed_balance_atomic=unflushed_balance_atomic,
-            flush_planning=flush_planning,
             treasury_balance_atomic=treasury_balance_atomic,
         )
 

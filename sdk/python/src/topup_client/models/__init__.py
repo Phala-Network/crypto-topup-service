@@ -20,9 +20,7 @@ from .error_detail import ErrorDetail
 from .error_response import ErrorResponse
 from .error_type import ErrorType
 from .failed_check_report import FailedCheckReport
-from .flush_planning_report import FlushPlanningReport
 from .nudge_response import NudgeResponse
-from .operator_identity import OperatorIdentity
 from .outbox_replay_response import OutboxReplayResponse
 from .pause_request import PauseRequest
 from .pause_response import PauseResponse
@@ -62,9 +60,7 @@ __all__ = (
     "ErrorResponse",
     "ErrorType",
     "FailedCheckReport",
-    "FlushPlanningReport",
     "NudgeResponse",
-    "OperatorIdentity",
     "OutboxReplayResponse",
     "PauseRequest",
     "PauseResponse",

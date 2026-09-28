@@ -78,7 +78,6 @@ export interface Trust {
     settlement_pubkey?: string;
     report_data?: string;
     quote_bytes?: number;
-    operators?: { chain_id: number; address: string }[];
   };
   tls_evidence: { app_id: string; compose_hash?: string; os_image_hash?: string; url: string } | null;
   verify_docs: string;
