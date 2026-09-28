@@ -28,9 +28,14 @@ def _deposit(**overrides: Any) -> dict[str, Any]:
     deposit: dict[str, Any] = {
         "id": DEPOSIT,
         "object": "deposit",
-        "account_id": "team-42",
+        "livemode": False,
+        "client_reference_id": "team-42",
         "quote": "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+        "deposit_address": None,
         "status": "credited",
+        "final": False,
+        "swept": False,
+        "metadata": {},
         "rejection_reason": None,
         "chain_id": 1,
         "asset": "pha",
@@ -76,7 +81,7 @@ def test_credited_event_id_is_derived_from_the_deposit_id() -> None:
 def test_credited_event_parses_into_a_typed_credit() -> None:
     credit = CreditedDeposit.from_event(_event(_deposit()))
     assert credit.deposit_id == DEPOSIT
-    assert credit.account_id == "team-42"
+    assert credit.client_reference_id == "team-42"
     assert credit.amount == 1234
     assert credit.price_source == "quote"
     assert credit.quote == "qt_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10"
@@ -85,7 +90,7 @@ def test_credited_event_parses_into_a_typed_credit() -> None:
 
 def test_spot_and_swept_credits_parse() -> None:
     credit = CreditedDeposit.from_event(
-        _event(_deposit(price_source="spot", quote=None, status="swept"))
+        _event(_deposit(price_source="spot", quote=None, swept=True))
     )
     assert credit.price_source == "spot"
     assert credit.quote is None
@@ -95,8 +100,9 @@ def test_spot_and_swept_credits_parse() -> None:
     "event",
     [
         _event(_deposit(), event_type="deposit.rejected"),
-        _event({key: value for key, value in _deposit().items() if key != "account_id"}),
+        _event({key: value for key, value in _deposit().items() if key != "client_reference_id"}),
         _event(_deposit(status="rejected")),
+        _event(_deposit(status="swept")),
         _event(_deposit(object="quote")),
         _event(_deposit(price_source="lock")),
         _event(_deposit(amount="1234")),
@@ -152,7 +158,7 @@ def test_send_test_event_passes_a_verifying_deduplicating_receiver() -> None:
         "https://product.example/webhooks",
         key,
         account=ACCOUNT,
-        account_id="team-42",
+        client_reference_id="team-42",
         amount=250,
         transport=_receiver(key, credits),
     )
@@ -167,7 +173,7 @@ def test_send_test_event_fails_a_receiver_that_skips_verification() -> None:
         "https://product.example/webhooks",
         Ed25519PrivateKey.generate(),
         account=ACCOUNT,
-        account_id="team-42",
+        client_reference_id="team-42",
         amount=250,
         transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
     )

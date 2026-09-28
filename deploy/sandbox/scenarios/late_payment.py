@@ -14,7 +14,7 @@ def run(ctx: Context) -> None:
     lock_ref, lock = ctx.lock(team, amount_minor=2500)
     expired = ctx.event("quote.expired", lambda quote: quote["id"] == lock_ref)
     check(
-        expired["account_id"] == team and expired["amount"] == lock.amount,
+        expired["client_reference_id"] == team and expired["amount"] == lock.amount,
         "expiry event names another quote",
     )
     check(expired["status"] == "expired", f"expired quote is {expired['status']}")

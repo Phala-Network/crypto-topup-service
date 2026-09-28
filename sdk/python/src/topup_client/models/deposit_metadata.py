@@ -15,8 +15,8 @@ T = TypeVar("T", bound="DepositMetadata")
 @_attrs_define
 class DepositMetadata:
     """Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the
-    quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
-    Always sent; optional in the schema like the quote's.
+    quote's or the deposit address's when the deposit is recorded, independent of it
+    afterwards; `{}` when none.
 
     """
 

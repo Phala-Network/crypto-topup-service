@@ -10,10 +10,12 @@ from .addresses import (
     deposit_id,
     forwarder_address,
     lock_salt,
+    quote_address,
 )
 from .attestation import attestation_report_data, verify_attestation_binding
 from .client import TopupClient
 from .errors import AddressMismatchError, ApiError, AttestationError, SignatureError, TopupError
+from .export import export_account
 from .fulfillment import (
     CREDITED_EVENT,
     CreditedDeposit,
@@ -21,6 +23,14 @@ from .fulfillment import (
     credited_event_id,
 )
 from .signing import RequestSigner, SigningAuth, VerifiedRequest, load_public_key, verify_request
+from .sweeps import (
+    batch_checksum,
+    flush_transaction,
+    flush_transactions,
+    safe_batch,
+    write_safe_batch,
+)
+from .treasury import sign_treasury_challenge
 from .webhooks import WebhookEvent, sign_webhook, verify_webhook, verify_webhook_signature
 
 __all__ = [
@@ -38,16 +48,24 @@ __all__ = [
     "VerifiedRequest",
     "WebhookEvent",
     "attestation_report_data",
+    "batch_checksum",
     "credited_event_id",
     "deposit_address",
     "deposit_address_salt",
     "deposit_id",
+    "export_account",
+    "flush_transaction",
+    "flush_transactions",
     "forwarder_address",
     "load_public_key",
     "lock_salt",
+    "quote_address",
+    "safe_batch",
+    "sign_treasury_challenge",
     "sign_webhook",
     "verify_attestation_binding",
     "verify_request",
     "verify_webhook",
     "verify_webhook_signature",
+    "write_safe_batch",
 ]

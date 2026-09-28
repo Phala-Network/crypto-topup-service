@@ -77,9 +77,14 @@ def _credited(
                 "object": {
                     "id": deposit,
                     "object": "deposit",
-                    "account_id": team,
+                    "livemode": livemode,
+                    "client_reference_id": team,
                     "quote": "qt_" + "0c" * 16,
+                    "deposit_address": None,
                     "status": "credited",
+                    "final": False,
+                    "swept": False,
+                    "metadata": {},
                     "rejection_reason": None,
                     "chain_id": CONFIG.chain_id,
                     "asset": "pha",
@@ -249,8 +254,8 @@ def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     requested: list[tuple[str, str, int]] = []
 
     class Service:
-        def list_deposits(self, *, account_id: str) -> list[SimpleNamespace]:
-            return [SimpleNamespace(id=own)] if account_id == TEAM else []
+        def list_deposits(self, *, client_reference_id: str) -> list[SimpleNamespace]:
+            return [SimpleNamespace(id=own)] if client_reference_id == TEAM else []
 
         def create_refund(self, deposit: str, to: str, amount: int) -> SimpleNamespace:
             requested.append((deposit, to, amount))

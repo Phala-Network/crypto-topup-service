@@ -2,17 +2,19 @@
 fulfillment.
 
 - `POST /topups` `{"amount": 2500}` creates a quote for the signed-in team and returns its
-  `client_secret`, which the browser passes to `<Checkout clientSecret apiBase />`.
+  `client_secret` and the `expected_address` the SDK recomputed, which the browser passes to
+  `<Checkout clientSecret apiBase expectedAddress />`.
 - `POST /webhooks/phala-pay` verifies each delivery with `pay.webhooks.construct_event`, which
   fails closed unless it is signed by your account's key in the key's mode and names your account
-  and mode, and, for `deposit.credited`, credits `amount` cents to `account_id` once per deposit
-  id, in the same transaction that records the credit, before answering `200`.
+  and mode, and, for `deposit.credited`, credits `amount` cents to `client_reference_id` once per
+  deposit id, in the same transaction that records the credit, before answering `200`.
 
 Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
     PHALA_PAY_API_BASE=https://pay.example.com \\
     PHALA_PAY_SECRET_KEY=ppay_sk_test_... \\
     PHALA_PAY_ACCOUNT=acct_... \\
+    PHALA_PAY_FORWARDER=<factory>,<implementation> of the attested deployment \\
     PHALA_PAY_WEBHOOK_KEYS=<your account's webhook public key in this mode, pinned from \\
         GET /v1/attestation; comma-separated while a rotation overlaps> \\
     uvicorn --factory fastapi_app:app_from_env
@@ -54,6 +56,7 @@ class TopupRequest(BaseModel):
 class TopupResponse(BaseModel):
     order_id: str
     client_secret: str
+    expected_address: str
 
 
 def current_team(x_team_id: Annotated[str, Header(pattern=r"^[A-Za-z0-9._-]{1,64}$")]) -> str:
@@ -96,10 +99,10 @@ def create_app(
                 (order_id, team, body.amount),
             )
         try:
-            # The order id as the Idempotency-Key: repeating the call returns the same quote
-            # with a fresh client secret, for example to resume the checkout after a reload.
+            # The order id as the Idempotency-Key: repeating the call within 24 hours replays the
+            # same quote and client secret, for example to resume the checkout after a reload.
             quote = pay.quotes.create(
-                account_id=team,
+                client_reference_id=team,
                 amount=body.amount,
                 chain_id=chain_id,
                 asset=asset,
@@ -115,7 +118,10 @@ def create_app(
             raise HTTPException(502, detail={"code": "unexpected_response"})
         with transaction() as db:
             db.execute("UPDATE orders SET quote = ? WHERE id = ?", (quote.id, order_id))
-        return TopupResponse(order_id=order_id, client_secret=quote.client_secret)
+        # `quote.address` was recomputed from the pinned forwarder; the page shows only it.
+        return TopupResponse(
+            order_id=order_id, client_secret=quote.client_secret, expected_address=quote.address
+        )
 
     @app.post("/webhooks/phala-pay")
     async def webhook(request: Request) -> dict[str, bool]:
@@ -135,13 +141,13 @@ def create_app(
             with transaction() as db:
                 inserted = db.execute(
                     "INSERT OR IGNORE INTO credits (deposit, team, amount) VALUES (?, ?, ?)",
-                    (deposit.id, deposit.account_id, deposit.amount),
+                    (deposit.id, deposit.client_reference_id, deposit.amount),
                 ).rowcount
                 if inserted:
                     db.execute(
                         "INSERT INTO balances (team, amount) VALUES (?, ?) "
                         "ON CONFLICT (team) DO UPDATE SET amount = amount + excluded.amount",
-                        (deposit.account_id, deposit.amount),
+                        (deposit.client_reference_id, deposit.amount),
                     )
             LOG.info("deposit %s credited: %s", deposit.id, bool(inserted))
         return {"received": True}
@@ -151,7 +157,13 @@ def create_app(
 
 def app_from_env() -> FastAPI:
     secret_key = os.environ["PHALA_PAY_SECRET_KEY"]
-    pay = PhalaPay(os.environ["PHALA_PAY_API_BASE"], secret_key)
+    factory, implementation = os.environ["PHALA_PAY_FORWARDER"].split(",")
+    pay = PhalaPay(
+        os.environ["PHALA_PAY_API_BASE"],
+        secret_key,
+        forwarder=(factory.strip(), implementation.strip()),
+        account=os.environ["PHALA_PAY_ACCOUNT"],
+    )
     return create_app(
         pay,
         [key.strip() for key in os.environ["PHALA_PAY_WEBHOOK_KEYS"].split(",") if key.strip()],

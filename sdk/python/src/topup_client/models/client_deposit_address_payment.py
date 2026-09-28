@@ -12,47 +12,54 @@ from ..types import UNSET, Unset
 from typing import cast
 
 
-T = TypeVar("T", bound="QuotePayment")
+T = TypeVar("T", bound="ClientDepositAddressPayment")
 
 
 @_attrs_define
-class QuotePayment:
-    """A payment observed at a quote's address. Display only: while `status` is `seen` it is not
-    final, may still disappear in a reorg, and nothing has been credited.
+class ClientDepositAddressPayment:
+    """A payment to a deposit address, as its public view shows it.
 
-        Attributes:
-            amount_atomic (str): Token amount in base units, as a decimal string.
-            deposit (str): `dep_` id the deposit has, or will have once recorded.
-            matches_quote (bool): Whether the payment is the quote's asset, in time, and within tolerance, so it will be
-                credited at the quoted price; otherwise it is credited at spot once final.
-            status (str): `seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the
-                route's confirmation; it is final once its block is). New values may be added.
-            tx_hash (str): Canonical transaction hash.
-            confirmations (int | None | Unset): Blocks on top of and including the transfer's block at the last head scan;
-                `seen` only.
-            estimated_final_at (int | None | Unset): Estimated finality time, Unix seconds: block time plus 15 minutes;
-                `seen` only.
+    Attributes:
+        amount_atomic (str): Token amount in base units, as a decimal string.
+        chain_id (int): EVM chain identifier.
+        created (int): When the payment was first seen or recorded, Unix seconds.
+        status (str): `seen` (in a block, below the route's confirmation, and may still disappear);
+            `confirming` (at the confirmation, being valued and screened); `credited`; `rejected`
+            (not credited; the payer should contact the merchant's support); or `reversed` (its
+            transaction left the chain before finality: the payment did not happen).
+        tx_hash (str): Transaction hash.
+        asset (None | str | Unset): Asset code; `null` for a token without a route.
+        confirmations (int | None | Unset): While `seen`: blocks on top of and including the payment's block; otherwise
+            `null`.
+        decimals (int | None | Unset): The token's decimals, to display `amount_atomic`; `null` with `asset`.
     """
 
     amount_atomic: str
-    deposit: str
-    matches_quote: bool
+    chain_id: int
+    created: int
     status: str
     tx_hash: str
+    asset: None | str | Unset = UNSET
     confirmations: int | None | Unset = UNSET
-    estimated_final_at: int | None | Unset = UNSET
+    decimals: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         amount_atomic = self.amount_atomic
 
-        deposit = self.deposit
+        chain_id = self.chain_id
 
-        matches_quote = self.matches_quote
+        created = self.created
 
         status = self.status
 
         tx_hash = self.tx_hash
+
+        asset: None | str | Unset
+        if isinstance(self.asset, Unset):
+            asset = UNSET
+        else:
+            asset = self.asset
 
         confirmations: int | None | Unset
         if isinstance(self.confirmations, Unset):
@@ -60,27 +67,29 @@ class QuotePayment:
         else:
             confirmations = self.confirmations
 
-        estimated_final_at: int | None | Unset
-        if isinstance(self.estimated_final_at, Unset):
-            estimated_final_at = UNSET
+        decimals: int | None | Unset
+        if isinstance(self.decimals, Unset):
+            decimals = UNSET
         else:
-            estimated_final_at = self.estimated_final_at
+            decimals = self.decimals
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
                 "amount_atomic": amount_atomic,
-                "deposit": deposit,
-                "matches_quote": matches_quote,
+                "chain_id": chain_id,
+                "created": created,
                 "status": status,
                 "tx_hash": tx_hash,
             }
         )
+        if asset is not UNSET:
+            field_dict["asset"] = asset
         if confirmations is not UNSET:
             field_dict["confirmations"] = confirmations
-        if estimated_final_at is not UNSET:
-            field_dict["estimated_final_at"] = estimated_final_at
+        if decimals is not UNSET:
+            field_dict["decimals"] = decimals
 
         return field_dict
 
@@ -89,13 +98,22 @@ class QuotePayment:
         d = dict(src_dict)
         amount_atomic = d.pop("amount_atomic")
 
-        deposit = d.pop("deposit")
+        chain_id = d.pop("chain_id")
 
-        matches_quote = d.pop("matches_quote")
+        created = d.pop("created")
 
         status = d.pop("status")
 
         tx_hash = d.pop("tx_hash")
+
+        def _parse_asset(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        asset = _parse_asset(d.pop("asset", UNSET))
 
         def _parse_confirmations(data: object) -> int | None | Unset:
             if data is None:
@@ -106,27 +124,28 @@ class QuotePayment:
 
         confirmations = _parse_confirmations(d.pop("confirmations", UNSET))
 
-        def _parse_estimated_final_at(data: object) -> int | None | Unset:
+        def _parse_decimals(data: object) -> int | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
             return cast(int | None | Unset, data)
 
-        estimated_final_at = _parse_estimated_final_at(d.pop("estimated_final_at", UNSET))
+        decimals = _parse_decimals(d.pop("decimals", UNSET))
 
-        quote_payment = cls(
+        client_deposit_address_payment = cls(
             amount_atomic=amount_atomic,
-            deposit=deposit,
-            matches_quote=matches_quote,
+            chain_id=chain_id,
+            created=created,
             status=status,
             tx_hash=tx_hash,
+            asset=asset,
             confirmations=confirmations,
-            estimated_final_at=estimated_final_at,
+            decimals=decimals,
         )
 
-        quote_payment.additional_properties = d
-        return quote_payment
+        client_deposit_address_payment.additional_properties = d
+        return client_deposit_address_payment
 
     @property
     def additional_keys(self) -> list[str]:

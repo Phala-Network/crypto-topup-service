@@ -12,6 +12,7 @@ from topup_sdk.addresses import (
     deposit_id,
     forwarder_address,
     lock_salt,
+    quote_address,
     same_address,
     to_checksum_address,
 )
@@ -32,6 +33,19 @@ def test_lock_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]
         VECTORS["factory"], VECTORS["implementation"], vector["treasury"], salt
     )
     assert address == vector["predicted_address"]
+    # The vectors' names predate the API's: product_slug is the account, external_id the
+    # quote's client_reference_id, and lock_ref its id.
+    assert (
+        quote_address(
+            VECTORS["factory"],
+            VECTORS["implementation"],
+            vector["treasury"],
+            account=vector["product_slug"],
+            client_reference_id=vector["external_id"],
+            quote_id=vector["lock_ref"],
+        )
+        == vector["predicted_address"]
+    )
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ synthetic test-mode `deposit.credited` of `--account` with a test seed the recei
 instance pins in place of the account's webhook key, delivers it, delivers it again, delivers it
 once more with a foreign signature, and once as another account's event signed with the pinned
 key. It passes when the first two answers are `2xx` and the others `4xx`; the product then checks
-its ledger holds exactly one credit of `--amount` cents for `--account-id`.
+its ledger holds exactly one credit of `--amount` cents for `--client-reference-id`.
 """
 
 from __future__ import annotations
@@ -51,7 +51,9 @@ def main(argv: list[str] | None = None) -> int:
         help="test seed the receiver pins as its webhook key",
     )
     test.add_argument("--account", required=True, help="the receiver's account, acct_…")
-    test.add_argument("--account-id", required=True, help="a test customer of the receiver")
+    test.add_argument(
+        "--client-reference-id", required=True, help="a test customer of the receiver"
+    )
     test.add_argument("--amount", type=int, default=100, help="credit in cents")
     args = parser.parse_args(argv)
 
@@ -61,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             args.url,
             Ed25519PrivateKey.from_private_bytes(seed),
             account=args.account,
-            account_id=args.account_id,
+            client_reference_id=args.client_reference_id,
             amount=args.amount,
         )
         print(json.dumps(report, indent=2))
@@ -87,7 +89,7 @@ def send_test_event(
     key: Ed25519PrivateKey,
     *,
     account: str,
-    account_id: str,
+    client_reference_id: str,
     amount: int,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
@@ -109,9 +111,11 @@ def send_test_event(
                 "id": deposit,
                 "object": "deposit",
                 "livemode": False,
-                "account_id": account_id,
+                "client_reference_id": client_reference_id,
                 "quote": None,
+                "deposit_address": None,
                 "status": "credited",
+                "final": False,
                 "rejection_reason": None,
                 "chain_id": 31337,
                 "asset": "test",
@@ -130,6 +134,7 @@ def send_test_event(
                 "amount_refunded_atomic": "0",
                 "refunded": False,
                 "created": now,
+                "metadata": {},
             }
         },
     }
@@ -156,7 +161,7 @@ def send_test_event(
         "event_id": event_id,
         "results": results,
         "passed": all(result["ok"] for result in results),
-        "then_check": f"exactly one credit of {amount} cents for {account_id}",
+        "then_check": f"exactly one credit of {amount} cents for {client_reference_id}",
     }
 
 

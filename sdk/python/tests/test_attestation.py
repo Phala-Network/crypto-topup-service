@@ -35,7 +35,7 @@ def _response(**overrides: Any) -> dict[str, Any]:
             {"version": 1, "public_key": PREVIOUS.hex(), "expires_at": 1_790_000_000},
         ],
         "report_data": REPORT_DATA_LIVE_ROTATING,
-        "quote": "",
+        "tdx_quote": "",
     }
     body.update(overrides)
     return body
@@ -121,6 +121,7 @@ def test_roll_webhook_key_posts_the_overlap_once_with_an_idempotency_key() -> No
         "name": "Acme",
         "charges_enabled": False,
         "paused_scopes": [],
+        "confirmation_policies": [],
         "webhook_keys": [
             {"version": 2, "expires_at": None},
             {"version": 1, "expires_at": 1_790_003_600},
@@ -137,7 +138,7 @@ def test_roll_webhook_key_posts_the_overlap_once_with_an_idempotency_key() -> No
         "http://service.test:8080", api_key, transport=httpx.MockTransport(respond)
     ) as client:
         rolled = client.roll_webhook_key(expires_in=3600)
-    assert [key.version for key in rolled.webhook_keys] == [2, 1]  # type: ignore[union-attr]
+    assert [key.version for key in rolled.webhook_keys] == [2, 1]
     (request,) = seen
     assert request.url.path == "/v1/account/webhook_keys/roll"
     assert json.loads(request.content) == {"expires_in": 3600}

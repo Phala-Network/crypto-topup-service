@@ -23,7 +23,8 @@ class ApiError(TopupError):
     """The service answered with a documented error object or an unexpected status.
 
     `error_type` is `invalid_request_error`, `idempotency_error`, or `api_error`; `param` names the
-    request parameter the error is about, when there is one.
+    request parameter the error is about, when there is one; `request_id` is the response's
+    `Request-Id`, to quote to support.
     """
 
     def __init__(
@@ -34,10 +35,13 @@ class ApiError(TopupError):
         *,
         error_type: str | None = None,
         param: str | None = None,
+        request_id: str | None = None,
     ) -> None:
-        super().__init__(f"{status_code} {code}: {message}")
+        suffix = f" (request {request_id})" if request_id else ""
+        super().__init__(f"{status_code} {code}: {message}{suffix}")
         self.status_code = status_code
         self.code = code
         self.message = message
         self.error_type = error_type
         self.param = param
+        self.request_id = request_id

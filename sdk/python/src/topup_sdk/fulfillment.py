@@ -1,7 +1,7 @@
 """Typed `deposit.credited` events for product fulfillment.
 
-`deposit.credited` is the fulfillment event: the deposit is final, priced, and screened, and the
-service owes the product `amount` cents for `account_id`. A product credits each deposit once,
+`deposit.credited` is the fulfillment event: the deposit is priced and screened, and the service
+owes the product `amount` cents for `client_reference_id`. A product credits each deposit once,
 keyed by `fulfillment_key`, the deposit's `dep_` id, under a unique index, and answers `2xx`
 after that commit:
 
@@ -51,7 +51,7 @@ class CreditedDeposit:
 
     event_id: str
     deposit_id: str
-    account_id: str
+    client_reference_id: str
     amount: int
     currency: str
     price_source: Literal["quote", "spot"]
@@ -79,9 +79,8 @@ class CreditedDeposit:
         if deposit is None or deposit.get("object") != "deposit":
             raise FulfillmentError(f"{CREDITED_EVENT} carries no deposit object")
         try:
-            # A deposit can be swept before its event is first delivered.
-            if deposit.get("status") not in ("credited", "swept"):
-                raise FulfillmentError("status must be credited or swept")
+            if deposit.get("status") != "credited":
+                raise FulfillmentError("status must be credited")
             price_source = _string(deposit, "price_source")
             if price_source not in ("quote", "spot"):
                 raise FulfillmentError("price_source must be quote or spot")
@@ -94,7 +93,7 @@ class CreditedDeposit:
             return cls(
                 event_id=event.id,
                 deposit_id=deposit_id,
-                account_id=_string(deposit, "account_id"),
+                client_reference_id=_string(deposit, "client_reference_id"),
                 amount=_integer(deposit, "amount"),
                 currency=_string(deposit, "currency"),
                 price_source="quote" if price_source == "quote" else "spot",

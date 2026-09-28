@@ -13,7 +13,7 @@ from __future__ import annotations
 import httpx
 
 from harness import TOKEN_UNIT, Context, check
-from topup_client.models import QuotePayment
+from topup_client.models import Payment
 
 SEEN_TIMEOUT_S = 60.0
 
@@ -24,7 +24,7 @@ def run(ctx: Context) -> None:
     tx_hash = ctx.pay(lock.address, int(lock.amount_atomic))
     payment = seen_lock_payment(ctx, team, lock_ref)
     check(payment.tx_hash == tx_hash, "seen payment is not the sent transaction")
-    check(payment.matches_quote, "the exact, in-time payment does not match its quote")
+    check(payment.matches_quote is True, "the exact, in-time payment does not match its quote")
     check_client_view(ctx, lock_ref, str(lock.client_secret))
     deposit, credited = ctx.credited(team, lock.address, lock)
     check(credited["price_source"] == "quote", "lock payment was not valued at the lock price")
@@ -42,10 +42,10 @@ def run(ctx: Context) -> None:
     check(second.quote == lock_ref, "the second deposit does not name its quote")
 
 
-def seen_lock_payment(ctx: Context, team: str, lock_ref: str) -> QuotePayment:
+def seen_lock_payment(ctx: Context, team: str, lock_ref: str) -> Payment:
     """Polls the lock until it shows its payment. At the default confirmation (two blocks) the
     payment may already be recorded as a deposit, and the lock completed, when first read."""
-    found: list[QuotePayment] = []
+    found: list[Payment] = []
 
     def seen() -> bool:
         lock = ctx.client.get_quote(lock_ref)
@@ -53,10 +53,10 @@ def seen_lock_payment(ctx: Context, team: str, lock_ref: str) -> QuotePayment:
             lock.status in {"open", "complete"},
             f"lock is {lock.status} before its payment was shown",
         )
-        if isinstance(lock.payment, QuotePayment):
+        if isinstance(lock.payment, Payment):
             check(
-                lock.payment.status in {"seen", "final"},
-                f"payment is {lock.payment.status}, not seen or final",
+                lock.payment.status in {"seen", "recorded"},
+                f"payment is {lock.payment.status}, not seen or recorded",
             )
             found.append(lock.payment)
         return bool(found)

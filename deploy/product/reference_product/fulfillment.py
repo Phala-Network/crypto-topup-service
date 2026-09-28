@@ -133,7 +133,7 @@ class Fulfillment:
                 return existing.status
             hold = self._hold_reason(db, credit, now)
             order_id = str(uuid.uuid4())
-            team_id = None if hold == "unknown_account" else credit.account_id
+            team_id = None if hold == "unknown_account" else credit.client_reference_id
             db.execute(
                 "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
                 "payload, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -157,7 +157,7 @@ class Fulfillment:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         credit_id,
-                        credit.account_id,
+                        credit.client_reference_id,
                         order_id,
                         credit.amount,
                         f"crypto:{self.config.token_symbol}:{credit.chain_id}",
@@ -175,7 +175,7 @@ class Fulfillment:
 
     def _hold_reason(self, db: Any, credit: CreditedDeposit, now: float) -> str | None:
         row = db.execute(
-            "SELECT suspended FROM teams WHERE id = ?", (credit.account_id,)
+            "SELECT suspended FROM teams WHERE id = ?", (credit.client_reference_id,)
         ).fetchone()
         if row is None:
             return "unknown_account"
@@ -184,7 +184,7 @@ class Fulfillment:
         if credit.amount > self.config.per_deposit_cap_minor:
             return "per_deposit_cap"
         since = now - self.config.period_seconds
-        already = self.ledger.credited_since(db, credit.account_id, since)
+        already = self.ledger.credited_since(db, credit.client_reference_id, since)
         if already + credit.amount > self.config.per_period_cap_minor:
             return "per_period_cap"
         return None
@@ -193,7 +193,7 @@ class Fulfillment:
 def _payload(credit: CreditedDeposit) -> dict[str, Any]:
     return {
         "deposit_id": credit.deposit_id,
-        "account_id": credit.account_id,
+        "account_id": credit.client_reference_id,
         "amount_minor": str(credit.amount),
         "price_source": credit.price_source,
         "quote": credit.quote,

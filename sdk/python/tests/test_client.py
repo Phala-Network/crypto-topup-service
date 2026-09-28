@@ -7,13 +7,12 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from topup_client.models import QuotePayment
+from topup_client.models import Payment
 from topup_sdk import (
     AddressMismatchError,
     ApiError,
     TopupClient,
-    forwarder_address,
-    lock_salt,
+    quote_address,
 )
 
 API_KEY = "ppay_sk_test_" + "A" * 43 + "000000"
@@ -26,13 +25,21 @@ QUOTE_ID = "qt_" + "0c" * 16
 
 
 def _quote(**fields: object) -> dict[str, object]:
-    address = forwarder_address(
-        FACTORY, IMPLEMENTATION, TREASURY, lock_salt(ACCOUNT, "ws 1", QUOTE_ID)
+    address = quote_address(
+        FACTORY,
+        IMPLEMENTATION,
+        str(fields.get("treasury", TREASURY)),
+        account=ACCOUNT,
+        client_reference_id="ws 1",
+        quote_id=QUOTE_ID,
     )
     return {
         "id": QUOTE_ID,
         "object": "quote",
-        "account_id": "ws 1",
+        "livemode": False,
+        "client_reference_id": "ws 1",
+        "treasury": TREASURY,
+        "metadata": {},
         "amount": 2500,
         "currency": "usd",
         "chain_id": 11155111,
@@ -60,7 +67,7 @@ class FakeService:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.headers.get("authorization") != f"Bearer {API_KEY}":
             return _error(401, "api_key_invalid")
-        if request.url.raw_path == b"/v1/account":
+        if request.method == "GET" and request.url.raw_path == b"/v1/account":
             return httpx.Response(
                 200,
                 json={
@@ -70,6 +77,8 @@ class FakeService:
                     "name": "Acme",
                     "charges_enabled": False,
                     "paused_scopes": [],
+                    "webhook_keys": [{"version": 1, "expires_at": None}],
+                    "confirmation_policies": [],
                     "created": NOW,
                 },
             )
@@ -84,11 +93,18 @@ def _error(status: int, code: str, **fields: str) -> httpx.Response:
     )
 
 
-def _client(service: FakeService, *, pinned: bool = True, max_attempts: int = 4) -> TopupClient:
+def _client(
+    service: FakeService,
+    *,
+    pinned: bool = True,
+    max_attempts: int = 4,
+    treasuries: dict[int, str] | None = None,
+) -> TopupClient:
     return TopupClient(
         "http://service.test:8080",
         API_KEY,
-        forwarder=(FACTORY, IMPLEMENTATION, TREASURY) if pinned else None,
+        forwarder=(FACTORY, IMPLEMENTATION) if pinned else None,
+        treasuries=treasuries,
         transport=httpx.MockTransport(service),
         sleep=lambda _: None,
         max_attempts=max_attempts,
@@ -105,7 +121,7 @@ def test_quotes_send_the_key_and_an_idempotency_key() -> None:
     request = service.requests[0]
     assert request.url.raw_path == b"/v1/quotes"
     assert json.loads(request.content) == {
-        "account_id": "ws 1",
+        "client_reference_id": "ws 1",
         "amount": 2500,
         "currency": "usd",
         "chain_id": 11155111,
@@ -175,9 +191,14 @@ def _deposit(index: int) -> dict[str, object]:
     return {
         "id": f"dep_{index:032x}",
         "object": "deposit",
-        "account_id": "ws 1",
+        "livemode": False,
+        "client_reference_id": "ws 1",
         "quote": QUOTE_ID,
+        "deposit_address": None,
         "status": "credited",
+        "final": True,
+        "swept": False,
+        "metadata": {},
         "rejection_reason": None,
         "chain_id": 11155111,
         "asset": "pha",
@@ -203,7 +224,7 @@ def test_list_deposits_follows_stripe_cursors() -> None:
     def respond(request: httpx.Request, count: int) -> httpx.Response:
         params = request.url.params
         assert request.url.raw_path.startswith(b"/v1/deposits")
-        assert params["account_id"] == "ws 1"
+        assert params["client_reference_id"] == "ws 1"
         assert params["status"] == "credited"
         if count == 1:
             assert "starting_after" not in params
@@ -229,7 +250,7 @@ def test_list_deposits_follows_stripe_cursors() -> None:
 
     service = FakeService(respond)
     with _client(service) as client:
-        deposits = list(client.list_deposits(account_id="ws 1", status="credited"))
+        deposits = list(client.list_deposits(client_reference_id="ws 1", status="credited"))
     assert [deposit.log_index for deposit in deposits] == [1, 2]
     assert deposits[0].quote == QUOTE_ID
 
@@ -238,6 +259,8 @@ REFUND_ID = "re_" + "0e" * 16
 REFUND = {
     "id": REFUND_ID,
     "object": "refund",
+    "livemode": False,
+    "metadata": {},
     "deposit": f"dep_{1:032x}",
     "amount_atomic": "1",
     "destination_address": "0x" + "44" * 20,
@@ -285,6 +308,8 @@ def test_refunds_are_marked_paid_and_canceled_by_id() -> None:
 def test_quote_payment_is_optional_and_parsed() -> None:
     payment = {
         "status": "seen",
+        "chain_id": 11155111,
+        "asset": "pha",
         "tx_hash": "0x" + "ab" * 32,
         "amount_atomic": "100",
         "confirmations": 1,
@@ -299,8 +324,117 @@ def test_quote_payment_is_optional_and_parsed() -> None:
     with _client(FakeService(respond)) as client:
         unpaid = client.get_quote(QUOTE_ID)
         seen = client.get_quote(QUOTE_ID)
-    assert not isinstance(unpaid.payment, QuotePayment)
-    assert isinstance(seen.payment, QuotePayment)
+    assert not isinstance(unpaid.payment, Payment)
+    assert isinstance(seen.payment, Payment)
     assert seen.payment.status == "seen"
     assert seen.payment.confirmations == 1
     assert seen.payment.matches_quote
+
+
+def test_a_pinned_treasury_is_the_only_one_a_quote_may_pay() -> None:
+    other = "0x" + "dd" * 20
+    # The address derives from the quote's own treasury, so only the pin catches another one.
+    moved = _quote(treasury=other)
+    service = FakeService(lambda request, _: httpx.Response(200, json=moved))
+    with _client(service) as client:
+        assert client.get_quote(QUOTE_ID).treasury == other
+    for pins in ({11155111: TREASURY}, {1: other}):
+        with _client(service, treasuries=pins) as client, pytest.raises(AddressMismatchError):
+            client.get_quote(QUOTE_ID)
+    with _client(service, treasuries={11155111: other}) as client:
+        assert client.get_quote(QUOTE_ID).address == moved["address"]
+    with pytest.raises(ValueError, match="forwarder"):
+        TopupClient("http://service.test", API_KEY, treasuries={1: TREASURY})
+
+
+def test_errors_carry_the_request_id() -> None:
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        header = "request-id" if count == 1 else "x-request-id"
+        response = _error(404, "resource_missing")
+        response.headers[header] = f"req_{count}"
+        return response
+
+    with _client(FakeService(respond)) as client:
+        for expected in ("req_1", "req_2"):
+            with pytest.raises(ApiError) as raised:
+                client.get_refund(REFUND_ID)
+            assert raised.value.request_id == expected
+            assert expected in str(raised.value)
+
+
+def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
+    account = {
+        "id": ACCOUNT,
+        "object": "account",
+        "livemode": False,
+        "name": "Acme",
+        "charges_enabled": False,
+        "paused_scopes": ["quotes"],
+        "webhook_keys": [{"version": 1, "expires_at": None}],
+        "confirmation_policies": [{"chain_id": 11155111, "confirmations": "finalized"}],
+        "created": NOW,
+    }
+    key = {
+        "id": "key_" + "01" * 16,
+        "object": "api_key",
+        "livemode": False,
+        "type": "secret",
+        "name": "ci",
+        "redacted": "ppay_sk_test_…AAAA",
+        "status": "active",
+        "created": NOW,
+        "expires_at": None,
+        "last_used": None,
+    }
+    event = {
+        "id": "evt_" + "02" * 16,
+        "object": "event",
+        "account": ACCOUNT,
+        "livemode": False,
+        "type": "deposit.credited",
+        "created": NOW,
+        "actor": "system",
+        "data": {"object": {}},
+        "pending_webhooks": 0,
+    }
+    answers = {
+        b"/v1/account/pause": account,
+        b"/v1/account/resume": account,
+        b"/v1/account": account,
+        b"/v1/api_keys": key,
+        f"/v1/api_keys/{key['id']}/roll".encode(): key,
+        f"/v1/events/{event['id']}/resend".encode(): event,
+    }
+
+    def respond(request: httpx.Request, _: int) -> httpx.Response:
+        if request.url.raw_path == b"/v1/events?type=deposit.reversed&limit=100":
+            return httpx.Response(
+                200,
+                json={"object": "list", "url": "/v1/events", "has_more": False, "data": [event]},
+            )
+        return httpx.Response(200, json=answers[request.url.raw_path])
+
+    service = FakeService(respond)
+    with _client(service) as client:
+        updated = client.update_account(confirmation_policies={11155111: "finalized", 1: None})
+        client.pause_quotes()
+        client.resume_quotes()
+        client.create_api_key(name="ci")
+        client.roll_api_key(str(key["id"]), expires_in=3600)
+        assert [e.id for e in client.list_events(type="deposit.reversed")] == [event["id"]]
+        client.resend_event(str(event["id"]), webhook_endpoint="we_" + "03" * 16)
+    assert updated.confirmation_policies[0].confirmations == "finalized"
+    policies, pause, resume, created, rolled, _, resent = service.requests
+    assert json.loads(policies.content) == {
+        "confirmation_policies": [
+            {"chain_id": 11155111, "confirmations": "finalized"},
+            {"chain_id": 1, "confirmations": None},
+        ]
+    }
+    assert json.loads(pause.content) == json.loads(resume.content) == {"scopes": ["quotes"]}
+    assert json.loads(created.content) == {"name": "ci"}
+    assert json.loads(rolled.content) == {"expires_in": 3600}
+    assert json.loads(resent.content) == {"webhook_endpoint": "we_" + "03" * 16}
+    for request in (policies, pause, resume, created, rolled, resent):
+        assert request.method == "POST"
+        assert request.headers["idempotency-key"].startswith('"')

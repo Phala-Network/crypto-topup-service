@@ -112,20 +112,25 @@ class FakeTopup:
             if head - payment["block"] + 1 >= FINAL_AFTER:
                 self.confirm(quote, payment)
         for deposit in deposits:
-            if deposit["status"] == "confirmed":
+            if deposit["status"] == "pending":
                 self.credit(deposit)
             elif deposit["status"] == "credited" and not deposit["_acknowledged"]:
                 self.deliver(deposit)
-            elif deposit["status"] == "credited":
+            elif deposit["status"] == "credited" and not deposit["swept"]:
                 self.sweep(deposit)
 
     def confirm(self, quote: dict[str, Any], payment: dict[str, Any]) -> None:
         deposit = {
             "id": deposit_id(CHAIN_ID, payment["tx_hash"], payment["log_index"]),
             "object": "deposit",
-            "account_id": quote["account_id"],
+            "livemode": False,
+            "client_reference_id": quote["client_reference_id"],
             "quote": quote["id"],
-            "status": "confirmed",
+            "deposit_address": None,
+            "status": "pending",
+            "final": True,
+            "swept": False,
+            "metadata": {},
             "rejection_reason": None,
             "chain_id": CHAIN_ID,
             "asset": "pha",
@@ -206,14 +211,14 @@ class FakeTopup:
         )
         self.call("anvil_stopImpersonatingAccount", forwarder)
         with self.state.lock:
-            deposit["status"] = "swept"
+            deposit["swept"] = True
         LOG.info("swept %s in %s", deposit["id"], tx)
 
     # API --------------------------------------------------------------------------------------
 
     def create_quote(self, body: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
         quote_id = "qt_" + uuid.uuid5(uuid.NAMESPACE_OID, idempotency_key).hex
-        account = str(body["account_id"])
+        account = str(body["client_reference_id"])
         amount = int(body["amount"])
         address = forwarder_address(
             self.args.factory,
@@ -229,7 +234,10 @@ class FakeTopup:
                 quote = {
                     "id": quote_id,
                     "object": "quote",
-                    "account_id": account,
+                    "livemode": False,
+                    "client_reference_id": account,
+                    "treasury": self.args.treasury.lower(),
+                    "metadata": {},
                     "amount": amount,
                     "currency": "usd",
                     "chain_id": CHAIN_ID,
@@ -259,7 +267,9 @@ class FakeTopup:
             head = int(self.call("eth_blockNumber"), 16)
             final = quote["deposit"] is not None
             view["payment"] = {
-                "status": "final" if final else "seen",
+                "status": "recorded" if final else "seen",
+                "chain_id": CHAIN_ID,
+                "asset": "pha",
                 "tx_hash": payment["tx_hash"],
                 "amount_atomic": payment["amount_atomic"],
                 "confirmations": None if final else head - payment["block"] + 1,
@@ -273,7 +283,7 @@ class FakeTopup:
         deposit = self.state.deposits.get(quote["deposit"] or "")
         payment_status = "none"
         if deposit is not None:
-            payment_status = {"confirmed": "confirming"}.get(deposit["status"], "credited")
+            payment_status = {"pending": "confirming"}.get(deposit["status"], "credited")
         elif quote["payment"] is not None:
             payment_status = "seen"
         keys = (
@@ -281,7 +291,7 @@ class FakeTopup:
             *("amount_atomic", "address", "payment_uri", "expires_at"),
         )
         view = {k: quote[k] for k in keys}
-        view.update(decimals=18, payment_status=payment_status, confirmations=None)
+        view.update(livemode=False, decimals=18, payment_status=payment_status, confirmations=None)
         return view
 
     def attestation(self, nonce: str) -> dict[str, Any]:
@@ -295,7 +305,7 @@ class FakeTopup:
             "livemode": False,
             "webhook_keys": [{"version": 1, "public_key": public.hex(), "expires_at": None}],
             "report_data": report.hex(),
-            "quote": "00" * 1024,
+            "tdx_quote": "00" * 1024,
         }
 
 
@@ -341,7 +351,8 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
                     {k: v for k, v in d.items() if not k.startswith("_")}
                     for d in fake.state.deposits.values()
                     if d["quote"] == query.get("quote", d["quote"])
-                    and d["account_id"] == query.get("account_id", d["account_id"])
+                    and d["client_reference_id"]
+                    == query.get("client_reference_id", d["client_reference_id"])
                 ]
                 body = {"object": "list", "url": "/v1/deposits", "has_more": False, "data": data}
                 self.send(HTTPStatus.OK, body)

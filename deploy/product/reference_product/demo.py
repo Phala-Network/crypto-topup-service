@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from topup_client.models import AttestationResponse, Deposit, Quote, QuotePayment
+from topup_client.models import AttestationResponse, Deposit, Payment, Quote
 from topup_sdk import ApiError, AttestationError, TopupClient
 
 from .config import MissingProductKeyError, ProductConfig
@@ -290,7 +290,7 @@ class DemoConsole:
     def _account(self, account: str) -> dict[str, Any]:
         deposits = {
             deposit.quote: deposit
-            for deposit in _take(self._service().list_deposits(account_id=account), 50)
+            for deposit in _take(self._service().list_deposits(client_reference_id=account), 50)
             if isinstance(deposit.quote, str)
         }
         with self.ledger.transaction() as db:
@@ -314,7 +314,7 @@ class DemoConsole:
             deposit = deposits.get(quote_id)
             credit = credits.get(quote_id)
             if deposit is not None:
-                status = deposit.status
+                status = _stage(deposit)
             else:
                 status = "expired" if now >= expires_at else "awaiting_payment"
             transactions.append(
@@ -410,7 +410,7 @@ class DemoConsole:
         events = self._events(quote, deposit)
         with self.ledger.transaction() as db:
             credit = None if deposit is None else self._credit(db, deposit.id)
-        sweep = self._sweep(deposit) if deposit is not None and deposit.status == "swept" else None
+        sweep = self._sweep(deposit) if deposit is not None and deposit.swept else None
         return {
             "quote": _quote_view(quote),
             "deposit": None if deposit is None else deposit.to_dict(),
@@ -560,11 +560,8 @@ class DemoConsole:
                     self.config.service_url,
                     self.config.api_key(),
                     account=self.config.product_slug,
-                    forwarder=(
-                        self.config.factory,
-                        self.config.implementation,
-                        self.config.treasury,
-                    ),
+                    forwarder=(self.config.factory, self.config.implementation),
+                    treasuries={self.config.chain_id: self.config.treasury},
                     transport=self.recorder,
                 )
             return self._client
@@ -579,6 +576,11 @@ class DemoConsole:
 # Views ------------------------------------------------------------------------------------------
 
 
+def _stage(deposit: Deposit) -> str:
+    """The deposit's `status`, or `swept` once a sweep after it moved its forwarder's balance."""
+    return "swept" if deposit.swept else deposit.status
+
+
 def _steps(
     quote: Quote,
     *,
@@ -589,9 +591,9 @@ def _steps(
     now: float,
 ) -> list[dict[str, Any]]:
     """The payment's timeline; every value comes from the service, the ledger, or the chain."""
-    payment = quote.payment if isinstance(quote.payment, QuotePayment) else None
-    status = None if deposit is None else deposit.status
-    final = status in ("confirmed", "credited", "swept")
+    payment = quote.payment if isinstance(quote.payment, Payment) else None
+    status = None if deposit is None else _stage(deposit)
+    final = status in ("pending", "credited", "swept")
     credited = status in ("credited", "swept")
     delivered = next((e for e in events if e["type"] == "deposit.credited"), None)
     expired = quote.status in ("expired", "canceled") or (
@@ -729,7 +731,7 @@ def _attestation_view(evidence: AttestationResponse) -> dict[str, Any]:
         "livemode": evidence.livemode,
         "webhook_public_key": evidence.webhook_keys[0].public_key,
         "report_data": evidence.report_data,
-        "quote_bytes": len(evidence.quote) // 2,
+        "quote_bytes": len(evidence.tdx_quote) // 2,
     }
 
 

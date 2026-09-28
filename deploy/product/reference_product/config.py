@@ -83,5 +83,6 @@ class ProductConfig:
             self.service_url,
             self.api_key(),
             account=self.product_slug,
-            forwarder=(self.factory, self.implementation, self.treasury),
+            forwarder=(self.factory, self.implementation),
+            treasuries={self.chain_id: self.treasury},
         )

@@ -213,7 +213,7 @@ def run_deposit(
         credited = _event(view, "deposit.credited", id=deposit.id)
         if credited["price_source"] != ("quote" if at_quote_price else "spot"):
             raise RuntimeError(f"deposit was valued at the {credited['price_source']} price")
-        if credited["account_id"] != team or credited["quote"] != quote.id:
+        if credited["client_reference_id"] != team or credited["quote"] != quote.id:
             raise RuntimeError(f"deposit.credited names another account or quote: {credited}")
         expected = quote.amount if at_quote_price else deposit.amount
         if credited["amount"] != expected:
@@ -304,7 +304,7 @@ def _credited(
     """Ready once the deposit is in `states` with its `deposit.credited` webhook (and
     `quote.expired` for a late payment) recorded."""
     deposit = _deposit_at(view, address)
-    if deposit is None or deposit.status not in states:
+    if deposit is None or ("swept" if deposit.swept else deposit.status) not in states:
         return None
     if _find_event(view, "deposit.credited", id=deposit.id) is None:
         return None
@@ -317,7 +317,7 @@ def _credited(
 
 def _rejected(view: dict[str, Any], address: str) -> tuple[Deposit, dict[str, Any]] | None:
     deposit = _deposit_at(view, address)
-    if deposit is not None and deposit.status in {"credited", "swept"}:
+    if deposit is not None and deposit.status == "credited":
         raise RuntimeError(f"deposit {deposit.id} is {deposit.status}, not rejected")
     if deposit is None or deposit.status != "rejected":
         return None

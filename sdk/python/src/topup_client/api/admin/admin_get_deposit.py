@@ -8,8 +8,8 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
+from ...models.deposit import Deposit
 from ...models.error_response import ErrorResponse
-from ...models.support_deposit_response import SupportDepositResponse
 from typing import cast
 
 
@@ -29,9 +29,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | SupportDepositResponse | None:
+) -> Deposit | ErrorResponse | None:
     if response.status_code == 200:
-        response_200 = SupportDepositResponse.from_dict(response.json())
+        response_200 = Deposit.from_dict(response.json())
 
         return response_200
 
@@ -53,7 +53,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | SupportDepositResponse]:
+) -> Response[Deposit | ErrorResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -66,8 +66,9 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse | SupportDepositResponse]:
-    """One deposit of any account with its stored facts, transitions, and webhook events.
+) -> Response[Deposit | ErrorResponse]:
+    """One deposit of any account, as its account sees it, with its internals, transitions, and
+    events in `admin`.
 
     Args:
         id (str):
@@ -77,7 +78,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | SupportDepositResponse]
+        Response[Deposit | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
@@ -95,8 +96,9 @@ def sync(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | SupportDepositResponse | None:
-    """One deposit of any account with its stored facts, transitions, and webhook events.
+) -> Deposit | ErrorResponse | None:
+    """One deposit of any account, as its account sees it, with its internals, transitions, and
+    events in `admin`.
 
     Args:
         id (str):
@@ -106,7 +108,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | SupportDepositResponse
+        Deposit | ErrorResponse
     """
 
     return sync_detailed(
@@ -119,8 +121,9 @@ async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse | SupportDepositResponse]:
-    """One deposit of any account with its stored facts, transitions, and webhook events.
+) -> Response[Deposit | ErrorResponse]:
+    """One deposit of any account, as its account sees it, with its internals, transitions, and
+    events in `admin`.
 
     Args:
         id (str):
@@ -130,7 +133,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | SupportDepositResponse]
+        Response[Deposit | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
@@ -146,8 +149,9 @@ async def asyncio(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | SupportDepositResponse | None:
-    """One deposit of any account with its stored facts, transitions, and webhook events.
+) -> Deposit | ErrorResponse | None:
+    """One deposit of any account, as its account sees it, with its internals, transitions, and
+    events in `admin`.
 
     Args:
         id (str):
@@ -157,7 +161,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | SupportDepositResponse
+        Deposit | ErrorResponse
     """
 
     return (

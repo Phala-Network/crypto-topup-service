@@ -13,34 +13,34 @@ from typing import cast
 import datetime
 
 
-T = TypeVar("T", bound="DepositEventResponse")
+T = TypeVar("T", bound="DepositEventDelivery")
 
 
 @_attrs_define
-class DepositEventResponse:
-    """One webhook event about a deposit and its delivery state.
+class DepositEventDelivery:
+    """An event about a deposit and its delivery state.
 
     Attributes:
         created_at (datetime.datetime): Event creation time.
-        event_type (str): Event type, such as `deposit.credited`.
-        id (str): Stable event identifier, sent as the `webhook-id` header: `evt_…`.
+        id (str): Event id, `evt_…`.
+        type_ (str): Event type, such as `deposit.credited`.
         delivered_at (datetime.datetime | None | Unset): When the last of the account's webhook endpoints accepted the
             event, or `null` while one
             has not or the account has none.
     """
 
     created_at: datetime.datetime
-    event_type: str
     id: str
+    type_: str
     delivered_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         created_at = self.created_at.isoformat()
 
-        event_type = self.event_type
-
         id = self.id
+
+        type_ = self.type_
 
         delivered_at: None | str | Unset
         if isinstance(self.delivered_at, Unset):
@@ -55,8 +55,8 @@ class DepositEventResponse:
         field_dict.update(
             {
                 "created_at": created_at,
-                "event_type": event_type,
                 "id": id,
+                "type": type_,
             }
         )
         if delivered_at is not UNSET:
@@ -69,9 +69,9 @@ class DepositEventResponse:
         d = dict(src_dict)
         created_at = datetime.datetime.fromisoformat(d.pop("created_at"))
 
-        event_type = d.pop("event_type")
-
         id = d.pop("id")
+
+        type_ = d.pop("type")
 
         def _parse_delivered_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -90,15 +90,15 @@ class DepositEventResponse:
 
         delivered_at = _parse_delivered_at(d.pop("delivered_at", UNSET))
 
-        deposit_event_response = cls(
+        deposit_event_delivery = cls(
             created_at=created_at,
-            event_type=event_type,
             id=id,
+            type_=type_,
             delivered_at=delivered_at,
         )
 
-        deposit_event_response.additional_properties = d
-        return deposit_event_response
+        deposit_event_delivery.additional_properties = d
+        return deposit_event_delivery
 
     @property
     def additional_keys(self) -> list[str]:

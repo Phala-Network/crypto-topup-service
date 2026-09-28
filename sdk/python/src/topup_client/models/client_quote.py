@@ -30,11 +30,14 @@ class ClientQuote:
             decimals (int): The token's decimals, to display `amount_atomic`.
             expires_at (int): End of the payment window, Unix seconds.
             id (str): `qt_` id.
+            livemode (bool): Whether the quote is in live mode; a test-mode page should say so.
             object_ (str): Always `quote`.
             payment_status (str): Progress of the payment shown on the page; display only, never a reason to deliver
                 anything: `none`; `seen` (in a block, below the route's confirmation, and may still
                 disappear); `confirming` (at the route's confirmation, being valued and screened);
-                `credited`; or `rejected` (not credited; the payer should contact the product's support).
+                `credited`; `rejected` (not credited; the payer should contact the merchant's support); or
+                `reversed` (credited, then its transaction left the chain before finality: the payment did
+                not happen, and the credit is taken back).
             payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
             status (str): `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
                 `expires_at` has passed.
@@ -51,6 +54,7 @@ class ClientQuote:
     decimals: int
     expires_at: int
     id: str
+    livemode: bool
     object_: str
     payment_status: str
     payment_uri: str
@@ -76,6 +80,8 @@ class ClientQuote:
         expires_at = self.expires_at
 
         id = self.id
+
+        livemode = self.livemode
 
         object_ = self.object_
 
@@ -104,6 +110,7 @@ class ClientQuote:
                 "decimals": decimals,
                 "expires_at": expires_at,
                 "id": id,
+                "livemode": livemode,
                 "object": object_,
                 "payment_status": payment_status,
                 "payment_uri": payment_uri,
@@ -136,6 +143,8 @@ class ClientQuote:
 
         id = d.pop("id")
 
+        livemode = d.pop("livemode")
+
         object_ = d.pop("object")
 
         payment_status = d.pop("payment_status")
@@ -163,6 +172,7 @@ class ClientQuote:
             decimals=decimals,
             expires_at=expires_at,
             id=id,
+            livemode=livemode,
             object_=object_,
             payment_status=payment_status,
             payment_uri=payment_uri,

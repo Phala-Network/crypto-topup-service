@@ -39,10 +39,26 @@ def deposit_id(chain_id: int, tx_hash: str, receipt_log_index: int) -> str:
     return object_id(DEPOSIT, uuid.uuid5(DEPOSIT_NAMESPACE, name))
 
 
-def lock_salt(product_slug: str, external_id: str, lock_ref: str) -> bytes:
-    """keccak256(abi.encode(product_slug, external_id, "lock", lock_ref)): a quote's address
-    salt, where `external_id` is the quote's `account_id` and `lock_ref` its id."""
-    return keccak256(_abi_encode(product_slug, external_id, "lock", lock_ref))
+def lock_salt(account: str, client_reference_id: str, quote_id: str) -> bytes:
+    """keccak256(abi.encode(account, client_reference_id, "lock", quote_id)), with the types
+    (string, string, string, string): a quote's address salt, where `account` is your `acct_` id
+    and `client_reference_id` and `quote_id` are the quote's."""
+    return keccak256(_abi_encode(account, client_reference_id, "lock", quote_id))
+
+
+def quote_address(
+    factory: str,
+    implementation: str,
+    treasury: str,
+    *,
+    account: str,
+    client_reference_id: str,
+    quote_id: str,
+) -> str:
+    """Recomputes a quote's address offline from the pinned forwarder, the quote's `treasury`,
+    and its salt inputs."""
+    salt = lock_salt(account, client_reference_id, quote_id)
+    return forwarder_address(factory, implementation, treasury, salt)
 
 
 def deposit_address_salt(

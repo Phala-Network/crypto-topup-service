@@ -13,12 +13,12 @@ from uuid import UUID
 import datetime
 
 
-T = TypeVar("T", bound="DepositTransitionResponse")
+T = TypeVar("T", bound="DepositTransition")
 
 
 @_attrs_define
-class DepositTransitionResponse:
-    """One immutable state transition in a support timeline.
+class DepositTransition:
+    """One immutable state transition of a deposit.
 
     Attributes:
         attempt (int): Retry attempt recorded for this transition.
@@ -80,7 +80,7 @@ class DepositTransitionResponse:
 
         to_state = d.pop("to_state")
 
-        deposit_transition_response = cls(
+        deposit_transition = cls(
             attempt=attempt,
             created_at=created_at,
             evidence=evidence,
@@ -89,8 +89,8 @@ class DepositTransitionResponse:
             to_state=to_state,
         )
 
-        deposit_transition_response.additional_properties = d
-        return deposit_transition_response
+        deposit_transition.additional_properties = d
+        return deposit_transition
 
     @property
     def additional_keys(self) -> list[str]:

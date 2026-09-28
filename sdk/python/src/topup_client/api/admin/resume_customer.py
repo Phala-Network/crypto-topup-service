@@ -16,7 +16,7 @@ from typing import cast
 
 def _get_kwargs(
     account: str,
-    customer: str,
+    client_reference_id: str,
     *,
     body: CustomerPauseRequest,
 ) -> dict[str, Any]:
@@ -24,9 +24,9 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/admin/accounts/{account}/customers/{customer}/resume".format(
+        "url": "/v1/admin/accounts/{account}/customers/{client_reference_id}/resume".format(
             account=quote(str(account), safe=""),
-            customer=quote(str(customer), safe=""),
+            client_reference_id=quote(str(client_reference_id), safe=""),
         ),
     }
 
@@ -75,7 +75,7 @@ def _build_response(
 
 def sync_detailed(
     account: str,
-    customer: str,
+    client_reference_id: str,
     *,
     client: AuthenticatedClient,
     body: CustomerPauseRequest,
@@ -84,7 +84,7 @@ def sync_detailed(
 
     Args:
         account (str):
-        customer (str):
+        client_reference_id (str):
         body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
@@ -97,7 +97,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         account=account,
-        customer=customer,
+        client_reference_id=client_reference_id,
         body=body,
     )
 
@@ -110,7 +110,7 @@ def sync_detailed(
 
 def sync(
     account: str,
-    customer: str,
+    client_reference_id: str,
     *,
     client: AuthenticatedClient,
     body: CustomerPauseRequest,
@@ -119,7 +119,7 @@ def sync(
 
     Args:
         account (str):
-        customer (str):
+        client_reference_id (str):
         body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
@@ -132,7 +132,7 @@ def sync(
 
     return sync_detailed(
         account=account,
-        customer=customer,
+        client_reference_id=client_reference_id,
         client=client,
         body=body,
     ).parsed
@@ -140,7 +140,7 @@ def sync(
 
 async def asyncio_detailed(
     account: str,
-    customer: str,
+    client_reference_id: str,
     *,
     client: AuthenticatedClient,
     body: CustomerPauseRequest,
@@ -149,7 +149,7 @@ async def asyncio_detailed(
 
     Args:
         account (str):
-        customer (str):
+        client_reference_id (str):
         body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
@@ -162,7 +162,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         account=account,
-        customer=customer,
+        client_reference_id=client_reference_id,
         body=body,
     )
 
@@ -173,7 +173,7 @@ async def asyncio_detailed(
 
 async def asyncio(
     account: str,
-    customer: str,
+    client_reference_id: str,
     *,
     client: AuthenticatedClient,
     body: CustomerPauseRequest,
@@ -182,7 +182,7 @@ async def asyncio(
 
     Args:
         account (str):
-        customer (str):
+        client_reference_id (str):
         body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
@@ -196,7 +196,7 @@ async def asyncio(
     return (
         await asyncio_detailed(
             account=account,
-            customer=customer,
+            client_reference_id=client_reference_id,
             client=client,
             body=body,
         )

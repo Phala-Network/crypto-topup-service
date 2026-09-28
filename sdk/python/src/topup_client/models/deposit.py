@@ -12,6 +12,7 @@ from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
+    from ..models.deposit_admin import DepositAdmin
     from ..models.deposit_metadata import DepositMetadata
     from ..models.quote import Quote
 
@@ -26,7 +27,6 @@ class Deposit:
     finality.
 
         Attributes:
-            account_id (str): Your account identifier.
             address (str): Receiving forwarder address.
             amount_atomic (str): Token amount in base units, as a decimal string.
             amount_refunded_atomic (str): Refunded token amount in base units, as a decimal string: the sum of succeeded
@@ -34,35 +34,39 @@ class Deposit:
             asset_contract (str): Token contract address.
             block_number (int): Number of the block the transfer is in; it changes if the transaction is re-included.
             chain_id (int): EVM chain identifier.
+            client_reference_id (str): Your identifier of the customer the deposit is credited to.
             created (int): Detection time, Unix seconds.
             currency (str): `usd`.
+            final (bool): Whether the deposit's block is final on both providers: a final deposit can no longer be
+                reversed, and only a final deposit can be refunded. A deposit is credited at the route's
+                confirmation, before it is final (`GET /v1/config` `typical_finality_seconds`).
             from_address (str): Sender of the transfer.
             id (str): `dep_` and the hex of the deposit's deterministic UUID,
                 `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
                 `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+            livemode (bool): Whether the deposit is on a live-mode route.
             log_index (int): Block-wide log index of the transfer; it changes if the transaction is re-included.
+            metadata (DepositMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of
+                the
+                quote's or the deposit address's when the deposit is recorded, independent of it
+                afterwards; `{}` when none.
             object_ (str): Always `deposit`.
             refunded (bool): Whether the deposit is fully refunded.
-            status (str): `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
-                not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
-                added.
+            status (str): `pending` (recorded at the route's confirmation and being valued and screened, or held
+                while the account's or customer's `settlement` is paused), `credited`, `rejected` (see
+                `rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a
+                credit as for `deposit.refunded`). New values may be added.
+            swept (bool): Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of
+                its token to the treasury (`GET /v1/sweeps`), whoever sent the flush.
             tx_hash (str): Transaction hash.
+            admin (DepositAdmin | None | Unset):
             amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
             asset (None | str | Unset): Asset code; `null` for a token without a route.
             deposit_address (None | str | Unset): The deposit address that received the transfer, `da_…`, on `chain_id` at
                 `address`; `null`
                 for a quote's address. Payments to a deposit address, active or retired, are credited at
-                spot. This service
-                always sends it; it is optional in the schema so clients also parse responses and events
-                from servers that predate it.
+                spot.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
-            livemode (bool | Unset): Whether the deposit is on a live-mode route. Always sent; optional in the schema like
-                the
-                quote's.
-            metadata (DepositMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a
-                copy of the
-                quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
-                Always sent; optional in the schema like the quote's.
             price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
             quote (None | Quote | str | Unset):
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
@@ -71,28 +75,31 @@ class Deposit:
             valued_at (int | None | Unset): Valuation time, Unix seconds.
     """
 
-    account_id: str
     address: str
     amount_atomic: str
     amount_refunded_atomic: str
     asset_contract: str
     block_number: int
     chain_id: int
+    client_reference_id: str
     created: int
     currency: str
+    final: bool
     from_address: str
     id: str
+    livemode: bool
     log_index: int
+    metadata: DepositMetadata
     object_: str
     refunded: bool
     status: str
+    swept: bool
     tx_hash: str
+    admin: DepositAdmin | None | Unset = UNSET
     amount: int | None | Unset = UNSET
     asset: None | str | Unset = UNSET
     deposit_address: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
-    livemode: bool | Unset = UNSET
-    metadata: DepositMetadata | Unset = UNSET
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
     rejection_reason: None | str | Unset = UNSET
@@ -100,10 +107,9 @@ class Deposit:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.deposit_admin import DepositAdmin  # noqa: PLC0415
         from ..models.deposit_metadata import DepositMetadata  # noqa: PLC0415
         from ..models.quote import Quote  # noqa: PLC0415
-
-        account_id = self.account_id
 
         address = self.address
 
@@ -117,15 +123,23 @@ class Deposit:
 
         chain_id = self.chain_id
 
+        client_reference_id = self.client_reference_id
+
         created = self.created
 
         currency = self.currency
+
+        final = self.final
 
         from_address = self.from_address
 
         id = self.id
 
+        livemode = self.livemode
+
         log_index = self.log_index
+
+        metadata = self.metadata.to_dict()
 
         object_ = self.object_
 
@@ -133,7 +147,17 @@ class Deposit:
 
         status = self.status
 
+        swept = self.swept
+
         tx_hash = self.tx_hash
+
+        admin: dict[str, Any] | None | Unset
+        if isinstance(self.admin, Unset):
+            admin = UNSET
+        elif isinstance(self.admin, DepositAdmin):
+            admin = self.admin.to_dict()
+        else:
+            admin = self.admin
 
         amount: int | None | Unset
         if isinstance(self.amount, Unset):
@@ -158,12 +182,6 @@ class Deposit:
             exchange_rate = UNSET
         else:
             exchange_rate = self.exchange_rate
-
-        livemode = self.livemode
-
-        metadata: dict[str, Any] | Unset = UNSET
-        if not isinstance(self.metadata, Unset):
-            metadata = self.metadata.to_dict()
 
         price_source: None | str | Unset
         if isinstance(self.price_source, Unset):
@@ -195,24 +213,30 @@ class Deposit:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "account_id": account_id,
                 "address": address,
                 "amount_atomic": amount_atomic,
                 "amount_refunded_atomic": amount_refunded_atomic,
                 "asset_contract": asset_contract,
                 "block_number": block_number,
                 "chain_id": chain_id,
+                "client_reference_id": client_reference_id,
                 "created": created,
                 "currency": currency,
+                "final": final,
                 "from_address": from_address,
                 "id": id,
+                "livemode": livemode,
                 "log_index": log_index,
+                "metadata": metadata,
                 "object": object_,
                 "refunded": refunded,
                 "status": status,
+                "swept": swept,
                 "tx_hash": tx_hash,
             }
         )
+        if admin is not UNSET:
+            field_dict["admin"] = admin
         if amount is not UNSET:
             field_dict["amount"] = amount
         if asset is not UNSET:
@@ -221,10 +245,6 @@ class Deposit:
             field_dict["deposit_address"] = deposit_address
         if exchange_rate is not UNSET:
             field_dict["exchange_rate"] = exchange_rate
-        if livemode is not UNSET:
-            field_dict["livemode"] = livemode
-        if metadata is not UNSET:
-            field_dict["metadata"] = metadata
         if price_source is not UNSET:
             field_dict["price_source"] = price_source
         if quote is not UNSET:
@@ -238,12 +258,11 @@ class Deposit:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.deposit_admin import DepositAdmin  # noqa: PLC0415
         from ..models.deposit_metadata import DepositMetadata  # noqa: PLC0415
         from ..models.quote import Quote  # noqa: PLC0415
 
         d = dict(src_dict)
-        account_id = d.pop("account_id")
-
         address = d.pop("address")
 
         amount_atomic = d.pop("amount_atomic")
@@ -256,15 +275,23 @@ class Deposit:
 
         chain_id = d.pop("chain_id")
 
+        client_reference_id = d.pop("client_reference_id")
+
         created = d.pop("created")
 
         currency = d.pop("currency")
+
+        final = d.pop("final")
 
         from_address = d.pop("from_address")
 
         id = d.pop("id")
 
+        livemode = d.pop("livemode")
+
         log_index = d.pop("log_index")
+
+        metadata = DepositMetadata.from_dict(d.pop("metadata"))
 
         object_ = d.pop("object")
 
@@ -272,7 +299,26 @@ class Deposit:
 
         status = d.pop("status")
 
+        swept = d.pop("swept")
+
         tx_hash = d.pop("tx_hash")
+
+        def _parse_admin(data: object) -> DepositAdmin | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                admin_type_0 = DepositAdmin.from_dict(data)
+
+                return admin_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(DepositAdmin | None | Unset, data)
+
+        admin = _parse_admin(d.pop("admin", UNSET))
 
         def _parse_amount(data: object) -> int | None | Unset:
             if data is None:
@@ -309,15 +355,6 @@ class Deposit:
             return cast(None | str | Unset, data)
 
         exchange_rate = _parse_exchange_rate(d.pop("exchange_rate", UNSET))
-
-        livemode = d.pop("livemode", UNSET)
-
-        _metadata = d.pop("metadata", UNSET)
-        metadata: DepositMetadata | Unset
-        if isinstance(_metadata, Unset):
-            metadata = UNSET
-        else:
-            metadata = DepositMetadata.from_dict(_metadata)
 
         def _parse_price_source(data: object) -> None | str | Unset:
             if data is None:
@@ -364,28 +401,31 @@ class Deposit:
         valued_at = _parse_valued_at(d.pop("valued_at", UNSET))
 
         deposit = cls(
-            account_id=account_id,
             address=address,
             amount_atomic=amount_atomic,
             amount_refunded_atomic=amount_refunded_atomic,
             asset_contract=asset_contract,
             block_number=block_number,
             chain_id=chain_id,
+            client_reference_id=client_reference_id,
             created=created,
             currency=currency,
+            final=final,
             from_address=from_address,
             id=id,
+            livemode=livemode,
             log_index=log_index,
+            metadata=metadata,
             object_=object_,
             refunded=refunded,
             status=status,
+            swept=swept,
             tx_hash=tx_hash,
+            admin=admin,
             amount=amount,
             asset=asset,
             deposit_address=deposit_address,
             exchange_rate=exchange_rate,
-            livemode=livemode,
-            metadata=metadata,
             price_source=price_source,
             quote=quote,
             rejection_reason=rejection_reason,

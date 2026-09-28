@@ -43,7 +43,10 @@ def _quote(account: str = "acct", **fields: Any) -> dict[str, Any]:
     return {
         "id": QUOTE,
         "object": "quote",
-        "account_id": account,
+        "livemode": False,
+        "client_reference_id": account,
+        "treasury": CONFIG.treasury.lower(),
+        "metadata": {},
         "amount": 2500,
         "currency": "usd",
         "chain_id": 11155111,
@@ -65,9 +68,14 @@ def _deposit(**fields: Any) -> dict[str, Any]:
     return {
         "id": "dep_" + "0d" * 16,
         "object": "deposit",
-        "account_id": "acct",
+        "livemode": False,
+        "client_reference_id": "acct",
         "quote": QUOTE,
+        "deposit_address": None,
         "status": "credited",
+        "final": True,
+        "swept": False,
+        "metadata": {},
         "rejection_reason": None,
         "chain_id": 11155111,
         "asset": "pha",
@@ -97,7 +105,7 @@ class Service:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/quotes":
-            self.quote = _quote(json.loads(request.content)["account_id"])
+            self.quote = _quote(json.loads(request.content)["client_reference_id"])
             quote = {**self.quote, "client_secret": f"{QUOTE}_secret_{'ab' * 24}"}
             return httpx.Response(200, json=quote)
         if request.url.path.startswith("/v1/quotes/"):

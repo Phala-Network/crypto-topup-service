@@ -36,6 +36,13 @@ from topup_sdk.addresses import same_address  # noqa: E402
 LOG = logging.getLogger("sandbox")
 TOKEN_UNIT = 10**18
 FINAL_STATES = {"credited", "swept", "rejected"}
+
+
+def stage(deposit: Deposit) -> str:
+    """The deposit's `status`, or `swept` once a sweep after it moved its forwarder's balance."""
+    return "swept" if deposit.swept else deposit.status
+
+
 DEPOSIT_TIMEOUT_S = 600.0
 EVENT_TIMEOUT_S = 180.0
 
@@ -74,7 +81,7 @@ class ScenarioFulfillment(Fulfillment):
         answer = super().handle(headers, body)
         try:
             envelope = json.loads(body)
-            team = str(envelope["data"]["object"]["account_id"])
+            team = str(envelope["data"]["object"]["client_reference_id"])
             credited = envelope["type"] == "deposit.credited"
         except (ValueError, KeyError, TypeError):
             return answer
@@ -126,12 +133,13 @@ class Context:
         deadline = time.monotonic() + DEPOSIT_TIMEOUT_S
         last_state = None
         while time.monotonic() < deadline:
-            for deposit in self.client.list_deposits(account_id=team):
+            for deposit in self.client.list_deposits(client_reference_id=team):
                 if same_address(deposit.address, address) and tx_hash in {None, deposit.tx_hash}:
-                    if deposit.status != last_state:
-                        LOG.info("deposit %s is %s", deposit.id, deposit.status)
-                        last_state = deposit.status
-                    if deposit.status in states:
+                    state = stage(deposit)
+                    if state != last_state:
+                        LOG.info("deposit %s is %s", deposit.id, state)
+                        last_state = state
+                    if state in states:
                         return deposit
             time.sleep(2)
         raise TimeoutError(
@@ -154,7 +162,7 @@ class Context:
         """Waits for credit and checks the webhook and product ledger agree with the service;
         returns the deposit and the `deposit.credited` event's deposit object."""
         deposit = self.deposit(team, address, tx_hash=tx_hash)
-        check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
+        check(deposit.status == "credited", f"deposit is {deposit.status}, not credited")
         credited = self.deposit_event("deposit.credited", deposit)
         check(
             credited["amount"] == deposit.amount,
