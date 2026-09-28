@@ -47,7 +47,7 @@ configs:
     content: |
       {
         "service_url": "${TOPUP_ORIGIN:-}",
-        "account": "acct_00000000000000000000000000000000",
+        "account": "acct_52daedc4c68d4ea1a1c18472506b85f4",
         "api_key_env": "PRODUCT_API_KEY",
         "route": "phala-cloud-sepolia-pha-usd",
         "chain_id": 11155111,

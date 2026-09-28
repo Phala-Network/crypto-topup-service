@@ -28,7 +28,7 @@ printf 'PRODUCT_API_KEY=ppay_rk_live_%s\n' "$key_body" >"$tmp/live-key.env"
 printf 'PRODUCT_API_KEY=ppay_rk_test_%s\n' "$key_body" >"$tmp/restricted.env"
 printf 'PRODUCT_API_KEY=ppay_sk_test_%s\n' "$key_body" >"$tmp/secret.env"
 # A config whose account is not an acct_ id (rendered from an edited source).
-sed 's/"account": "acct_0*",/"account": "phala-cloud",/' "$root/deploy/product/docker-compose.yml" \
+sed 's/"account": "acct_[0-9a-f]*",/"account": "phala-cloud",/' "$root/deploy/product/docker-compose.yml" \
     >"$tmp/slug-source.yml"
 "$root/deploy/product/render-compose.sh" "$tmp/slug-source.yml" >"$tmp/slug.yml"
 
