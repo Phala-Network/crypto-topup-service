@@ -14,7 +14,7 @@ import {
   type Refund,
   type Timeline,
 } from "./api.js";
-import { Detail, Details, ExplorerLink, StatusBadge, Subsection, describe } from "./common.js";
+import { Detail, Details, Disclosure, ExplorerLink, StatusBadge, describe } from "./common.js";
 import { statusLabel, tokens } from "./format.js";
 import { errorMessage, transferTokens } from "./testTokens.js";
 
@@ -38,7 +38,7 @@ export function Refunds({
   const symbol = account.token.symbol;
   const refundable = deposit.final && (deposit.status === "credited" || deposit.status === "rejected");
   return (
-    <Subsection title="Refunds" id="refunds-title">
+    <Disclosure summary={`Refunds (${timeline.refunds.length})`}>
       <p className="text-muted-foreground">
         The merchant refunds from its own treasury: declare the refund, pay it from the treasury{" "}
         <ExplorerLink account={account} kind="address" value={account.treasury} /> that this
@@ -64,7 +64,7 @@ export function Refunds({
           ))}
         </ul>
       )}
-    </Subsection>
+    </Disclosure>
   );
 }
 

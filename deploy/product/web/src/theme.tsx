@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 
 export type Theme = "light" | "dark";
 
-/** The visitor's theme, shared by the website's pages: stored, else the system's; `dark` on `<html>`. */
+/** The visitor's theme: stored, else the system's; `dark` on `<html>`. */
 export function useTheme(): [Theme, (theme: Theme) => void] {
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = localStorage.getItem("demo-theme");
@@ -28,9 +28,8 @@ export function useTheme(): [Theme, (theme: Theme) => void] {
 export function ThemeToggle({ theme, onChange }: { theme: Theme; onChange: (theme: Theme) => void }) {
   const next = theme === "dark" ? "light" : "dark";
   return (
-    <Button type="button" variant="outline" onClick={() => onChange(next)} aria-label={`Switch to ${next} theme`}>
+    <Button type="button" variant="ghost" size="icon" onClick={() => onChange(next)} aria-label={`Switch to ${next} theme`}>
       {theme === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-      <span className="hidden sm:inline">{theme === "dark" ? "Light" : "Dark"} theme</span>
     </Button>
   );
 }

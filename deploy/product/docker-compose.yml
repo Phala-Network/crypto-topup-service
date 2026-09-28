@@ -1,6 +1,6 @@
 # Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
-# receiver with fulfillment, the account API, and the public Phala Pay demo page at
-# PRODUCT_PUBLIC_URL/demo/ of deploy/product/reference_product for the
+# receiver with fulfillment, the account API, and the public Phala Pay website with its live demo
+# at PRODUCT_PUBLIC_URL/ of deploy/product/reference_product for the
 # phala-cloud product on the Sepolia staging route, served on its custom domain PRODUCT_DOMAIN
 # (PRODUCT_PUBLIC_URL is https://PRODUCT_DOMAIN) by dstack-ingress, as topup's is. Deploy (target
 # `product`) renders this file with deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and
@@ -88,5 +88,5 @@ configs:
         "ledger_path": "/data/ledger.sqlite3",
         "per_deposit_cap_minor": 500000,
         "per_period_cap_minor": 1000000,
-        "demo_dir": "/opt/product/demo"
+        "demo_dir": "/opt/product/web"
       }

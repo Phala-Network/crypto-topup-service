@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react";
 import { useEffect, type ComponentProps, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -63,11 +64,27 @@ export function Subsection({
       className="flex flex-col gap-2 border-t pt-4 text-xs @4xl:first:border-t-0 @4xl:first:pt-0"
       aria-labelledby={id}
     >
-      <h3 id={id} className="text-sm font-medium">
+      <h4 id={id} className="text-sm font-medium">
         {title}
-      </h3>
+      </h4>
       {children}
     </section>
+  );
+}
+
+/** A part of a card below a divider, collapsed until opened: secondary detail. */
+export function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
+  return (
+    <details className="group/disclosure border-t pt-4 text-xs @4xl:first:border-t-0 @4xl:first:pt-0">
+      <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-medium [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="size-4 shrink-0 transition-transform group-open/disclosure:rotate-90"
+          aria-hidden="true"
+        />
+        {summary}
+      </summary>
+      <div className="mt-2 flex flex-col gap-2">{children}</div>
+    </details>
   );
 }
 

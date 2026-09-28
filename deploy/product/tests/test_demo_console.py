@@ -247,10 +247,8 @@ def _rpc(request: httpx.Request) -> httpx.Response:
 def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
     # The built website's layout (deploy/product/web/dist).
     (tmp_path / "index.html").write_text("<!doctype html><title>Phala Pay</title>")
-    (tmp_path / "demo").mkdir()
-    (tmp_path / "demo" / "index.html").write_text("<!doctype html><title>Demo</title>")
     (tmp_path / "assets").mkdir()
-    (tmp_path / "assets" / "landing-0a1b2c.js").write_text("export {};")
+    (tmp_path / "assets" / "index-0a1b2c.js").write_text("export {};")
     (tmp_path / "secret.txt").write_text("not served")
     (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
     service = Service()
@@ -266,9 +264,10 @@ def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
 
 
 def _account(console: DemoConsole) -> str:
-    response = console.handle("GET", "/demo/api/account", {}, b"")
+    response = console.handle("GET", "/api/account", {}, b"")
     assert response.status == HTTPStatus.OK
     cookie = response.headers["set-cookie"]
+    assert "Path=/;" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=Strict" in cookie
     assert "Secure" in cookie
@@ -281,12 +280,12 @@ def _customer(cookie: str) -> str:
 
 def _post(console: DemoConsole, cookie: str, path: str, body: dict[str, Any]) -> Any:
     headers = {"Cookie": cookie, "Content-Type": "application/json"}
-    response = console.handle("POST", f"/demo/api/{path}", headers, json.dumps(body).encode())
+    response = console.handle("POST", f"/api/{path}", headers, json.dumps(body).encode())
     return response.status, json.loads(response.body)
 
 
 def _get(console: DemoConsole, cookie: str, path: str) -> Any:
-    response = console.handle("GET", f"/demo/api/{path}", {"Cookie": cookie}, b"")
+    response = console.handle("GET", f"/api/{path}", {"Cookie": cookie}, b"")
     return response.status, json.loads(response.body)
 
 
@@ -472,61 +471,66 @@ def test_the_sweep_is_built_only_from_forwarders_the_pins_derive(
 
 def test_requests_need_the_cookie_and_posts_need_json(demo: tuple[DemoConsole, Service]) -> None:
     console, _ = demo
-    no_cookie = console.handle("GET", f"/demo/api/quotes/{QUOTE}", {}, b"")
+    no_cookie = console.handle("GET", f"/api/quotes/{QUOTE}", {}, b"")
     assert no_cookie.status == HTTPStatus.UNAUTHORIZED
-    forged = console.handle("GET", "/demo/api/account", {"Cookie": "demo_account=admin"}, b"")
+    forged = console.handle("GET", "/api/account", {"Cookie": "demo_account=admin"}, b"")
     assert "set-cookie" in forged.headers
     cookie = _account(console)
     form = {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"}
     for path in ("quotes", "deposit_address", "refunds"):
-        post = console.handle("POST", f"/demo/api/{path}", form, b"amount=2500")
+        post = console.handle("POST", f"/api/{path}", form, b"amount=2500")
         assert post.status == HTTPStatus.UNSUPPORTED_MEDIA_TYPE
     # Another browser's deposit is not found.
     status, _ = _get(console, cookie, f"deposits/{DEPOSIT}")
     assert status == HTTPStatus.NOT_FOUND
 
 
-def test_serves_the_landing_page_at_the_root(demo: tuple[DemoConsole, Service]) -> None:
+def test_serves_the_page_at_the_root(demo: tuple[DemoConsole, Service]) -> None:
     console, _ = demo
     assert console.handles("/")
-    landing = console.handle("GET", "/", {}, b"")
-    assert landing.status == HTTPStatus.OK
-    assert landing.body == b"<!doctype html><title>Phala Pay</title>"
-    assert landing.headers["content-type"] == "text/html; charset=utf-8"
-    # The same security headers as the demo page.
-    page = console.handle("GET", "/demo/", {}, b"")
-    assert page.body == b"<!doctype html><title>Demo</title>"
-    for header in ["content-security-policy", "referrer-policy", "x-content-type-options"]:
-        assert landing.headers[header] == page.headers[header]
-    assert landing.headers["cache-control"] == page.headers["cache-control"] == "no-cache"
-    csp = landing.headers["content-security-policy"]
+    page = console.handle("GET", "/", {}, b"")
+    assert page.status == HTTPStatus.OK
+    assert page.body == b"<!doctype html><title>Phala Pay</title>"
+    assert page.headers["content-type"] == "text/html; charset=utf-8"
+    assert page.headers["cache-control"] == "no-cache"
+    assert page.headers["referrer-policy"] == "no-referrer"
+    assert page.headers["x-content-type-options"] == "nosniff"
+    csp = page.headers["content-security-policy"]
     assert csp.startswith("default-src 'none'; script-src 'self';")
-    # Their shared assets, by content hash; nothing else at the root is the website's.
-    asset = console.handle("GET", "/assets/landing-0a1b2c.js", {}, b"")
+    assert "connect-src 'self' http://service.test;" in csp
+    # Its assets, by content hash; nothing else at the root is the website's.
+    asset = console.handle("GET", "/assets/index-0a1b2c.js", {}, b"")
     assert asset.status == HTTPStatus.OK
     assert asset.headers["cache-control"] == "public, max-age=31536000"
     assert "content-security-policy" not in asset.headers
     assert console.handle("POST", "/", {}, b"").status == HTTPStatus.METHOD_NOT_ALLOWED
-    assert console.handle("GET", "/assets/../secret.txt", {}, b"").status == HTTPStatus.NOT_FOUND
     for path in ["/index.html", "/secret.txt", "/webhooks", "/healthz", "/accounts/x"]:
         assert not console.handles(path)
 
 
 def test_serves_only_the_built_page(demo: tuple[DemoConsole, Service]) -> None:
     console, _ = demo
-    page = console.handle("GET", "/demo/", {}, b"")
-    assert "connect-src 'self' http://service.test;" in page.headers["content-security-policy"]
     for path in [
-        "/demo/secret.txt",
-        "/demo/../config.json",
-        "/demo/api/unknown",
-        "/demo/assets/landing-0a1b2c.js",
+        "/assets/../secret.txt",
         "/assets/secret.txt",
+        "/api/../secret.txt",
+        "/api/unknown",
+        "/api/assets/index-0a1b2c.js",
     ]:
         assert console.handle("GET", path, {}, b"").status in (
             HTTPStatus.NOT_FOUND,
             HTTPStatus.UNAUTHORIZED,
         )
+
+
+def test_the_old_demo_paths_are_gone(demo: tuple[DemoConsole, Service]) -> None:
+    console, _ = demo
+    assert console.handles("/api/account")
+    assert console.handle("GET", "/api/account", {}, b"").status == HTTPStatus.OK
+    # The demo is on the page at `/`: no separate page and no redirect, like any unknown path.
+    for path in ["/demo", "/demo/", "/demo/api/account"]:
+        assert not console.handles(path)
+        assert console.handle("GET", path, {}, b"").status == HTTPStatus.NOT_FOUND
 
 
 def test_the_config_requires_an_account_id() -> None:

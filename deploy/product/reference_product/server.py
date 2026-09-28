@@ -56,7 +56,7 @@ ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 class ProductServer:
     """Serves `POST /webhooks`, `GET /healthz`, and, given an `AccountApi`, `/accounts`, and,
-    given a `DemoConsole`, the website: `/`, `/assets/`, and `/demo/`."""
+    given a `DemoConsole`, the website: `/`, `/assets/`, and `/api/`."""
 
     def __init__(
         self,

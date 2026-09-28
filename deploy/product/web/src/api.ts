@@ -226,7 +226,7 @@ export class ApiError extends Error {
   }
 }
 
-// Relative to the page, which the product serves at `{public_url}/demo/`.
+// Relative to the page, which the product serves at `{public_url}/`: the API is `{public_url}/api/`.
 async function request(path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(`api/${path}`, { credentials: "same-origin", ...init });
   const body: unknown = await response.json().catch(() => null);
