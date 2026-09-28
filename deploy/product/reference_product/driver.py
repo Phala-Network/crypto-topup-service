@@ -163,9 +163,9 @@ def run_deposit(
     at the quoted price. `pay_bps` pays that fraction of the quote instead, and
     `pay_after_expiry` pays it after the quote's window; those deposits must be credited at spot.
     `token` pays another token. `until` is `credited` or `swept` for a credit, `rejected` for a
-    rejection, or `refunded`: a rejection, then a refund request to `refund_to` for the whole
-    deposit, which finance approves and executes (deploy/runbooks/refund-execution.md) while this
-    waits for the `deposit.refunded` webhook.
+    rejection, or `refunded`: a rejection, then a refund to `refund_to` for the whole deposit,
+    which the operator pays from the refund's treasury and attaches with
+    `POST /v1/refunds/{id}/mark_paid` while this waits for the `deposit.refunded` webhook.
     """
     payer = Payer(config)
     with ProductApi(config.public_url, driver) as api:
@@ -251,11 +251,12 @@ def _check_rejection(
         return
     refund = api.refund(team, deposit.id, refund_to, deposit.amount_atomic)
     LOG.info(
-        "refund %s is %s: %s atomic to %s; approve and execute it with "
-        "deploy/runbooks/refund-execution.md (REFUND_ID=%s)",
+        "refund %s is %s: pay %s atomic from %s to %s, then attach the transaction with "
+        "POST /v1/refunds/%s/mark_paid",
         refund["id"],
         refund["status"],
         refund["amount_atomic"],
+        refund["treasury"],
         refund["destination_address"],
         refund["id"],
     )
@@ -270,7 +271,7 @@ def _check_rejection(
     refunded = _event(view, "deposit.refunded", id=deposit.id)
     if refunded["amount_refunded_atomic"] != refund["amount_atomic"]:
         raise RuntimeError(f"deposit.refunded differs from the request: {refunded}")
-    LOG.info("refund %s is confirmed; deposit %s is refunded", refund["id"], deposit.id)
+    LOG.info("refund %s succeeded; deposit %s is refunded", refund["id"], deposit.id)
 
 
 def _deposit_at(view: dict[str, Any], address: str) -> Deposit | None:

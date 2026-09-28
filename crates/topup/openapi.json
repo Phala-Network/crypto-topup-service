@@ -659,138 +659,6 @@
         ]
       }
     },
-    "/v1/admin/refunds/{id}/approve": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "operationId": "approve_refund",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Refund id, `re_…` or the UUID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminRefundResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/refunds/{id}/record": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "operationId": "record_refund",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Refund id, `re_…` or the UUID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RecordRefundRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminRefundResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
     "/v1/admin/report/daily": {
       "get": {
         "tags": [
@@ -2443,7 +2311,7 @@
         "tags": [
           "refunds"
         ],
-        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit\nmust be final.",
+        "summary": "Creates a `pending` refund of a final deposit (design D5): a rejected deposit other than a\nsanctioned or dust one, or a credited one. The amount, the unrefunded remainder by default, is\nreserved until the refund is canceled or fails. The destination must pass sanctions screening\n(`400 destination_sanctioned`). The merchant then pays it from the refund's `treasury` and\nattaches the transaction with `mark_paid`.",
         "operationId": "create_refund",
         "parameters": [
           {
@@ -2502,6 +2370,16 @@
           },
           "409": {
             "description": "`deposit_not_refundable`, `deposit_not_final`, `paused`, or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Destination screening is unavailable; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -2673,6 +2551,184 @@
           }
         ]
       }
+    },
+    "/v1/refunds/{id}/cancel": {
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "Cancels a pending refund and releases its reservation of the deposit, whether or not a\ntransaction was attached; canceling a canceled refund returns it. Once its verification has\nended (`succeeded` or `failed`), a refund cannot be canceled.",
+        "operationId": "cancel_refund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Refund id, `re_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`refund_unexpected_state` (succeeded or failed) or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/refunds/{id}/mark_paid": {
+      "post": {
+        "tags": [
+          "refunds"
+        ],
+        "summary": "Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At\n`finalized`, both providers must show a `Transfer` of the deposit's token from the refund's\n`treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses\n(`log_index`, or any such log when absent). Then the refund is `succeeded` and\n`deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same\ntransaction returns the refund.",
+        "operationId": "mark_refund_paid",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Refund id, `re_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkRefundPaidRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`refund_unexpected_state` (not pending, or marked paid with another transaction), `transfer_already_used`, or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -2799,34 +2855,6 @@
           "reason": {
             "type": "string",
             "description": "Why the action is taken, 1 to 1024 bytes: the incident or sign-off it rests on."
-          }
-        }
-      },
-      "AdminRefundResponse": {
-        "type": "object",
-        "description": "Administrative refund workflow result.",
-        "required": [
-          "id",
-          "status"
-        ],
-        "properties": {
-          "confirmation_evidence": {
-            "description": "Most recent confirmation evidence, when checked."
-          },
-          "id": {
-            "type": "string",
-            "description": "Refund id, `re_…`."
-          },
-          "status": {
-            "type": "string",
-            "description": "Stable workflow status."
-          },
-          "tx_hash": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Recorded treasury transaction hash, when present."
           }
         }
       },
@@ -4129,6 +4157,29 @@
         },
         "additionalProperties": false
       },
+      "MarkRefundPaidRequest": {
+        "type": "object",
+        "description": "`POST /v1/refunds/{id}/mark_paid` body: the merchant's refund transaction.",
+        "required": [
+          "transaction_hash"
+        ],
+        "properties": {
+          "log_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block-wide index of the `Transfer` log that pays the refund; any matching log when absent.",
+            "minimum": 0
+          },
+          "transaction_hash": {
+            "type": "string",
+            "description": "Hash of the transaction that pays the refund from the treasury of the deposit's address."
+          }
+        },
+        "additionalProperties": false
+      },
       "MetadataClear": {
         "type": "string",
         "description": "`\"\"`: unset every key of the object's metadata.",
@@ -4508,28 +4559,16 @@
           }
         }
       },
-      "RecordRefundRequest": {
-        "type": "object",
-        "description": "Administrative refund record body owned by C12.",
-        "required": [
-          "tx_hash"
-        ],
-        "properties": {
-          "tx_hash": {
-            "type": "string",
-            "description": "Treasury transaction hash to verify at finalized."
-          }
-        }
-      },
       "Refund": {
         "type": "object",
-        "description": "A refund of (part of) a deposit to the customer, executed by finance from the treasury.",
+        "description": "A refund of (part of) a deposit to the customer, which the merchant pays from the treasury of\nthe deposit's address and attaches with `mark_paid` (design D5).",
         "required": [
           "id",
           "object",
           "deposit",
           "amount_atomic",
           "destination_address",
+          "treasury",
           "status",
           "created"
         ],
@@ -4551,9 +4590,25 @@
             "type": "string",
             "description": "Destination address."
           },
+          "failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the refund failed: `transaction_failed`, `transfer_not_found`, `sender_mismatch`,\n`destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be\nadded."
+          },
           "id": {
             "type": "string",
             "description": "`re_` id."
+          },
+          "log_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block-wide index of the paying `Transfer` log: as named when marked paid, or found at\nverification.",
+            "minimum": 0
           },
           "metadata": {
             "type": "object",
@@ -4571,14 +4626,18 @@
           },
           "status": {
             "type": "string",
-            "description": "`pending` (requested, approved, or sent) or `succeeded` (the transfer is final)."
+            "description": "`pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is\nfinal), `failed` (the attached transaction does not pay the refund; see\n`failure_reason`), or `canceled`."
           },
-          "tx_hash": {
+          "transaction_hash": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Refund transaction hash, once sent."
+            "description": "The attached refund transaction, once marked paid."
+          },
+          "treasury": {
+            "type": "string",
+            "description": "The treasury the refund must be paid from: the one the deposit's address pays, which may\ndiffer from the account's current treasury."
           }
         }
       },
@@ -4677,7 +4736,7 @@
           },
           "rejected_holds_atomic": {
             "type": "string",
-            "description": "Rejected token amount still held after confirmed refunds."
+            "description": "Rejected token amount still held after succeeded refunds."
           },
           "route": {
             "type": "string",

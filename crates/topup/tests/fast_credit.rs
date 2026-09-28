@@ -145,6 +145,21 @@ async fn a_transaction_replaced_with_the_same_nonce_is_reversed_once() -> Result
             ensure!(credited.price_source.as_deref() == Some("lock"));
             ensure!(chain.quote_status().await? == ("consumed".to_owned(), Some(credited.id)));
 
+            // The API refunds only final deposits; a pending refund of this one is written
+            // directly, to show a reversal cancels it.
+            let refund = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO refunds (id, account_id, livemode, chain_id, deposit_id, \
+                 amount_atomic, destination_address, status) \
+                 SELECT $1, account_id, livemode, chain_id, id, 1, $3, 'pending' \
+                 FROM deposits WHERE id = $2",
+            )
+            .bind(refund)
+            .bind(credited.id)
+            .bind(OTHER.to_lowercase())
+            .execute(&chain.pool)
+            .await?;
+
             // The payer's nonce is spent on another transaction instead.
             let replacement = chain.payer_replacement(nonce)?;
             chain.reorg(2, &[(&replacement, 0)])?;
@@ -172,6 +187,12 @@ async fn a_transaction_replaced_with_the_same_nonce_is_reversed_once() -> Result
             .fetch_one(&chain.pool)
             .await?;
             ensure!(evidence["result"] == "dropped_nonce_consumed");
+            let refund_status: String =
+                sqlx::query_scalar("SELECT status FROM refunds WHERE id = $1")
+                    .bind(refund)
+                    .fetch_one(&chain.pool)
+                    .await?;
+            ensure!(refund_status == "canceled");
             // The quote's window is still open, so it opens again with its reservation.
             ensure!(chain.quote_status().await? == ("open".to_owned(), None));
 

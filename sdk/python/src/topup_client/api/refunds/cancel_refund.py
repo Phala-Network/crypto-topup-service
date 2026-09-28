@@ -8,29 +8,27 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.admin_refund_response import AdminRefundResponse
 from ...models.error_response import ErrorResponse
-from ...models.record_refund_request import RecordRefundRequest
+from ...models.refund import Refund
+from ...types import UNSET, Unset
 from typing import cast
 
 
 def _get_kwargs(
     id: str,
     *,
-    body: RecordRefundRequest,
+    idempotency_key: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
+    if not isinstance(idempotency_key, Unset):
+        headers["Idempotency-Key"] = idempotency_key
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/admin/refunds/{id}/record".format(
+        "url": "/v1/refunds/{id}/cancel".format(
             id=quote(str(id), safe=""),
         ),
     }
-
-    _kwargs["json"] = body.to_dict()
-
-    headers["Content-Type"] = "application/json"
 
     _kwargs["headers"] = headers
     return _kwargs
@@ -38,16 +36,16 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> AdminRefundResponse | ErrorResponse | None:
+) -> ErrorResponse | Refund | None:
     if response.status_code == 200:
-        response_200 = AdminRefundResponse.from_dict(response.json())
+        response_200 = Refund.from_dict(response.json())
 
         return response_200
 
-    if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
 
-        return response_400
+        return response_401
 
     if response.status_code == 404:
         response_404 = ErrorResponse.from_dict(response.json())
@@ -67,7 +65,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[AdminRefundResponse | ErrorResponse]:
+) -> Response[ErrorResponse | Refund]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -80,24 +78,27 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-    body: RecordRefundRequest,
-) -> Response[AdminRefundResponse | ErrorResponse]:
-    """
+    idempotency_key: None | str | Unset = UNSET,
+) -> Response[ErrorResponse | Refund]:
+    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
+    transaction was attached; canceling a canceled refund returns it. Once its verification has
+    ended (`succeeded` or `failed`), a refund cannot be canceled.
+
     Args:
         id (str):
-        body (RecordRefundRequest): Administrative refund record body owned by C12.
+        idempotency_key (None | str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[AdminRefundResponse | ErrorResponse]
+        Response[ErrorResponse | Refund]
     """
 
     kwargs = _get_kwargs(
         id=id,
-        body=body,
+        idempotency_key=idempotency_key,
     )
 
     response = client.get_httpx_client().request(
@@ -111,25 +112,28 @@ def sync(
     id: str,
     *,
     client: AuthenticatedClient,
-    body: RecordRefundRequest,
-) -> AdminRefundResponse | ErrorResponse | None:
-    """
+    idempotency_key: None | str | Unset = UNSET,
+) -> ErrorResponse | Refund | None:
+    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
+    transaction was attached; canceling a canceled refund returns it. Once its verification has
+    ended (`succeeded` or `failed`), a refund cannot be canceled.
+
     Args:
         id (str):
-        body (RecordRefundRequest): Administrative refund record body owned by C12.
+        idempotency_key (None | str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        AdminRefundResponse | ErrorResponse
+        ErrorResponse | Refund
     """
 
     return sync_detailed(
         id=id,
         client=client,
-        body=body,
+        idempotency_key=idempotency_key,
     ).parsed
 
 
@@ -137,24 +141,27 @@ async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-    body: RecordRefundRequest,
-) -> Response[AdminRefundResponse | ErrorResponse]:
-    """
+    idempotency_key: None | str | Unset = UNSET,
+) -> Response[ErrorResponse | Refund]:
+    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
+    transaction was attached; canceling a canceled refund returns it. Once its verification has
+    ended (`succeeded` or `failed`), a refund cannot be canceled.
+
     Args:
         id (str):
-        body (RecordRefundRequest): Administrative refund record body owned by C12.
+        idempotency_key (None | str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[AdminRefundResponse | ErrorResponse]
+        Response[ErrorResponse | Refund]
     """
 
     kwargs = _get_kwargs(
         id=id,
-        body=body,
+        idempotency_key=idempotency_key,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -166,25 +173,28 @@ async def asyncio(
     id: str,
     *,
     client: AuthenticatedClient,
-    body: RecordRefundRequest,
-) -> AdminRefundResponse | ErrorResponse | None:
-    """
+    idempotency_key: None | str | Unset = UNSET,
+) -> ErrorResponse | Refund | None:
+    """Cancels a pending refund and releases its reservation of the deposit, whether or not a
+    transaction was attached; canceling a canceled refund returns it. Once its verification has
+    ended (`succeeded` or `failed`), a refund cannot be canceled.
+
     Args:
         id (str):
-        body (RecordRefundRequest): Administrative refund record body owned by C12.
+        idempotency_key (None | str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        AdminRefundResponse | ErrorResponse
+        ErrorResponse | Refund
     """
 
     return (
         await asyncio_detailed(
             id=id,
             client=client,
-            body=body,
+            idempotency_key=idempotency_key,
         )
     ).parsed

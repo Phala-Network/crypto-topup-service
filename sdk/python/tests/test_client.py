@@ -234,21 +234,28 @@ def test_list_deposits_follows_stripe_cursors() -> None:
     assert deposits[0].quote == QUOTE_ID
 
 
+REFUND_ID = "re_" + "0e" * 16
+REFUND = {
+    "id": REFUND_ID,
+    "object": "refund",
+    "deposit": f"dep_{1:032x}",
+    "amount_atomic": "1",
+    "destination_address": "0x" + "44" * 20,
+    "treasury": "0x" + "7e" * 20,
+    "status": "pending",
+    "failure_reason": None,
+    "transaction_hash": None,
+    "log_index": None,
+    "created": NOW,
+}
+
+
 def test_refunds_send_an_idempotency_key_and_default_to_the_remainder() -> None:
-    refund = {
-        "id": "re_" + "0e" * 16,
-        "object": "refund",
-        "deposit": f"dep_{1:032x}",
-        "amount_atomic": "1",
-        "destination_address": "0x" + "44" * 20,
-        "status": "pending",
-        "tx_hash": None,
-        "created": NOW,
-    }
-    service = FakeService(lambda request, _: httpx.Response(200, json=refund))
+    service = FakeService(lambda request, _: httpx.Response(200, json=REFUND))
     with _client(service) as client:
         created = client.create_refund(f"dep_{1:032x}", "0x" + "44" * 20)
     assert created.status == "pending"
+    assert created.treasury == "0x" + "7e" * 20
     request = service.requests[0]
     assert request.url.raw_path == b"/v1/refunds"
     assert json.loads(request.content) == {
@@ -256,6 +263,23 @@ def test_refunds_send_an_idempotency_key_and_default_to_the_remainder() -> None:
         "destination_address": "0x" + "44" * 20,
     }
     assert request.headers["idempotency-key"].startswith('"')
+
+
+def test_refunds_are_marked_paid_and_canceled_by_id() -> None:
+    marked = {**REFUND, "transaction_hash": "0x" + "dd" * 32, "log_index": 7}
+    service = FakeService(lambda request, _: httpx.Response(200, json=marked))
+    with _client(service) as client:
+        refund = client.mark_refund_paid(REFUND_ID, "0x" + "dd" * 32, log_index=7)
+        client.mark_refund_paid(REFUND_ID, "0x" + "dd" * 32)
+        client.cancel_refund(REFUND_ID)
+    assert refund.transaction_hash == "0x" + "dd" * 32
+    assert refund.log_index == 7
+    paid, unnamed, canceled = service.requests
+    assert paid.url.raw_path == f"/v1/refunds/{REFUND_ID}/mark_paid".encode()
+    assert json.loads(paid.content) == {"transaction_hash": "0x" + "dd" * 32, "log_index": 7}
+    assert json.loads(unnamed.content) == {"transaction_hash": "0x" + "dd" * 32}
+    assert canceled.method == "POST"
+    assert canceled.url.raw_path == f"/v1/refunds/{REFUND_ID}/cancel".encode()
 
 
 def test_quote_payment_is_optional_and_parsed() -> None:

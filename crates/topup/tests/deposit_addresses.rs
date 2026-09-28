@@ -680,6 +680,7 @@ fn app(pool: &sqlx::PgPool, routes: Vec<RouteFile>) -> Result<Router> {
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
     })
     .0)
 }

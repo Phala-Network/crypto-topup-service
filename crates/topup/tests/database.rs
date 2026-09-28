@@ -160,9 +160,9 @@ async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> 
             // A refund of that deposit filed under another account.
             assert_sqlstate(
                 sqlx::query(
-                    "INSERT INTO refunds (id, account_id, livemode, deposit_id, amount_atomic, \
-                     to_address, status, requested_by, route) \
-                     VALUES ($1, $2, true, $3, 1, $4, 'requested', 'test', 'r')",
+                    "INSERT INTO refunds (id, account_id, livemode, chain_id, deposit_id, \
+                     amount_atomic, destination_address, status) \
+                     VALUES ($1, $2, true, 1, $3, 1, $4, 'pending')",
                 )
                 .bind(Uuid::new_v4())
                 .bind(other.account_id)
@@ -611,7 +611,6 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("pending_transfers", OPERATIONAL),
     ("deposits", OPERATIONAL),
     ("refunds", OPERATIONAL),
-    ("refund_payment_claims", OPERATIONAL),
     ("webhook_endpoints", OPERATIONAL),
     ("events", OPERATIONAL),
     ("webhook_deliveries", OPERATIONAL),

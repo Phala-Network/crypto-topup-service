@@ -25,10 +25,9 @@ use crate::tenancy::Scope;
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
-    AdminRefundResponse, DailyReportResponse, DepositEventResponse, DepositResponse,
-    DepositTransitionResponse, NudgeResponse, OutboxReplayResponse,
-    ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
-    SupportDepositResponse,
+    DailyReportResponse, DepositEventResponse, DepositResponse, DepositTransitionResponse,
+    NudgeResponse, OutboxReplayResponse, ReconciliationBlockLiftResponse,
+    ReconciliationBlockReport, RouteDailyReport, SupportDepositResponse,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -400,9 +399,9 @@ pub struct NewRefund<'a> {
     pub scope: Scope,
     /// Deposit to refund.
     pub deposit_id: Uuid,
-    /// Fallback route of an unrouted deposit.
+    /// The deposit's route, or the fallback route of an unrouted deposit.
     pub route: &'a RouteFile,
-    /// Customer-controlled destination.
+    /// Customer-controlled destination, already screened.
     pub destination: EvmAddress,
     /// Requested amount; `None` refunds the remainder.
     pub amount: Option<AtomicAmount>,
@@ -412,15 +411,15 @@ pub struct NewRefund<'a> {
     pub actor: &'a Actor,
 }
 
-/// Creates a refund request after every policy check and returns its id; a request for the same
-/// deposit, destination, and amount returns the refund it created.
+/// Creates a `pending` refund after every policy check and returns its id: the deposit is final
+/// and refundable, nothing pauses refunds, and the amount fits the deposit's remainder after its
+/// pending and succeeded refunds, which it then reserves.
 pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uuid, ApiError> {
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
-               deposit.final_at IS NOT NULL AS is_final,
-               COALESCE(deposit.route, $4) AS effective_route,
+               deposit.chain_id, deposit.final_at IS NOT NULL AS is_final,
                customer.paused_scopes AS customer_scopes,
                account.paused_scopes AS account_scopes,
                COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
@@ -457,35 +456,20 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     if !row.try_get::<bool, _>("is_final")? {
         return Err(ApiError::deposit_not_final());
     }
-    let effective_route: String = row.try_get("effective_route")?;
+    let chain_id: i64 = row.try_get("chain_id")?;
 
-    let to_address = format!("{:#x}", refund.destination);
-    if let Some(amount) = refund.amount
-        && let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id FROM refunds
-            WHERE deposit_id = $1 AND to_address = $2 AND amount_atomic = $3::text::numeric
-            "#,
-        )
-        .bind(refund.deposit_id)
-        .bind(&to_address)
-        .bind(amount.value().to_string())
-        .fetch_optional(&mut *transaction)
-        .await?
-    {
-        transaction.commit().await?;
-        return Ok(existing);
-    }
-
-    let prior_total = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(sum(amount_atomic), 0)::text FROM refunds WHERE deposit_id = $1",
+    let reserved = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT COALESCE(sum(amount_atomic), 0)::text
+        FROM refunds
+        WHERE deposit_id = $1 AND status IN ('pending', 'succeeded')
+        "#,
     )
     .bind(refund.deposit_id)
     .fetch_one(&mut *transaction)
     .await?;
-    let prior_total = parse_atomic(prior_total)?;
     let remaining = deposit_amount
-        .checked_sub(prior_total)
+        .checked_sub(parse_atomic(reserved)?)
         .ok_or_else(ApiError::internal)?;
     let amount = refund.amount.map_or(remaining, AtomicAmount::value);
     if amount.is_zero() {
@@ -505,19 +489,18 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     sqlx::query(
         r#"
         INSERT INTO refunds
-            (id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
-             requested_by, metadata)
-        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8, $9)
+            (id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
+             status, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, 'pending', $8)
         "#,
     )
     .bind(refund_id)
     .bind(refund.scope.account_id())
     .bind(refund.scope.livemode())
+    .bind(chain_id)
     .bind(refund.deposit_id)
     .bind(amount.to_string())
-    .bind(to_address)
-    .bind(effective_route)
-    .bind(refund.actor.to_string())
+    .bind(format!("{:#x}", refund.destination))
     .bind(sqlx::types::Json(refund.metadata))
     .execute(&mut *transaction)
     .await?;
@@ -533,6 +516,129 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     Ok(refund_id)
 }
 
+/// Attaches the merchant's refund transaction to a pending refund; the verification worker checks
+/// it at finality. Repeating the same transaction is a no-op; another one is `409`, since only the
+/// verification outcome or a cancel ends a pending refund.
+pub async fn mark_refund_paid(
+    pool: &PgPool,
+    scope: Scope,
+    refund_id: Uuid,
+    tx_hash: B256,
+    log_index: Option<u64>,
+    actor: &Actor,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    let (status, current_hash, current_log) = locked_refund(&mut transaction, scope, refund_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let tx_hash = format!("{tx_hash:#x}");
+    let log_index = log_index
+        .map(|index| {
+            i64::try_from(index)
+                .map_err(|_| ApiError::invalid_param("log_index", "log_index is too large"))
+        })
+        .transpose()?;
+    if let Some(current) = current_hash {
+        let same = current == tx_hash && log_index.is_none_or(|index| current_log == Some(index));
+        if same && status != "canceled" {
+            return Ok(());
+        }
+        return Err(ApiError::refund_unexpected_state(if status == "pending" {
+            "already marked paid with another transaction".to_owned()
+        } else {
+            status
+        }));
+    }
+    if status != "pending" {
+        return Err(ApiError::refund_unexpected_state(status));
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE refunds
+        SET tx_hash = $2, log_index = $3, next_check_at = now(), updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(refund_id)
+    .bind(&tx_hash)
+    .bind(log_index)
+    .execute(&mut *transaction)
+    .await;
+    match updated {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(error))
+            if error.constraint() == Some("refunds_transfer_unique") =>
+        {
+            return Err(ApiError::transfer_already_used());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    insert_audit_tx_with_reason(
+        &mut transaction,
+        Some(scope.account_id()),
+        actor,
+        "refund_marked_paid",
+        &format!("refund:{refund_id}"),
+        &tx_hash,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Cancels a pending refund, releasing its reservation; canceling a canceled refund is a no-op.
+pub async fn cancel_refund(
+    pool: &PgPool,
+    scope: Scope,
+    refund_id: Uuid,
+    actor: &Actor,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    let (status, _, _) = locked_refund(&mut transaction, scope, refund_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    match status.as_str() {
+        "canceled" => return Ok(()),
+        "pending" => {}
+        _ => return Err(ApiError::refund_unexpected_state(status)),
+    }
+    sqlx::query("UPDATE refunds SET status = 'canceled', updated_at = now() WHERE id = $1")
+        .bind(refund_id)
+        .execute(&mut *transaction)
+        .await?;
+    insert_audit_tx(
+        &mut transaction,
+        Some(scope.account_id()),
+        actor,
+        "refund_canceled",
+        &format!("refund:{refund_id}"),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// The scope's refund `refund_id`, locked: its status, transaction, and log.
+async fn locked_refund(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    scope: Scope,
+    refund_id: Uuid,
+) -> Result<Option<(String, Option<String>, Option<i64>)>, ApiError> {
+    Ok(sqlx::query_as(
+        r#"
+        SELECT status, tx_hash, log_index
+        FROM refunds
+        WHERE id = $1 AND account_id = $2 AND livemode = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(refund_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .fetch_optional(&mut **transaction)
+    .await?)
+}
+
 /// One deposit with its transitions and webhook events, for the operator.
 pub async fn admin_deposit(
     pool: &PgPool,
@@ -541,135 +647,6 @@ pub async fn admin_deposit(
     let mut query = deposit_query();
     query.push(" WHERE deposit.id = ").push_bind(deposit_id);
     Ok(fetch_support_page(pool, query).await?.into_iter().next())
-}
-
-/// Approves a requested refund idempotently and appends an audit row.
-pub async fn approve_refund(
-    pool: &PgPool,
-    refund_id: Uuid,
-    routes: &[RouteFile],
-    actor: &Actor,
-) -> Result<AdminRefundResponse, ApiError> {
-    let mut transaction = pool.begin().await?;
-    let current = refund_admin_row(&mut transaction, refund_id).await?;
-    if current.status == "requested" {
-        if refund_approval_paused(&mut transaction, refund_id).await? {
-            return Err(ApiError::paused("refund approvals are paused"));
-        }
-        let route = routes
-            .iter()
-            .filter(|route| route.route == current.route)
-            .max_by_key(|route| route.version)
-            .ok_or_else(ApiError::internal)?;
-        let eligibility = refund_approval_eligibility(&mut transaction, refund_id, route).await?;
-        refund_eligibility(eligibility)
-            .map_err(|_| ApiError::conflict("deposit is no longer eligible for a refund"))?;
-        sqlx::query(
-            "UPDATE refunds SET status = 'approved', approved_by = $2, updated_at = now() WHERE id = $1",
-        )
-        .bind(refund_id)
-        .bind(actor.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        insert_audit_tx(
-            &mut transaction,
-            Some(current.account_id),
-            actor,
-            "refund_approved",
-            &format!("refund:{refund_id}"),
-        )
-        .await?;
-    }
-    let updated = refund_admin_row(&mut transaction, refund_id).await?;
-    transaction.commit().await?;
-    Ok(updated.into())
-}
-
-/// Records the treasury transaction and moves an approved refund to `sent`.
-pub async fn record_refund(
-    pool: &PgPool,
-    refund_id: Uuid,
-    tx_hash: B256,
-    actor: &Actor,
-) -> Result<AdminRefundResponse, ApiError> {
-    let mut transaction = pool.begin().await?;
-    let current = refund_admin_row(&mut transaction, refund_id).await?;
-    let tx_hash = format!("{tx_hash:#x}");
-    match current.status.as_str() {
-        "approved" => {
-            sqlx::query(
-                r#"
-                UPDATE refunds
-                SET status = 'sent', tx_hash = $2, next_check_at = now(),
-                    tx_version = tx_version + 1,
-                    confirmation_evidence = jsonb_build_object(
-                        'result', 'recorded', 'tx_hash', $2,
-                        'version', tx_version + 1
-                    ),
-                    updated_at = now()
-                WHERE id = $1
-                "#,
-            )
-            .bind(refund_id)
-            .bind(&tx_hash)
-            .execute(&mut *transaction)
-            .await?;
-            insert_audit_tx(
-                &mut transaction,
-                Some(current.account_id),
-                actor,
-                "refund_recorded",
-                &format!("refund:{refund_id}"),
-            )
-            .await?;
-        }
-        "sent" if current.tx_hash.as_deref() == Some(tx_hash.as_str()) => {}
-        "sent" => {
-            let previous = current.tx_hash.as_deref().ok_or_else(ApiError::internal)?;
-            sqlx::query(
-                r#"
-                UPDATE refunds
-                SET tx_hash = $2, tx_version = tx_version + 1, next_check_at = now(),
-                    confirmation_evidence = jsonb_build_object(
-                        'result', 'tx_hash_corrected',
-                        'previous_tx_hash', tx_hash,
-                        'replacement_tx_hash', $2,
-                        'previous_evidence', confirmation_evidence,
-                        'version', tx_version + 1
-                    ),
-                    updated_at = now()
-                WHERE id = $1
-                "#,
-            )
-            .bind(refund_id)
-            .bind(&tx_hash)
-            .execute(&mut *transaction)
-            .await?;
-            insert_audit_tx_with_reason(
-                &mut transaction,
-                Some(current.account_id),
-                actor,
-                "refund_tx_hash_corrected",
-                &format!("refund:{refund_id}"),
-                &format!("replaced {previous} with {tx_hash}"),
-            )
-            .await?;
-        }
-        "confirmed" if current.tx_hash.as_deref() == Some(tx_hash.as_str()) => {}
-        "confirmed" => {
-            return Err(ApiError::conflict(
-                "confirmed refund transaction hash cannot be changed",
-            ));
-        }
-        _ => {
-            return Err(ApiError::conflict(
-                "refund must be approved before recording",
-            ));
-        }
-    }
-    let updated = refund_admin_row(&mut transaction, refund_id).await?;
-    transaction.commit().await?;
-    Ok(updated.into())
 }
 
 /// Makes a deposit immediately claimable without changing its state.
@@ -1028,27 +1005,6 @@ impl TryFrom<ReconciliationBlockRow> for ReconciliationBlockReport {
     }
 }
 
-#[derive(FromRow)]
-struct RefundAdminRow {
-    id: Uuid,
-    account_id: Uuid,
-    route: String,
-    status: String,
-    tx_hash: Option<String>,
-    confirmation_evidence: Option<Value>,
-}
-
-impl From<RefundAdminRow> for AdminRefundResponse {
-    fn from(row: RefundAdminRow) -> Self {
-        Self {
-            id: crate::ids::format(crate::ids::REFUND, row.id),
-            status: row.status,
-            tx_hash: row.tx_hash,
-            confirmation_evidence: row.confirmation_evidence,
-        }
-    }
-}
-
 impl TryFrom<DepositViewRow> for DepositResponse {
     type Error = ApiError;
 
@@ -1272,19 +1228,19 @@ pub async fn daily_report(
 
     for row in sqlx::query(
         r#"
-        WITH confirmed AS (
+        WITH succeeded AS (
             SELECT deposit_id, sum(amount_atomic) AS amount
             FROM refunds
-            WHERE status = 'confirmed'
+            WHERE status = 'succeeded'
             GROUP BY deposit_id
         )
         SELECT COALESCE(
                    deposit.route,
                    'unrouted:' || deposit.chain_id::text || ':' || deposit.asset_contract
                ) AS report_key,
-               COALESCE(sum(GREATEST(deposit.amount_atomic - COALESCE(confirmed.amount, 0), 0)), 0)::text AS amount
+               COALESCE(sum(GREATEST(deposit.amount_atomic - COALESCE(succeeded.amount, 0), 0)), 0)::text AS amount
         FROM deposits AS deposit
-        LEFT JOIN confirmed ON confirmed.deposit_id = deposit.id
+        LEFT JOIN succeeded ON succeeded.deposit_id = deposit.id
         WHERE deposit.state = 'rejected'
         GROUP BY report_key
         "#,
@@ -1437,7 +1393,7 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
         ]),
         credited_undelivered: 0,
         credited_undelivered_max_age_seconds: 0,
-        refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),
+        refunds_by_status: zero_counts(&["pending", "succeeded", "failed", "canceled"]),
         age_in_state_max_seconds: zero_counts(&[
             "detected",
             "confirmed",
@@ -1468,7 +1424,7 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
         ]),
         credited_undelivered: 0,
         credited_undelivered_max_age_seconds: 0,
-        refunds_by_status: zero_counts(&["requested", "approved", "sent", "confirmed"]),
+        refunds_by_status: zero_counts(&["pending", "succeeded", "failed", "canceled"]),
         age_in_state_max_seconds: zero_counts(&[
             "detected",
             "confirmed",
@@ -1504,73 +1460,6 @@ fn refund_deposit_from_row(row: &PgRow, route: &RouteFile) -> Result<RefundDepos
         amount: AtomicAmount::new(parse_atomic(row.try_get("amount_atomic")?)?),
         min_refund: route.asset.min_refund_atomic,
     })
-}
-
-async fn refund_admin_row(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    refund_id: Uuid,
-) -> Result<RefundAdminRow, ApiError> {
-    sqlx::query_as::<_, RefundAdminRow>(
-        r#"
-        SELECT id, account_id, route, status, tx_hash, confirmation_evidence
-        FROM refunds
-        WHERE id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(refund_id)
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or_else(ApiError::not_found)
-}
-
-async fn refund_approval_eligibility(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    refund_id: Uuid,
-    route: &RouteFile,
-) -> Result<RefundDeposit, ApiError> {
-    let row = sqlx::query(
-        r#"
-        SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason
-        FROM refunds AS refund
-        JOIN deposits AS deposit ON deposit.id = refund.deposit_id
-        JOIN customers AS customer ON customer.id = deposit.customer_id
-        WHERE refund.id = $1
-        FOR UPDATE OF deposit, customer
-        "#,
-    )
-    .bind(refund_id)
-    .fetch_one(&mut **transaction)
-    .await?;
-    refund_deposit_from_row(&row, route)
-}
-
-async fn refund_approval_paused(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    refund_id: Uuid,
-) -> Result<bool, ApiError> {
-    let row = sqlx::query(
-        r#"
-        SELECT customer.paused_scopes AS customer_scopes,
-               account.paused_scopes AS account_scopes,
-               COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
-        FROM refunds AS refund
-        JOIN deposits AS deposit ON deposit.id = refund.deposit_id
-        JOIN customers AS customer ON customer.id = deposit.customer_id
-        JOIN accounts AS account ON account.id = deposit.account_id
-        LEFT JOIN route_pauses AS route_pause ON route_pause.route = refund.route
-        WHERE refund.id = $1
-        "#,
-    )
-    .bind(refund_id)
-    .fetch_one(&mut **transaction)
-    .await?;
-    let customer_scopes: Vec<String> = row.try_get("customer_scopes")?;
-    let account_scopes: Vec<String> = row.try_get("account_scopes")?;
-    let route_scopes: Vec<String> = row.try_get("route_scopes")?;
-    Ok([customer_scopes, account_scopes, route_scopes]
-        .iter()
-        .any(|scopes| scopes.iter().any(|scope| scope == "refunds")))
 }
 
 fn updated_scopes(current: Vec<String>, requested: &[String], pause: bool) -> Vec<String> {

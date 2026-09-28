@@ -526,7 +526,18 @@ pub struct CreateRefundRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// A refund of (part of) a deposit to the customer, executed by finance from the treasury.
+/// `POST /v1/refunds/{id}/mark_paid` body: the merchant's refund transaction.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MarkRefundPaidRequest {
+    /// Hash of the transaction that pays the refund from the treasury of the deposit's address.
+    pub transaction_hash: String,
+    /// Block-wide index of the `Transfer` log that pays the refund; any matching log when absent.
+    pub log_index: Option<u64>,
+}
+
+/// A refund of (part of) a deposit to the customer, which the merchant pays from the treasury of
+/// the deposit's address and attaches with `mark_paid` (design D5).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Refund {
     /// `re_` id.
@@ -539,10 +550,22 @@ pub struct Refund {
     pub amount_atomic: String,
     /// Destination address.
     pub destination_address: String,
-    /// `pending` (requested, approved, or sent) or `succeeded` (the transfer is final).
+    /// The treasury the refund must be paid from: the one the deposit's address pays, which may
+    /// differ from the account's current treasury.
+    pub treasury: String,
+    /// `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
+    /// final), `failed` (the attached transaction does not pay the refund; see
+    /// `failure_reason`), or `canceled`.
     pub status: String,
-    /// Refund transaction hash, once sent.
-    pub tx_hash: Option<String>,
+    /// Why the refund failed: `transaction_failed`, `transfer_not_found`, `sender_mismatch`,
+    /// `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
+    /// added.
+    pub failure_reason: Option<String>,
+    /// The attached refund transaction, once marked paid.
+    pub transaction_hash: Option<String>,
+    /// Block-wide index of the paying `Transfer` log: as named when marked paid, or found at
+    /// verification.
+    pub log_index: Option<u64>,
     /// Request time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
@@ -601,13 +624,6 @@ pub struct ConfigAsset {
     pub typical_credit_seconds: u64,
     /// Typical time from payment to finality, in seconds; refunds wait for it.
     pub typical_finality_seconds: u64,
-}
-
-/// Administrative refund record body owned by C12.
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-pub struct RecordRefundRequest {
-    /// Treasury transaction hash to verify at finalized.
-    pub tx_hash: String,
 }
 
 /// The merchant's contact recorded at onboarding (design D8): the operator's channel for the key
@@ -820,19 +836,6 @@ pub struct NudgeResponse {
     pub next_attempt_at: DateTime<Utc>,
 }
 
-/// Administrative refund workflow result.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct AdminRefundResponse {
-    /// Refund id, `re_…`.
-    pub id: String,
-    /// Stable workflow status.
-    pub status: String,
-    /// Recorded treasury transaction hash, when present.
-    pub tx_hash: Option<String>,
-    /// Most recent confirmation evidence, when checked.
-    pub confirmation_evidence: Option<serde_json::Value>,
-}
-
 /// Administrative action body; `reason` is recorded in the action's audit row.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct AdminReasonRequest {
@@ -879,7 +882,7 @@ pub struct RouteDailyReport {
     pub unflushed_balance_atomic: String,
     /// Sum of unconsumed rate-lock token amounts.
     pub open_rate_lock_exposure_atomic: String,
-    /// Rejected token amount still held after confirmed refunds.
+    /// Rejected token amount still held after succeeded refunds.
     pub rejected_holds_atomic: String,
     /// Deposit counts keyed by state.
     pub deposits_by_state: std::collections::BTreeMap<String, u64>,

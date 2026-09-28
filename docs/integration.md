@@ -153,7 +153,9 @@ sequenceDiagram
     PP-->>PP: finalized Flushed event marks the deposit swept
     opt Refund (operator only, from your admin)
         BE->>PP: POST /v1/refunds {deposit, destination_address}
-        PP->>BE: webhook deposit.refunded, after finance's transfer is final
+        BE->>ETH: transfer from the refund's treasury (your wallet or Safe)
+        BE->>PP: POST /v1/refunds/{id}/mark_paid {transaction_hash}
+        PP->>BE: webhook deposit.refunded, once the transfer is final
     end
 ```
 
@@ -488,8 +490,8 @@ events, and the event follows the `credited` commit within a second.
 
 The service never asks whether you accept a deposit. To refuse one (an account you do not know, a
 closed or suspended workspace, your own caps), record it as held and answer `2xx`; when support
-has a destination address from the user, an operator refunds it from your admin (§3).
-Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
+has a destination address from the user, an operator refunds it from your admin (§3): you pay
+it from your treasury, attach the transaction, and `deposit.refunded` follows. To
 stop crediting an account before deposits arrive, pause its `settlement` scope
 (the operator's `POST /v1/admin/accounts/{acct}/customers/{account_id}/pause`): its deposits
 then wait in `confirmed` until you resume.
@@ -579,7 +581,9 @@ route's `min_refund_atomic` (in `/v1/config`). A credited deposit is refunded on
 for a credit you did not apply or reverse, such as a held credit (§2.4;
 [architecture §15](architecture.md#15-operating-policies)).
 
-Refunds are operator actions, as in Stripe's Dashboard: your support or finance staff start one
+The service never moves funds: you pay every refund from your own treasury, in two steps, as
+BTCPay Server's payouts do ([BTCPay payouts](https://docs.btcpayserver.org/Payouts/)). Refunds are
+operator actions, as in Stripe's Dashboard: your support or finance staff start one
 from your own internal admin, whose backend holds your secret key. Never offer a refund
 as a self-service action to the paying user: a crypto refund is irreversible, and a credited
 balance may already be spent. Request it by deposit id, not through the user's account, so that a
@@ -597,19 +601,46 @@ Idempotency-Key: "…"
 
 ```json
 {"id": "re_…", "object": "refund", "deposit": "dep_…", "amount_atomic": "…",
- "destination_address": "0x…", "status": "pending", "tx_hash": null, "created": 1790500000,
+ "destination_address": "0x…", "treasury": "0x…", "status": "pending",
+ "failure_reason": null, "transaction_hash": null, "log_index": null, "created": 1790500000,
  "metadata": {"reason": "duplicate", "ticket": "T-1"}}
 ```
 
 - `amount_atomic` is in token base units and defaults to the unrefunded remainder; more than the
-  remainder is `400 amount_too_large`.
-- `status` is `pending` while finance approves and executes the transfer from the treasury Safe,
-  and `succeeded` once the transfer is final, when `deposit.refunded` is sent and the deposit's
-  `amount_refunded_atomic` (and `refunded`, once whole) shows it. `GET /v1/refunds/{id}` reads it.
+  remainder is `400 amount_too_large`. A pending refund reserves its amount until it succeeds,
+  fails, or is canceled.
+- The destination is screened against the route's sanctions oracle: a listed address is
+  `400 destination_sanctioned`, and `503 unavailable` means screening could not answer; retry.
 - An ineligible deposit is `409 deposit_not_refundable`; a deposit that is not final yet (about
   15 minutes after its block on Ethereum) is `409 deposit_not_final`, so nothing is paid back for
   a payment that could still be reversed: retry after finality. A paused `refunds` scope is
   `409 paused`. The same `Idempotency-Key` with the same request returns the same response.
+
+Then pay it: transfer exactly `amount_atomic` of the deposit's token from `treasury` to
+`destination_address`, from your wallet or Safe, and attach the transaction:
+
+```http
+POST /v1/refunds/re_…/mark_paid
+
+{"transaction_hash": "0x…", "log_index": 123}
+```
+
+- `treasury` is the treasury the deposit's own address pays, fixed when its quote was issued. It
+  stays the sender to use even after you change your treasury; a transfer from any other address
+  does not pay the refund.
+- `log_index` (optional) names the transfer's block-wide log index when one transaction pays
+  several refunds; without it, any matching transfer in the transaction counts. One transfer log
+  pays one refund: naming a log another refund holds is `409 transfer_already_used`.
+- Once the transaction is final on both of the service's providers (refunds need no speed), the
+  refund is `succeeded`, `deposit.refunded` is sent, and the deposit's `amount_refunded_atomic`
+  (and `refunded`, once whole) shows it. A final transaction that does not pay it makes the refund
+  `failed` with a `failure_reason` (`transaction_failed`, `transfer_not_found`,
+  `sender_mismatch`, `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`) and
+  releases its reservation; create a new refund to try again. Attaching the same transaction again
+  returns the refund; another one is `409 refund_unexpected_state`.
+- `POST /v1/refunds/{id}/cancel` cancels a pending refund, attached or not, and releases its
+  reservation; a succeeded or failed refund cannot be canceled. A deposit that is reversed cancels
+  its pending refunds. `GET /v1/refunds/{id}` reads a refund.
 - When `deposit.refunded` arrives, reverse the credit you applied for that deposit (a held
   credit was never applied), once per event id.
 
@@ -840,10 +871,12 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 | `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/deposits/{id}` `{metadata}` | Update the deposit's metadata (§1.4); the quote's is unchanged. | `update_deposit` |
-| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
-| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
-| `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
+| `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | A `pending` refund of a final deposit (§3), paid by you from its `treasury`; `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
+| `POST /v1/refunds/{id}/mark_paid` `{transaction_hash, log_index?}` | Attach the transaction that pays the refund; verified at finality (§3). | `mark_refund_paid` |
+| `POST /v1/refunds/{id}/cancel` | Cancel a pending refund and release its reservation. | `cancel_refund` |
+| `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until its transaction is final, then `succeeded` or `failed`, or `canceled`; `expand[]=deposit`. | `get_refund` |
 | `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
+| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
 | `GET /v1/attestation?nonce=` | Settlement key evidence (§5.3); unauthenticated. | `attestation` |
 
 ### 5.8 Errors
@@ -857,6 +890,7 @@ parameter when there is one. Codes are stable; messages are not.
 |---|---|---|
 | 400 | `parameter_missing`, `parameter_unknown`, `parameter_invalid` | Malformed input, with `param`. Do not retry unchanged. |
 | 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`), or above a refund's remainder (`param: "amount_atomic"`). |
+| 400 | `destination_sanctioned` | A sanctions list names the refund's `destination_address` (§3). |
 | 400 | `idempotency_key_reused` (`type: idempotency_error`) | The same `Idempotency-Key` with another request. |
 | 401 | `api_key_missing`, `api_key_invalid`, `api_key_expired` | No Bearer key; a malformed, unknown, or revoked key; a rolled key past its expiry (§5.5). |
 | 403 | `testmode_charges_only` | A live key of an account the operator has not enabled for live mode. |
@@ -869,6 +903,7 @@ parameter when there is one. Codes are stable; messages are not.
 | 409 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
 | 409 | `deposit_not_refundable` | The deposit is not eligible for a refund (§3). |
 | 409 | `deposit_not_final` | The deposit could still be reversed; request the refund once it is final (§3). |
+| 409 | `refund_unexpected_state`, `transfer_already_used` | `mark_paid` or cancel refused: the refund is not pending or already carries another transaction, or the named transfer log pays another refund (§3). |
 | 409 | `conflict` | Other state conflicts. |
 | 429 | `rate_limit` | Requests per account and mode (§5.5), quote creation per customer, or reads of one quote by its `client_secret`. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |

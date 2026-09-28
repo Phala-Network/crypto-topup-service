@@ -94,6 +94,22 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking:** refunds are paid by the merchant (docs/design/multi-tenant.md D5, PR 9), in
+  BTCPay's two-step payout flow. `POST /v1/refunds` creates a `pending` refund of a final deposit
+  and reserves its amount; its destination is screened for sanctions
+  (`400 destination_sanctioned`, `503 unavailable` when screening cannot answer). Pay it from the
+  refund's new `treasury` field (the treasury of the deposit's own address, not the account's
+  current one), then attach the transaction with **`POST /v1/refunds/{id}/mark_paid
+  {transaction_hash, log_index?}`**. At finality on both providers, a `Transfer` of the deposit's
+  token from that treasury to the destination for exactly the amount, in a log no other refund
+  holds, makes the refund `succeeded` and sends `deposit.refunded`; anything else makes it `failed`
+  with a `failure_reason` and releases the reservation. **`POST /v1/refunds/{id}/cancel`** cancels
+  a pending refund; a reversed deposit cancels its pending refunds. The Refund object gains
+  `treasury`, `failure_reason`, and `log_index`, renames `tx_hash` to `transaction_hash`, and its
+  `status` is Stripe's `pending`, `succeeded`, `failed`, or `canceled`. New `409` codes:
+  `refund_unexpected_state`, `transfer_already_used`. The operator's
+  `POST /v1/admin/refunds/{id}/approve` and `/record` are removed, and the daily report's
+  `refunds_by_status` counts the new statuses.
 - **Breaking:** the service sends no transactions (docs/design/multi-tenant.md §5, §13, PR 4).
   Anyone, usually the merchant with its own wallet or Safe, sweeps forwarders with the
   permissionless factory's `flush(treasury, salts, token)` and pays the gas. The finalized scanner

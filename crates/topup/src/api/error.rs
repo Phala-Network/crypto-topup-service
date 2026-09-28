@@ -212,6 +212,38 @@ impl ApiError {
         )
     }
 
+    /// Returns a refund refused because a sanctions list names its destination (design §8).
+    #[must_use]
+    pub fn destination_sanctioned() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "destination_sanctioned",
+            "the destination address is on a sanctions list",
+        )
+        .with_param("destination_address")
+    }
+
+    /// Returns a refund transaction whose transfer log already pays another refund.
+    #[must_use]
+    pub fn transfer_already_used() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "transfer_already_used",
+            "the transfer log already pays another refund",
+        )
+        .with_param("log_index")
+    }
+
+    /// Returns a refund action its status does not allow.
+    #[must_use]
+    pub fn refund_unexpected_state(detail: impl std::fmt::Display) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "refund_unexpected_state",
+            format!("the refund is {detail}"),
+        )
+    }
+
     /// Returns an `Idempotency-Key` reused with a different request (design §13).
     #[must_use]
     pub fn idempotency_key_reused() -> Self {

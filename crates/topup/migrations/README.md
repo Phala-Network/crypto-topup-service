@@ -32,6 +32,14 @@ exactly one of them set, `account_limits.max_active_deposit_addresses`, and the
 `deposit_addresses.read` and `.write` permissions. Its down migration refuses to run once a
 deposit address exists.
 
+`20261009000000_merchant_refunds` (design PR 9) replaces the operator refund workflow with the
+merchant's two-step flow (design D5): statuses `pending`, `succeeded`, `failed`, `canceled`;
+`chain_id`, `destination_address` (was `to_address`), `log_index`, and `failure_reason`; one
+refund per transfer log (`refunds_transfer_unique`, over pending and succeeded refunds). It drops
+`requested_by`, `approved_by`, `route`, `tx_version`, `confirmed_at`, the natural-key replay index,
+and `refund_payment_claims`. Existing rows map `confirmed` to `succeeded` and every other status to
+`pending`.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -73,9 +81,8 @@ platform and read across accounts. Composite foreign keys, `(parent_id, account_
 referencing a unique key of the parent, make a quote agree with its customer, an address with its
 quote or deposit address, a deposit address with its customer, a deposit with its address and
 customer, and a refund with its deposit, so no write can join
-two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush_failures`,
-`refund_payment_claims`, and `webhook_deliveries` have no `account_id` and are reached only
-through their scoped parent.
+two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush_failures`, and
+`webhook_deliveries` have no `account_id` and are reached only through their scoped parent.
 
 `permissions` is the one authorization table (design D13): each row grants a permission to an API
 key kind (`key:secret`, `key:restricted`); there are no roles. The migrations seed it and the
@@ -83,8 +90,6 @@ service can only read it.
 
 ## Kept until a later design PR
 
-- The refund workflow columns (`requested_by`, `approved_by`, the `requested`, `approved`, `sent`,
-  `confirmed` statuses, `to_address`) are the operator-approved flow design PR 9 replaces.
 - Tables for treasuries, confirmation policies, and account limits are created now and used by
   later design PRs (7 and 10).
 

@@ -6,9 +6,10 @@ scanning reports a Phala Pay key. The service raises no alert for this: only the
 tell its own requests from others.
 
 **Impact:** whoever holds a secret key acts as the merchant in that key's mode: it can create
-quotes (within the caps and rate limits), cancel them, read deposits, request refunds, and manage
-the mode's keys. It cannot move funds: forwarders pay only the treasury, and credits exist only as
-`deposit.credited` events the service signs and delivers to the account's webhook endpoints.
+quotes (within the caps and rate limits), cancel them, read deposits, create and cancel refunds,
+and manage the mode's keys. It cannot move funds: forwarders pay only the treasury, credits exist
+only as `deposit.credited` events the service signs and delivers to the account's webhook
+endpoints, and a refund succeeds only once the merchant pays it from its treasury.
 
 ## The merchant rolls the key
 
@@ -37,9 +38,9 @@ admin POST "/v1/admin/accounts/$ACCOUNT/api_keys" \
    otherwise).
 3. Send the key to the contact through an encrypted channel. The merchant rolls it on receipt, so
    no one at Phala holds a working key.
-4. Review what the old key could have done: confirm every refund request since the exposure with
-   the merchant before Finance approves it (daily report `refunds_by_status`), and let the
-   merchant check its customers' pause scopes and open quotes. If the merchant cannot act
+4. Review what the old key could have done: the merchant reviews every refund created since the
+   exposure (daily report `refunds_by_status`) and cancels those it did not make
+   (`POST /v1/refunds/{id}/cancel`), and checks its customers' pause scopes and open quotes. If the merchant cannot act
    promptly, pause `quotes` and `refunds` on its routes meanwhile
    (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","refunds"]}'`); deposits
    keep being credited.
@@ -47,4 +48,4 @@ admin POST "/v1/admin/accounts/$ACCOUNT/api_keys" \
 ## Done when
 
 The merchant's requests with its new key succeed, a request with a revoked key answers
-`401 api_key_invalid`, and every refund request since the exposure is confirmed or declined.
+`401 api_key_invalid`, and every refund created since the exposure is confirmed or canceled.

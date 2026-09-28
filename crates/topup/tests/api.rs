@@ -548,9 +548,9 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         let refund = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO refunds (id, account_id, livemode, deposit_id, amount_atomic, to_address,
-                                 route, status, requested_by)
-            SELECT $1, account_id, livemode, id, 10, $3, route, 'requested', 'test'
+            INSERT INTO refunds (id, account_id, livemode, chain_id, deposit_id, amount_atomic,
+                                 destination_address, status)
+            SELECT $1, account_id, livemode, chain_id, id, 10, $3, 'pending'
             FROM deposits WHERE id = $2
             "#,
         )
@@ -592,6 +592,18 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             (
                 Method::GET,
                 format!("/v1/refunds/{refund}?expand[]=deposit"),
+                Vec::new(),
+            ),
+            (
+                Method::POST,
+                format!("/v1/refunds/{refund}/mark_paid"),
+                serde_json::to_vec(
+                    &json!({"transaction_hash": format!("{:#x}", B256::repeat_byte(0x69))}),
+                )?,
+            ),
+            (
+                Method::POST,
+                format!("/v1/refunds/{refund}/cancel"),
                 Vec::new(),
             ),
             (Method::POST, "/v1/refunds".to_owned(), refund_body),
@@ -1200,6 +1212,7 @@ fn app_state_with_attestor(
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
+        refund_screening: Arc::new(support::ClearScreener),
     }
 }
 
