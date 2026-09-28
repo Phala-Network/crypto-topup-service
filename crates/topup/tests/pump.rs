@@ -168,6 +168,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
+                    actor: topup::db::SYSTEM_ACTOR.to_owned(),
                 }],
                 effects: TransitionEffects {
                     mark_final: false,

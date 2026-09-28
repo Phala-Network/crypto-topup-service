@@ -109,7 +109,7 @@ def sync_detailed(
     client_secret: str | Unset = UNSET,
 ) -> Response[ClientQuote | Quote | ErrorResponse]:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
-    public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
+    public view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.
 
     Args:
         id (str):
@@ -145,7 +145,7 @@ def sync(
     client_secret: str | Unset = UNSET,
 ) -> ClientQuote | Quote | ErrorResponse | None:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
-    public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
+    public view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.
 
     Args:
         id (str):
@@ -176,7 +176,7 @@ async def asyncio_detailed(
     client_secret: str | Unset = UNSET,
 ) -> Response[ClientQuote | Quote | ErrorResponse]:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
-    public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
+    public view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.
 
     Args:
         id (str):
@@ -210,7 +210,7 @@ async def asyncio(
     client_secret: str | Unset = UNSET,
 ) -> ClientQuote | Quote | ErrorResponse | None:
     """One quote, for example to resume a checkout page. The payer's browser can read the quote's
-    public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
+    public view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.
 
     Args:
         id (str):

@@ -17,8 +17,9 @@ use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
+use crate::api_keys::{self, IssuedKey};
 use crate::audit::{self, Actor};
-use crate::db::{Account, Customer};
+use crate::db::Customer;
 use crate::tenancy::Scope;
 
 use super::auth::VerifiedSignature;
@@ -29,21 +30,6 @@ use super::models::{
     ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
     SupportDepositResponse,
 };
-
-/// The columns of [`IssuedAccount`] for account `$1`.
-macro_rules! issued_account_select {
-    () => {
-        r#"
-        SELECT account.id, account.public_id, account.name, account.paused_scopes,
-               signing_key.livemode, signing_key.public_key,
-               (SELECT endpoint.url FROM webhook_endpoints AS endpoint
-                WHERE endpoint.account_id = account.id AND endpoint.livemode = signing_key.livemode
-                ORDER BY endpoint.created_at, endpoint.id LIMIT 1) AS webhook_url
-        FROM accounts AS account
-        JOIN request_signing_keys AS signing_key ON signing_key.account_id = account.id
-        WHERE account.id = $1"#
-    };
-}
 
 /// Records a verified request signature exactly once within the acceptance window.
 pub async fn record_signature(
@@ -73,198 +59,294 @@ pub async fn record_signature(
     Ok(())
 }
 
-/// An account's request signing key and the mode it selects.
-pub struct SigningKey {
-    /// The account the key belongs to.
-    pub account: Account,
-    /// The mode the key acts in.
-    pub livemode: bool,
-    /// Standard base64 of the ed25519 public key.
-    pub public_key: String,
+/// An account as the admin API shows it.
+#[derive(FromRow)]
+pub struct AdminAccount {
+    /// Account id.
+    pub id: Uuid,
+    /// `acct_…`.
+    pub public_id: String,
+    /// Display name.
+    pub name: String,
+    /// `{name, email}`.
+    pub contact: Value,
+    /// `{reference, reviewed_at, reviewed_by}`.
+    pub due_diligence: Value,
+    /// Live mode.
+    pub charges_enabled: bool,
+    /// Restricted for review.
+    pub restricted: bool,
+    /// Account-level pause scopes.
+    pub paused_scopes: Vec<String>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
 }
 
-/// Finds the request signing key of `account_id`.
-pub async fn find_signing_key(
-    pool: &PgPool,
-    account_id: Uuid,
-) -> Result<Option<SigningKey>, ApiError> {
-    let row = sqlx::query(
-        r#"
-        SELECT account.id, account.public_id, account.name, account.paused_scopes,
-               signing_key.livemode, signing_key.public_key
-        FROM request_signing_keys AS signing_key
-        JOIN accounts AS account ON account.id = signing_key.account_id
-        WHERE account.id = $1
-        "#,
-    )
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        Ok(SigningKey {
-            account: account_from_row(&row)?,
-            livemode: row.try_get("livemode")?,
-            public_key: row.try_get("public_key")?,
-        })
-    })
-    .transpose()
+/// The columns of [`AdminAccount`].
+macro_rules! admin_account_columns {
+    () => {
+        "id, public_id, name, contact, due_diligence, charges_enabled, restricted, \
+         paused_scopes, created_at"
+    };
 }
 
-/// An account as the admin API shows it: with its signing key and webhook endpoint.
+/// An account with the keys the admin request issued, each with its secret.
 pub struct IssuedAccount {
     /// The account.
-    pub account: Account,
-    /// The mode its signing key acts in.
-    pub livemode: bool,
-    /// Standard base64 of its ed25519 public key.
-    pub public_key: String,
-    /// Its webhook endpoint's URL.
-    pub webhook_url: String,
+    pub account: AdminAccount,
+    /// Keys issued by the request.
+    pub api_keys: Vec<IssuedKey>,
 }
 
-/// Issues an account with its request signing key and one webhook endpoint in the key's mode,
-/// and appends an audit row, in one transaction. Transitional until self-serve signup and API
-/// keys (design PRs 5 and 6).
+/// A new account's values (design D8).
+pub struct NewAccount<'a> {
+    /// Display name.
+    pub name: &'a str,
+    /// `{name, email}`.
+    pub contact: Value,
+    /// `{reference, reviewed_at, reviewed_by}`.
+    pub due_diligence: Value,
+    /// Live mode.
+    pub charges_enabled: bool,
+    /// Webhook URL registered in each enabled mode, until design PR 8.
+    pub webhook_url: Option<&'a str>,
+}
+
+/// Creates an account with the first secret key of test mode and, with `charges_enabled`, of
+/// live mode, a webhook endpoint per enabled mode when a URL is given, and the audit rows and
+/// `api_key.created` events, in one transaction.
 pub async fn create_account(
     pool: &PgPool,
-    name: &str,
-    livemode: bool,
-    public_key: &str,
-    webhook_url: &str,
-    actor: &Actor,
-) -> Result<IssuedAccount, ApiError> {
-    let mut transaction = pool.begin().await?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO accounts (id, name)
-        VALUES ($1, $2)
-        RETURNING id, public_id, name, paused_scopes
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(name)
-    .fetch_one(&mut *transaction)
-    .await?;
-    let account = account_from_row(&row)?;
-    sqlx::query(
-        "INSERT INTO request_signing_keys (account_id, livemode, public_key) VALUES ($1, $2, $3)",
-    )
-    .bind(account.id)
-    .bind(livemode)
-    .bind(public_key)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO webhook_endpoints (id, account_id, livemode, url) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(account.id)
-    .bind(livemode)
-    .bind(webhook_url)
-    .execute(&mut *transaction)
-    .await?;
-    audit::insert(
-        &mut *transaction,
-        &audit::Entry {
-            account_id: Some(account.id),
-            actor,
-            action: "account.issue",
-            subject: &format!("account:{}", account.public_id),
-            reason: "signed API request",
-        },
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(IssuedAccount {
-        account,
-        livemode,
-        public_key: public_key.to_owned(),
-        webhook_url: webhook_url.to_owned(),
-    })
-}
-
-/// Replaces an issued account's verification key and the URL of its webhook endpoints in the
-/// key's mode, and appends an audit row carrying the reason and the replaced values, in the same
-/// transaction.
-///
-/// Merchant requests read the key on every request, so the replaced key stops verifying when this
-/// commits: a hard cut, with no overlap. Repeating the request with the stored values changes
-/// nothing and writes no audit row.
-pub async fn update_account(
-    pool: &PgPool,
-    account_id: Uuid,
-    public_key: &str,
-    webhook_url: &str,
+    account: &NewAccount<'_>,
     actor: &Actor,
     reason: &str,
 ) -> Result<IssuedAccount, ApiError> {
     let mut transaction = pool.begin().await?;
-    let existing = issued_account(&mut transaction, account_id, true)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if existing.public_key == public_key && existing.webhook_url == webhook_url {
-        transaction.commit().await?;
-        return Ok(existing);
+    let created = sqlx::query_as::<_, AdminAccount>(concat!(
+        "INSERT INTO accounts (id, name, contact, due_diligence, charges_enabled) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING ",
+        admin_account_columns!()
+    ))
+    .bind(Uuid::new_v4())
+    .bind(account.name)
+    .bind(&account.contact)
+    .bind(&account.due_diligence)
+    .bind(account.charges_enabled)
+    .fetch_one(&mut *transaction)
+    .await?;
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(created.id),
+            actor,
+            action: "account.create",
+            subject: &format!("account:{}", created.public_id),
+            reason: &serde_json::json!({
+                "reason": reason,
+                "charges_enabled": account.charges_enabled,
+                "due_diligence": account.due_diligence,
+            })
+            .to_string(),
+        },
+    )
+    .await?;
+    let modes: &[bool] = if account.charges_enabled {
+        &[false, true]
+    } else {
+        &[false]
+    };
+    let mut issued = Vec::with_capacity(modes.len());
+    for &livemode in modes {
+        if let Some(url) = account.webhook_url {
+            insert_endpoint(&mut transaction, created.id, livemode, url).await?;
+        }
+        issued.push(
+            api_keys::create_in(
+                &mut transaction,
+                Scope::new(created.id, livemode),
+                "",
+                actor,
+                "the account's first key",
+            )
+            .await
+            .map_err(super::keys::map_error)?,
+        );
     }
-    sqlx::query("UPDATE request_signing_keys SET public_key = $2 WHERE account_id = $1")
+    transaction.commit().await?;
+    Ok(IssuedAccount {
+        account: created,
+        api_keys: issued,
+    })
+}
+
+/// An admin update of an account; absent fields stay.
+pub struct AccountChanges<'a> {
+    /// Live mode.
+    pub charges_enabled: Option<bool>,
+    /// Restricted for review.
+    pub restricted: Option<bool>,
+    /// `{name, email}`.
+    pub contact: Option<Value>,
+    /// Webhook URL of every endpoint, until design PR 8.
+    pub webhook_url: Option<&'a str>,
+}
+
+/// Applies `changes`, with an audit row and an `account.updated` event per enabled mode, in one
+/// transaction; an update that changes nothing writes nothing. Enabling live mode for an account
+/// without a live key issues its first live key, and registers a live webhook endpoint with the
+/// test endpoint's URL when there is none.
+pub async fn update_account(
+    pool: &PgPool,
+    account_id: Uuid,
+    changes: &AccountChanges<'_>,
+    actor: &Actor,
+    reason: &str,
+) -> Result<IssuedAccount, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let before = sqlx::query_as::<_, AdminAccount>(concat!(
+        "SELECT ",
+        admin_account_columns!(),
+        " FROM accounts WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(account_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let urls: Vec<(bool, String)> = sqlx::query_as(
+        "SELECT livemode, url FROM webhook_endpoints WHERE account_id = $1 ORDER BY created_at, id",
+    )
+    .bind(account_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let after = sqlx::query_as::<_, AdminAccount>(concat!(
+        "UPDATE accounts SET charges_enabled = COALESCE($2, charges_enabled), \
+         restricted = COALESCE($3, restricted), contact = COALESCE($4, contact) \
+         WHERE id = $1 RETURNING ",
+        admin_account_columns!()
+    ))
+    .bind(account_id)
+    .bind(changes.charges_enabled)
+    .bind(changes.restricted)
+    .bind(&changes.contact)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let url_changed = changes
+        .webhook_url
+        .is_some_and(|url| urls.is_empty() || urls.iter().any(|(_, stored)| stored != url));
+    let unchanged = after.charges_enabled == before.charges_enabled
+        && after.restricted == before.restricted
+        && after.contact == before.contact
+        && !url_changed;
+    if unchanged {
+        transaction.commit().await?;
+        return Ok(IssuedAccount {
+            account: after,
+            api_keys: Vec::new(),
+        });
+    }
+    let modes: &[bool] = if after.charges_enabled {
+        &[false, true]
+    } else {
+        &[false]
+    };
+    let url = changes
+        .webhook_url
+        .map(str::to_owned)
+        .or_else(|| urls.first().map(|(_, url)| url.clone()));
+    if let Some(url) = &url {
+        sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
+            .bind(account_id)
+            .bind(url)
+            .execute(&mut *transaction)
+            .await?;
+        for &livemode in modes {
+            let registered = urls.iter().any(|(mode, _)| *mode == livemode);
+            if !registered {
+                insert_endpoint(&mut transaction, account_id, livemode, url).await?;
+            }
+        }
+    }
+    let mut issued = Vec::new();
+    if after.charges_enabled && !before.charges_enabled {
+        let has_live_key: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM api_keys \
+             WHERE account_id = $1 AND livemode AND revoked_at IS NULL)",
+        )
         .bind(account_id)
-        .bind(public_key)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
-    sqlx::query("UPDATE webhook_endpoints SET url = $3 WHERE account_id = $1 AND livemode = $2")
-        .bind(account_id)
-        .bind(existing.livemode)
-        .bind(webhook_url)
-        .execute(&mut *transaction)
-        .await?;
-    let evidence = serde_json::json!({
-        "reason": reason,
-        "replaced": {"public_key": existing.public_key, "webhook_url": existing.webhook_url},
-    });
+        if !has_live_key {
+            issued.push(
+                api_keys::create_in(
+                    &mut transaction,
+                    Scope::new(account_id, true),
+                    "",
+                    actor,
+                    "the account's first live key",
+                )
+                .await
+                .map_err(super::keys::map_error)?,
+            );
+        }
+    }
     audit::insert(
         &mut *transaction,
         &audit::Entry {
             account_id: Some(account_id),
             actor,
             action: "account.update",
-            subject: &format!("account:{}", existing.account.public_id),
-            reason: &evidence.to_string(),
+            subject: &format!("account:{}", after.public_id),
+            reason: &serde_json::json!({
+                "reason": reason,
+                "replaced": {
+                    "charges_enabled": before.charges_enabled,
+                    "restricted": before.restricted,
+                    "contact": before.contact,
+                    "webhook_url": urls.first().map(|(_, url)| url),
+                },
+            })
+            .to_string(),
         },
     )
     .await?;
-    let updated = issued_account(&mut transaction, account_id, false)
-        .await?
-        .ok_or_else(ApiError::internal)?;
+    for &livemode in modes {
+        crate::db::enqueue_in(
+            &mut transaction,
+            &crate::db::NewOutboxEvent {
+                id: Uuid::new_v4(),
+                event_type: "account.updated".to_owned(),
+                account_id,
+                livemode,
+                object: crate::db::EventObject::Account(account_id),
+                next_attempt_at: Utc::now(),
+                actor: api_keys::event_actor(actor),
+            },
+        )
+        .await?;
+    }
     transaction.commit().await?;
-    Ok(updated)
+    Ok(IssuedAccount {
+        account: after,
+        api_keys: issued,
+    })
 }
 
-async fn issued_account(
+async fn insert_endpoint(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     account_id: Uuid,
-    lock: bool,
-) -> Result<Option<IssuedAccount>, ApiError> {
-    let query = if lock {
-        concat!(
-            issued_account_select!(),
-            " FOR UPDATE OF account, signing_key"
-        )
-    } else {
-        issued_account_select!()
-    };
-    let row = sqlx::query(query)
-        .bind(account_id)
-        .fetch_optional(&mut **transaction)
-        .await?;
-    row.map(|row| {
-        Ok(IssuedAccount {
-            account: account_from_row(&row)?,
-            livemode: row.try_get("livemode")?,
-            public_key: row.try_get("public_key")?,
-            webhook_url: row.try_get("webhook_url")?,
-        })
-    })
-    .transpose()
+    livemode: bool,
+    url: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO webhook_endpoints (id, account_id, livemode, url) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(livemode)
+    .bind(url)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 /// Finds or creates the customer `client_reference_id` of `scope`.
@@ -324,20 +406,13 @@ pub struct NewRefund<'a> {
     pub destination: EvmAddress,
     /// Requested amount; `None` refunds the remainder.
     pub amount: Option<AtomicAmount>,
-    /// `Idempotency-Key` of the request.
-    pub idempotency_key: Option<&'a str>,
     /// Audit actor.
     pub actor: &'a Actor,
 }
 
-/// Creates a refund request after every policy check and returns its id; a repeated
-/// `Idempotency-Key` returns the refund created with it.
+/// Creates a refund request after every policy check and returns its id; a request for the same
+/// deposit, destination, and amount returns the refund it created.
 pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uuid, ApiError> {
-    if let Some(key) = refund.idempotency_key
-        && let Some(existing) = refund_by_key(pool, refund.scope, key).await?
-    {
-        return existing.replay(refund);
-    }
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
         r#"
@@ -383,8 +458,7 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     let effective_route: String = row.try_get("effective_route")?;
 
     let to_address = format!("{:#x}", refund.destination);
-    if refund.idempotency_key.is_none()
-        && let Some(amount) = refund.amount
+    if let Some(amount) = refund.amount
         && let Some(existing) = sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id FROM refunds
@@ -426,12 +500,12 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     }
 
     let refund_id = Uuid::new_v4();
-    let inserted = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO refunds
             (id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
-             requested_by, idempotency_key)
-        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8, $9)
+             requested_by)
+        VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7, 'requested', $8)
         "#,
     )
     .bind(refund_id)
@@ -442,24 +516,8 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     .bind(to_address)
     .bind(effective_route)
     .bind(refund.actor.to_string())
-    .bind(refund.idempotency_key)
     .execute(&mut *transaction)
-    .await;
-    match inserted {
-        Ok(_) => {}
-        // A concurrent request with the same key committed first: answer as its repeat.
-        Err(sqlx::Error::Database(error))
-            if error.constraint() == Some("refunds_idempotency_key_unique") =>
-        {
-            drop(transaction);
-            let key = refund.idempotency_key.ok_or_else(ApiError::internal)?;
-            return refund_by_key(pool, refund.scope, key)
-                .await?
-                .ok_or_else(ApiError::internal)?
-                .replay(refund);
-        }
-        Err(error) => return Err(error.into()),
-    }
+    .await?;
     insert_audit_tx(
         &mut transaction,
         Some(refund.scope.account_id()),
@@ -470,57 +528,6 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
     .await?;
     transaction.commit().await?;
     Ok(refund_id)
-}
-
-/// The parameters a refund was created with, to answer a repeated `Idempotency-Key`.
-struct StoredRefund {
-    id: Uuid,
-    deposit_id: Uuid,
-    to_address: String,
-    amount: U256,
-}
-
-impl StoredRefund {
-    fn replay(self, request: &NewRefund<'_>) -> Result<Uuid, ApiError> {
-        let same = self.deposit_id == request.deposit_id
-            && self.to_address == format!("{:#x}", request.destination)
-            && request
-                .amount
-                .is_none_or(|amount| amount.value() == self.amount);
-        if same {
-            Ok(self.id)
-        } else {
-            Err(ApiError::idempotency_key_reused())
-        }
-    }
-}
-
-async fn refund_by_key(
-    pool: &PgPool,
-    scope: Scope,
-    key: &str,
-) -> Result<Option<StoredRefund>, ApiError> {
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
-        r#"
-        SELECT id, deposit_id, to_address, amount_atomic::text
-        FROM refunds
-        WHERE account_id = $1 AND livemode = $2 AND idempotency_key = $3
-        "#,
-    )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|(id, deposit_id, to_address, amount)| {
-        Ok(StoredRefund {
-            id,
-            deposit_id,
-            to_address,
-            amount: parse_atomic(amount)?,
-        })
-    })
-    .transpose()
 }
 
 /// One deposit with its transitions and webhook events, for the operator.
@@ -915,15 +922,6 @@ impl From<CustomerRow> for Customer {
             paused_scopes: row.paused_scopes,
         }
     }
-}
-
-fn account_from_row(row: &PgRow) -> Result<Account, ApiError> {
-    Ok(Account {
-        id: row.try_get("id")?,
-        public_id: row.try_get("public_id")?,
-        name: row.try_get("name")?,
-        paused_scopes: row.try_get("paused_scopes")?,
-    })
 }
 
 #[derive(FromRow)]

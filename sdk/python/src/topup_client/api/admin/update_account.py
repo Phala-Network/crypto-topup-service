@@ -22,7 +22,7 @@ def _get_kwargs(
     headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "put",
+        "method": "post",
         "url": "/v1/admin/accounts/{account}".format(
             account=quote(str(account), safe=""),
         ),
@@ -82,13 +82,13 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: UpdateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
-    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
+    """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
+    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
 
     Args:
         account (str):
-        body (UpdateAccountRequest): Administrative replacement of an account's verification key
-            and webhook URL. The key id and
-            mode stay.
+        body (UpdateAccountRequest): `POST /v1/admin/accounts/{account}` body; absent fields stay
+            as they are.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -116,13 +116,13 @@ def sync(
     client: AuthenticatedClient,
     body: UpdateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
-    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
+    """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
+    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
 
     Args:
         account (str):
-        body (UpdateAccountRequest): Administrative replacement of an account's verification key
-            and webhook URL. The key id and
-            mode stay.
+        body (UpdateAccountRequest): `POST /v1/admin/accounts/{account}` body; absent fields stay
+            as they are.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -145,13 +145,13 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: UpdateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
-    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
+    """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
+    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
 
     Args:
         account (str):
-        body (UpdateAccountRequest): Administrative replacement of an account's verification key
-            and webhook URL. The key id and
-            mode stay.
+        body (UpdateAccountRequest): `POST /v1/admin/accounts/{account}` body; absent fields stay
+            as they are.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -177,13 +177,13 @@ async def asyncio(
     client: AuthenticatedClient,
     body: UpdateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
-    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
+    """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
+    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
 
     Args:
         account (str):
-        body (UpdateAccountRequest): Administrative replacement of an account's verification key
-            and webhook URL. The key id and
-            mode stay.
+        body (UpdateAccountRequest): `POST /v1/admin/accounts/{account}` body; absent fields stay
+            as they are.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

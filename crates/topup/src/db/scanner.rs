@@ -70,6 +70,7 @@ async fn insert_rejected_event(
             livemode,
             object: super::outbox::EventObject::Deposit(id),
             next_attempt_at: Utc::now(),
+            actor: crate::db::SYSTEM_ACTOR.to_owned(),
         },
     )
     .await

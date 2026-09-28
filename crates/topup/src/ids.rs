@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 /// Account ids (`accounts.public_id`).
 pub const ACCOUNT: &str = "acct_";
+/// API key ids.
+pub const API_KEY: &str = "key_";
 /// Webhook endpoint ids.
 pub const WEBHOOK_ENDPOINT: &str = "we_";
 /// Quote ids.

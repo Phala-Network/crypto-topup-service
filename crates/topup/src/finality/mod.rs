@@ -633,6 +633,7 @@ async fn reverse_deposit(
                 livemode,
                 object: EventObject::Deposit(deposit.id),
                 next_attempt_at: Utc::now(),
+                actor: crate::db::SYSTEM_ACTOR.to_owned(),
             },
         )
         .await?;
@@ -664,6 +665,7 @@ async fn reverse_deposit(
                 livemode,
                 object: EventObject::Quote(quote_id),
                 next_attempt_at: Utc::now(),
+                actor: crate::db::SYSTEM_ACTOR.to_owned(),
             },
         )
         .await?;

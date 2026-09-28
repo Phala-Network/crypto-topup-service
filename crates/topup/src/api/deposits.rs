@@ -5,7 +5,6 @@ use std::str::FromStr;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
-use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use topup_core::money::AtomicAmount;
@@ -18,7 +17,7 @@ use crate::tenancy::{Permission, Scope};
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
+use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote, Refund,
 };
@@ -57,7 +56,7 @@ const DEPOSIT_STATES: [&str; 6] = [
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "deposits"
 )]
 /// The account's deposits in the credential's mode, newest first, with Stripe's cursor
@@ -177,7 +176,7 @@ pub(crate) async fn list_deposits(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "deposits"
 )]
 /// One deposit.
@@ -207,8 +206,9 @@ pub(crate) async fn get_deposit(
     params(
         (
             "Idempotency-Key" = Option<String>, Header,
-            description = "Up to 255 characters; a repeat with the same parameters returns the \
-                           same refund, and with other parameters is `409 idempotency_error`."
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
         )
     ),
     request_body = CreateRefundRequest,
@@ -218,12 +218,12 @@ pub(crate) async fn get_deposit(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
             status = 409,
-            description = "`deposit_not_refundable`, `deposit_not_final`, `paused`, \
-                           `signature_replayed`, or `idempotency_error`",
+            description = "`deposit_not_refundable`, `deposit_not_final`, `paused`, or \
+                           `idempotency_key_in_use`",
             body = ErrorResponse
         )
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "refunds"
 )]
 /// Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
@@ -232,13 +232,11 @@ pub(crate) async fn get_deposit(
 pub(crate) async fn create_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
-    headers: HeaderMap,
     ApiJson(request): ApiJson<CreateRefundRequest>,
 ) -> ApiResult<Json<Refund>> {
     merchant
         .require(&state.pool, Permission::RefundsWrite)
         .await?;
-    let key = idempotency_key(&headers)?;
     let deposit_id = ids::parse(ids::DEPOSIT, &request.deposit)
         .ok_or_else(|| ApiError::invalid_param("deposit", "deposit must be a dep_ id"))?;
     let destination = EvmAddress::from_str(&request.destination_address)
@@ -271,7 +269,6 @@ pub(crate) async fn create_refund(
             route,
             destination,
             amount,
-            idempotency_key: key.as_deref(),
             actor: &merchant.actor(),
         },
     )
@@ -294,7 +291,7 @@ pub(crate) async fn create_refund(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "refunds"
 )]
 /// One refund.

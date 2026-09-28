@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
 use support::seed::{self, NewAccount, NewAddress};
-use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, with_database};
+use support::{TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, with_database};
 
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 /// With 32-slot epochs anvil reports `finalized = latest - 64`.
@@ -75,9 +75,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         .into_iter()
         .next()
         .context("one chain")?;
-    let product_key = SigningKey::from_bytes(&[61; 32]);
     let admin_key = SigningKey::from_bytes(&[62; 32]);
-    let kid = seed_account(pool, &product_key).await?;
+    let product_key = seed_account(pool).await?;
     let app = topup::api::router(AppState {
         pool: pool.clone(),
         routes: Arc::clone(&route_set),
@@ -90,13 +89,12 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(FixedQuote),
         client_reads: Arc::default(),
+        rate_limits: Arc::default(),
     })
     .0;
     let api = Api {
         app,
         key: product_key,
-        kid,
-        created: Utc::now().timestamp().into(),
         quotes: std::sync::Mutex::default(),
     };
     let reader = FinalizedReader::new(Arc::new(EvmClient::new(&anvil.rpc_url)?));
@@ -457,12 +455,8 @@ impl Ledger {
 
 struct Api {
     app: axum::Router,
-    key: SigningKey,
-    /// The account's key id, `{acct_…}/v1`.
-    kid: String,
-    /// Distinct `created` per request: identical requests signed in the same second would carry
-    /// the same single-use signature.
-    created: std::sync::atomic::AtomicI64,
+    /// The account's test secret key.
+    key: String,
     /// Quote ids and client secrets by the test's name for them.
     quotes: std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>,
 }
@@ -557,15 +551,7 @@ impl Api {
         let response = self
             .app
             .clone()
-            .oneshot(signed_request(
-                method,
-                path,
-                body,
-                &self.kid,
-                &self.key,
-                self.created
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            ))
+            .oneshot(merchant_request(method, path, body, &self.key))
             .await?;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1_048_576).await?;
@@ -599,21 +585,19 @@ async fn pending_block_time(pool: &sqlx::PgPool, tx_hash: &str) -> Result<DateTi
     )
 }
 
-/// Seeds a test-mode account signing with `key` and its customer `ws-pending`; returns the
-/// account's key id.
-async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<String> {
+/// Seeds a test-mode account and its customer `ws-pending`; returns the account's test key.
+async fn seed_account(pool: &sqlx::PgPool) -> Result<String> {
     let (account, _) = seed::create_account_and_customer(
         pool,
         &NewAccount {
             livemode: false,
-            public_key: public_key_base64(key),
             webhook_url: "https://product.test/webhooks".to_owned(),
             ..NewAccount::named("phala-cloud")
         },
         "ws-pending",
     )
     .await?;
-    Ok(format!("{}/v1", account.public_id))
+    Ok(seed::create_api_key(pool, account.id, false).await?)
 }
 
 fn test_route(token: Address) -> RouteFile {

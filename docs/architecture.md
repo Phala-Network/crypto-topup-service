@@ -21,9 +21,10 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Job queue | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` | — |
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
 | Product fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the product holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
-| Product API shape | Stripe's API conventions: top-level resources, the list object, the error object, prefixed ids, `expand[]`, the Event object, `client_secret` | Requests are signed instead of carrying a secret key; token amounts are decimal strings; §12 lists every departure |
-| Idempotent product API | `Idempotency-Key` on quote and refund creation (Stripe; the IETF Idempotency-Key draft), natural keys elsewhere (`(product, account_id)`) | The key is stored on the created object and never pruned; a retry with a fresh signature returns the stored result |
-| Request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | — |
+| Product API shape | Stripe's API conventions: top-level resources, the list object, the error object, prefixed ids, `expand[]`, the Event object, `client_secret` | Token amounts are decimal strings; §12 lists every departure |
+| Idempotent product API | `Idempotency-Key` on every `POST`, kept per account and mode with a request fingerprint and the response for 24 hours (Stripe; the IETF Idempotency-Key draft) | An API key's secret is never stored for a replay |
+| Merchant authentication | Bearer secret keys `ppay_sk_{test,live}_…`, stored as SHA-256, with GitHub's token format (prefix, random body, CRC32 checksum); Stripe's roll with an overlap of at most 7 days | Keys are created, rolled, and revoked through the API; the operator issues the first and recovery keys (design D7, D8) |
+| Admin request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | The operator's admin API only |
 | Webhooks | Standard Webhooks | — |
 | Money | Integer minor units; 8-decimal scaled prices | Precision is an application choice |
 | Backup | WAL-G base backups plus continuous WAL, `archive_timeout` bounding RPO | — |
@@ -165,7 +166,7 @@ Contracts: Solidity with OpenZeppelin, Foundry; no external audit (§4).
 
 ```mermaid
 flowchart TB
-    products["Products<br/>signed requests"]
+    products["Merchants<br/>API key requests"]
     admin["Operator<br/>admin key"]
     subgraph cvm["dstack CVM on Phala Cloud (compose hash attested)"]
         direction LR
@@ -209,16 +210,20 @@ the authorization table) are listed in [design §14](design/multi-tenant.md#14-d
 tables the service uses today:
 
 ```text
-accounts      id, public_id (acct_ + hex, generated), name, paused_scopes text[], …   -- the tenant
+accounts      id, public_id (acct_ + hex, generated), name, contact, due_diligence, charges_enabled,
+              restricted, paused_scopes text[], …   -- the tenant, created by the operator
               -- scopes: quotes | settlement | refunds; empty = active
-request_signing_keys  account_id PK, livemode, public_key   -- key id {public_id}/v1 (§12), until API keys
+api_keys      id (key_ + hex), account_id, livemode, kind (secret|restricted), name, prefix, last4,
+              key_hash UNIQUE (SHA-256), created_by (key_… | admin), expires_at, last_used_at,
+              revoked_at                                              -- design D7
+idempotency_keys  account_id, livemode, key, fingerprint, response jsonb, created_at
+              PRIMARY KEY (account_id, livemode, key)                  -- pruned after 24 h
 customers     id, account_id, livemode, client_reference_id, paused_scopes text[]
               UNIQUE (account_id, livemode, client_reference_id)
               -- client_reference_id is the API's account_id; created by the customer's first quote
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, idempotency_key,
-              client_secret_hash                  UNIQUE (account_id, livemode, idempotency_key)
+              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash
 addresses     id, account_id, livemode, chain_id, quote_id UNIQUE, salt, treasury, address,
               deployed_block                      -- finalized ForwarderCreated for the pair
               UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
@@ -248,20 +253,20 @@ flush_failures  chain_id, tx_hash, log_index, address_id, token, reason (revert 
               -- finalized FlushFailed events for a known address; its deposits stay unswept
 refunds       id, account_id, livemode, deposit_id, amount_atomic, to_address, tx_hash,
               status (requested|approved|sent|confirmed), requested_by, approved_by,
-              idempotency_key, created_at   -- executed from the treasury Safe
+              created_at   -- executed from the treasury Safe
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
-events        id (evt_…), account_id, livemode, type, object_type (deposit|quote), object_id,
-              data jsonb, created   -- data: the object, rendered at the first delivery attempt
+events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account),
+              object_id, actor (key_… | admin | system), data jsonb, created
+              -- data: the object, rendered at the first delivery attempt
 webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
               PRIMARY KEY (event_id, endpoint_id)   -- one per enabled endpoint of the event's scope
-audit         id, account_id, actor_type (user|api_key|admin|system), actor_id, action, subject,
+audit         id, account_id, actor_type (api_key|admin|system), actor_id, action, subject,
               reason, created_at
 ```
 
 Composite foreign keys tie each tenant row to its parent's account and mode (a quote to its
 customer, an address to its quote, a deposit to its address and customer, a refund to its
-deposit), so no row joins two accounts or two modes. `request_signing_keys` goes with API keys
-(design PR 5). `flushed` and `flush_failures` are finalized chain facts: the service inserts them
+deposit), so no row joins two accounts or two modes. `flushed` and `flush_failures` are finalized chain facts: the service inserts them
 and never rewrites them.
 
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
@@ -419,8 +424,8 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   overpayment, below one unit of the last decimal, is the payer's; the credit is unchanged).
   `expires_at = now + window` *(policy)*. Quotes count against open-exposure caps per account,
   per product, and global *(policy)*, reserved atomically at creation; creation is rate-limited
-  per account. Repeating an `Idempotency-Key` with the same parameters returns the stored quote
-  (other parameters are `409 idempotency_error`), also while `quotes` is paused.
+  per customer. Repeating an `Idempotency-Key` with the same request within 24 hours returns the
+  first response (another request is `400 idempotency_error`), also while `quotes` is paused.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
   `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
   single `UPDATE … WHERE consumed_by IS NULL`, in the confirm step. If that deposit is reversed
@@ -542,7 +547,7 @@ knows it. Where it departs, the last column says why.
 | Convention | Stripe | Here |
 |---|---|---|
 | Resources | Top-level nouns, actions as `POST …/{id}/cancel` ([API reference](https://docs.stripe.com/api)) | `/v1/quotes`, `/v1/deposits`, `/v1/refunds`, `POST /v1/quotes/{id}/cancel` |
-| Caller | The secret key identifies the account | The RFC 9421 `keyid`, `{product}/v1`, identifies the product; the service stores only its public key |
+| Caller | The secret key identifies the account | Same: `Authorization: Bearer ppay_sk_…`; the key also selects the mode |
 | Customer reference | Checkout's `client_reference_id` | `account_id`, the product's own id for its customer (a workspace); an account is created by its first quote |
 | Ids | Prefixed opaque ids | `qt_`, `dep_`, `re_`, `evt_` and the 32 hex digits of a UUID; the deposit and event UUIDs are UUIDv5, so they stay recomputable (§0, §11) |
 | Amounts | Integer minor units, lowercase currency ([currencies](https://docs.stripe.com/currencies)) | `amount` in US cents with `currency: "usd"`; token amounts are decimal strings (`amount_atomic`), since 18-decimal values exceed JSON's safe integers |
@@ -550,30 +555,40 @@ knows it. Where it departs, the last column says why.
 | Lists ([pagination](https://docs.stripe.com/api/pagination)) | `{object: "list", url, has_more, data}`, newest first; `limit` 1–100, `starting_after` or `ending_before` | Same |
 | Expansion ([expanding](https://docs.stripe.com/api/expanding_objects)) | `expand[]`, depth ≤ 4 | `expand[]` for a deposit's `quote`, a quote's `deposit`, and a refund's `deposit`; depth 1 |
 | Errors ([errors](https://docs.stripe.com/api/errors)) | `{error: {type, code, message, param, doc_url}}` | `{error: {type, code, message, param}}`; `type` is `invalid_request_error`, `idempotency_error`, or `api_error` |
-| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | On `POST /v1/quotes` and `POST /v1/refunds`, covered by the signature, stored on the object and never pruned |
+| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | Same, per account and mode; a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
 | Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
 | Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; `livemode` in objects comes with design PR 10 |
+| Onboarding | Connect accounts created through the API, `stripe_dashboard.type = none` | The operator creates every account after offline due diligence; there is no dashboard (design D8) |
 
-Every merchant request is signed (§3); the account is the signature's `keyid`, which must have the
-form `{acct_…}/v1` and name an issued account with its stored key. The server builds the request's
-scope, the account and the key's mode, from the verified key alone, and every query filters on
-both (design D13); the authorization table then grants the key's permissions.
-The verifier rebuilds `@target-uri` from the configured public origin (`TOPUP_PUBLIC_ORIGIN`,
-§14) and the request's path and query, never from `Host` or `X-Forwarded-*`, so signers sign the
-public URL they call. Signatures are single-use within the acceptance window. Each deployment
-(sandbox, staging, production) must pin a distinct product key: single use is recorded per
-database, so a shared key would let a signed request be replayed within the freshness window
-against another deployment that shares its public origin (for example a replacement or restored
-instance). A request for another account's object, or for the same account's object in the other
-mode, answers `404` as for a missing one. The admin key can only issue accounts and replace their
-key and webhook URL, pause and resume, nudge, drive the refund workflow, lift reconciliation
-blocks (§13), and replay webhook events; each change writes `audit`.
+Every merchant request carries a secret key, `Authorization: Bearer ppay_sk_{test,live}_…`
+(design D7); HTTP Basic is refused. A key whose checksum fails is refused without a database read;
+otherwise its SHA-256 is looked up, and a revoked or unknown key is `401 api_key_invalid`, a rolled
+key past its expiry `401 api_key_expired`. The server builds the request's scope, the key's account
+and mode, from the key alone, and every query filters on both (design D13); the authorization
+table then grants the key kind's permissions. A live key of an account the operator has not
+enabled for live mode is `403 testmode_charges_only`. Requests are rate-limited per account and
+mode in the process, 100 per second live and 25 test, with a 500 per second test-mode ceiling
+across accounts (`429 rate_limit`). Every `POST` is idempotent by `Idempotency-Key` (above). A
+request for another account's object, or for the same account's object in the other mode,
+answers `404` as for a missing one.
+
+A secret key manages its mode's keys (`/v1/api_keys`): create, list, roll (the old key works for
+up to 7 days, or is revoked at once), and revoke, except the mode's last key that is neither
+revoked nor expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
+admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
+within the acceptance window), creates accounts with their contact, due diligence record, live
+mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, drives the
+refund workflow, lifts reconciliation blocks (§13), and replays webhook events; each change writes
+`audit`, and each key or account change is also an `api_key.*` or `account.updated` event with
+its actor.
 
 ```text
+GET    /v1/account                                                the key's account, in its mode
+GET|POST /v1/api_keys, GET|DELETE /v1/api_keys/{id}, POST /v1/api_keys/{id}/roll {expires_in}
 GET    /v1/config                                                 assets, limits, quote terms
 POST   /v1/quotes {account_id, amount, currency, chain_id, asset} single-use address + locked price; Idempotency-Key
-GET    /v1/quotes/{id}                                            resume a checkout; unsigned with ?client_secret=: the payer's view
+GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
 GET    /v1/deposits?account_id&quote&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
@@ -581,10 +596,11 @@ POST   /v1/refunds {deposit, destination_address, amount_atomic?}  rejected, or 
 GET    /v1/refunds/{id}
 GET    /v1/attestation?nonce=…                                    settlement key (§14)
 
-POST   /v1/admin/accounts {name, livemode, public_key, webhook_url}   issue an account and its key id {acct}/v1
-PUT    /v1/admin/accounts/{acct} {public_key, webhook_url, reason}   replace both (§15 Rotation); same values → no change
+POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason, webhook_url?}   + first keys
+POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, webhook_url?, reason}   enabling live → first live key
+POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   recovery key
 GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
-POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, reason}
+POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/refunds/{id}/approve | record {tx_hash}
@@ -628,17 +644,16 @@ A seen transfer can disappear in a reorg; only deposits and `deposit.credited` r
 scopes, and while a chain is frozen (§13) it stops updating.
 
 **Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{48 random hex
-digits}`, for the payer's checkout page. Only its SHA-256 is stored, so no other response returns
-it; a repeat with the same `Idempotency-Key` returns a new secret, and the earlier one stops
-working (the product repeats only when it lost the response). `GET /v1/quotes/{id}?client_secret=…`
-without signature headers returns the public subset `ClientQuote`: `{id, object, status, amount,
+digits}`, for the payer's checkout page. Only its SHA-256 is stored with the quote, so no read
+returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
+secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
 payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
 route's confirmation, being valued and screened), `credited`, or `rejected` (the reason is not
 exposed). No account,
-price, deposit id, or transaction hash. Every unsigned response, errors included, allows any
+price, deposit id, or transaction hash. Every such response, errors included, allows any
 origin (`Access-Control-Allow-Origin: *`); the secret is the bearer. A secret that is not the
-quote's is `404`. Unsigned reads are limited in the process to 120 per quote and 6 000 in total per
+quote's is `404`. These reads are limited in the process to 120 per quote and 6 000 in total per
 minute (`429 rate_limit`).
 
 **Deposit.** `{id, object: "deposit", account_id, quote, status, rejection_reason, chain_id, asset,
@@ -662,15 +677,17 @@ remainder is `400 amount_too_large`. A reversed deposit is not refundable.
 | Status | `type` | `code` |
 |---|---|---|
 | 400 | `invalid_request_error` | `parameter_missing`, `parameter_invalid`, `parameter_unknown`, `amount_too_small`, `amount_too_large` (each with `param`) |
-| 401 | `invalid_request_error` | `signature_invalid` |
+| 400 | `idempotency_error` | `idempotency_key_reused` (the same key with another request) |
+| 401 | `invalid_request_error` | `api_key_missing`, `api_key_invalid`, `api_key_expired`; `signature_invalid` (admin) |
+| 403 | `invalid_request_error` | `testmode_charges_only`, `permission_denied` |
 | 404 | `invalid_request_error` | `resource_missing` |
-| 409 | `idempotency_error` | `idempotency_key_reused` (the same key with other parameters) |
-| 409 | `invalid_request_error` | `signature_replayed`, `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_not_refundable`, `deposit_not_final`, `paused`, `chain_frozen` |
-| 429 | `invalid_request_error` | `rate_limit` (quote creations per account; unsigned quote reads) |
+| 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry) |
+| 409 | `invalid_request_error` | `api_key_inactive`, `last_api_key`, `signature_replayed` (admin), `exposure_cap_exceeded`, `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state`, `deposit_not_refundable`, `deposit_not_final`, `paused`, `chain_frozen` |
+| 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; quote creations per customer; quote reads by `client_secret`) |
 | 503 | `api_error` | `unavailable` (no fresh price, database unavailable) |
 | 500 | `api_error` | `internal_error` |
 
-The SDK retries `429`, `5xx`, transport errors, and `signature_replayed`, re-signing with the same
+The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, with the same
 `Idempotency-Key`.
 
 **Events** (Standard Webhooks, signed with the settlement key) are Stripe's Event object,
@@ -828,9 +845,8 @@ defaulted addresses from it. The defaults and why:
 The defaults are the pilot's numbers *(policy)*: finance confirms each, including the zero token
 floors, before production, and a route overrides any it does not accept.
 
-Crediting before `finalized` is limited to the reviewed chain families of §8. An account's key id is
-`{acct_…}/v1`; the database stores the account's public key and the mode it signs in, and its
-webhook endpoint's URL.
+Crediting before `finalized` is limited to the reviewed chain families of §8. Accounts, their API
+keys (hashed), and their webhook endpoints live in the database, not in configuration.
 Changing a value, including a default, is a new version and compose hash; deposits keep the
 version that created them. The service sends no transactions, so a route has no operator key,
 flush schedule, or gas policy (design §14). Pause flags are the only runtime-mutable state. Every
@@ -912,10 +928,10 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | The merchant pays its own sweep gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sweep, and open quote exposure up to the caps. |
-| Rotation | Settlement key: add `settlement/v2`; products accept both for 30 days. Account key: the admin replaces the stored public key (`PUT /v1/admin/accounts/{acct}`), a hard cut: requests are verified against one stored key under the account's one key id (§12), so the old key fails from that commit; the key id is unchanged. Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Settlement key: add `settlement/v2`; products accept both for 30 days. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
 | Kill switches | Pause scopes (`quotes`, `settlement`, `refunds`) at account, customer, or route level; no pause stops a sweep, since anyone can flush a forwarder to its own treasury. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
-| Runbooks before pilot | product key compromise, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, refund execution, rejected funds at treasury, deposit reversed. |
+| Runbooks before pilot | API key compromise and key recovery, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, refund execution, rejected funds at treasury, deposit reversed. |
 
 ## 16. Observability and tests
 

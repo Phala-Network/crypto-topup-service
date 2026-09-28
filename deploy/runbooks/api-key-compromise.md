@@ -1,0 +1,50 @@
+# API key compromise and key recovery
+
+**Trigger:** a merchant reports that a secret key (`ppay_sk_…`) was exposed, that it lost every
+key of a mode, or that requests it did not make appear in its `api_key.*` events; or GitHub secret
+scanning reports a Phala Pay key. The service raises no alert for this: only the merchant can
+tell its own requests from others.
+
+**Impact:** whoever holds a secret key acts as the merchant in that key's mode: it can create
+quotes (within the caps and rate limits), cancel them, read deposits, request refunds, and manage
+the mode's keys. It cannot move funds: forwarders pay only the treasury, and credits exist only as
+`deposit.credited` events the service signs and delivers to the account's webhook endpoints.
+
+## The merchant rolls the key
+
+A merchant that still holds a working key replaces a leaked one itself (design D7), without the
+operator: `POST /v1/api_keys/{id}/roll {"expires_in": 0}` returns a new key and revokes the old
+one at once, and `DELETE /v1/api_keys/{id}` revokes any other key. The service refuses to revoke
+the mode's last key that is neither revoked nor expiring, so the account always keeps one.
+
+## Recovery by the operator
+
+When the merchant lost every key of a mode, or suspects a leak it cannot win by rolling (the
+attacker rolls too):
+
+1. Verify the request with the account's recorded contact over a second channel (the `contact`
+   of `POST /v1/admin/accounts`). Never act on the request's own channel alone.
+2. Issue a recovery key, revoking the mode's keys first when the merchant asks:
+
+```sh
+admin POST "/v1/admin/accounts/$ACCOUNT/api_keys" \
+  '{"livemode":false,"revoke_existing":true,"reason":"key recovery: <how the contact confirmed>"}'
+```
+
+   The answer is `200` with the key's `secret`, shown only once; the `audit` rows
+   `api_key.revoked` and `api_key.created` and the account's `api_key.*` events carry actor
+   `admin`. A live key needs the account enabled for live mode (`403 testmode_charges_only`
+   otherwise).
+3. Send the key to the contact through an encrypted channel. The merchant rolls it on receipt, so
+   no one at Phala holds a working key.
+4. Review what the old key could have done: confirm every refund request since the exposure with
+   the merchant before Finance approves it (daily report `refunds_by_status`), and let the
+   merchant check its customers' pause scopes and open quotes. If the merchant cannot act
+   promptly, pause `quotes` and `refunds` on its routes meanwhile
+   (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","refunds"]}'`); deposits
+   keep being credited.
+
+## Done when
+
+The merchant's requests with its new key succeed, a request with a revoked key answers
+`401 api_key_invalid`, and every refund request since the exposure is confirmed or declined.

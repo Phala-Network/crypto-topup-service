@@ -11,17 +11,13 @@ from topup_client.models import QuotePayment
 from topup_sdk import (
     AddressMismatchError,
     ApiError,
-    RequestSigner,
     TopupClient,
     forwarder_address,
-    load_public_key,
     lock_salt,
-    verify_request,
 )
-from topup_sdk.signing import target_uri
 
-SEED = bytes([5] * 32)
-KEYID = "acme/v1"
+API_KEY = "ppay_sk_test_" + "A" * 43 + "000000"
+ACCOUNT = "acct_" + "0a" * 16
 NOW = 1_790_000_000
 FACTORY = "0x" + "aa" * 20
 IMPLEMENTATION = "0x" + "bb" * 20
@@ -31,7 +27,7 @@ QUOTE_ID = "qt_" + "0c" * 16
 
 def _quote(**fields: object) -> dict[str, object]:
     address = forwarder_address(
-        FACTORY, IMPLEMENTATION, TREASURY, lock_salt("acme", "ws 1", QUOTE_ID)
+        FACTORY, IMPLEMENTATION, TREASURY, lock_salt(ACCOUNT, "ws 1", QUOTE_ID)
     )
     return {
         "id": QUOTE_ID,
@@ -55,30 +51,28 @@ def _quote(**fields: object) -> dict[str, object]:
 
 
 class FakeService:
-    """Verifies each request like the service and enforces single-use signatures."""
+    """Checks each request's API key like the service and records it."""
 
     def __init__(self, respond: Callable[[httpx.Request, int], httpx.Response]) -> None:
         self.respond = respond
         self.requests: list[httpx.Request] = []
-        self.signatures: set[str] = set()
-        signer = RequestSigner.from_seed(KEYID, SEED)
-        self.public_key = load_public_key(signer.public_key_base64())
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        verify_request(
-            method=request.method,
-            target_uri=target_uri(request),
-            headers=dict(request.headers),
-            body=request.content,
-            public_key=self.public_key,
-            keyid=KEYID,
-            require_idempotency_key=False,
-            now=NOW,
-        )
-        signature = request.headers["signature"]
-        if signature in self.signatures:
-            return _error(409, "signature_replayed")
-        self.signatures.add(signature)
+        if request.headers.get("authorization") != f"Bearer {API_KEY}":
+            return _error(401, "api_key_invalid")
+        if request.url.raw_path == b"/v1/account":
+            return httpx.Response(
+                200,
+                json={
+                    "id": ACCOUNT,
+                    "object": "account",
+                    "livemode": False,
+                    "name": "Acme",
+                    "charges_enabled": False,
+                    "paused_scopes": [],
+                    "created": NOW,
+                },
+            )
         self.requests.append(request)
         return self.respond(request, len(self.requests))
 
@@ -90,24 +84,24 @@ def _error(status: int, code: str, **fields: str) -> httpx.Response:
     )
 
 
-def _client(service: FakeService, *, pinned: bool = True, **kwargs: int) -> TopupClient:
-    signer = RequestSigner.from_seed(KEYID, SEED, clock=lambda: NOW)
+def _client(service: FakeService, *, pinned: bool = True, max_attempts: int = 4) -> TopupClient:
     return TopupClient(
         "http://service.test:8080",
-        signer,
+        API_KEY,
         forwarder=(FACTORY, IMPLEMENTATION, TREASURY) if pinned else None,
         transport=httpx.MockTransport(service),
         sleep=lambda _: None,
-        **kwargs,
+        max_attempts=max_attempts,
     )
 
 
-def test_quotes_are_signed_with_an_idempotency_key() -> None:
+def test_quotes_send_the_key_and_an_idempotency_key() -> None:
     service = FakeService(lambda request, _: httpx.Response(200, json=_quote()))
     with _client(service) as client:
         quote = client.create_quote("ws 1", 2500, chain_id=11155111, asset="pha")
+        # The address check read the account id once.
+        assert client.account_id() == ACCOUNT
     assert quote.id == QUOTE_ID
-    assert client.product_slug == "acme"
     request = service.requests[0]
     assert request.url.raw_path == b"/v1/quotes"
     assert json.loads(request.content) == {
@@ -118,20 +112,22 @@ def test_quotes_are_signed_with_an_idempotency_key() -> None:
         "asset": "pha",
     }
     assert uuid.UUID(request.headers["idempotency-key"].strip('"'))
-    assert "idempotency-key" in request.headers["signature-input"]
-    assert "authorization" not in request.headers
+    assert request.headers["authorization"] == f"Bearer {API_KEY}"
+    assert "signature" not in request.headers
 
 
-def test_transient_failures_are_retried_with_fresh_signatures_and_one_key() -> None:
+def test_transient_failures_are_retried_with_one_idempotency_key() -> None:
     def respond(request: httpx.Request, count: int) -> httpx.Response:
-        return _error(503, "unavailable") if count < 3 else httpx.Response(200, json=_quote())
+        if count == 1:
+            return _error(503, "unavailable")
+        if count == 2:
+            return _error(409, "idempotency_key_in_use")
+        return httpx.Response(200, json=_quote())
 
     service = FakeService(respond)
     with _client(service) as client:
         client.create_quote("ws 1", 2500, chain_id=11155111, asset="pha", idempotency_key="k-1")
-    # Three identical requests within one clock second: each carries a distinct signature.
     assert len(service.requests) == 3
-    assert len(service.signatures) == 3
     assert {request.headers["idempotency-key"] for request in service.requests} == {'"k-1"'}
 
 
@@ -169,9 +165,10 @@ def test_open_quotes_must_have_the_derived_address() -> None:
         assert client.get_quote(QUOTE_ID).address == forged["address"]
 
 
-def test_product_key_ids_end_in_v1() -> None:
-    with pytest.raises(ValueError, match="/v1"):
-        TopupClient("http://service.test", RequestSigner.from_seed("acme/v2", SEED))
+def test_only_secret_keys_are_accepted() -> None:
+    for key in ["sk_test_123", "ppay_rk_test_" + "A" * 49, "acme/v1"]:
+        with pytest.raises(ValueError, match="secret key"):
+            TopupClient("http://service.test", key)
 
 
 def _deposit(index: int) -> dict[str, object]:

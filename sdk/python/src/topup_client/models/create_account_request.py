@@ -8,85 +8,112 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
+from typing import cast
+
+if TYPE_CHECKING:
+    from ..models.contact import Contact
+    from ..models.due_diligence import DueDiligence
+
 
 T = TypeVar("T", bound="CreateAccountRequest")
 
 
 @_attrs_define
 class CreateAccountRequest:
-    """Administrative account issuance body, until self-serve signup (design PR 5) and API keys
-    (design PR 6) replace it.
+    """`POST /v1/admin/accounts` body. Accounts are created only by the operator (design D8).
 
-        Attributes:
-            livemode (bool): The mode the account's signing key acts in: `true` for live routes, `false` for test
-                routes.
-            name (str): Display name, 1 to 200 characters.
-            public_key (str): Standard base64 of the account's 32-byte ed25519 request-verification public key.
-            webhook_url (str): Absolute `https` URL of the account's webhook receiver; `http` only when the service's
-                own public origin uses `http` (local stacks).
+    Attributes:
+        contact (Contact): The merchant's contact recorded at onboarding (design D8): the operator's channel for the key
+            hand-over, recovery, incidents, and restores, and the only personal data kept.
+        due_diligence (DueDiligence): The record of the operator's offline due diligence (design D8): a reference to it,
+            when, and
+            by whom.
+        name (str): Display name, 1 to 200 characters.
+        reason (str): Why the account is created, 1 to 1024 bytes.
+        charges_enabled (bool | Unset): Whether the account may use live mode (design D12). Default `false`.
+        webhook_url (None | str | Unset): Absolute `https` URL of the account's webhook receiver, registered in each
+            enabled mode;
+            `http` only when the service's own public origin uses `http` (local stacks). Until
+            merchants register endpoints through the API (design PR 8).
     """
 
-    livemode: bool
+    contact: Contact
+    due_diligence: DueDiligence
     name: str
-    public_key: str
-    webhook_url: str
-    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
+    reason: str
+    charges_enabled: bool | Unset = UNSET
+    webhook_url: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
-        livemode = self.livemode
+        from ..models.contact import Contact  # noqa: PLC0415
+        from ..models.due_diligence import DueDiligence  # noqa: PLC0415
+
+        contact = self.contact.to_dict()
+
+        due_diligence = self.due_diligence.to_dict()
 
         name = self.name
 
-        public_key = self.public_key
+        reason = self.reason
 
-        webhook_url = self.webhook_url
+        charges_enabled = self.charges_enabled
+
+        webhook_url: None | str | Unset
+        if isinstance(self.webhook_url, Unset):
+            webhook_url = UNSET
+        else:
+            webhook_url = self.webhook_url
 
         field_dict: dict[str, Any] = {}
-        field_dict.update(self.additional_properties)
+
         field_dict.update(
             {
-                "livemode": livemode,
+                "contact": contact,
+                "due_diligence": due_diligence,
                 "name": name,
-                "public_key": public_key,
-                "webhook_url": webhook_url,
+                "reason": reason,
             }
         )
+        if charges_enabled is not UNSET:
+            field_dict["charges_enabled"] = charges_enabled
+        if webhook_url is not UNSET:
+            field_dict["webhook_url"] = webhook_url
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.contact import Contact  # noqa: PLC0415
+        from ..models.due_diligence import DueDiligence  # noqa: PLC0415
+
         d = dict(src_dict)
-        livemode = d.pop("livemode")
+        contact = Contact.from_dict(d.pop("contact"))
+
+        due_diligence = DueDiligence.from_dict(d.pop("due_diligence"))
 
         name = d.pop("name")
 
-        public_key = d.pop("public_key")
+        reason = d.pop("reason")
 
-        webhook_url = d.pop("webhook_url")
+        charges_enabled = d.pop("charges_enabled", UNSET)
+
+        def _parse_webhook_url(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        webhook_url = _parse_webhook_url(d.pop("webhook_url", UNSET))
 
         create_account_request = cls(
-            livemode=livemode,
+            contact=contact,
+            due_diligence=due_diligence,
             name=name,
-            public_key=public_key,
+            reason=reason,
+            charges_enabled=charges_enabled,
             webhook_url=webhook_url,
         )
 
-        create_account_request.additional_properties = d
         return create_account_request
-
-    @property
-    def additional_keys(self) -> list[str]:
-        return list(self.additional_properties.keys())
-
-    def __getitem__(self, key: str) -> Any:
-        return self.additional_properties[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self.additional_properties[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        del self.additional_properties[key]
-
-    def __contains__(self, key: str) -> bool:
-        return key in self.additional_properties

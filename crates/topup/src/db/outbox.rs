@@ -10,6 +10,10 @@ pub enum EventObject {
     Deposit(Uuid),
     /// A quote, by its id.
     Quote(Uuid),
+    /// An API key, by its id.
+    ApiKey(Uuid),
+    /// The account itself.
+    Account(Uuid),
 }
 
 impl EventObject {
@@ -19,6 +23,8 @@ impl EventObject {
         match self {
             Self::Deposit(_) => "deposit",
             Self::Quote(_) => "quote",
+            Self::ApiKey(_) => "api_key",
+            Self::Account(_) => "account",
         }
     }
 
@@ -28,6 +34,8 @@ impl EventObject {
         match type_code {
             "deposit" => Some(Self::Deposit(id)),
             "quote" => Some(Self::Quote(id)),
+            "api_key" => Some(Self::ApiKey(id)),
+            "account" => Some(Self::Account(id)),
             _ => None,
         }
     }
@@ -36,7 +44,7 @@ impl EventObject {
     #[must_use]
     pub const fn id(self) -> Uuid {
         match self {
-            Self::Deposit(id) | Self::Quote(id) => id,
+            Self::Deposit(id) | Self::Quote(id) | Self::ApiKey(id) | Self::Account(id) => id,
         }
     }
 }
@@ -56,7 +64,12 @@ pub struct NewOutboxEvent {
     pub object: EventObject,
     /// Earliest delivery attempt.
     pub next_attempt_at: DateTime<Utc>,
+    /// Who caused the event: an API key id (`key_…`), `admin`, or [`SYSTEM_ACTOR`].
+    pub actor: String,
 }
+
+/// The actor of events the service's own workers cause.
+pub const SYSTEM_ACTOR: &str = "system";
 
 /// Records an event and one delivery to each enabled webhook endpoint of its account and mode
 /// that subscribes to its type, for at-least-once delivery (the outbox, architecture §11). An
@@ -67,8 +80,8 @@ pub async fn enqueue_in(
 ) -> Result<(), sqlx::Error> {
     let inserted = sqlx::query(
         r#"
-        INSERT INTO events (id, account_id, livemode, type, object_type, object_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO events (id, account_id, livemode, type, object_type, object_id, actor)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -78,6 +91,7 @@ pub async fn enqueue_in(
     .bind(&event.event_type)
     .bind(event.object.type_code())
     .bind(event.object.id())
+    .bind(&event.actor)
     .execute(&mut *connection)
     .await?
     .rows_affected();

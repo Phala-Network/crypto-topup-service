@@ -551,6 +551,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes,
             client_reads: Arc::default(),
+            rate_limits: Arc::default(),
         };
         return serve_read_only(args.bind, state).await;
     }
@@ -633,6 +634,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes,
         client_reads: Arc::default(),
+        rate_limits: Arc::default(),
     };
     let (application, _) = topup::api::router(state);
     tasks.spawn("API server", |cancellation| {

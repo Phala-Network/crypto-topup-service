@@ -13,6 +13,7 @@
 )]
 
 pub mod api;
+pub mod api_keys;
 pub mod audit;
 pub mod contracts;
 pub mod db;

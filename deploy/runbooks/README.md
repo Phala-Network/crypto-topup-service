@@ -67,7 +67,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | `topup-outbox-<n>`, `outbox delivery poll failed`, daily report `credited_undelivered`, product reports missing webhooks or credits | [Outbox backlog](outbox-backlog.md) |
 | `TopupUnsupportedInflows`, rejected funds at the treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
 | `TopupDepositReversed`, `TopupDepositPendingAfterReorg`, `topup-finality-watch` | [Deposit reversed or pending after a reorg](deposit-reversed.md) |
-| Product reports its request-signing key exposed, or product requests it did not make | [Product key compromise](product-key-compromise.md) |
+| Merchant reports a secret key exposed or lost, or requests it did not make | [API key compromise and key recovery](api-key-compromise.md) |
 | Unswept credited deposits, a `FlushFailed` target | Not a platform alert: the merchant sweeps with its own wallet, and a target whose transfer failed (a token or treasury refusing it) is the merchant's to resolve ([deploy/README.md, "Sweeping"](../README.md#sweeping)) |
 | Database loss, restore drill | [RESTORE.md](../RESTORE.md) |
 | Approved refund | [Refund execution](refund-execution.md) |
@@ -100,5 +100,5 @@ in its current form against a CVM.
 | Backup age | 2026-09-22, local | partial: predates encrypted backups; local restore drills cover archiving | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Incident communication | 2026-09-22, local | partial: publication and roles human-only | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Wrong-network deposit | — | not exercised; every step is human-only | — |
-| Product key compromise | 2026-09-26, local | partial: the key replacement and its hard cut in the API test `admin_product_key_replacement`; the product side not exercised | this runbook's PR |
+| API key compromise and key recovery | 2026-09-28, local | partial: the merchant roll and the operator recovery in the API tests `keys_authenticate_by_bearer_and_expire_or_revoke` and `operator_onboards_accounts_enables_live_mode_and_recovers_keys`; the contact verification not exercised | design PR 5 |
 | Route or chain retirement | — | not exercised; the upgrade is human-only | — |

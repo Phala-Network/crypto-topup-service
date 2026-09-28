@@ -73,13 +73,14 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: CreateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
-    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
-    Each call issues a new account. Until self-serve signup and API keys replace it.
+    """Creates a merchant account after the operator's offline due diligence (design D8): records the
+    contact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the
+    first secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown
+    only in this response; send it to the contact, who rolls it on receipt. Audited.
 
     Args:
-        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
-            (design PR 5) and API keys
-            (design PR 6) replace it.
+        body (CreateAccountRequest): `POST /v1/admin/accounts` body. Accounts are created only by
+            the operator (design D8).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -105,13 +106,14 @@ def sync(
     client: AuthenticatedClient,
     body: CreateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
-    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
-    Each call issues a new account. Until self-serve signup and API keys replace it.
+    """Creates a merchant account after the operator's offline due diligence (design D8): records the
+    contact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the
+    first secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown
+    only in this response; send it to the contact, who rolls it on receipt. Audited.
 
     Args:
-        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
-            (design PR 5) and API keys
-            (design PR 6) replace it.
+        body (CreateAccountRequest): `POST /v1/admin/accounts` body. Accounts are created only by
+            the operator (design D8).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -132,13 +134,14 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: CreateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
-    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
-    Each call issues a new account. Until self-serve signup and API keys replace it.
+    """Creates a merchant account after the operator's offline due diligence (design D8): records the
+    contact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the
+    first secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown
+    only in this response; send it to the contact, who rolls it on receipt. Audited.
 
     Args:
-        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
-            (design PR 5) and API keys
-            (design PR 6) replace it.
+        body (CreateAccountRequest): `POST /v1/admin/accounts` body. Accounts are created only by
+            the operator (design D8).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -162,13 +165,14 @@ async def asyncio(
     client: AuthenticatedClient,
     body: CreateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
-    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
-    Each call issues a new account. Until self-serve signup and API keys replace it.
+    """Creates a merchant account after the operator's offline due diligence (design D8): records the
+    contact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the
+    first secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown
+    only in this response; send it to the contact, who rolls it on receipt. Audited.
 
     Args:
-        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
-            (design PR 5) and API keys
-            (design PR 6) replace it.
+        body (CreateAccountRequest): `POST /v1/admin/accounts` body. Accounts are created only by
+            the operator (design D8).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

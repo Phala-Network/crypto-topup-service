@@ -682,6 +682,7 @@ fn rejected_event(deposit: &Deposit) -> OutboxEvent {
         livemode: deposit.livemode,
         object: EventObject::Deposit(deposit.id),
         next_attempt_at: Utc::now(),
+        actor: crate::db::SYSTEM_ACTOR.to_owned(),
     }
 }
 

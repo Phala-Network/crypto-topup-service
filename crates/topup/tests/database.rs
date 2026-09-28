@@ -55,7 +55,7 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
 /// The schema starts from one squashed migration that builds every table on an empty database:
 /// staging is reset rather than migrated (design §14, §16 PR 11). Later migrations are additive.
 #[tokio::test]
-async fn one_migration_builds_the_schema_on_an_empty_database() -> Result<()> {
+async fn the_migrations_build_the_schema_on_an_empty_database() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let first = db::MIGRATOR
@@ -179,10 +179,10 @@ async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> 
     .await
 }
 
-/// The one authorization table (design D13): secret keys hold every API permission and no
-/// dashboard permission, restricted keys may be granted the same, and the roles follow Stripe's.
+/// The one authorization table (design D13): key kinds only. Secret keys hold every permission;
+/// restricted keys may be granted all but `api_keys.write` and `treasury.write`.
 #[tokio::test]
-async fn the_authorization_table_grants_roles_and_keys_as_designed() -> Result<()> {
+async fn the_authorization_table_grants_key_kinds_as_designed() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let rows: Vec<(String, String)> =
@@ -199,61 +199,56 @@ async fn the_authorization_table_grants_roles_and_keys_as_designed() -> Result<(
                 .iter()
                 .map(|(_, permission)| permission.as_str())
                 .collect();
+            ensure!(
+                rows.iter().all(
+                    |(principal, _)| principal == "key:secret" || principal == "key:restricted"
+                ),
+                "no roles remain"
+            );
             let (secret, restricted) = (held("key:secret"), held("key:restricted"));
-            let (owner, administrator) = (held("role:owner"), held("role:administrator"));
-            let (developer, view_only) = (held("role:developer"), held("role:view_only"));
-
-            ensure!(secret == restricted);
-            for dashboard_only in ["keys.write", "members.write", "treasury.write"] {
-                ensure!(!secret.contains(dashboard_only), "{dashboard_only}");
-            }
-            for api in [
+            ensure!(secret == all);
+            let expected: std::collections::BTreeSet<&str> = all
+                .iter()
+                .copied()
+                .filter(|permission| !["api_keys.write", "treasury.write"].contains(permission))
+                .collect();
+            ensure!(restricted == expected, "{restricted:?}");
+            for permission in [
                 "quotes.write",
                 "refunds.write",
                 "deposits.read",
                 "endpoints.write",
+                "api_keys.read",
+                "api_keys.write",
+                "treasury.write",
+                "account.write",
             ] {
-                ensure!(secret.contains(api), "{api}");
+                ensure!(secret.contains(permission), "{permission}");
             }
-            ensure!(owner == all);
-            ensure!(
-                administrator
-                    .iter()
-                    .all(|permission| *permission != "ownership.write")
-            );
-            ensure!(administrator.len() + 1 == all.len());
-            ensure!(
-                view_only
-                    .iter()
-                    .all(|permission| permission.ends_with(".read"))
-            );
-            ensure!(
-                all.iter()
-                    .filter(|permission| permission.ends_with(".read"))
-                    .all(|permission| view_only.contains(permission))
-            );
-            let developer_writes: Vec<&str> = developer
-                .iter()
-                .copied()
-                .filter(|permission| permission.ends_with(".write"))
-                .collect();
-            ensure!(developer_writes == ["endpoints.write", "keys.write", "refunds.write"]);
+            for removed in [
+                "keys.write",
+                "members.write",
+                "audit.read",
+                "ownership.write",
+            ] {
+                ensure!(!all.contains(removed), "{removed}");
+            }
 
             // The service reads the table and checks it through `tenancy::holds`.
-            use topup::tenancy::{Permission, Principal, Role, holds};
+            use topup::tenancy::{Permission, Principal, holds};
             ensure!(
                 holds(
                     &context.app_pool,
                     Principal::SecretKey,
-                    Permission::QuotesWrite
+                    Permission::ApiKeysWrite
                 )
                 .await?
             );
             ensure!(
                 !holds(
                     &context.app_pool,
-                    Principal::Role(Role::ViewOnly),
-                    Permission::RefundsWrite
+                    Principal::RestrictedKey,
+                    Permission::ApiKeysWrite
                 )
                 .await?
             );
@@ -261,7 +256,7 @@ async fn the_authorization_table_grants_roles_and_keys_as_designed() -> Result<(
             assert_sqlstate(
                 sqlx::query(
                     "INSERT INTO permissions (permission, principal) \
-                     VALUES ('keys.write', 'key:secret')",
+                     VALUES ('members.write', 'key:secret')",
                 )
                 .execute(&context.app_pool)
                 .await
@@ -602,15 +597,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("accounts", OPERATIONAL),
     ("confirmation_policies", OPERATIONAL),
     ("account_limits", OPERATIONAL),
-    ("users", OPERATIONAL),
-    ("identities", OPERATIONAL),
-    ("passkeys", OPERATIONAL),
-    ("recovery_codes", OPERATIONAL),
-    ("memberships", OPERATIONAL),
-    ("invitations", OPERATIONAL),
-    ("sessions", OPERATIONAL),
     ("api_keys", OPERATIONAL),
-    ("request_signing_keys", OPERATIONAL),
     ("treasuries", OPERATIONAL),
     ("route_pauses", OPERATIONAL),
     ("seen_signatures", OPERATIONAL),
@@ -1008,6 +995,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
+                    actor: topup::db::SYSTEM_ACTOR.to_owned(),
                 },
                 OutboxEvent {
                     id: Uuid::new_v4(),
@@ -1016,6 +1004,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
+                    actor: topup::db::SYSTEM_ACTOR.to_owned(),
                 },
             ];
             let mut transaction = context.app_pool.begin().await?;
@@ -1052,6 +1041,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                 livemode: true,
                 object: EventObject::Deposit(object),
                 next_attempt_at: Utc::now(),
+                actor: topup::db::SYSTEM_ACTOR.to_owned(),
             });
             let mut transaction = context.app_pool.begin().await?;
             ensure!(

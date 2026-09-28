@@ -351,21 +351,24 @@ transfer failed stays unswept and is recorded in `flush_failures`.
 
 ## Account credentials
 
-`POST /v1/admin/accounts {"name", "livemode", "public_key", "webhook_url"}` issues a merchant
-account (design §6) until operator onboarding with API keys replaces it (design PR 5). The
-answer carries the account's id, `acct_…`, and its key id, `{acct_…}/v1`, which the merchant signs
-its requests with; `livemode` is the mode of every request that key signs (`false` on staging:
-Sepolia routes are test routes). `public_key` is the base64 key the integrator printed with
-`topup-sdk keygen`; `webhook_url` is an absolute `https` URL. Each call issues a new account:
-`200`, or `400`. Any account may quote on every loaded route of its key's mode; routes no longer
-name a product.
+Accounts are created only by the operator, after due diligence done offline (design D8). `POST
+/v1/admin/accounts {"name", "contact", "due_diligence", "charges_enabled", "reason",
+"webhook_url"}` creates a merchant account and records its `contact` (`name`, security `email`)
+and the `due_diligence` record (`reference`, `reviewed_at`, `reviewed_by`); `charges_enabled`
+decides live mode (design D12; `false` on staging: Sepolia routes are test routes), and
+`webhook_url`, optional until merchants register endpoints through the API (design PR 8), is
+registered in each enabled mode. The answer is `200` with the account's id, `acct_…`, and in
+`api_keys` its first secret key of test mode (`ppay_sk_test_…`) and, with live mode, of live mode,
+each `secret` shown only in this answer; or `400`. Send the keys to the contact through an
+encrypted channel; the merchant rolls them on receipt and manages its keys through
+`/v1/api_keys`. Each call creates a new account; creation and each key are audited.
 
-`PUT /v1/admin/accounts/{account} {"public_key", "webhook_url", "reason"}` replaces an issued
-account's key and webhook URL: a hard cut, since requests are verified against the one stored key
-under the key id `{acct_…}/v1`, which stays the same (architecture §15, Rotation). The answer is
-`200` with the stored values (a repeat changes nothing), `404` for an account never issued, or
-`400`; the `audit` row `account.update` records the reason and the replaced values. A compromised
-key: [product key compromise](runbooks/product-key-compromise.md).
+`POST /v1/admin/accounts/{account} {"charges_enabled"?, "restricted"?, "contact"?,
+"webhook_url"?, "reason"}` updates an account; enabling live mode for an account without a live
+key answers with its first live key, and every change is audited and announced to the account as
+`account.updated`. `POST /v1/admin/accounts/{account}/api_keys {"livemode", "revoke_existing",
+"reason"}` issues a recovery key after the operator verified the request with the recorded
+contact: [API key compromise and key recovery](runbooks/api-key-compromise.md).
 
 **HUMAN-ONLY, admin key holder**, after [attestation](#attestation-ingress-and-egress): convert the
 admin seed to PEM once, then sign and send the exact body:
@@ -374,15 +377,18 @@ admin seed to PEM once, then sign and send the exact body:
 (umask 077 && { printf '302e020100300506032b657004220420'; tr -d '\n' < admin.seed; } |
   xxd -r -p | openssl pkey -inform DER -out admin.pem)
 export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/staging-v1   # the CVM's TOPUP_ADMIN_KID
-jq -cjn --arg public_key '<base64 from the integrator>' \
-  '{name: "Phala Cloud", livemode: false, public_key: $public_key,
+jq -cjn '{name: "Phala Cloud", contact: {name: "<name>", email: "<security email>"},
+    due_diligence: {reference: "<review reference>", reviewed_at: "<YYYY-MM-DD>",
+                    reviewed_by: "<reviewer>"},
+    charges_enabled: false, reason: "<why>",
     webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-account.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST \
   "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts" /tmp/topup-account.json \
   "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
-curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
+(umask 077 && curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
   -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
-  --data-binary @/tmp/topup-account.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts"
+  --data-binary @/tmp/topup-account.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts" \
+  > ~/staging/account.json)   # holds the first key: hand it over, then delete the file
 ```
 
 ## Staging reset (HUMAN-ONLY, design PR 11)
@@ -397,10 +403,10 @@ runs an image with the multi-tenant schema, the staging owner, in order:
    volume with an empty one. Keep the last backup for the retention period; it restores only with
    an image built before the reset.
 3. Deploys the new image (Deploy `upgrade`): `migrate` builds the schema on the empty database.
-4. Re-issues each account ([Account credentials](#account-credentials)) and sends each merchant
-   its `acct_…` id and key id. For the staging reference product, set `product_slug` to the issued
-   `acct_…` id and `product_keyid` to its key id in
-   [product/docker-compose.yml](product/docker-compose.yml), then Deploy (`product`, `upgrade`).
+4. Re-creates each account ([Account credentials](#account-credentials)) and sends each merchant's
+   contact its `acct_…` id and first key. For the staging reference product, set `product_slug`
+   to the new `acct_…` id in [product/docker-compose.yml](product/docker-compose.yml), seal its
+   test key as `PRODUCT_API_KEY`, then Deploy (`product`, `upgrade`).
 5. Runs one deposit ([Staging reference product](#staging-reference-product), step 4).
 
 ## Staging reference product
@@ -409,25 +415,26 @@ Staging's `phala-cloud` product is a second CVM running
 [product/reference_product](product/reference_product): `serve` mode is the webhook receiver that
 fulfills each `deposit.credited` once (its tests are in `product/tests`) and an account API, with
 a SQLite ledger; `deposit` mode, run from an operator's machine, plays a Phala Cloud user and signs
-with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_SEED`
+with a separate driver key (`driver/v1`). Its sealed env holds only `PRODUCT_API_KEY`, its
+Phala Pay test key
 ([product/staging.env.example](product/staging.env.example)); `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`,
 for its API calls), `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL`, and
 `PRODUCT_DRIVER_PUBLIC_KEY` are attested. At startup it pins topup's `settlement/v1` key, which
 verifies the webhooks, from a verified attestation at `TOPUP_ORIGIN`. Its preflight
 ([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a keyless Sepolia
-RPC (it is published and the product seals no RPC key); the deposit driver pays through it. Switching staging to Phala Cloud's backend is a
-`PUT /v1/admin/accounts/{account}` with their key and webhook URL
-([Account credentials](#account-credentials)); the route stays as it is. A product
+RPC (it is published and the product seals no RPC key); the deposit driver pays through it.
+Switching staging to Phala Cloud's backend is a `POST /v1/admin/accounts/{account}` with its
+webhook URL ([Account credentials](#account-credentials)); the route stays as it is. A product
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`
-with only `PRODUCT_SEED`, then Deploy `upgrade`, once.
+with only `PRODUCT_API_KEY`, then Deploy `upgrade`, once.
 
 The product also serves the public **Phala Pay demo** at `PRODUCT_PUBLIC_URL/demo/`
 ([product/web](product/web), built into the image; served by
 [reference_product/demo.py](product/reference_product/demo.py)): a cloud console's billing page
 paid with `@phala/pay`'s `<Checkout>`, with a live timeline of the payment built only from real
 data (the service's quote and deposit read with the product key, this product's verified webhook
-events and ledger rows, and the sweep transfer on chain), the product's signed API requests with
-signatures shortened, and the service's attestation. Each browser gets a random demo account in an
+events and ledger rows, and the sweep transfer on chain), the product's API requests, and the
+service's attestation. Each browser gets a random demo account in an
 `HttpOnly` cookie; quote creation is rate-limited per account (3 a minute, 20 a day) and overall
 (30 a minute), and the page carries a strict CSP. It holds no faucet key: test PHA is minted by the
 visitor's own wallet (`mint` is public on the staging token), with Sepolia ETH from a public faucet
@@ -436,26 +443,25 @@ stand-in service ([product/web/e2e/fake_service.py](product/web/e2e/fake_service
 
 Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
 
-1. On the owner's machine (mode-0600 files, never committed), create the keys and set the
+1. On the owner's machine (mode-0600 files, never committed), create the driver key and set the
    `staging` variable `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`);
    `PRODUCT_RPC_URL` is `TOPUP_RPC_PROVIDER_B_URL` unless the variable of that name is set:
 
    ```sh
    cd sdk/python
-   uv run --locked topup-sdk keygen --keyid phala-cloud/v1 --seed-out ~/staging/product.seed
    uv run --locked topup-sdk keygen --keyid driver/v1 --seed-out ~/staging/driver.seed
    ```
 
-2. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
-   `.env.product` holding `PRODUCT_SEED=<hex seed>` with the two commands the summary prints.
-   Until then the account API answers 503.
-3. Issue the product's account in topup ([Account credentials](#account-credentials)) with the
-   product key's public key and `<product URL>/webhooks`, and set the product's `product_slug`
-   and `product_keyid` to the issued `acct_…` id and key id.
+2. Create the product's account in topup ([Account credentials](#account-credentials)) with
+   `<product URL>/webhooks`, set the product's `product_slug` to the new `acct_…` id, and keep
+   its test key (`api_keys[0].secret`) for the next step.
+3. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
+   `.env.product` holding `PRODUCT_API_KEY=<ppay_sk_test_…>` with the two commands the summary
+   prints. Until then the account API answers 503.
 4. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the locked amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),
-   `product_slug`, `product_keyid`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`,
+   `product_slug`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`,
    `treasury`, `token`, `token_symbol`, and `public_url` (the product URL), with the route's values.
 
    ```sh

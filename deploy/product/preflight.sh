@@ -9,7 +9,7 @@
 #          [--offline] [--unsealed]
 #
 # --offline runs only the local checks (env file and compose). --unsealed accepts an empty
-# PRODUCT_SEED: Deploy (target `product`) provisions without it and the owner seals it from their own
+# PRODUCT_API_KEY: Deploy (target `product`) provisions without it and the owner seals it from their own
 # machine. PRODUCT_RPC_URL is published with the compose, so it must be keyless. Output never prints
 # an RPC URL. Every failure is reported; the exit status is 1 if any.
 set -euo pipefail
@@ -77,13 +77,13 @@ while IFS= read -r name; do
     value=${env[$name]-}
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
-    elif [[ -z "$value" && ! ("$name" == PRODUCT_SEED && $unsealed == 1) ]]; then
+    elif [[ -z "$value" && ! ("$name" == PRODUCT_API_KEY && $unsealed == 1) ]]; then
         fail "$name is empty"
     fi
 done <"$tmp/expected"
-seed=${env[PRODUCT_SEED]-}
-[[ -z "$seed" || "$seed" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "PRODUCT_SEED must be 64 lowercase hex characters (topup-sdk keygen --seed-out)"
+api_key=${env[PRODUCT_API_KEY]-}
+[[ -z "$api_key" || "$api_key" =~ ^ppay_sk_(test|live)_[0-9A-Za-z]{49}$ ]] ||
+    fail "PRODUCT_API_KEY must be a Phala Pay secret key (ppay_sk_test_…)"
 if [[ -n "$os_image" && "$os_image" != "$approved_os_image" ]]; then
     fail "OS image $os_image is not the approved $approved_os_image (deploy/README.md)"
 fi

@@ -15,7 +15,14 @@ from fastapi.testclient import TestClient
 from phala_pay import PhalaPay
 from topup_sdk import sign_webhook
 
-from .test_phala_pay import EVENT_ID, QUOTE_ID, SEED, SERVICE_KEY, SERVICE_PUBLIC_KEY, _deposit
+from .test_phala_pay import (
+    API_KEY,
+    EVENT_ID,
+    QUOTE_ID,
+    SERVICE_KEY,
+    SERVICE_PUBLIC_KEY,
+    _deposit,
+)
 from .test_phala_pay import _quote as quote_object
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
@@ -46,9 +53,7 @@ def app(tmp_path: Path) -> tuple[TestClient, list[httpx.Request], Path]:
             )
         return httpx.Response(200, json=quote_object(client_secret=SECRET))
 
-    client = PhalaPay(
-        "http://service.test", "acme/v1", seed=SEED, transport=httpx.MockTransport(service)
-    )
+    client = PhalaPay("http://service.test", API_KEY, transport=httpx.MockTransport(service))
     database = tmp_path / "product.sqlite3"
     api = create_app(client, SERVICE_PUBLIC_KEY, str(database), chain_id=11155111, asset="pha")
     return TestClient(api), requests, database

@@ -21,18 +21,17 @@ install with `uv` or `pip` directly, and switch to the PyPI package once it is r
 
 ## Quickstart
 
-Create the product key once and send only the printed public key to the operator:
-
-```sh
-uvx --from phala-pay topup-sdk keygen --keyid acme/v1 --seed-out product.seed
-```
+The operator creates your account and hands your contact its first secret key, `ppay_sk_test_…`;
+roll it on receipt and keep the new key in your secret store.
 
 Create a quote for the signed-in account and return its client secret to the browser:
 
 ```python
+import os
+
 from phala_pay import PhalaPay
 
-pay = PhalaPay(api_base="https://pay.example.com", key_id="acme/v1", key_file="product.seed")
+pay = PhalaPay(api_base="https://pay.example.com", api_key=os.environ["PHALA_PAY_SECRET_KEY"])
 
 quote = pay.quotes.create(
     account_id="team-42",  # your id for the customer; credits are addressed to it
@@ -77,13 +76,15 @@ event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with
 | `pay.config.retrieve()` | `GET /v1/config` |
 | `pay.webhooks.construct_event(payload, headers, public_key)` (also `phala_pay.Webhook`, no client needed) | verifies a webhook delivery |
 
-Every request is signed with the product key (RFC 9421). Transport errors, `429`, and `5xx` are
-retried with backoff, reusing one `Idempotency-Key` per `POST`. Failures raise `ApiError` with the
+Every request sends the secret key as `Authorization: Bearer ppay_sk_…`. Transport errors, `429`,
+`5xx`, and `409 idempotency_key_in_use` are retried with backoff, reusing one `Idempotency-Key`
+per `POST`. Failures raise `ApiError` with the
 service's stable `code`, `error_type`, and `param`. With `forwarder=(factory, implementation,
-treasury)` pinned from the attested deployment and the product's treasury, `quotes.create` and `quotes.retrieve` also recompute the
-deposit address and raise `AddressMismatchError` on a difference.
+treasury)` pinned from the attested deployment and your treasury, `quotes.create` and
+`quotes.retrieve` also recompute the deposit address (from your account id, read once from
+`GET /v1/account` or passed as `account=`) and raise `AddressMismatchError` on a difference.
 
-Lower-level modules: `topup_sdk` (request signing and verification, address derivation,
+Lower-level modules: `topup_sdk` (webhook and admin request signatures, address derivation,
 attestation, `TopupClient`) and `topup_client` (generated from `crates/topup/openapi.json`; do not
 edit). `uv run topup-sdk send-test-event --url … --seed-file test.seed --account-id …` sends a
 signed test event, a duplicate, and a forged copy to a webhook receiver whose test instance pins

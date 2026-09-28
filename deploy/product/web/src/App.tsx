@@ -484,7 +484,7 @@ function DeveloperView({ exchanges }: { exchanges: ApiExchange[] }) {
     <details className="subsection dev">
       <summary>Developer view: the product's API requests ({exchanges.length})</summary>
       <p className="muted small">
-        Signed with the product key on the server (RFC 9421); the browser never holds it.
+        Sent with the product's secret API key from the server; the browser never holds it.
       </p>
       {exchanges.map((exchange, index) => (
         <details key={`${exchange.method}-${exchange.url}-${index}`} className="exchange">

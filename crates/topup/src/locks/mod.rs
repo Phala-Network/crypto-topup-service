@@ -213,9 +213,6 @@ pub enum RateLockError {
     /// The lock address already received a deposit, so it cannot be cancelled.
     #[error("rate lock address already received a payment")]
     PendingPayment,
-    /// An idempotency key was reused with different parameters.
-    #[error("idempotency key was reused with different parameters")]
-    IdempotencyMismatch,
     /// Money arithmetic could not be represented.
     #[error("rate-lock arithmetic is out of range")]
     Arithmetic,
@@ -230,20 +227,17 @@ pub enum RateLockError {
     Database(#[from] sqlx::Error),
 }
 
-/// Creates a lock for `credit` on `route` for `customer` of `account`, or, for a repeated
-/// `idempotency_key`, returns the lock created with it.
+/// Creates a lock for `credit` on `route` for `customer` of `account`.
 ///
 /// The quote is scoped to the customer's account and mode, and `route` must be a route of that
-/// mode. A repeat must name the same customer, route, and credit; anything else is an
-/// idempotency mismatch. Callers answer a repeat (with [`find_by_idempotency_key`]) before any
-/// other check, so pausing quotes never hides a lock the merchant already showed.
+/// mode. Repeated requests are answered by the API's `Idempotency-Key` layer before they reach
+/// this function.
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
     account: &Account,
     customer: &Customer,
     route: &RouteFile,
-    idempotency_key: Option<&str>,
     credit_minor: MinorAmount,
 ) -> Result<RateLock, RateLockError> {
     if customer.account_id != account.id {
@@ -255,11 +249,6 @@ pub async fn create(
         ));
     }
     let scope = Scope::new(account.id, customer.livemode);
-    if let Some(key) = idempotency_key
-        && let Some(existing) = find_by_idempotency_key(pool, scope, key).await?
-    {
-        return replay(existing, customer, route, credit_minor);
-    }
     // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
     // authoritative check repeats under the customer row lock below.
     check_creation_rate(pool, customer.id, route).await?;
@@ -292,7 +281,7 @@ pub async fn create(
         &customer.client_reference_id,
         &quote_id(id),
     );
-    // The route's treasury until accounts set their own (design PR 8); the address keeps it for
+    // The route's treasury until accounts set their own (design PR 7); the address keeps it for
     // good, as the forwarder does.
     let treasury = route.chain.contracts.treasury;
     let address = forwarder_address(
@@ -301,14 +290,14 @@ pub async fn create(
         treasury,
         salt,
     );
-    let inserted = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-            credit_minor, expires_at, status, exposure_reserved, created_at, idempotency_key
+            credit_minor, expires_at, status, exposure_reserved, created_at
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', true, $10, $11)
+                $9, 'open', true, $10)
         "#,
     )
     .bind(id)
@@ -321,24 +310,8 @@ pub async fn create(
     .bind(credit_minor.value().to_string())
     .bind(expires_at)
     .bind(now)
-    .bind(idempotency_key)
     .execute(&mut *transaction)
-    .await;
-    match inserted {
-        Ok(_) => {}
-        // A concurrent request with the same key committed first: answer as its repeat.
-        Err(sqlx::Error::Database(error))
-            if error.constraint() == Some("quotes_idempotency_key_unique") =>
-        {
-            drop(transaction);
-            let key = idempotency_key.ok_or(RateLockError::DatabaseInvariant)?;
-            let existing = find_by_idempotency_key(pool, scope, key)
-                .await?
-                .ok_or(RateLockError::DatabaseInvariant)?;
-            return replay(existing, customer, route, credit_minor);
-        }
-        Err(error) => return Err(error.into()),
-    }
+    .await?;
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only
     // needs to cover it from the chain's committed cursor instead of backfilling from genesis.
     sqlx::query(
@@ -378,46 +351,6 @@ pub async fn create(
         created_at: now,
         consumed_by: None,
     })
-}
-
-/// Returns the scope's lock created with `idempotency_key`, if any.
-pub async fn find_by_idempotency_key(
-    pool: &PgPool,
-    scope: Scope,
-    idempotency_key: &str,
-) -> Result<Option<RateLock>, RateLockError> {
-    let row = sqlx::query_as::<_, RateLockRow>(concat!(
-        select_lock!(),
-        " WHERE quote.account_id = $1 AND quote.livemode = $2 AND quote.idempotency_key = $3"
-    ))
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(idempotency_key)
-    .fetch_optional(pool)
-    .await?;
-    row.map(TryInto::try_into).transpose()
-}
-
-/// Checks that a repeated idempotency key names the stored lock's customer, route, and credit.
-///
-/// # Errors
-///
-/// [`RateLockError::IdempotencyMismatch`] when any of them differs.
-pub fn replay(
-    existing: RateLock,
-    customer: &Customer,
-    route: &RouteFile,
-    credit_minor: MinorAmount,
-) -> Result<RateLock, RateLockError> {
-    if existing.client_reference_id == customer.client_reference_id
-        && existing.route == route.route
-        && existing.chain_id == route.chain.chain_id
-        && existing.credit_minor == credit_minor
-    {
-        Ok(existing)
-    } else {
-        Err(RateLockError::IdempotencyMismatch)
-    }
 }
 
 /// Random bytes after `_secret_` in a client secret.
@@ -657,6 +590,7 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
                 livemode: row.livemode,
                 object: crate::db::EventObject::Quote(row.id),
                 next_attempt_at: Utc::now(),
+                actor: crate::db::SYSTEM_ACTOR.to_owned(),
             },
         )
         .await?;

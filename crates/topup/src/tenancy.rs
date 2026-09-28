@@ -1,5 +1,5 @@
 //! Tenant isolation (design D13): the server-built [`Scope`] every merchant query takes, and the
-//! one authorization table that roles and API keys share.
+//! one authorization table of API key kinds.
 //!
 //! A merchant request is scoped to one account and one mode. The scope is built by the server from
 //! the authenticated credential, never from a client-supplied account id, and every query that
@@ -17,9 +17,8 @@ use uuid::Uuid;
 
 /// The account and mode a merchant request acts in.
 ///
-/// Built only from an authenticated credential (the API key, or today the account's request
-/// signing key; later the dashboard session's membership). It has no parser and no deserializer,
-/// so request data cannot become a scope.
+/// Built only from an authenticated API key: the key's account and mode. It has no parser and
+/// no deserializer, so request data cannot become a scope.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Scope {
     account_id: Uuid,
@@ -64,6 +63,10 @@ pub enum Permission {
     RefundsRead,
     /// Request refunds.
     RefundsWrite,
+    /// List and read the API keys of the account and mode.
+    ApiKeysRead,
+    /// Create, roll, and revoke the API keys of the account and mode.
+    ApiKeysWrite,
 }
 
 impl Permission {
@@ -77,33 +80,20 @@ impl Permission {
             Self::DepositsRead => "deposits.read",
             Self::RefundsRead => "refunds.read",
             Self::RefundsWrite => "refunds.write",
+            Self::ApiKeysRead => "api_keys.read",
+            Self::ApiKeysWrite => "api_keys.write",
         }
     }
 }
 
-/// Who holds permissions: a dashboard role or an API key kind.
+/// Who holds permissions: an API key kind. There are no users or roles (design D8): the
+/// operator creates accounts, and accounts act through API keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Principal {
-    /// A secret API key, which holds every API permission. The account's request signing key
-    /// counts as one until API keys replace it (design PR 6).
+    /// A secret API key, which holds every API permission.
     SecretKey,
-    /// A restricted API key, limited further by its own grants (design PR 14).
+    /// A restricted API key, limited further by its own grants (design PR 12).
     RestrictedKey,
-    /// A member's role in the account.
-    Role(Role),
-}
-
-/// A member's role (design D6), Stripe's team roles.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Role {
-    /// Holds every permission.
-    Owner,
-    /// Holds every permission but ownership.
-    Administrator,
-    /// Reads, and writes keys, endpoints, and refunds.
-    Developer,
-    /// Reads only.
-    ViewOnly,
 }
 
 impl Principal {
@@ -113,10 +103,6 @@ impl Principal {
         match self {
             Self::SecretKey => "key:secret",
             Self::RestrictedKey => "key:restricted",
-            Self::Role(Role::Owner) => "role:owner",
-            Self::Role(Role::Administrator) => "role:administrator",
-            Self::Role(Role::Developer) => "role:developer",
-            Self::Role(Role::ViewOnly) => "role:view_only",
         }
     }
 }

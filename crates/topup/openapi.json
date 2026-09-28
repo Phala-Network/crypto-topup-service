@@ -6,12 +6,48 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/account": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "The account the API key belongs to, in the key's mode.",
+        "operationId": "get_account",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/admin/accounts": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.\nEach call issues a new account. Until self-serve signup and API keys replace it.",
+        "summary": "Creates a merchant account after the operator's offline due diligence (design D8): records the\ncontact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the\nfirst secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown\nonly in this response; send it to the contact, who rolls it on receipt. Audited.",
         "operationId": "create_account",
         "requestBody": {
           "content": {
@@ -25,7 +61,7 @@
         },
         "responses": {
           "200": {
-            "description": "OK: issued",
+            "description": "OK: created, with its first secret keys",
             "content": {
               "application/json": {
                 "schema": {
@@ -63,11 +99,11 @@
       }
     },
     "/v1/admin/accounts/{account}": {
-      "put": {
+      "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Replaces an account's request signing key and webhook URL; the key id and mode stay.",
+        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nthe contact, or the webhook URL. Audited, and announced to the account as `account.updated`.",
         "operationId": "update_account",
         "parameters": [
           {
@@ -92,7 +128,7 @@
         },
         "responses": {
           "200": {
-            "description": "OK: replaced, or already holding these values",
+            "description": "OK: updated, or already holding these values",
             "content": {
               "application/json": {
                 "schema": {
@@ -122,7 +158,94 @@
             }
           },
           "404": {
-            "description": "Not Found: no account is issued with this id",
+            "description": "Not Found: no account has this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/api_keys": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Issues a recovery key (design D7) after the operator verified the request with the recorded\ncontact, optionally revoking every key of the mode first. Audited, and announced as\n`api_key.*` events with actor `admin`.",
+        "operationId": "issue_api_key",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: the key with its `secret`, shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`testmode_charges_only`: a live key for an account without live mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found: no account has this id",
             "content": {
               "application/json": {
                 "schema": {
@@ -170,7 +293,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
+                "$ref": "#/components/schemas/CustomerPauseRequest"
               }
             }
           },
@@ -246,7 +369,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
+                "$ref": "#/components/schemas/CustomerPauseRequest"
               }
             }
           },
@@ -803,6 +926,351 @@
         ]
       }
     },
+    "/v1/api_keys": {
+      "get": {
+        "tags": [
+          "api_keys"
+        ],
+        "summary": "The keys of the requesting key's account and mode, newest first, without their secrets.",
+        "operationId": "list_api_keys",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "api_keys"
+        ],
+        "summary": "Creates a secret key in the requesting key's mode. The response is the only time its `secret`\nis shown; a replay of the request (`Idempotency-Key`) returns the key without it.",
+        "operationId": "create_api_key",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: the key with its `secret`, shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/api_keys/{id}": {
+      "get": {
+        "tags": [
+          "api_keys"
+        ],
+        "summary": "One key of the requesting key's account and mode, without its secret.",
+        "operationId": "get_api_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Key id, `key_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "api_keys"
+        ],
+        "summary": "Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be\nrevoked, so the account always keeps a working key; to replace a leaked last key, roll it with\n`expires_in: 0`.",
+        "operationId": "revoke_api_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Key id, `key_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK: revoked, or already revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`last_api_key`: the mode's last key that is neither revoked nor expiring; create or roll a key first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/api_keys/{id}/roll": {
+      "post": {
+        "tags": [
+          "api_keys"
+        ],
+        "summary": "Rolls a key: returns a new secret key with the same name, and the old key keeps working for\n`expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it at once. A\nkey may roll itself.",
+        "operationId": "roll_api_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Key id, `key_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: the new key with its `secret`, shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`api_key_inactive`: revoked or already rolled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/attestation": {
       "get": {
         "tags": [
@@ -885,7 +1353,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1029,7 +1497,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1098,7 +1566,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1114,7 +1582,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Up to 255 characters; a repeat with the same parameters returns the same quote, and with other parameters is `409 idempotency_error`.",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
             "required": false,
             "schema": {
               "type": [
@@ -1166,7 +1634,7 @@
             }
           },
           "409": {
-            "description": "`exposure_cap_exceeded`, `paused`, `chain_frozen`, `signature_replayed`, or `idempotency_error`",
+            "description": "`exposure_cap_exceeded`, `paused`, `chain_frozen`, or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1198,7 +1666,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1208,7 +1676,7 @@
         "tags": [
           "quotes"
         ],
-        "summary": "One quote, for example to resume a checkout page. The payer's browser can read the quote's\npublic view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.",
+        "summary": "One quote, for example to resume a checkout page. The payer's browser can read the quote's\npublic view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.",
         "operationId": "get_quote",
         "parameters": [
           {
@@ -1223,7 +1691,7 @@
           {
             "name": "expand[]",
             "in": "query",
-            "description": "`deposit`; signed requests only",
+            "description": "`deposit`; API key requests only",
             "required": false,
             "schema": {
               "type": "array",
@@ -1235,7 +1703,7 @@
           {
             "name": "client_secret",
             "in": "query",
-            "description": "The quote's `client_secret`, to read its public view without a signature. Send the request without `Signature` headers; the response then allows any origin.",
+            "description": "The quote's `client_secret`, to read its public view without an API key. Send the request without `Authorization`; the response then allows any origin.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1244,7 +1712,7 @@
         ],
         "responses": {
           "200": {
-            "description": "OK: a `Quote` to a signed request, a `ClientQuote` to a request by `client_secret`",
+            "description": "OK: a `Quote` to a request with an API key, a `ClientQuote` to a request by `client_secret`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1286,7 +1754,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           },
           {}
         ]
@@ -1307,6 +1775,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -1354,7 +1834,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1370,7 +1850,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "Up to 255 characters; a repeat with the same parameters returns the same refund, and with other parameters is `409 idempotency_error`.",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
             "required": false,
             "schema": {
               "type": [
@@ -1422,7 +1902,7 @@
             }
           },
           "409": {
-            "description": "`deposit_not_refundable`, `deposit_not_final`, `paused`, `signature_replayed`, or `idempotency_error`",
+            "description": "`deposit_not_refundable`, `deposit_not_final`, `paused`, or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1434,7 +1914,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1503,7 +1983,7 @@
         },
         "security": [
           {
-            "http_message_signature": []
+            "api_key": []
           }
         ]
       }
@@ -1511,34 +1991,104 @@
   },
   "components": {
     "schemas": {
-      "AccountResponse": {
+      "AccountObject": {
         "type": "object",
-        "description": "An issued account and its request signing credential.",
+        "description": "The account of the request's API key (`GET /v1/account`), in the key's mode.",
         "required": [
           "id",
-          "name",
+          "object",
           "livemode",
-          "key_id",
-          "public_key",
-          "webhook_url",
-          "paused_scopes"
+          "name",
+          "charges_enabled",
+          "paused_scopes",
+          "created"
         ],
         "properties": {
+          "charges_enabled": {
+            "type": "boolean",
+            "description": "Whether the operator enabled live mode."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
           "id": {
             "type": "string",
             "description": "Account id, `acct_…`."
           },
-          "key_id": {
-            "type": "string",
-            "description": "The key id the account signs its requests with, `{id}/v1`."
-          },
           "livemode": {
             "type": "boolean",
-            "description": "The mode the account's signing key acts in."
+            "description": "The mode of the key that reads it."
           },
           "name": {
             "type": "string",
             "description": "Display name."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `account`."
+          },
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Active account-level pause scopes."
+          }
+        }
+      },
+      "AccountResponse": {
+        "type": "object",
+        "description": "An account as the operator sees it.",
+        "required": [
+          "id",
+          "object",
+          "name",
+          "contact",
+          "due_diligence",
+          "charges_enabled",
+          "restricted",
+          "paused_scopes",
+          "created",
+          "api_keys"
+        ],
+        "properties": {
+          "api_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyObject"
+            },
+            "description": "The secret keys this request issued, each with its `secret` shown only here: at creation\na test key and, with `charges_enabled`, a live key; on an update that enables live mode,\nthe first live key. Send them to the contact; the merchant rolls them on receipt."
+          },
+          "charges_enabled": {
+            "type": "boolean",
+            "description": "Whether the account may use live mode."
+          },
+          "contact": {
+            "$ref": "#/components/schemas/Contact",
+            "description": "The merchant's contact."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "due_diligence": {
+            "$ref": "#/components/schemas/DueDiligence",
+            "description": "The due diligence record."
+          },
+          "id": {
+            "type": "string",
+            "description": "Account id, `acct_…`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `account`."
           },
           "paused_scopes": {
             "type": "array",
@@ -1547,13 +2097,9 @@
             },
             "description": "Active account-level pause scopes."
           },
-          "public_key": {
-            "type": "string",
-            "description": "Standard base64 of the account's ed25519 public key."
-          },
-          "webhook_url": {
-            "type": "string",
-            "description": "Webhook receiver URL."
+          "restricted": {
+            "type": "boolean",
+            "description": "Whether the account is restricted for review."
           }
         }
       },
@@ -1595,6 +2141,109 @@
               "null"
             ],
             "description": "Recorded treasury transaction hash, when present."
+          }
+        }
+      },
+      "ApiKeyList": {
+        "type": "object",
+        "description": "`GET /v1/api_keys` response.",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyObject"
+            },
+            "description": "The mode's keys, newest first."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Always `false`: every key of the mode is listed."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/api_keys`."
+          }
+        }
+      },
+      "ApiKeyObject": {
+        "type": "object",
+        "description": "An API key (design D7). `secret` is present only in the response that created it.",
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "type",
+          "name",
+          "redacted",
+          "status",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a rolled key stops working, Unix seconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "Key id, `key_…`."
+          },
+          "last_used": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Last use, Unix seconds, to the minute."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The key's mode."
+          },
+          "name": {
+            "type": "string",
+            "description": "The key's label."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `api_key`."
+          },
+          "redacted": {
+            "type": "string",
+            "description": "The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`."
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The whole key, `ppay_sk_…`, shown once. Store it in a secret manager."
+          },
+          "status": {
+            "type": "string",
+            "description": "`active`; `expiring` for a rolled key that still works until `expires_at`; `expired`;\n`revoked`."
+          },
+          "type": {
+            "type": "string",
+            "description": "`secret`; `restricted` keys come later."
           }
         }
       },
@@ -1840,33 +2489,75 @@
           }
         }
       },
-      "CreateAccountRequest": {
+      "Contact": {
         "type": "object",
-        "description": "Administrative account issuance body, until self-serve signup (design PR 5) and API keys\n(design PR 6) replace it.",
+        "description": "The merchant's contact recorded at onboarding (design D8): the operator's channel for the key\nhand-over, recovery, incidents, and restores, and the only personal data kept.",
         "required": [
           "name",
-          "livemode",
-          "public_key",
-          "webhook_url"
+          "email"
         ],
         "properties": {
-          "livemode": {
+          "email": {
+            "type": "string",
+            "description": "The security contact's email address."
+          },
+          "name": {
+            "type": "string",
+            "description": "The contact's name, 1 to 200 characters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAccountRequest": {
+        "type": "object",
+        "description": "`POST /v1/admin/accounts` body. Accounts are created only by the operator (design D8).",
+        "required": [
+          "name",
+          "contact",
+          "due_diligence",
+          "reason"
+        ],
+        "properties": {
+          "charges_enabled": {
             "type": "boolean",
-            "description": "The mode the account's signing key acts in: `true` for live routes, `false` for test\nroutes."
+            "description": "Whether the account may use live mode (design D12). Default `false`."
+          },
+          "contact": {
+            "$ref": "#/components/schemas/Contact",
+            "description": "The merchant's contact."
+          },
+          "due_diligence": {
+            "$ref": "#/components/schemas/DueDiligence",
+            "description": "The due diligence the decision rests on."
           },
           "name": {
             "type": "string",
             "description": "Display name, 1 to 200 characters."
           },
-          "public_key": {
+          "reason": {
             "type": "string",
-            "description": "Standard base64 of the account's 32-byte ed25519 request-verification public key."
+            "description": "Why the account is created, 1 to 1024 bytes."
           },
           "webhook_url": {
-            "type": "string",
-            "description": "Absolute `https` URL of the account's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absolute `https` URL of the account's webhook receiver, registered in each enabled mode;\n`http` only when the service's own public origin uses `http` (local stacks). Until\nmerchants register endpoints through the API (design PR 8)."
           }
-        }
+        },
+        "additionalProperties": false
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "description": "`POST /v1/api_keys` body.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The key's label, at most 200 characters."
+          }
+        },
+        "additionalProperties": false
       },
       "CreateQuoteRequest": {
         "type": "object",
@@ -1931,6 +2622,27 @@
           }
         },
         "additionalProperties": false
+      },
+      "CustomerPauseRequest": {
+        "type": "object",
+        "description": "Administrative pause or resume of one customer of an account.",
+        "required": [
+          "scopes",
+          "livemode"
+        ],
+        "properties": {
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode of the customer: customers of test and live mode are separate."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pause scopes to add or remove."
+          }
+        }
       },
       "DailyReportResponse": {
         "type": "object",
@@ -2393,6 +3105,31 @@
           }
         }
       },
+      "DueDiligence": {
+        "type": "object",
+        "description": "The record of the operator's offline due diligence (design D8): a reference to it, when, and\nby whom.",
+        "required": [
+          "reference",
+          "reviewed_at",
+          "reviewed_by"
+        ],
+        "properties": {
+          "reference": {
+            "type": "string",
+            "description": "Reference to the review in Phala's records, 1 to 200 characters."
+          },
+          "reviewed_at": {
+            "type": "string",
+            "format": "date",
+            "description": "Date of the review, `YYYY-MM-DD`."
+          },
+          "reviewed_by": {
+            "type": "string",
+            "description": "Who reviewed, 1 to 200 characters."
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorDetail": {
         "type": "object",
         "description": "Stable error fields safe to expose to callers.",
@@ -2419,7 +3156,7 @@
           },
           "type": {
             "$ref": "#/components/schemas/ErrorType",
-            "description": "Error category: `invalid_request_error` for any 4xx except an idempotency conflict,\n`idempotency_error` for an `Idempotency-Key` reused with other parameters, `api_error` for\n5xx."
+            "description": "Error category: `invalid_request_error` for any 4xx except an idempotency conflict,\n`idempotency_error` for an `Idempotency-Key` reused with another request or still in use,\n`api_error` for 5xx."
           }
         }
       },
@@ -2488,6 +3225,33 @@
             "description": "Error that stopped the check, without provider URLs."
           }
         }
+      },
+      "IssueApiKeyRequest": {
+        "type": "object",
+        "description": "`POST /v1/admin/accounts/{account}/api_keys` body: a recovery key (design D7).",
+        "required": [
+          "livemode",
+          "reason"
+        ],
+        "properties": {
+          "livemode": {
+            "type": "boolean",
+            "description": "The key's mode; `true` needs `charges_enabled`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The key's label, at most 200 characters."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, 1 to 1024 bytes: how the request was verified with the recorded contact."
+          },
+          "revoke_existing": {
+            "type": "boolean",
+            "description": "Revokes every key of the mode first, for a leak the merchant cannot win by rolling."
+          }
+        },
+        "additionalProperties": false
       },
       "NudgeResponse": {
         "type": "object",
@@ -2896,6 +3660,19 @@
           }
         }
       },
+      "RollApiKeyRequest": {
+        "type": "object",
+        "description": "`POST /v1/api_keys/{id}/roll` body.",
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at\nonce.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "RouteDailyReport": {
         "type": "object",
         "description": "Per-route daily finance report produced by C12.",
@@ -3055,34 +3832,62 @@
       },
       "UpdateAccountRequest": {
         "type": "object",
-        "description": "Administrative replacement of an account's verification key and webhook URL. The key id and\nmode stay.",
+        "description": "`POST /v1/admin/accounts/{account}` body; absent fields stay as they are.",
         "required": [
-          "public_key",
-          "webhook_url",
           "reason"
         ],
         "properties": {
-          "public_key": {
-            "type": "string",
-            "description": "Standard base64 of the account's new 32-byte ed25519 request-verification public key."
+          "charges_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Enables or disables live mode. Enabling it for an account without a live key returns the\naccount's first live key."
+          },
+          "contact": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Contact",
+                "description": "Replaces the merchant's contact."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reason": {
             "type": "string",
-            "description": "Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on."
+            "description": "Why, 1 to 1024 bytes."
+          },
+          "restricted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Marks the account restricted for review."
           },
           "webhook_url": {
-            "type": "string",
-            "description": "Absolute `https` URL of the account's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Replaces the URL of the account's webhook endpoints (until design PR 8)."
           }
-        }
+        },
+        "additionalProperties": false
       }
     },
     "securitySchemes": {
+      "api_key": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A secret key, `Authorization: Bearer ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account and the mode. HTTP Basic is not accepted."
+      },
       "http_message_signature": {
         "type": "apiKey",
         "in": "header",
         "name": "Signature",
-        "description": "RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign the public URL you call; `Host` and `X-Forwarded-*` headers are ignored."
+        "description": "The operator's admin API only: an RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign the public URL you call; `Host` and `X-Forwarded-*` headers are ignored."
       }
     }
   }

@@ -168,13 +168,14 @@ test("tops up an account end to end and shows every step behind the scenes", asy
   await expect(row).toContainText("80 PHA");
   await expect(row.locator("a")).toHaveAttribute("href", /sepolia\.etherscan\.io\/tx\//);
 
-  // The developer view shows the signed requests, never the signature in full or the secret.
+  // The developer view shows the requests, never the API key or the client secret.
   await page.getByText(/^Developer view/).click();
   const dev = page.locator("details.dev");
   await expect(dev).toContainText("POST /v1/quotes");
   await expect(dev).toContainText("GET /v1/deposits");
   await dev.locator("details.exchange").first().click();
-  await expect(dev).toContainText("signature-input");
+  await expect(dev).toContainText("Bearer ppay_sk_test_…");
+  await expect(dev).not.toContainText("AAAAAAAA");
   await expect(dev).toContainText("handed to this browser's checkout");
   await expect(dev).not.toContainText("_secret_5");
 

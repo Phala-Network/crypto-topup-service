@@ -435,6 +435,7 @@ async fn seed_account_event(pool: &PgPool, account_id: Uuid, event_id: Uuid) -> 
             livemode: true,
             object: EventObject::Deposit(deposit_id),
             next_attempt_at: Utc::now() - Duration::seconds(1),
+            actor: topup::db::SYSTEM_ACTOR.to_owned(),
         },
     )
     .await?;

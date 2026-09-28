@@ -466,11 +466,11 @@ jobs:
               echo "provider's URL; empty for a keyless URL). The same name set keeps the compose hash."
             else
               env_file=.env.product
-              echo "### Owner: seal the product seed"
+              echo "### Owner: seal the product's API key"
               echo
-              echo "The product runs without its signing seed: webhooks and fulfillment are served,"
+              echo "The product runs without its Phala Pay key: webhooks and fulfillment are served,"
               echo "the account API answers 503. From your own machine, write \`$env_file\` with the"
-              echo "single line \`PRODUCT_SEED=<the hex seed in ~/staging/product.seed>\` (mode 0600)."
+              echo "single line \`PRODUCT_API_KEY=<the account's ppay_sk_test_ key>\` (mode 0600)."
             fi
             echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact:"
             echo

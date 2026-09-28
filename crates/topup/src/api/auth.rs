@@ -1,11 +1,12 @@
-//! RFC 9421 HTTP Message Signatures verification for inbound requests.
+//! Request authentication: merchants present an API key as a Bearer token (design D7); the
+//! operator's admin API keeps its RFC 9421 HTTP Message Signatures.
 
 use super::AppState;
 use super::error::ApiError;
 use super::repository;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
@@ -14,8 +15,9 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use sqlx::PgPool;
 use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
-use uuid::Uuid;
+use zeroize::Zeroizing;
 
+use crate::api_keys::{self, ApiKey, KeyKind, Rejection};
 use crate::audit::Actor;
 use crate::db::Account;
 use crate::tenancy::{self, Permission, Principal, Scope};
@@ -23,7 +25,7 @@ use crate::tenancy::{self, Permission, Principal, Scope};
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
-/// A configured RFC 9421 ed25519 verification key.
+/// A configured RFC 9421 ed25519 verification key of the admin API.
 #[derive(Clone, Debug)]
 pub struct VerificationKey {
     /// Key identifier required in `Signature-Input`.
@@ -47,31 +49,35 @@ impl VerificationKey {
 }
 
 /// The authenticated merchant of a request: its account, the [`Scope`] every query it makes
-/// takes, and the credential it signed with.
+/// takes, and the API key it presented.
 #[derive(Clone, Debug)]
 pub(crate) struct Merchant {
-    /// The account the credential belongs to.
+    /// The account the key belongs to.
     pub(crate) account: Account,
-    /// Built from the credential alone: its account and mode.
+    /// Built from the key alone: its account and mode.
     pub(crate) scope: Scope,
-    /// The credential's key id, `{acct_…}/v1`.
-    pub(crate) key_id: String,
+    /// The key the request authenticated with.
+    pub(crate) key: ApiKey,
 }
 
 impl Merchant {
-    /// The audit actor of the merchant's requests.
+    /// The audit actor of the merchant's requests: the key.
     pub(crate) fn actor(&self) -> Actor {
-        Actor::api_key(&self.key_id)
+        self.key.actor()
     }
 
     /// Fails with `403 permission_denied` unless the authorization table grants `permission` to
-    /// the credential. The request signing key is a secret key until API keys replace it.
+    /// the key's kind.
     pub(crate) async fn require(
         &self,
         pool: &PgPool,
         permission: Permission,
     ) -> Result<(), ApiError> {
-        if tenancy::holds(pool, Principal::SecretKey, permission).await? {
+        let principal = match self.key.kind {
+            KeyKind::Secret => Principal::SecretKey,
+            KeyKind::Restricted => Principal::RestrictedKey,
+        };
+        if tenancy::holds(pool, principal, permission).await? {
             Ok(())
         } else {
             Err(ApiError::permission_denied())
@@ -79,77 +85,89 @@ impl Merchant {
     }
 }
 
-/// Authenticates a merchant request and attaches its [`Merchant`], whose scope comes from the
-/// signing key: key id `{acct_…}/v1` names the account, and the stored key fixes the mode.
+/// Authenticates a merchant request by its `Authorization: Bearer ppay_sk_…` key (design D7) and
+/// attaches its [`Merchant`], whose scope is the key's account and mode. A key that fails the
+/// checksum is refused without a database read; HTTP Basic and any other scheme are refused. A
+/// live key of an account the operator has not enabled for live mode is `403
+/// testmode_charges_only`. The account and mode's rate limit applies to every authenticated
+/// request.
 pub async fn authenticate_merchant(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some((account_id, kid)) = request
-        .headers()
-        .get("signature-input")
-        .and_then(|value| value.to_str().ok())
-        .map(http_signature::signature_keyids)
-        .and_then(|keyids| {
-            keyids
-                .into_iter()
-                .find_map(|keyid| account_of_key_id(&keyid).map(|account| (account, keyid)))
-        })
-    else {
-        return ApiError::unauthorized().into_response();
+    let presented = match bearer_key(request.headers()) {
+        Ok(presented) => presented,
+        Err(error) => return unauthorized(error),
     };
-    let signing_key = match repository::find_signing_key(&state.pool, account_id).await {
-        Ok(Some(signing_key)) => signing_key,
-        Ok(None) => return ApiError::unauthorized().into_response(),
-        Err(error) => return error.into_response(),
-    };
-    let key = match VerificationKey::from_base64(kid.clone(), &signing_key.public_key) {
-        Ok(key) => key,
-        Err(message) => {
-            tracing::error!(account_id = %account_id, %message, "stored signing key is invalid");
-            return ApiError::unauthorized().into_response();
+    let authenticated = match api_keys::authenticate(&state.pool, &presented).await {
+        Ok(Ok(authenticated)) => authenticated,
+        Ok(Err(Rejection::Expired)) => return unauthorized(ApiError::api_key_expired()),
+        Ok(Err(Rejection::Invalid | Rejection::Revoked)) => {
+            return unauthorized(ApiError::api_key_invalid());
         }
+        Err(error) => return ApiError::from(error).into_response(),
     };
-    let verified = match verify_request(&mut request, &state.public_origin, &key).await {
-        Ok(verified) => verified,
-        Err(()) => return ApiError::unauthorized().into_response(),
-    };
-    if let Err(error) = repository::record_signature(&state.pool, &verified).await {
-        return error.into_response();
+    let scope = authenticated.key.scope();
+    // The operator can turn live mode off after issuing live keys (design D12).
+    if scope.livemode() && !authenticated.charges_enabled {
+        return ApiError::testmode_charges_only().into_response();
     }
-    let scope = Scope::new(signing_key.account.id, signing_key.livemode);
+    if !state.rate_limits.allow(scope) {
+        return ApiError::too_many_requests().into_response();
+    }
     request.extensions_mut().insert(Merchant {
-        account: signing_key.account,
+        account: authenticated.account,
         scope,
-        key_id: kid,
+        key: authenticated.key,
     });
     next.run(request).await
 }
 
-/// Passes an unsigned request that carries a `client_secret` query parameter to the handler
-/// without a merchant, which then serves the quote's public view; any other request must be a
-/// signed merchant request.
+/// Passes a request without `Authorization` that carries a `client_secret` query parameter to
+/// the handler without a merchant, which then serves the quote's public view; any other request
+/// must be an authenticated merchant request.
 pub async fn authenticate_merchant_or_client_secret(
     state: State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let unsigned = !request.headers().contains_key("signature-input")
-        && !request.headers().contains_key("signature");
+    let anonymous = !request.headers().contains_key(header::AUTHORIZATION);
     let has_client_secret = request.uri().query().is_some_and(|query| {
         url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == "client_secret")
     });
-    if unsigned && has_client_secret {
+    if anonymous && has_client_secret {
         next.run(request).await
     } else {
         authenticate_merchant(state, request, next).await
     }
 }
 
-/// The account a merchant key id names: `{acct_…}/v1`.
-fn account_of_key_id(keyid: &str) -> Option<Uuid> {
-    crate::ids::parse(crate::ids::ACCOUNT, keyid.strip_suffix("/v1")?)
+/// The key of `Authorization: Bearer <key>`. The scheme is case-insensitive (RFC 9110 §11.1).
+fn bearer_key(headers: &HeaderMap) -> Result<Zeroizing<String>, ApiError> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .ok_or_else(ApiError::api_key_missing)?
+        .to_str()
+        .map_err(|_| ApiError::api_key_invalid())?;
+    let (scheme, key) = value
+        .trim()
+        .split_once(' ')
+        .ok_or_else(ApiError::api_key_invalid)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(ApiError::api_key_invalid());
+    }
+    Ok(Zeroizing::new(key.trim().to_owned()))
+}
+
+/// A `401` with the challenge RFC 6750 §3 asks for.
+fn unauthorized(error: ApiError) -> Response {
+    let mut response = error.into_response();
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"Phala Pay\""),
+    );
+    response
 }
 
 /// Authenticates an administrative request with the separately configured key.
@@ -237,27 +255,6 @@ mod tests {
     use ed25519_dalek::SigningKey;
 
     use super::*;
-
-    /// The scope's account comes only from the key id the request was verified with; anything
-    /// but `{acct_…}/v1` names no account.
-    #[test]
-    fn only_an_account_key_id_names_an_account() {
-        let account = Uuid::from_u128(0x0c6e_1d0a_9b3f_4c2e_8d7a_6b5c_4d3e_2f10);
-        assert_eq!(
-            account_of_key_id("acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10/v1"),
-            Some(account)
-        );
-        for keyid in [
-            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
-            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10/v2",
-            "phala-cloud/v1",
-            "admin/v1",
-            "0c6e1d0a-9b3f-4c2e-8d7a-6b5c4d3e2f10/v1",
-            "acct_0C6E1D0A9B3F4C2E8D7A6B5C4D3E2F10/v1",
-        ] {
-            assert_eq!(account_of_key_id(keyid), None, "{keyid}");
-        }
-    }
 
     fn signed_message<'a>(
         vector: &'a serde_json::Value,

@@ -34,7 +34,6 @@ from topup_client.models import Quote
 from topup_sdk import (
     AttestationError,
     CreditedDeposit,
-    RequestSigner,
     TopupClient,
     WebhookEvent,
     load_public_key,
@@ -50,8 +49,7 @@ class Integration:
 
     service_url: str
     product_slug: str
-    product_keyid: str
-    product_seed_file: str
+    api_key_file: str
     chain_id: int
     factory: str
     implementation: str
@@ -64,12 +62,12 @@ class Integration:
         return cls(**{field.name: values[field.name] for field in fields(cls)})
 
     def client(self) -> TopupClient:
-        """A client whose key id, `{product}/v1`, names the product; with the forwarder pinned,
-        it recomputes every open quote's address before returning it."""
-        signer = RequestSigner.from_seed_file(self.product_keyid, self.product_seed_file)
+        """A client of the product's account (`product_slug`, `acct_…`) with its secret key; with
+        the forwarder pinned, it recomputes every open quote's address before returning it."""
         return TopupClient(
             self.service_url,
-            signer,
+            Path(self.api_key_file).read_text(encoding="ascii").strip(),
+            account=self.product_slug,
             forwarder=(self.factory, self.implementation, self.treasury),
         )
 
