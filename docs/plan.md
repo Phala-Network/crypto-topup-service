@@ -27,7 +27,7 @@ each item. The design is [architecture.md](architecture.md); integrators read
       existing Order and credit path. A draft PR is open in the Phala Cloud monorepo, pending the
       `phala-pay` PyPI release and a staging run. Owner: engineering; review: Phala Cloud team.
 - [ ] Issue Phala Cloud's production account (`POST /v1/admin/accounts`: webhook URL, public
-      key; self-serve signup replaces this in design PR 5). Owner: operator.
+      key; operator onboarding with API keys replaces this in design PR 5). Owner: operator.
 
 ### Production inputs
 

@@ -355,7 +355,7 @@ by [design PR 4](../docs/design/multi-tenant.md#16-plan).
 ## Account credentials
 
 `POST /v1/admin/accounts {"name", "livemode", "public_key", "webhook_url"}` issues a merchant
-account (design §6) until self-serve signup and API keys replace it (design PRs 5 and 6). The
+account (design §6) until operator onboarding with API keys replaces it (design PR 5). The
 answer carries the account's id, `acct_…`, and its key id, `{acct_…}/v1`, which the merchant signs
 its requests with; `livemode` is the mode of every request that key signs (`false` on staging:
 Sepolia routes are test routes). `public_key` is the base64 key the integrator printed with
@@ -388,7 +388,7 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
   --data-binary @/tmp/topup-account.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts"
 ```
 
-## Staging reset (HUMAN-ONLY, design PR 13)
+## Staging reset (HUMAN-ONLY, design PR 11)
 
 The multi-tenant schema (design §14) replaced the migration history with one migration and
 migrates no data (`crates/topup/migrations/README.md`). A staging database that still holds the

@@ -12,7 +12,7 @@ migrator refuses to start, because the applied versions are missing from the bin
 migrations are additive (plan §6 item 6): never edit an applied migration, and never squash again
 once any environment holds data.
 
-**Staging reset, HUMAN-ONLY (design §16 PR 13).** An operator with the staging owner credentials
+**Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-issues each account with `POST /v1/admin/accounts`
 (`deploy/README.md`, Account credentials). Nothing is migrated: deposits, quotes, and events of the
@@ -64,20 +64,23 @@ two accounts or two modes. `transitions`, `pending_transfers`, `refund_payment_c
   `deposits.flush_id`, and the `flush` pause scope belong to the operator flusher, which design PR 4
   removes together with them; PR 4 also reshapes `flushed` into the chain-sourced record of §14.
 - `request_signing_keys` holds each account's RFC 9421 ed25519 key until API keys replace merchant
-  request signing (design PR 6). Its key id is `{accounts.public_id}/v1`, and the key's `livemode`
+  request signing (design PR 5). Its key id is `{accounts.public_id}/v1`, and the key's `livemode`
   is the mode of every request it signs.
 - The refund workflow columns (`requested_by`, `approved_by`, the `requested`, `approved`, `sent`,
-  `confirmed` statuses, `to_address`) are the operator-approved flow design PR 10 replaces.
+  `confirmed` statuses, `to_address`) are the operator-approved flow design PR 9 replaces.
 - `quotes.idempotency_key` and `refunds.idempotency_key` keep today's per-object replay until
-  `idempotency_keys` serves every `POST` (design PR 6).
-- Tables for users, sessions, passkeys, API keys, treasuries, confirmation policies, account limits,
-  and idempotency keys are created now and used by design PRs 5, 6, 8, and 12.
+  `idempotency_keys` serves every `POST` (design PR 5).
+- Tables for API keys, treasuries, confirmation policies, account limits, and idempotency keys
+  are created now and used by design PRs 5 and 7. The user, identity, passkey, recovery-code,
+  membership, invitation, and session tables, the `role:*` principals, and the account profile,
+  ToS, and `live_access` columns were created for a dashboard the design no longer has; design
+  PR 5 drops them in an additive migration.
 
 ## Points the schema does not show on its own
 
 - `accounts.public_id` is generated from `id`: `acct_` and its 32 hex digits.
 - `addresses.treasury` is the forwarder's clone argument, the only address it can pay. Until
-  treasuries are set per account (design PR 8) quotes take it from the route.
+  treasuries are set per account (design PR 7) quotes take it from the route.
 - `addresses.created_block` defaults to zero, which makes the first scanner pass check the full
   chain history before setting `backfilled`. Quote creation sets it from the chain's committed
   cursor instead.
